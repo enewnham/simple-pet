@@ -1,10 +1,12 @@
 # Simple Pet
 
-A native macOS desktop pet that embodies your coding agents as one character. It speaks about their goals, work, and results in first person, including concurrent work across Claude Code, Codex, Cursor CLI, and command wrappers. A local Python daemon tracks parallel tool calls, schedules sprite behavior, and maintains a small Haiku conversation. The Swift/AppKit renderer displays the configured pet.
+A native macOS desktop pet that speaks about your coding agents’ work as one character. It follows concurrent tasks across Claude Code, Codex, Cursor CLI, and command wrappers. A local Python daemon tracks the work and uses Claude Haiku for commentary. Swift/AppKit renders the pet.
 
-## Build and start
+## Quick start
 
-Requires macOS 12+, Swift 5.9+, Git, and [uv](https://docs.astral.sh/uv/). uv installs the Python 3.12 environment and locked Anthropic SDK dependencies.
+Requires macOS 12+, Swift 5.9+, Git, [uv](https://docs.astral.sh/uv/), an Anthropic API key, and a pet sprite pack. uv installs Python 3.12 and the locked dependencies.
+
+From the repository root, import your sprite ZIP and start the pet:
 
 ```sh
 make setup
@@ -15,140 +17,21 @@ export ANTHROPIC_API_KEY='your-api-key'
 bin/pet-daemon
 ```
 
-The daemon launches its renderer and stays in the foreground. Ctrl-C or the pet's right-click **Quit Pet** menu stops both processes. `make run` performs setup, builds, and starts the daemon.
+The imported sprites go into `assets/pets/my-pet`, matching the example configuration. For other import options and custom packs, see [fetch-assets.sh](scripts/fetch-assets.sh) and [import-assets.swift](scripts/import-assets.swift).
 
-The 200×160 transparent panel starts in the bottom-right corner, floats across Spaces, and has no Dock icon. Drag the sprite to reposition it. Walking stays on its current monitor. Dragging it onto another monitor changes the walking area.
+The pet floats across Spaces without a Dock icon. Drag it to reposition it or move it to another monitor. Click it to replay a message spoken within the last minute, or request fresh commentary. Long speech bubbles scroll. Ctrl-C or the right-click **Quit Pet** menu stops both the daemon and renderer.
 
-Startup requires API credentials and a valid sprite pack. Runtime API errors keep hook delivery and sprite behavior running. The daemon owns its renderer process and removes its own socket on shutdown. A live listener at either configured socket is left intact and startup fails.
+Use `make run` to set up, build, and start subsequent runs.
 
-## Configure the pet
+## Connect your agents
 
-Copy [pet.config.example.json](pet.config.example.json) to `pet.config.json` and set `pet_dir` to your imported sprite pack. The local configuration and imported assets are gitignored. Paths are relative to the configuration file.
-
-```sh
-bin/pet-daemon --config /absolute/path/to/pet.config.json
-```
-
-Configuration is loaded once. Pet selection stays fixed for the run. Restart after changing the pet or configuration.
-
-| Setting | Default |
-| --- | --- |
-| `pet_dir` | Required sprite pack path |
-| `persona` | Deadpan, slightly snarky desktop companion |
-| `log_file` | `logs/pet-daemon.jsonl` |
-| `memory_file` | `state/pet-memory.json` |
-| `overlay_binary` | `.build/pet-overlay` |
-| `daemon_socket` | `/tmp/pet-daemon.sock` |
-| `overlay_socket` | `/tmp/pet.sock` |
-| `model` | `claude-haiku-5-5` |
-| `observation_seconds` | Random interval between 20 and 40 |
-| `summary_interval` | Summarize 32 older exchanges when 64 accumulate, retaining 32 verbatim |
-| `summary_summary_interval` | Consolidate 8 older summaries when 16 accumulate, retaining 8 verbatim |
-| `compaction_max_tokens` | 1024 summary API output tokens |
-| `speech_ttl` | 5 seconds |
-| `request_timeout` | 20 seconds |
-| `stale_seconds` | 3600 seconds |
-| `completed_retention_seconds` | 7200 seconds |
-| `max_tokens` | 4096 API output tokens |
-
-Set `persona` in your local `pet.config.json` to choose the pet's voice:
-
-```json
-{
-  "pet_dir": "assets/pets/my-pet",
-  "persona": "You are a gentle, curious woodland pet who enjoys solving problems with a developer."
-}
-```
-
-Omitting `persona` uses the deadpan companion described above. Persona controls character and tone. Shared instructions define the pet's first-person relationship to the agents' work, speech pacing, and structured response contract. The pet speaks as the character doing the work and keeps its instructions, private thoughts, and session metadata out of speech. Restart after editing the persona.
-
-`behavior` accepts these settings:
-
-| Setting | Default |
-| --- | --- |
-| `roaming` | `true` |
-| `repeat_range` | `[1, 3]` complete cycles |
-| `repeat_budget` | 4 seconds, with longer clips played once |
-| `gesture_cooldown` | 15 seconds after a gesture |
-| `baseline_dwell` / `idle_debounce` | 2 / 1 seconds |
-| `error_seconds` | 2 seconds |
-| `walk_seconds` / `walk_speed` | `[2, 6]` seconds / 40 pixels per second |
-| `idle_pause` / `working_pause` | `[20, 60]` / `[8, 20]` seconds |
-| `work_burst_seconds` | `[2, 4]` seconds |
-| `pointer_radius` / `resume_seconds` | 100 pixels / 3 seconds |
-| `gaze_reset_seconds` / `gaze_deadzone` | 1.2 seconds / 24 pixels |
-
-Observation timing and behavior timing are independent. The daemon chooses walking direction, targets, repeats, and pauses. Haiku suggests optional gestures using the selected pet's available clips.
-
-Speech frequency and brevity are guided by the shared instructions in [cognition.py](pet_daemon/cognition.py). Character and tone come from the configured persona. The daemon accepts nullable speech and applies no word-count limit, prose trimming, silence lottery, or automatic speech cooldown. `max_tokens` supplies the Anthropic API's required output budget. Socket payloads still have transport limits.
-
-## Try parallel sessions
-
-Add the client and hook adapter to PATH before launching harnesses:
+Add the client and hook adapter to PATH before launching your harness:
 
 ```sh
 export PATH="$PWD/bin:$PWD/scripts:$PATH"
 ```
 
-Use another terminal while the daemon runs:
-
-```sh
-pet-notify intent --session demo-a --text "Refactor batch inserts"
-pet-notify --session demo-a --status start --tool "cargo test"
-pet-notify --session demo-b --status start --tool "pytest"
-
-pet-notify --session demo-a --status done
-# demo-b is still working.
-
-pet-notify --session demo-b --status error --detail "AssertionError in parser tests"
-pet-notify speak --context "One test suite passed; the parser suite failed"
-```
-
-For overlapping tools in one manual session, supply a different `--call` for each operation and repeat it on completion:
-
-```sh
-pet-notify --session demo --call build --status start --tool "cargo build"
-pet-notify --session demo --call tests --status start --tool "cargo test"
-pet-notify --session demo --call build --status done
-pet-notify --session demo --call tests --status done
-```
-
-`speak` returns after queuing a request. It uses the daemon's conversation and explicitly requests speech. Optional `--ttl` changes that bubble's expiry. Hooks and the client never wait for model output.
-
-All tool events count pending calls. The pet reports `working` while any remain and `idle` otherwise, including reasoning and human-input gaps. Errors preempt ordinary behavior briefly. Turn completion is tracked separately, so a tool gap does not count as pipeline convergence. Cancelled and stale work do not count as clean completion.
-
-Sessions use native identifiers and timestamps. Stale lanes expire after the configured interval. Live session tracking starts fresh on restart.
-
-The pet saves its conversation, including private thoughts, to `memory_file` after each valid model response and replaces the file atomically. Memory has three parts: long-term memory, ordered summary chunks, and recent user/assistant exchanges. When raw exchanges reach twice `summary_interval`, the next observation asks the configured model to summarize the oldest `summary_interval` exchanges into one new chunk. It appends that chunk and keeps the remaining exchanges verbatim. This summary request includes only the exchanges being retired.
-
-When chunks reach twice `summary_summary_interval`, the model combines the oldest `summary_summary_interval` chunks with existing long-term memory. It replaces long-term memory and keeps the remaining chunks unchanged. `compaction_max_tokens` sets the output budget for either kind of summary. A failed summary keeps its source messages and retries on a later observation.
-
-On restart, the same pet resumes all three parts of memory. Historical messages keep their exact content. The pet infers their age from observation timestamps and uses the current snapshot for active work and outcomes. Each summary includes the timestamp of the latest observation it summarizes.
-
-Requests enable five-minute caching for the system prompt and conversation. A separate cache marker follows the latest summary chunk so the memory prefix remains reusable when raw exchanges become a new chunk. Between summaries, each observation appends to the same conversation prefix. Consolidating chunks changes long-term memory and requires a fresh memory cache write. Each summarization and observation request has its own `request_timeout` budget.
-
-Memory paths are relative to the configuration file. The default `state/` directory is gitignored. Use a separate file for each pet if switching between pets. A file saved for another pet is ignored. Unreadable files or invalid JSON start an empty conversation with a warning. Save failures log a warning. Delete the file while the daemon is stopped to reset the conversation.
-
-Prompt submission, individual session completion, and failures trigger observations. Each observation includes every tracked session and the triggering event. The pet owns those goals and results in its speech, such as "I'm testing the parser" or "My parser tests passed." Finishing one task can leave it busy with another. Routine observations cover ongoing work. The shared instructions favor brief acknowledgements at the start and finish, and frequent short comments during active work. Ordinary tool updates do not invalidate an observation, while new turns, outcomes, or failure recovery can discard stale commentary.
-
-## Behavior logs
-
-The daemon appends structured JSON Lines to `logs/pet-daemon.jsonl`. Set `log_file` in your local config to choose another path. Restart the daemon to enable logging after updating the code. Logs rotate at 10 MiB, keeping three backups, and the repository ignores `logs/`.
-
-Each line has a UTC timestamp, event, level, and run ID. Observation events share an observation ID. The log includes startup settings and sprite capabilities, hook packets and session snapshots, complete model requests (persona, history, snapshot, and response schema), model responses and token usage, compaction requests and responses, memory summaries, thoughts, speech, gesture decisions, discarded responses, animation repeats, movement targets, completion, interruptions, and errors. Renderer status records capture screen and interaction changes rather than every polling update.
-
-These local logs contain the task and tool excerpts supplied by hooks and the pet's conversation. API keys and HTTP headers are not logged.
-
-Follow decisions and movement with `jq`:
-
-```sh
-tail -f logs/pet-daemon.jsonl | jq 'select(.event == "observation.decision" or .event == "behavior.walk" or .event == "behavior.gesture_rejected")'
-jq 'select(.event == "observation.request") | .request' logs/pet-daemon.jsonl
-```
-
-## Native hooks
-
-Configure each harness using its example:
+Merge the hooks from the matching example into your harness configuration, preserving unrelated settings and handlers:
 
 | Harness | Example | Destination |
 | --- | --- | --- |
@@ -156,106 +39,68 @@ Configure each harness using its example:
 | Codex | [codex-hooks.json](examples/codex-hooks.json) | `~/.codex/hooks.json` |
 | Cursor CLI | [cursor-hooks.json](examples/cursor-hooks.json) | `~/.cursor/hooks.json` |
 
-Merge hook arrays without removing unrelated settings or handlers. Replace `pet-hook` in the commands with the absolute path to `scripts/pet-hook`, or use the PATH setup above. In Codex, review and trust the definitions through `/hooks`.
+If the harness cannot find `pet-hook` through PATH, replace it in the hook commands with the absolute path to `scripts/pet-hook`. In Codex, review and trust the definitions through `/hooks`.
 
-Adapters forward prompt intent, selected command/result excerpts, progress, failures, and native tool/session/subagent identifiers. They do not read full transcripts or make API calls. Native inputs are untrusted data in the persona prompt. Excerpts forwarded to Haiku may contain task or command details.
+Hooks forward goals, progress, selected command/result excerpts, and failures. Those excerpts are sent to Haiku for commentary. Hooks return without waiting for model output, and a missing daemon does not block the harness.
 
-Hook responses preserve harness decisions: `{}` normally and `{"continue":true}` for Cursor prompt submission. Cursor's imported Claude hook payloads are skipped to avoid duplicate pet events.
-
-Claude terminal failures close the turn and trigger an alert. Codex failures use structured tool result fields. Cursor failures and cancellation statuses are normalized for tools, subagents, and turns. Subagent aliases and parent relationships keep parallel work correlated.
-
-See the official [Claude hooks](https://code.claude.com/docs/en/hooks), [Codex hooks](https://developers.openai.com/codex/hooks), and [Cursor hooks](https://cursor.com/docs/hooks) references.
-
-## Wrap CLI commands
-
-The wrapper forwards command intent and lifecycle while preserving standard input, output, signals, and exit status:
+For commands outside a harness, use the wrapper. It preserves input, output, signals, and exit status:
 
 ```sh
 examples/pet-run pytest
-examples/pet-run cargo build
-examples/pet-run git commit -m 'Add parser'
-printf 'hello\n' | examples/pet-run cat
 ```
 
-It uses a unique session for each invocation. Failures automatically schedule a daemon observation.
-
-## Sprite packs
-
-The fetch script imports existing artwork from [OpenPets](https://github.com/OpenPetsHQ/openpets):
+To request speech manually, run this in another terminal while the daemon is running:
 
 ```sh
-scripts/fetch-assets.sh --pet NAME --source /path/to/openpets
-scripts/fetch-assets.sh --source /path/to/custom-pack --pet custom
-scripts/fetch-assets.sh --zip ~/Downloads/pet.zip
-scripts/fetch-assets.sh --zip ~/Downloads/pet.zip --pet my-pet
-scripts/fetch-assets.sh --pet NAME --ref COMMIT
+pet-notify speak --context "The desktop pet is running"
 ```
 
-ZIP files can contain the pet files at the archive root or inside one top-level folder. The default name comes from `pet.json` (`id`), `manifest.json` (`pet`), or the ZIP filename. Use `--pet` to choose a name.
+The pet stays busy while any tracked tool call is active. See [pet-notify](bin/pet-notify) for manual session events and [pet-hook](scripts/pet-hook) for harness adapters.
 
-Default output is `assets/pets/NAME`, which is gitignored. Set `pet_dir` to the imported directory and restart the daemon.
+## Customize
 
-Standard sheets supply idle, left/right running, waving, jumping, failure, waiting, running, and review clips. V2 sheets can also supply sixteen gaze poses. Named PNG folders and explicit custom manifests can supply fewer clips. A rest pose is required. Missing reactions use the existing rest pose; packs without left/right walking sprites stay stationary.
-
-The importer validates referenced frames before replacing installed clip data. It preserves unrelated output files. Generated packs include a manifest and source provenance.
-
-A custom normalized manifest declares actual clip capabilities:
+Edit `pet.config.json` to select sprites, choose a voice, adjust check-ins, or disable roaming:
 
 ```json
 {
-  "pet": "little-companion",
-  "rest": "quiet",
-  "clips": {
-    "quiet": {
-      "frames": ["clips/quiet/000.png"],
-      "fps": 1,
-      "role": "rest"
-    },
-    "hop": {
-      "frames": ["clips/hop/000.png", "clips/hop/001.png"],
-      "fps": 8,
-      "role": "celebrate",
-      "max_repeats": 3
-    }
+  "pet_dir": "assets/pets/my-pet",
+  "persona": "You are a gentle, curious woodland pet who enjoys solving problems with a developer.",
+  "idle_message_seconds": 300,
+  "behavior": {
+    "roaming": false
   }
 }
 ```
 
-Roles include `rest`, `work`, `attention`, `celebrate`, `error`, `greeting`, `walk-left`, `walk-right`, `gaze`, and `gesture`. Frame paths stay inside the pack. An optional `gaze` array lists sixteen static clip IDs clockwise from up. Optional `gazeAnchor` gives normalized image coordinates.
+Only `pet_dir` is required. The default persona is deadpan and slightly snarky, roaming is enabled, and check-ins occur after five minutes of quiet or waiting for input. Activity in another task does not reset that task's check-in timer.
 
-## Local protocol and checks
+Paths are relative to the configuration file. Local configuration and imported assets are gitignored. Restart after changing the configuration. To use another file, run `bin/pet-daemon --config /absolute/path/to/pet.config.json`.
 
-Clients send one JSON datagram to the daemon. Hook packets have a 2000-byte UTF-8 budget, with optional excerpts trimmed before identifiers. Missing or full daemon sockets drop hook updates without blocking the harness. Python process startup contributes to hook latency.
+The pet remembers its conversation across restarts in `state/pet-memory.json`. Use a separate `memory_file` for each pet. To reset its memory, delete that file while the daemon is stopped.
 
-The daemon sends activity, playback, motion, and speech commands to the overlay. Rendering uses a background `DispatchSourceRead` and the main AppKit thread. The renderer reports geometry, interaction state, and correlated playback completion or interruption.
+See [config.py](pet_daemon/config.py) for all settings and defaults, and [cognition.py](pet_daemon/cognition.py) for the shared speech instructions.
 
-Speech pauses window locomotion while a stationary gesture can accompany it. Activity updates preserve the current bubble. New text replaces it. Empty text clears it.
+## Development checks
+
+Run the automated checks and compile the renderer:
 
 ```sh
 make check
 make build
 ```
 
-Checks cover real UNIX sockets, native hook responses, wrapper behavior, parallel lane tracking, stale events, sprite import, animation pacing, and actual SDK serialization through a fake HTTP transport. Automated checks make no paid model requests.
+The checks cover hooks, sockets, parallel tasks, sprite imports, and behavior without paid model requests. For a desktop smoke check in a logged-in macOS session, run `make desktop-check`. It uses the configured sprites and a fake API, so API credentials are unnecessary.
 
-Run the native desktop smoke check explicitly in a logged-in macOS session:
-
-```sh
-make desktop-check
-```
-
-It uses the built renderer, the configured sprites, temporary sockets, and a fake API to verify movement, hooks, long speech, expiry, and cleanup. It does not require API credentials.
-
-For a live API and desktop check, start the daemon with your API key and run:
+The daemon writes JSON Lines to `logs/pet-daemon.jsonl`. Logs contain task and command excerpts, model requests and responses, private thoughts, and behavior decisions. API keys and HTTP headers are excluded. Follow decisions with:
 
 ```sh
-pet-notify speak --context "The desktop pet is running and the validation suite passed"
+tail -f logs/pet-daemon.jsonl | jq 'select(.event == "observation.decision")'
 ```
 
-Watch for speech and its expiry, drag the pet, and exercise the parallel-session examples. Observation logs include token and prompt-cache usage.
+For runtime details, see [daemon.py](pet_daemon/daemon.py), [sessions.py](pet_daemon/sessions.py), [behavior.py](pet_daemon/behavior.py), and [memory.py](pet_daemon/memory.py).
 
 ## License and attribution
 
-Simple Pet is a fork and rebuild of [OpenPets](https://github.com/OpenPetsHQ/openpets), simplified into a native macOS desktop pet with a local Python daemon. Credit goes to the OpenPets authors for the original project and artwork.
+Simple Pet is a fork and rebuild of [OpenPets](https://github.com/OpenPetsHQ/openpets). Credit goes to the OpenPets authors for the original project and artwork.
 
-Simple Pet is licensed under the [MIT license](LICENSE). The license retains OpenPets' copyright notice and includes Elliot Newnham's notice for modifications. The original OpenPets license is also preserved in [assets/LICENSE.OpenPets](assets/LICENSE.OpenPets).
+Simple Pet is licensed under the [MIT license](LICENSE), retaining OpenPets’ copyright notice and adding Elliot Newnham’s notice for modifications. The original license is preserved in [assets/LICENSE.OpenPets](assets/LICENSE.OpenPets).
