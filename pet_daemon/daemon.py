@@ -172,6 +172,7 @@ class Daemon:
             elif kind == "speak" and isinstance(packet.get("context"), str):
                 ttl = packet.get("ttl")
                 if ttl is None or (type(ttl) in (int, float) and math.isfinite(ttl) and ttl >= 0):
+                    self.behavior.wake("speech_request")
                     self.manual = (packet["context"], ttl)
                     trace("speech.requested", context=packet["context"], ttl=ttl)
         except (ValueError, KeyError, TypeError, UnicodeError) as error:
@@ -182,6 +183,7 @@ class Daemon:
         return max(self.config.speech_ttl, 3 + len(speech.split()) / 2)
 
     def click(self):
+        self.behavior.wake("click")
         if self.last_speech and self.clock() - self.last_speech[1] <= SPEECH_REPLAY_SECONDS:
             speech, _ = self.last_speech
             self.emit({"text": speech, "ttl": self.speech_duration(speech)})
@@ -201,7 +203,7 @@ class Daemon:
             timeout = self.config.request_timeout * (1 + self.cognition.compaction_requests_due)
             try:
                 result = await asyncio.wait_for(
-                    self.cognition.observe({**self.sessions.snapshot(keys), "trigger": trigger}, reason, context),
+                    self.cognition.observe({**self.sessions.snapshot(keys), "trigger": trigger, "sleeping": self.behavior.sleeping}, reason, context),
                     timeout=timeout,
                 )
                 if context is None and observation_context != self.sessions.observation_context(include_activity, keys):
@@ -210,6 +212,8 @@ class Daemon:
                     return
                 if result["speak"] is not None:
                     speech = result["speak"]
+                    if speech.strip() and ttl != 0:
+                        self.behavior.wake("speech")
                     reading_seconds = self.speech_duration(speech)
                     delivered = self.emit({"text": speech, "ttl": reading_seconds if ttl is None else ttl})
                     if delivered and speech.strip() and ttl != 0:
@@ -262,7 +266,7 @@ class Daemon:
                     request = ("check_in", None, None, {"sessions": check_in})
                     for key in check_in:
                         self.sessions.lanes[key].last_check_in = now
-                elif now >= self.next_observation:
+                elif now >= self.next_observation and not self.behavior.sleeping:
                     request = ("routine", None, None)
                 if request:
                     self.next_observation = now + self.rng.uniform(*self.config.observation_seconds)

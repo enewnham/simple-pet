@@ -24,6 +24,31 @@ class Behavior:
         self.pointer_moved = -math.inf
         self.last_pointer = None
         self.blocked = None
+        self.nap_until = None
+        self.next_nap = None
+
+    @property
+    def sleeping(self):
+        return self.nap_until is not None
+
+    def wake(self, reason):
+        self.next_nap = self.clock() + self.rng.uniform(*self.config.nap_interval)
+        if not self.sleeping:
+            return
+        self.nap_until = None
+        self.emit({"sleeping": False})
+        self._baseline(self.pack.rest)
+        self.next_action = self.clock() + self.rng.uniform(*self._pause())
+        trace("behavior.woke", reason=reason, next_nap=self.next_nap)
+
+    def _nap(self):
+        now = self.clock()
+        clips = self.pack.role("sleep")
+        clip_id = self.rng.choice(clips).id if clips else self.pack.rest
+        self.nap_until = now + self.rng.uniform(*self.config.nap_seconds)
+        self.emit({"sleeping": True, "stop_motion": True})
+        self._baseline(clip_id, source="nap")
+        trace("behavior.napping", clip=clip_id, until=self.nap_until)
 
     def renderer_status(self, packet):
         for name in ("x", "y", "width", "height"):
@@ -135,6 +160,7 @@ class Behavior:
         if reason:
             trace("behavior.gesture_rejected", clip=clip_id, reason=reason)
             return False
+        self.wake("gesture")
         self._play(clip, source="observation")
         return True
 
@@ -185,6 +211,17 @@ class Behavior:
         if not self.status:
             return
         now = self.clock()
+        nap_allowed = self.config.naps and state == "idle" and not sessions.active and not sessions.failed and not self._blocked()
+        if not nap_allowed:
+            if self.sleeping:
+                self.wake("activity_or_interaction")
+            self.next_nap = None
+        elif self.sleeping:
+            if now < self.nap_until:
+                return
+            self.wake("nap_finished")
+        elif self.next_nap is None:
+            self.next_nap = now + self.rng.uniform(*self.config.nap_interval)
         changed = state != self.state
         if changed:
             trace("behavior.state", previous=self.state, state=state)
@@ -240,6 +277,9 @@ class Behavior:
                 self.baseline_until = now + self.rng.uniform(*self.config.work_burst_seconds)
                 trace("behavior.work_burst", clip=self.clip, until=self.baseline_until)
                 return
+        if nap_allowed and now >= self.next_nap:
+            self._nap()
+            return
         if now >= self.next_action and not self.status["dragging"] and not self.status["menu"]:
             self.next_action = now + self.rng.uniform(*self._pause())
             trace("behavior.routine", state=state, next_action=self.next_action, gesture_after=self.gesture_after)

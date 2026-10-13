@@ -89,7 +89,13 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                     screen = status["screen"]
                     self.assertGreaterEqual(status["x"], screen["x"])
                     self.assertLessEqual(status["x"] + status["width"], screen["x"] + screen["width"])
+                    config.behavior.nap_interval = (0.2, 0.2)
+                    config.behavior.nap_seconds = (2, 2)
+                    daemon.behavior.next_nap = daemon.clock() + 0.2
+                    await wait_for(lambda: daemon.behavior.status["sleeping"])
+                    config.behavior.nap_interval = (120, 240)
                     await cli("intent", "--session", "build", "--text", "Build the parser")
+                    await wait_for(lambda: not daemon.behavior.status["sleeping"])
                     await cli("--session", "build", "--status", "start", "--tool", "cargo build")
                     await hook("cursor", "beforeSubmitPrompt", {"conversation_id": "cursor-tests", "prompt": "Test the parser"}, expected={"continue": True})
                     await hook("cursor", "preToolUse", {

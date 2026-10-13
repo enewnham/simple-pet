@@ -21,6 +21,8 @@ The imported sprites go into `assets/pets/my-pet`, matching the example configur
 
 The pet floats across Spaces without a Dock icon. Drag it to reposition it or move it to another monitor. Click it to replay a message spoken within the last minute, or request fresh commentary. Long speech bubbles scroll. Ctrl-C or the right-click **Quit Pet** menu stops both the daemon and renderer.
 
+During full idleness, the pet takes 20–45 second naps spaced 2–4 minutes apart. A small “Zzz” marks a nap. Packs with a `sleep` clip use that animation. Work, unresolved failures, speech, and mouse interaction keep it awake. Clicking wakes it immediately. Routine commentary pauses during naps.
+
 Use `make run` to set up, build, and start subsequent runs.
 
 ## Connect your agents
@@ -73,6 +75,8 @@ Edit `pet.config.json` to select sprites, choose a voice, adjust check-ins, or d
 ```
 
 Only `pet_dir` is required. The default persona is deadpan and slightly snarky, roaming is enabled, and check-ins occur after five minutes of quiet or waiting for input. Activity in another task does not reset that task's check-in timer.
+
+Set `behavior.naps` to `false` to disable naps. `behavior.nap_interval` and `behavior.nap_seconds` accept minimum and maximum durations in seconds.
 
 Paths are relative to the configuration file. Local configuration and imported assets are gitignored. Restart after changing the configuration. To use another file, run `bin/pet-daemon --config /absolute/path/to/pet.config.json`.
 

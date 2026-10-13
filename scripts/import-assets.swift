@@ -33,8 +33,9 @@ let aliases: [String: String] = [
     "celebrate": "celebrate", "celebrating": "celebrate", "jumping": "celebrate",
     "error": "error", "shock": "error", "down": "error", "failed": "error",
     "waving": "greeting", "running-left": "walk-left", "running-right": "walk-right",
+    "sleep": "sleep", "sleeping": "sleep", "nap": "sleep",
 ]
-let roles = Set(["rest", "work", "attention", "celebrate", "error", "greeting", "walk-left", "walk-right", "gaze", "gesture"])
+let roles = Set(["rest", "sleep", "work", "attention", "celebrate", "error", "greeting", "walk-left", "walk-right", "gaze", "gesture"])
 let manager = FileManager.default
 
 func decodeImage(_ url: URL) throws -> CGImage {

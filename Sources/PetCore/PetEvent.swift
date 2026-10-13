@@ -27,11 +27,12 @@ public struct PetEvent: Decodable {
     public let animation: AnimationCommand?
     public let motion: MotionCommand?
     public let stopMotion: Bool?
-    enum CodingKeys: String, CodingKey { case state, text, ttl, animation, motion; case stopMotion = "stop_motion" }
+    public let sleeping: Bool?
+    enum CodingKeys: String, CodingKey { case state, text, ttl, animation, motion, sleeping; case stopMotion = "stop_motion" }
 
     public static func decode(_ data: Data) throws -> PetEvent {
         let event = try JSONDecoder().decode(PetEvent.self, from: data)
-        guard event.state != nil || event.text != nil || event.animation != nil || event.motion != nil || event.stopMotion == true else {
+        guard event.state != nil || event.text != nil || event.animation != nil || event.motion != nil || event.stopMotion == true || event.sleeping != nil else {
             throw EventError.invalid
         }
         if let ttl = event.ttl, !ttl.isFinite || ttl < 0 { throw EventError.invalid }
@@ -51,6 +52,7 @@ public struct PetEvent: Decodable {
 public final class PetModel {
     public private(set) var state: PetState = .idle
     public private(set) var text: String?
+    public private(set) var sleeping = false
     public var onChange: (() -> Void)?
     private var expiration: DispatchWorkItem?
 
@@ -59,6 +61,7 @@ public final class PetModel {
     public func apply(_ event: PetEvent) {
         dispatchPrecondition(condition: .onQueue(.main))
         if let state = event.state { self.state = state }
+        if let sleeping = event.sleeping { self.sleeping = sleeping }
         if let input = event.text {
             expiration?.cancel()
             expiration = nil

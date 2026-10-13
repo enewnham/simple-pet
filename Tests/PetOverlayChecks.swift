@@ -70,6 +70,12 @@ struct PetOverlayChecks {
         view.onInteraction = { dragging, _ in interactions.append(dragging) }
         let spritePoint = NSPoint(x: 100, y: 52)
         let beforeClick = view.petFrameInScreen
+        let awakeLabel = view.accessibilityLabel()
+        try apply(["sleeping": true], to: model)
+        try require(view.accessibilityLabel() == "Pet: sleeping. ", "Naps expose the sleeping state")
+        try require(view.petFrameInScreen == beforeClick, "Naps preserve the pet position")
+        try apply(["sleeping": false], to: model)
+        try require(view.accessibilityLabel() == awakeLabel, "Waking restores the activity label")
         NSApp.postEvent(mouseEvent(.leftMouseUp, at: spritePoint, in: panel), atStart: true)
         view.mouseDown(with: mouseEvent(.leftMouseDown, at: spritePoint, in: panel))
         try require(clicks == 1, "Clicking the sprite requests speech")

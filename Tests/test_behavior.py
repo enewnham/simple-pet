@@ -288,6 +288,86 @@ class BehaviorTests(unittest.TestCase):
         behavior.tick('idle', self.sessions)
         self.assertEqual(self.animations()[-1]['id'], 'quiet-pose')
 
+    def test_idle_naps_are_short_and_separated_by_awake_time(self):
+        behavior = self.make_behavior(nap_interval=(120, 120), nap_seconds=(20, 20))
+        behavior.tick('idle', self.sessions)
+        self.clock.advance(119)
+        behavior.tick('idle', self.sessions)
+        self.assertFalse(behavior.sleeping)
+        self.clock.advance(1)
+        behavior.tick('idle', self.sessions)
+        self.assertTrue(behavior.sleeping)
+        self.assertIn({'sleeping': True, 'stop_motion': True}, self.output)
+        self.clock.advance(19)
+        behavior.tick('idle', self.sessions)
+        self.assertTrue(behavior.sleeping)
+        self.clock.advance(1)
+        behavior.tick('idle', self.sessions)
+        self.assertFalse(behavior.sleeping)
+        self.assertIn({'sleeping': False}, self.output)
+        self.clock.advance(119)
+        behavior.tick('idle', self.sessions)
+        self.assertFalse(behavior.sleeping)
+        self.clock.advance(1)
+        behavior.tick('idle', self.sessions)
+        self.assertTrue(behavior.sleeping)
+
+    def test_naps_use_available_sleep_clips_and_keep_them_out_of_model_gestures(self):
+        behavior = self.make_behavior({'snooze': {'role': 'sleep', 'frames': 4, 'fps': 2}}, nap_interval=(1, 1))
+        behavior.tick('idle', self.sessions)
+        self.clock.advance(1)
+        behavior.tick('idle', self.sessions)
+        self.assertTrue(behavior.sleeping)
+        self.assertEqual(self.animations()[-1]['id'], 'snooze')
+        self.assertIsNone(self.animations()[-1]['repeats'])
+        self.assertNotIn('snooze', behavior.pack.gesture_ids)
+        self.assertFalse(behavior.gesture('snooze', self.sessions))
+
+    def test_active_turns_and_unresolved_failures_keep_the_pet_awake(self):
+        for event in ('intent', 'waiting', 'turn_error'):
+            with self.subTest(event=event):
+                self.sessions = Sessions(self.clock)
+                self.sessions.handle({'harness': 'cli', 'session': 'one', 'event': event, 'goal': 'Plan changes'})
+                behavior = self.make_behavior(nap_interval=(1, 1))
+                behavior.tick('idle', self.sessions)
+                self.clock.advance(1000)
+                behavior.tick('idle', self.sessions)
+                self.assertFalse(behavior.sleeping)
+                self.assertFalse(any(packet.get('sleeping') for packet in self.output))
+
+    def test_new_work_wakes_a_nap_immediately(self):
+        behavior = self.make_behavior({'busy': {'role': 'work'}}, nap_interval=(1, 1))
+        behavior.tick('idle', self.sessions)
+        self.clock.advance(1)
+        behavior.tick('idle', self.sessions)
+        self.assertTrue(behavior.sleeping)
+        self.start()
+        behavior.tick('working', self.sessions)
+        self.assertFalse(behavior.sleeping)
+        self.assertEqual(self.animations()[-1]['id'], 'busy')
+        self.assertEqual(behavior.state, 'working')
+
+    def test_speech_and_mouse_interaction_wake_naps(self):
+        for interaction in ({'speech': True}, {'dragging': True}, {'menu': True}, {'pointer': {'x': 200, 'y': 152}}):
+            with self.subTest(interaction=interaction):
+                behavior = self.make_behavior({'snooze': {'role': 'sleep'}}, nap_interval=(1, 1))
+                behavior.tick('idle', self.sessions)
+                self.clock.advance(1)
+                behavior.tick('idle', self.sessions)
+                self.assertTrue(behavior.sleeping)
+                behavior.renderer_status(self.status(**interaction))
+                behavior.tick('idle', self.sessions)
+                self.assertFalse(behavior.sleeping)
+                self.assertEqual(self.animations()[-1]['id'], 'quiet-pose')
+
+    def test_naps_can_be_disabled(self):
+        behavior = self.make_behavior(naps=False, nap_interval=(1, 1))
+        behavior.tick('idle', self.sessions)
+        self.clock.advance(1000)
+        behavior.tick('idle', self.sessions)
+        self.assertFalse(behavior.sleeping)
+        self.assertFalse(any(packet.get('sleeping') for packet in self.output))
+
 
 if __name__ == '__main__':
     unittest.main()

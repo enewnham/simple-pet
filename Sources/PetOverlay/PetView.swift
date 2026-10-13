@@ -56,7 +56,8 @@ final class PetView: NSView {
         addSubview(speechScroll)
         model.onChange = { [weak self] in
             guard let self = self else { return }
-            self.setAccessibilityLabel("Pet: \(self.model.state.rawValue). \(self.model.text ?? "")")
+            let activity = self.model.sleeping ? "sleeping" : self.model.state.rawValue
+            self.setAccessibilityLabel("Pet: \(activity). \(self.model.text ?? "")")
             self.layoutSpeech()
             self.needsDisplay = true
             self.onModelChange?()
@@ -127,6 +128,11 @@ final class PetView: NSView {
         let rect = NSRect(x: spriteRect.midX - size.width / 2, y: spriteRect.minY, width: size.width, height: size.height)
         NSGraphicsContext.current?.imageInterpolation = .none
         image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+        if model.sleeping {
+            let sleep = NSAttributedString(string: "Zzz", attributes: [.font: NSFont.systemFont(ofSize: 15, weight: .medium),
+                                                                       .foregroundColor: NSColor.secondaryLabelColor])
+            sleep.draw(at: NSPoint(x: spriteRect.maxX - 12, y: spriteRect.maxY - 20))
+        }
         if let rect = speechRect {
             let bubble = NSBezierPath(roundedRect: rect, xRadius: 9, yRadius: 9)
             NSColor.windowBackgroundColor.withAlphaComponent(0.96).setFill()

@@ -122,11 +122,13 @@ try manager.copyItem(at: output.appendingPathComponent("clips/idle/000.png"), to
 let customManifest: [String: Any] = ["pet": "custom", "rest": "calm", "clips": [
     "calm": ["frames": ["pose.png"], "fps": 1.0, "role": "rest"],
     "bounce": ["frames": ["pose.png"], "fps": 2.0, "role": "celebrate", "max_repeats": 2],
+    "snooze": ["frames": ["pose.png"], "fps": 1.0, "role": "sleep"],
 ]]
 try writeObject(customManifest, to: custom.appendingPathComponent("manifest.json"))
 try require(try invoke("custom", root: custom) == 0, "Accept direct custom packs with explicit semantic metadata.")
 let installed = try readManifest()["clips"] as! [String: [String: Any]]
 try require(installed["bounce"]?["max_repeats"] as? Int == 2, "Preserve custom repetition limits.")
+try require(installed["snooze"]?["role"] as? String == "sleep", "Preserve authored sleep clips.")
 try require(try invoke("custom", root: custom, origin: "/downloads/custom-pet.zip") == 0, "Accept an original local ZIP path as provenance.")
 try require(try readManifest()["source"] as? String == "/downloads/custom-pet.zip", "Preserve the original ZIP path rather than its extraction directory.")
 let saved = try Data(contentsOf: output.appendingPathComponent("manifest.json"))

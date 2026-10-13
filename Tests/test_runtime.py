@@ -165,6 +165,40 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         schema = self.requests[0]["output_config"]["format"]["schema"]
         self.assertEqual(schema["properties"]["speak"], {"type": "string"})
 
+    async def test_napping_pauses_routine_commentary_and_click_wakes_for_speech(self):
+        self.use_clock()
+        self.config.behavior.nap_interval = (1, 1)
+        self.config.behavior.nap_seconds = (10, 10)
+        self.daemon.behavior.next_nap = self.now + 1
+        self.now += 1
+        await self.packet(lambda packet: packet.get("sleeping") is True)
+        self.daemon.next_observation = self.now
+        self.now += 2
+        self.send_status(x=101)
+        await self.wait_for(lambda: self.daemon.behavior.status["x"] == 101)
+        self.assertTrue(self.daemon.behavior.sleeping)
+        self.assertEqual(self.requests, [])
+        self.send({"kind": "renderer", "event": "click"})
+        await self.packet(lambda packet: packet.get("sleeping") is False)
+        speech = await self.packet(lambda packet: "text" in packet)
+        self.assertEqual(speech["text"], self.speech)
+        snapshot = json.loads(self.requests[-1]["messages"][-1]["content"])
+        self.assertEqual(snapshot["reason"], "click")
+        self.assertFalse(snapshot["sleeping"])
+
+    async def test_prompt_wakes_a_nap_before_tool_work_starts(self):
+        self.use_clock()
+        self.config.behavior.nap_interval = (1, 1)
+        self.daemon.behavior.next_nap = self.now + 1
+        self.now += 1
+        await self.packet(lambda packet: packet.get("sleeping") is True)
+        self.event("intent", harness="codex", goal="Run checks")
+        await self.packet(lambda packet: packet.get("sleeping") is False)
+        speech = await self.packet(lambda packet: "text" in packet)
+        self.assertEqual(speech["text"], self.speech)
+        self.assertFalse(self.daemon.sessions.working)
+        self.assertFalse(self.daemon.behavior.sleeping)
+
     async def test_click_replays_recent_speech_and_requests_fresh_speech_after_a_minute(self):
         self.use_clock()
         self.send({"kind": "speak", "context": "Inspect the build", "ttl": 1})

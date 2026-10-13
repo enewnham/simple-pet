@@ -22,6 +22,9 @@ def interval(value):
 @dataclass
 class BehaviorConfig:
     roaming: bool = True
+    naps: bool = True
+    nap_interval: tuple = (120, 240)
+    nap_seconds: tuple = (20, 45)
     repeat_range: tuple = (1, 3)
     repeat_budget: float = 4
     gesture_cooldown: float = 15
@@ -41,7 +44,7 @@ class BehaviorConfig:
     def validate(self):
         for item in fields(self):
             value = getattr(self, item.name)
-            if item.name == "roaming":
+            if item.name in ("roaming", "naps"):
                 valid = type(value) is bool
             elif item.name == "repeat_range":
                 valid = interval(value) and all(type(v) is int for v in value)

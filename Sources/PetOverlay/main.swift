@@ -127,7 +127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let rect = view?.petFrameInScreen ?? panel.frame
         let dx = pointer.x - rect.midX
         let dy = pointer.y - (rect.minY + 52)
-        return dragging || menu || model.text != nil || model.state == .error || hypot(dx, dy) <= options.pointerRadius
+        return dragging || menu || model.text != nil || model.sleeping || model.state == .error || hypot(dx, dy) <= options.pointerRadius
     }
 
     private func receive(_ event: PetEvent) {
@@ -190,7 +190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "width": petFrame.width, "height": petFrame.height,
             "screen": ["x": bounds.minX, "y": bounds.minY, "width": bounds.width, "height": bounds.height],
             "pointer": ["x": pointer.x, "y": pointer.y, "moving": now - pointerMovedAt < 0.3],
-            "dragging": dragging, "menu": menu, "speech": model.text != nil
+            "dragging": dragging, "menu": menu, "speech": model.text != nil, "sleeping": model.sleeping
         ]
         let encoded = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
         if now - lastStatusTime >= 0.1 && (force || encoded != lastStatus || now - lastStatusTime >= 1) {

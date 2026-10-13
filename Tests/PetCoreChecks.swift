@@ -9,13 +9,14 @@ struct PetCoreChecks {
         try checks.testRejectsMalformedEventsWithoutApplyingPartialState()
         try await checks.testSpeechExpiresWithoutChangingState()
         try await checks.testNewSpeechSurvivesEarlierExpirationAndStateInputPreservesIt()
+        try checks.testNapCommandsPreserveActivityAndWakeIndependently()
         try await checks.testSocketReceivesValidEventsAfterInvalidJSON()
         try await checks.testSocketReceivesLongSpeechWithoutTruncation()
         try checks.testReclaimsStaleSocketAndPreservesRegularFiles()
         try checks.testFinitePlaybackHoldsLastFrameAndCompletesOnce()
         try checks.testMotionStaysWithinMonitorBounds()
         try checks.testRejectsInvalidSpritePacks()
-        print("Pet core checks passed (9 scenarios).")
+        print("Pet core checks passed (10 scenarios).")
     }
     private func event(_ json: String) throws -> PetEvent {
         try PetEvent.decode(Data(json.utf8))
@@ -72,6 +73,17 @@ struct PetCoreChecks {
         try require(lstat(path, &info) == 0)
         try require(info.st_mode & 0o777 == 0o600)
         try requireThrows { try SocketServer(path: path) { _ in } }
+    }
+
+    func testNapCommandsPreserveActivityAndWakeIndependently() throws {
+        let model = PetModel()
+        model.apply(try event("{\"sleeping\":true}"))
+        try require(model.sleeping && model.state == .idle)
+        model.apply(try event("{\"state\":\"idle\"}"))
+        try require(model.sleeping)
+        model.apply(try event("{\"sleeping\":false,\"state\":\"working\"}"))
+        try require(!model.sleeping && model.state == .working)
+        try requireThrows { try event("{\"sleeping\":\"true\"}") }
     }
 
     func testSocketReceivesLongSpeechWithoutTruncation() async throws {
