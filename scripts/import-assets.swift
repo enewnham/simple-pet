@@ -215,11 +215,12 @@ func extract(source: URL, staging: URL) throws -> [String: Any] {
 }
 
 func run() throws {
-    guard CommandLine.arguments.count == 5 else { throw AssetError("Usage: import-assets SOURCE OUTPUT PET COMMIT") }
+    guard (5...6).contains(CommandLine.arguments.count) else { throw AssetError("Usage: import-assets SOURCE OUTPUT PET COMMIT [SOURCE_ORIGIN]") }
     let root = URL(fileURLWithPath: CommandLine.arguments[1]).standardizedFileURL
     let output = URL(fileURLWithPath: CommandLine.arguments[2]).standardizedFileURL
     let pet = CommandLine.arguments[3]
     let commit = CommandLine.arguments[4]
+    let origin = CommandLine.arguments.count == 6 && !CommandLine.arguments[5].isEmpty ? CommandLine.arguments[5] : nil
     guard safeName(pet) else { throw AssetError("Use a pet directory name without slashes.") }
     let candidates = (pet == "builtin" ? [root.appendingPathComponent("apps/desktop/assets")] :
         ["assets/pets", "apps/desktop/assets/pets", "pets"].map { root.appendingPathComponent($0).appendingPathComponent(pet) }) + [root]
@@ -234,7 +235,6 @@ func run() throws {
         throw AssetError("Output must be separate from the source pet.")
     }
     let license = root.appendingPathComponent("LICENSE")
-    guard manager.fileExists(atPath: license.path) else { throw AssetError("Source must include its LICENSE file.") }
     let parent = output.deletingLastPathComponent()
     try manager.createDirectory(at: parent, withIntermediateDirectories: true)
     let staging = parent.appendingPathComponent(".pet-assets-\(UUID().uuidString)")
@@ -243,14 +243,20 @@ func run() throws {
     defer { try? manager.removeItem(at: staging) }
     var metadata = try extract(source: source, staging: staging)
     metadata["pet"] = pet
-    metadata["source"] = metadata["source"] ?? (source == root ? root.path : "https://github.com/OpenPetsHQ/openpets")
+    let packageURL = source.appendingPathComponent("pet.json")
+    let package = manager.fileExists(atPath: packageURL.path) ? try readObject(packageURL) : [:]
+    if !package.isEmpty { metadata["package"] = package }
+    metadata["source"] = origin ?? metadata["source"] ?? package["sourceUrl"] ?? package["sourceURL"] ?? package["source"] ??
+        (source == root ? root.path : "https://github.com/OpenPetsHQ/openpets")
     metadata["commit"] = commit
     metadata["sourcePath"] = source == root ? "." : String(source.path.dropFirst(root.path.count + 1))
     let json = try JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted, .sortedKeys])
     try json.write(to: staging.appendingPathComponent("manifest.json"))
-    try manager.copyItem(at: license, to: staging.appendingPathComponent("LICENSE.OpenPets"))
+    if source != root, manager.fileExists(atPath: license.path) {
+        try manager.copyItem(at: license, to: staging.appendingPathComponent("LICENSE.OpenPets"))
+    }
     let petLicense = source.appendingPathComponent("LICENSE")
-    if source != root, manager.fileExists(atPath: petLicense.path) {
+    if manager.fileExists(atPath: petLicense.path) {
         try manager.copyItem(at: petLicense, to: staging.appendingPathComponent("LICENSE.Pet"))
     }
     let sourceAttribution = source.appendingPathComponent("ATTRIBUTION.md")
