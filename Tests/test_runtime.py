@@ -127,6 +127,48 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(speech["ttl"], 5)
         self.assertEqual(len(self.requests), 1)
 
+    async def test_file_log_connects_hook_context_model_decision_and_renderer_delivery(self):
+        import logging
+        from pet_daemon.cognition import PERSONA
+        from pet_daemon.telemetry import configure
+
+        logger = logging.getLogger("pet-daemon")
+        handlers, level, propagate = logger.handlers[:], logger.level, logger.propagate
+        path = Path(self.temp.name) / "logs" / "pet.jsonl"
+        configure(path)
+        try:
+            self.event("intent", harness="claude", goal="Fix the quoted parser \"猫\"\ncarefully")
+            self.event("tool_start", harness="claude", call="parser", tool="pytest parser")
+            await self.packet(lambda packet: packet.get("state") == "working")
+            await self.daemon.observe("explicit", "Inspect parser progress")
+            speech = await self.packet(lambda packet: "text" in packet)
+            entries = [json.loads(line) for line in path.read_text().splitlines()]
+            hooks = [entry for entry in entries if entry["event"] == "hook.received"]
+            self.assertTrue(any(entry["packet"].get("tool") == "pytest parser" for entry in hooks))
+            request = next(entry for entry in entries if entry["event"] == "observation.request")
+            self.assertEqual(request["request"]["system"][0]["text"], PERSONA)
+            snapshot = json.loads(request["request"]["messages"][-1]["content"])
+            self.assertEqual(snapshot["sessions"][0]["last_tool"], "pytest parser")
+            self.assertIn('猫', snapshot["sessions"][0]["goal"])
+            response = next(entry for entry in entries if entry["event"] == "observation.response")
+            self.assertEqual(response["response"]["usage"]["input_tokens"], 100)
+            decision = next(entry for entry in entries if entry["event"] == "observation.decision")
+            delivery = next(entry for entry in entries if entry["event"] == "renderer.command" and "text" in entry["packet"])
+            self.assertEqual(decision["decision"]["speak"], speech["text"])
+            self.assertEqual(delivery["packet"]["text"], speech["text"])
+            self.assertEqual({entry["observation_id"] for entry in (request, response, decision, delivery)},
+                             {request["observation_id"]})
+            self.assertEqual(len({entry["run_id"] for entry in entries}), 1)
+            self.assertTrue(all(entry["timestamp"].endswith("+00:00") for entry in entries))
+            self.assertNotIn("test-fixture", path.read_text())
+        finally:
+            for handler in logger.handlers[:]:
+                if handler not in handlers:
+                    logger.removeHandler(handler)
+                    handler.close()
+            logger.setLevel(level)
+            logger.propagate = propagate
+
     async def test_recovery_discards_stale_automatic_speech_but_keeps_thought(self):
         self.slow = True
         self.event("intent", harness="claude", goal="Repair tests")
@@ -225,10 +267,11 @@ class ConfigurationTests(unittest.TestCase):
     def test_loads_startup_paths_relative_to_config_and_configurable_timing(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "pet.json"
-            path.write_text(json.dumps({"pet_dir": "pets/other", "observation_seconds": [15, 25], "history_pairs": 6,
+            path.write_text(json.dumps({"pet_dir": "pets/other", "observation_seconds": [15, 25], "history_pairs": 6, "log_file": "analysis/pet.jsonl",
                                         "behavior": {"repeat_range": [2, 4], "roaming": False}}))
             config = Config.load(path)
             self.assertEqual(config.pet_dir, Path(directory).resolve() / "pets/other")
+            self.assertEqual(config.log_file, Path(directory).resolve() / "analysis/pet.jsonl")
             self.assertEqual(config.observation_seconds, [15, 25])
             self.assertFalse(config.behavior.roaming)
             self.assertEqual(config.behavior.repeat_range, [2, 4])

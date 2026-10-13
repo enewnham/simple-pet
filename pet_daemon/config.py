@@ -49,6 +49,7 @@ class BehaviorConfig:
 @dataclass
 class Config:
     pet_dir: Path
+    log_file: Path = Path("logs/pet-daemon.jsonl")
     overlay_binary: Path = Path(".build/pet-overlay")
     daemon_socket: str = "/tmp/pet-daemon.sock"
     overlay_socket: str = "/tmp/pet.sock"
@@ -70,7 +71,7 @@ class Config:
             raise ValueError("Configuration must be a JSON object")
         behavior = BehaviorConfig(**data.pop("behavior", {}))
         config = cls(**data, behavior=behavior)
-        for name in ("pet_dir", "overlay_binary"):
+        for name in ("pet_dir", "overlay_binary", "log_file"):
             value = Path(getattr(config, name)).expanduser()
             setattr(config, name, (path.parent / value).resolve())
         config.validate()

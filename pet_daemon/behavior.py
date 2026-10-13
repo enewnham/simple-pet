@@ -1,5 +1,7 @@
 import math
 
+from .telemetry import trace
+
 
 class Behavior:
     def __init__(self, pack, config, clock, rng, emit):
@@ -21,6 +23,7 @@ class Behavior:
         self.clear_since = None
         self.pointer_moved = -math.inf
         self.last_pointer = None
+        self.blocked = None
 
     def renderer_status(self, packet):
         for name in ("x", "y", "width", "height"):
@@ -45,6 +48,8 @@ class Behavior:
             self.last_pointer = position
         if self.status is None:
             self.state = None
+        if self.status is None or any(self.status[name] != packet[name] for name in ("screen", "dragging", "menu", "speech")):
+            trace("renderer.status", packet=packet)
         self.status = packet
         return True
 
@@ -55,9 +60,11 @@ class Behavior:
             return
         if packet.get("result") not in ("finished", "interrupted"):
             return
+        trace("behavior.completed", pending=self.pending, packet=packet, position={"x": self.status["x"], "y": self.status["y"]})
         self.pending = None
         self.clip = None
         self.next_action = self.clock() + self.rng.uniform(*self._pause())
+        trace("behavior.pause", next_action=self.next_action)
 
     def _pause(self):
         return self.config.working_pause if self.state == "working" else self.config.idle_pause
@@ -66,22 +73,24 @@ class Behavior:
         self.command += 1
         return self.command
 
-    def _baseline(self, clip_id):
+    def _baseline(self, clip_id, source="rest"):
         if self.clip == clip_id and not self.pending:
             return
         command = self._next_id()
         self.clip = clip_id
         self.baseline_started = self.clock()
         self.baseline_until = None
+        trace("behavior.animation", source=source, clip=clip_id, repeats=None, command_id=command)
         self.emit({"animation": {"id": clip_id, "repeats": None, "command_id": command}})
 
-    def _stop(self):
+    def _stop(self, reason):
+        trace("behavior.interrupted", reason=reason, pending=self.pending, clip=self.clip)
         self.pending = None
         self.clip = None
         self.baseline_until = None
         self.emit({"stop_motion": True})
 
-    def _play(self, clip, kind="gesture"):
+    def _play(self, clip, kind="gesture", source="routine"):
         minimum, maximum = self.config.repeat_range
         maximum = min(maximum, clip.max_repeats or maximum, max(1, math.floor(self.config.repeat_budget / clip.seconds)))
         minimum = min(minimum, maximum)
@@ -91,6 +100,7 @@ class Behavior:
         self.pending = {"id": command, "event": "animation", "kind": kind, "role": clip.role, "until": self.clock() + duration + 1}
         self.clip = clip.id
         self.baseline_until = None
+        trace("behavior.animation", source=source, kind=kind, clip=clip.id, repeats=repeats, duration_seconds=duration, command_id=command)
         self.emit({"stop_motion": True, "animation": {"id": clip.id, "repeats": repeats, "command_id": command}})
         if kind == "gesture":
             self.gesture_after = self.clock() + duration + self.config.gesture_cooldown
@@ -105,19 +115,27 @@ class Behavior:
 
     def gesture(self, clip_id, sessions):
         clip = self.pack.clips.get(clip_id)
-        if not clip or clip_id not in self.pack.gesture_ids or not self.status or self.state == "error":
+        reason = None
+        if not clip or clip_id not in self.pack.gesture_ids:
+            reason = "unavailable_clip"
+        elif not self.status or self.state == "error":
+            reason = "renderer_unavailable_or_error"
+        elif self.status["dragging"] or self.status["menu"]:
+            reason = "interaction"
+        elif self.clock() < self.gesture_after:
+            reason = "cooldown"
+        elif clip.role == "celebrate" and not sessions.clean_convergence:
+            reason = "no_clean_convergence"
+        elif clip.role == "error" and not sessions.failed:
+            reason = "no_unresolved_failure"
+        elif clip.role == "work" and not sessions.working:
+            reason = "no_active_tools"
+        elif clip.role == "attention" and not sessions.active:
+            reason = "no_active_turn"
+        if reason:
+            trace("behavior.gesture_rejected", clip=clip_id, reason=reason)
             return False
-        if self.status["dragging"] or self.status["menu"] or self.clock() < self.gesture_after:
-            return False
-        if clip.role == "celebrate" and not sessions.clean_convergence:
-            return False
-        if clip.role == "error" and not sessions.failed:
-            return False
-        if clip.role == "work" and not sessions.working:
-            return False
-        if clip.role == "attention" and not sessions.active:
-            return False
-        self._play(clip)
+        self._play(clip, source="observation")
         return True
 
     def _walk(self):
@@ -142,6 +160,8 @@ class Behavior:
         self.pending = {"id": command, "event": "motion", "kind": "walk", "role": clip.role, "until": now + seconds + 1}
         self.clip = clip.id
         self.baseline_until = None
+        trace("behavior.walk", clip=clip.id, command_id=command, seconds=seconds,
+              origin={"x": status["x"], "y": status["y"]}, target={"x": x, "y": y})
         self.emit({"animation": {"id": clip.id, "repeats": None, "command_id": command},
                    "motion": {"x": x, "y": y, "seconds": seconds, "command_id": command}})
         return True
@@ -158,7 +178,7 @@ class Behavior:
         if math.hypot(dx, dy) <= self.config.gaze_deadzone:
             return False
         index = round(math.atan2(dx, dy) * 16 / (2 * math.pi)) % 16
-        self._baseline(self.pack.gaze[index])
+        self._baseline(self.pack.gaze[index], source="gaze")
         return True
 
     def tick(self, state, sessions):
@@ -167,31 +187,37 @@ class Behavior:
         now = self.clock()
         changed = state != self.state
         if changed:
+            trace("behavior.state", previous=self.state, state=state)
             self.state = state
             self.emit({"state": state})
             self.idle_since = now if state == "idle" else None
             if state == "error":
-                self._stop()
+                self._stop("error")
                 candidates = self.pack.role("error")
                 if candidates:
-                    self._play(self.rng.choice(candidates), "error")
+                    self._play(self.rng.choice(candidates), "error", source="failure")
                 else:
                     self._baseline(self.pack.rest)
                 return
-        if self._blocked():
+        blocked = self._blocked()
+        if blocked != self.blocked:
+            trace("behavior.roaming_blocked", blocked=blocked, state=state, status=self.status)
+            self.blocked = blocked
+        if blocked:
             self.clear_since = None
             if self.pending and self.pending["kind"] == "walk":
-                self._stop()
+                self._stop("roaming_blocked")
         elif self.clear_since is None:
             self.clear_since = now
         if state == "error":
             return
         if self.pending:
             if self.pending["kind"] == "error" or (self.pending["role"] == "celebrate" and not sessions.clean_convergence) or (self.pending["role"] == "error" and not sessions.failed):
-                self._stop()
+                self._stop("activity_changed")
             elif self.pending["kind"] == "gesture" and (self.status["dragging"] or self.status["menu"]):
-                self._stop()
+                self._stop("interaction")
             elif now >= self.pending["until"]:
+                trace("behavior.timed_out", pending=self.pending)
                 self.pending = None
                 self.clip = None
                 self.next_action = now + self.rng.uniform(*self._pause())
@@ -210,11 +236,13 @@ class Behavior:
         if changed and state == "working":
             candidates = self.pack.role("work", "attention")
             if candidates:
-                self._baseline(self.rng.choice(candidates).id)
+                self._baseline(self.rng.choice(candidates).id, source="work_burst")
                 self.baseline_until = now + self.rng.uniform(*self.config.work_burst_seconds)
+                trace("behavior.work_burst", clip=self.clip, until=self.baseline_until)
                 return
         if now >= self.next_action and not self.status["dragging"] and not self.status["menu"]:
             self.next_action = now + self.rng.uniform(*self._pause())
+            trace("behavior.routine", state=state, next_action=self.next_action, gesture_after=self.gesture_after)
             if self.rng.random() < 0.5 and self._walk():
                 return
             candidates = self.pack.role("work", "attention") if state == "working" else self.pack.role("greeting", "gesture")

@@ -8,6 +8,7 @@ from anthropic import AsyncAnthropic
 
 from .config import Config
 from .daemon import Daemon
+from .telemetry import configure
 
 
 async def run(config):
@@ -28,9 +29,13 @@ def main():
     logging.getLogger("anthropic").setLevel(logging.WARNING)
     try:
         config = Config.load(args.config)
+        configure(config.log_file, args.verbose)
         asyncio.run(run(config))
     except (OSError, ValueError, TypeError, KeyError, RuntimeError) as error:
+        logging.getLogger("pet-daemon").exception("Daemon failed")
         parser.exit(1, f"pet-daemon: {error}\n")
+    finally:
+        logging.shutdown()
 
 
 if __name__ == "__main__":

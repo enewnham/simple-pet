@@ -34,6 +34,7 @@ Configuration is loaded once. Pet selection stays fixed for the run. Restart aft
 | Setting | Default |
 | --- | --- |
 | `pet_dir` | Required sprite pack path |
+| `log_file` | `logs/pet-daemon.jsonl` |
 | `overlay_binary` | `.build/pet-overlay` |
 | `daemon_socket` | `/tmp/pet-daemon.sock` |
 | `overlay_socket` | `/tmp/pet.sock` |
@@ -102,6 +103,21 @@ pet-notify --session demo --call tests --status done
 All tool events count pending calls. The pet reports `working` while any remain and `idle` otherwise, including reasoning and human-input gaps. Errors preempt ordinary behavior briefly. Turn completion is tracked separately, so a tool gap does not count as pipeline convergence. Cancelled and stale work do not count as clean completion.
 
 Sessions use native identifiers and timestamps. Stale lanes expire after the configured interval. Conversation and session history stay in memory. A restart begins a fresh history.
+
+## Behavior logs
+
+The daemon appends structured JSON Lines to `logs/pet-daemon.jsonl`. Set `log_file` in your local config to choose another path. Restart the daemon to enable logging after updating the code. Logs rotate at 10 MiB, keeping three backups, and the repository ignores `logs/`.
+
+Each line has a UTC timestamp, event, level, and run ID. Observation events share an observation ID. The log includes startup settings and sprite capabilities, hook packets and session snapshots, complete model requests (persona, rolling history, snapshot, and response schema), model responses and token usage, thoughts, speech, gesture decisions, discarded responses, animation repeats, movement targets, completion, interruptions, and errors. Renderer status records capture screen and interaction changes rather than every polling update.
+
+These local logs contain the task and tool excerpts supplied by hooks and the pet's conversation. API keys and HTTP headers are not logged.
+
+Follow decisions and movement with `jq`:
+
+```sh
+tail -f logs/pet-daemon.jsonl | jq 'select(.event == "observation.decision" or .event == "behavior.walk" or .event == "behavior.gesture_rejected")'
+jq 'select(.event == "observation.request") | .request' logs/pet-daemon.jsonl
+```
 
 ## Native hooks
 

@@ -1,6 +1,8 @@
 import json
 import logging
 
+from .telemetry import trace
+
 
 log = logging.getLogger("pet-daemon")
 PERSONA = """
@@ -61,7 +63,7 @@ class Cognition:
 
     async def observe(self, snapshot, reason, context=None):
         user = {"role": "user", "content": json.dumps({"reason": reason, "context": context, "pet": self.pack.pet, **snapshot}, ensure_ascii=False)}
-        response = await self.client.messages.create(
+        request = dict(
             model=self.config.model,
             max_tokens=self.config.max_tokens,
             timeout=self.config.request_timeout,
@@ -70,6 +72,9 @@ class Cognition:
             messages=[*self.history, user],
             output_config={"effort": "low", "format": {"type": "json_schema", "schema": self.schema(context is not None)}},
         )
+        trace("observation.request", reason=reason, request=request)
+        response = await self.client.messages.create(**request)
+        trace("observation.response", reason=reason, response=response.model_dump(mode="json"))
         if response.stop_reason != "end_turn":
             raise ValueError(f"Observation ended with {response.stop_reason}")
         content = "".join(block.text for block in response.content if block.type == "text")
@@ -84,6 +89,7 @@ class Cognition:
             raise ValueError("Observation selected an unavailable gesture")
         self.history.extend([user, {"role": "assistant", "content": content}])
         self.history = self.history[-2 * self.config.history_pairs:]
+        trace("observation.decision", reason=reason, decision=result, history_pairs=len(self.history) // 2)
         usage = response.usage
         log.info("observation %s tokens input=%s output=%s cache_read=%s cache_write=%s", reason, usage.input_tokens, usage.output_tokens,
                  getattr(usage, "cache_read_input_tokens", 0), getattr(usage, "cache_creation_input_tokens", 0))

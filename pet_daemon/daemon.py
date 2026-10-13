@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import asdict
 import errno
 import json
 import logging
@@ -14,6 +15,7 @@ from .behavior import Behavior
 from .cognition import Cognition
 from .sessions import Sessions
 from .sprites import Pack
+from .telemetry import observation, trace
 
 
 log = logging.getLogger("pet-daemon")
@@ -105,6 +107,8 @@ class Daemon:
         self.sender.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 131072)
         self.sender.setblocking(False)
         self.loop_task = asyncio.create_task(self.loop())
+        trace("daemon.started", config=asdict(self.config), pet=self.pack.pet,
+              clips={key: asdict(clip) for key, clip in self.pack.clips.items()}, next_observation=self.next_observation)
         log.info("listening at %s; pet=%s model=%s", self.config.daemon_socket, self.pack.pet, self.config.model)
 
     def emit(self, packet):
@@ -113,8 +117,10 @@ class Daemon:
         try:
             data = json.dumps(packet, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
             self.sender.sendto(data, self.config.overlay_socket)
+            trace("renderer.command", packet=packet)
             return True
         except (OSError, ValueError) as error:
+            trace("renderer.delivery_failed", packet=packet, error=str(error))
             log.warning("Renderer delivery failed: %s", error)
             return False
 
@@ -124,6 +130,8 @@ class Daemon:
             self.pending = (reason, now + 1)
         elif not self.pending or self.pending[0] != "failure" or not self.sessions.failed:
             self.pending = (reason, now + 3)
+
+        trace("observation.queued", reason=reason, scheduled=self.pending)
 
     def activity(self):
         return "error" if self.clock() < self.error_until else "working" if self.sessions.working else "idle"
@@ -138,6 +146,7 @@ class Daemon:
             kind = packet.get("kind")
             if kind == "event":
                 result = self.sessions.handle(packet)
+                trace("hook.received", packet=packet, result=result, revision=self.sessions.revision, snapshot=self.sessions.snapshot())
                 if result:
                     if result["failure"]:
                         self.error_until = self.clock() + self.config.behavior.error_seconds
@@ -150,38 +159,53 @@ class Daemon:
                     if self.behavior.renderer_status(packet):
                         self.behavior.tick(self.activity(), self.sessions)
                 else:
+                    trace("renderer.feedback", packet=packet)
                     self.behavior.completion(packet)
             elif kind == "speak" and isinstance(packet.get("context"), str):
                 ttl = packet.get("ttl", self.config.speech_ttl)
                 if type(ttl) in (int, float) and math.isfinite(ttl) and ttl >= 0:
                     self.manual = (packet["context"], ttl)
-        except (ValueError, KeyError, TypeError, UnicodeError):
+                    trace("speech.requested", context=packet["context"], ttl=ttl)
+        except (ValueError, KeyError, TypeError, UnicodeError) as error:
+            trace("input.rejected", error=str(error))
             log.debug("Ignoring malformed datagram")
 
     async def observe(self, reason, context=None, ttl=None):
-        revision = self.sessions.revision
-        try:
-            result = await asyncio.wait_for(
-                self.cognition.observe(self.sessions.snapshot(), reason, context),
-                timeout=self.config.request_timeout,
-            )
-            if context is None and revision != self.sessions.revision:
-                log.info("kept observation in history; discarded stale automatic response")
-                return
-            if result["speak"] is not None:
-                self.emit({"text": result["speak"], "ttl": self.config.speech_ttl if ttl is None else ttl})
-            if result["gesture"] is not None:
-                self.behavior.gesture(result["gesture"], self.sessions)
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            log.warning("Observation failed: %s", error)
+        with observation():
+            started = self.clock()
+            revision = self.sessions.revision
+            trace("observation.started", reason=reason, revision=revision)
+            try:
+                result = await asyncio.wait_for(
+                    self.cognition.observe(self.sessions.snapshot(), reason, context),
+                    timeout=self.config.request_timeout,
+                )
+                if context is None and revision != self.sessions.revision:
+                    trace("observation.discarded", reason="session_changed", requested_revision=revision, revision=self.sessions.revision, decision=result)
+                    log.info("kept observation in history; discarded stale automatic response")
+                    return
+                if result["speak"] is not None:
+                    self.emit({"text": result["speak"], "ttl": self.config.speech_ttl if ttl is None else ttl})
+                if result["gesture"] is not None:
+                    accepted = self.behavior.gesture(result["gesture"], self.sessions)
+                    trace("observation.gesture", gesture=result["gesture"], accepted=accepted)
+            except asyncio.CancelledError:
+                trace("observation.cancelled")
+                raise
+            except Exception as error:
+                log.warning("Observation failed: %s", error, exc_info=True)
+            finally:
+                trace("observation.finished", duration_seconds=self.clock() - started)
 
     async def loop(self):
         while True:
             now = self.clock()
             if now >= self.next_prune:
-                self.sessions.prune()
+                previous = set(self.sessions.lanes)
+                changed = self.sessions.prune()
+                removed = sorted(previous - set(self.sessions.lanes))
+                if changed or removed:
+                    trace("sessions.pruned", removed=removed, snapshot=self.sessions.snapshot())
                 self.next_prune = now + 1
             self.behavior.tick(self.activity(), self.sessions)
             if self.request_task and self.request_task.done():
@@ -199,14 +223,18 @@ class Daemon:
                     valid = self.sessions.failed if reason == "failure" else self.sessions.convergence is not None and not self.sessions.active
                     if valid:
                         request = (reason, None, None)
+                    else:
+                        trace("observation.skipped", reason=reason, snapshot=self.sessions.snapshot())
                 elif now >= self.next_observation:
                     request = ("routine", None, None)
                 if request:
                     self.next_observation = now + self.rng.uniform(*self.config.observation_seconds)
+                    trace("observation.scheduled", reason=request[0], next_observation=self.next_observation)
                     self.request_task = asyncio.create_task(self.observe(*request))
             await asyncio.sleep(0.05)
 
     async def close(self):
+        trace("daemon.stopping", snapshot=self.sessions.snapshot())
         for task in (self.loop_task, self.request_task):
             if task:
                 task.cancel()
