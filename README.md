@@ -9,7 +9,8 @@ Requires macOS 12+, Swift 5.9+, Git, and [uv](https://docs.astral.sh/uv/). uv in
 ```sh
 make setup
 make build
-scripts/fetch-assets.sh --zip ~/Downloads/rainbow-terminal-cat.zip
+scripts/fetch-assets.sh --zip ~/Downloads/pet.zip --pet my-pet
+cp pet.config.example.json pet.config.json
 export ANTHROPIC_API_KEY='your-api-key'
 bin/pet-daemon
 ```
@@ -22,7 +23,7 @@ Startup requires API credentials and a valid sprite pack. Runtime API errors kee
 
 ## Configure the pet
 
-Edit [pet.config.json](pet.config.json), then start the daemon. Select a sprite pack through `pet_dir`. Paths are relative to the configuration file.
+Copy [pet.config.example.json](pet.config.example.json) to `pet.config.json` and set `pet_dir` to your imported sprite pack. The local configuration and imported assets are gitignored. Paths are relative to the configuration file.
 
 ```sh
 bin/pet-daemon --config /absolute/path/to/pet.config.json
