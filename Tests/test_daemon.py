@@ -310,7 +310,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
     async def observe(self, reason="routine", context=None):
         return await self.cognition.observe(self.sessions.snapshot(), reason, context)
 
-    async def test_custom_persona_replaces_default_voice_and_keeps_observer_instructions(self):
+    async def test_custom_persona_keeps_shared_work_identity(self):
         self.config.persona = "You are a gentle, curious woodland companion."
         await self.observe()
         prompt = self.requests[-1][1]["system"][0]["text"]
@@ -318,7 +318,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("deadpan", prompt)
         self.assertNotIn("snarky", prompt)
         self.assertEqual(prompt.split("\n\n", 1)[1], INSTRUCTIONS)
-        self.assertIn("not to you", prompt)
+        self.assertIn("Their work is your work.", prompt)
         self.assertEqual(self.requests[-1][1]["system"][0]["cache_control"]["ttl"], "5m")
 
     async def test_sends_cached_persona_and_dynamic_gesture_schema_through_sdk(self):

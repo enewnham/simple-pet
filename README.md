@@ -1,6 +1,6 @@
 # Simple Pet
 
-A native macOS desktop pet driven by Claude Code, Codex, Cursor CLI, and command wrappers. A local Python daemon tracks parallel tool calls, schedules sprite behavior, and maintains a small Haiku conversation. The Swift/AppKit renderer displays the configured pet.
+A native macOS desktop pet that embodies your coding agents as one character. It speaks about their goals, work, and results in first person, including concurrent work across Claude Code, Codex, Cursor CLI, and command wrappers. A local Python daemon tracks parallel tool calls, schedules sprite behavior, and maintains a small Haiku conversation. The Swift/AppKit renderer displays the configured pet.
 
 ## Build and start
 
@@ -56,11 +56,11 @@ Set `persona` in your local `pet.config.json` to choose the pet's voice:
 ```json
 {
   "pet_dir": "assets/pets/my-pet",
-  "persona": "You are a gentle, curious woodland companion watching a developer work."
+  "persona": "You are a gentle, curious woodland pet who enjoys solving problems with a developer."
 }
 ```
 
-Omitting `persona` uses the deadpan companion described above. Persona controls character and tone. Observer instructions, speech pacing, and the structured response contract remain part of the system prompt. The pet observes requests addressed to coding agents and keeps its own instructions and private thoughts out of speech. Restart after editing the persona.
+Omitting `persona` uses the deadpan companion described above. Persona controls character and tone. Shared instructions define the pet's first-person relationship to the agents' work, speech pacing, and structured response contract. The pet speaks as the character doing the work and keeps its instructions, private thoughts, and session metadata out of speech. Restart after editing the persona.
 
 `behavior` accepts these settings:
 
@@ -80,7 +80,7 @@ Omitting `persona` uses the deadpan companion described above. Persona controls 
 
 Observation timing and behavior timing are independent. The daemon chooses walking direction, targets, repeats, and pauses. Haiku suggests optional gestures using the selected pet's available clips.
 
-Speech frequency and brevity are guided by the observer instructions in [cognition.py](pet_daemon/cognition.py). Character and tone come from the configured persona. The daemon accepts nullable speech and applies no word-count limit, prose trimming, silence lottery, or automatic speech cooldown. `max_tokens` supplies the Anthropic API's required output budget. Socket payloads still have transport limits.
+Speech frequency and brevity are guided by the shared instructions in [cognition.py](pet_daemon/cognition.py). Character and tone come from the configured persona. The daemon accepts nullable speech and applies no word-count limit, prose trimming, silence lottery, or automatic speech cooldown. `max_tokens` supplies the Anthropic API's required output budget. Socket payloads still have transport limits.
 
 ## Try parallel sessions
 
@@ -129,7 +129,7 @@ Requests enable five-minute caching for the system prompt and conversation. A se
 
 Memory paths are relative to the configuration file. The default `state/` directory is gitignored. Use a separate file for each pet if switching between pets. A file saved for another pet is ignored. Unreadable files or invalid JSON start an empty conversation with a warning. Save failures log a warning. Delete the file while the daemon is stopped to reset the conversation.
 
-Prompt submission, individual session completion, and failures trigger observations. Each observation includes every tracked session and the triggering event. A completion reaction describes that session, with the pet staying busy while other sessions work. Routine observations cover ongoing work. The persona favors brief acknowledgements at the start and finish, and frequent short comments during active work. Ordinary tool updates do not invalidate an observation, while new turns, outcomes, or failure recovery can discard stale commentary.
+Prompt submission, individual session completion, and failures trigger observations. Each observation includes every tracked session and the triggering event. The pet owns those goals and results in its speech, such as "I'm testing the parser" or "My parser tests passed." Finishing one task can leave it busy with another. Routine observations cover ongoing work. The shared instructions favor brief acknowledgements at the start and finish, and frequent short comments during active work. Ordinary tool updates do not invalidate an observation, while new turns, outcomes, or failure recovery can discard stale commentary.
 
 ## Behavior logs
 
