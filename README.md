@@ -240,3 +240,7 @@ pet-notify speak --context "The desktop pet is running and the validation suite 
 ```
 
 Watch for speech and its expiry, drag the pet, and exercise the parallel-session examples. Observation logs include token and prompt-cache usage.
+
+## Attribution
+
+Simple Pet is inspired by [OpenPets](https://github.com/OpenPetsHQ/openpets). The OpenPets copyright and full MIT license notice are included in [assets/LICENSE.OpenPets](assets/LICENSE.OpenPets).
