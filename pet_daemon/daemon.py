@@ -124,12 +124,13 @@ class Daemon:
             log.warning("Renderer delivery failed: %s", error)
             return False
 
-    def queue(self, reason):
+    def queue(self, reason, trigger=None):
         now = self.clock()
         if reason == "failure":
-            self.pending = (reason, now + 1)
+            self.pending = (reason, now + 1, trigger)
         elif not self.pending or self.pending[0] != "failure" or not self.sessions.failed:
-            self.pending = (reason, now + 3)
+            delay = {"prompt": 0, "completion": 1}[reason]
+            self.pending = (reason, now + delay, trigger)
 
         trace("observation.queued", reason=reason, scheduled=self.pending)
 
@@ -150,9 +151,11 @@ class Daemon:
                 if result:
                     if result["failure"]:
                         self.error_until = self.clock() + self.config.behavior.error_seconds
-                        self.queue("failure")
-                    elif result["convergence"]:
-                        self.queue("convergence")
+                        self.queue("failure", packet)
+                    elif packet["event"] == "intent":
+                        self.queue("prompt", packet)
+                    elif packet["event"] == "turn_done" or result["convergence"]:
+                        self.queue("completion", packet)
                     self.behavior.tick(self.activity(), self.sessions)
             elif kind == "renderer":
                 if packet.get("event") == "status":
@@ -170,17 +173,18 @@ class Daemon:
             trace("input.rejected", error=str(error))
             log.debug("Ignoring malformed datagram")
 
-    async def observe(self, reason, context=None, ttl=None):
+    async def observe(self, reason, context=None, ttl=None, trigger=None):
         with observation():
             started = self.clock()
             revision = self.sessions.revision
+            observation_context = self.sessions.observation_context()
             trace("observation.started", reason=reason, revision=revision)
             try:
                 result = await asyncio.wait_for(
-                    self.cognition.observe(self.sessions.snapshot(), reason, context),
+                    self.cognition.observe({**self.sessions.snapshot(), "trigger": trigger}, reason, context),
                     timeout=self.config.request_timeout,
                 )
-                if context is None and revision != self.sessions.revision:
+                if context is None and observation_context != self.sessions.observation_context():
                     trace("observation.discarded", reason="session_changed", requested_revision=revision, revision=self.sessions.revision, decision=result)
                     log.info("kept observation in history; discarded stale automatic response")
                     return
@@ -218,11 +222,11 @@ class Daemon:
                     self.manual = None
                     request = ("explicit", context, ttl)
                 elif self.pending and now >= self.pending[1]:
-                    reason, _ = self.pending
+                    reason, _, trigger = self.pending
                     self.pending = None
-                    valid = self.sessions.failed if reason == "failure" else self.sessions.convergence is not None and not self.sessions.active
+                    valid = reason != "failure" or self.sessions.failed
                     if valid:
-                        request = (reason, None, None)
+                        request = (reason, None, None, trigger)
                     else:
                         trace("observation.skipped", reason=reason, snapshot=self.sessions.snapshot())
                 elif now >= self.next_observation:

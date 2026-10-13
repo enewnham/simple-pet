@@ -127,6 +127,42 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(speech["ttl"], 5)
         self.assertEqual(len(self.requests), 1)
 
+    async def test_prompt_triggers_commentary_without_waiting_for_routine_timer(self):
+        self.event("intent", harness="codex", goal="Run local checks")
+        speech = await self.packet(lambda packet: "text" in packet)
+        self.assertEqual(speech["text"], self.speech)
+        snapshot = json.loads(self.requests[0]["messages"][-1]["content"])
+        self.assertEqual(snapshot["reason"], "prompt")
+        self.assertEqual(snapshot["trigger"]["goal"], "Run local checks")
+
+    async def test_completion_reacts_to_one_session_while_other_tools_keep_working(self):
+        self.event("tool_start", harness="codex", call="checks", tool="pytest")
+        self.event("tool_start", session="two", harness="cursor", call="build", tool="cargo build")
+        await self.wait_for(lambda: len(self.daemon.sessions.lanes) == 2)
+        self.event("turn_done", harness="codex", progress="Checks passed")
+        speech = await self.packet(lambda packet: "text" in packet, timeout=2)
+        snapshot = json.loads(self.requests[0]["messages"][-1]["content"])
+        self.assertEqual(snapshot["reason"], "completion")
+        self.assertEqual(snapshot["trigger"]["session"], "one")
+        self.assertEqual(snapshot["trigger"]["progress"], "Checks passed")
+        self.assertEqual(snapshot["activity"], "working")
+        self.assertEqual(speech["text"], self.speech)
+        self.assertEqual(self.daemon.activity(), "working")
+
+    async def test_tool_progress_during_observation_preserves_commentary(self):
+        self.slow = True
+        self.event("tool_start", harness="codex", call="checks", tool="pytest")
+        await self.packet(lambda packet: packet.get("state") == "working")
+        task = asyncio.create_task(self.daemon.observe("routine"))
+        await asyncio.wait_for(self.entered.wait(), 1)
+        self.event("tool_done", harness="codex", call="checks", progress="Tests passed")
+        self.event("tool_start", harness="codex", call="lint", tool="lint")
+        await self.wait_for(lambda: "lint" in self.daemon.sessions.lanes["codex:one"].calls)
+        self.release.set()
+        await task
+        speech = await self.packet(lambda packet: "text" in packet)
+        self.assertEqual(speech["text"], self.speech)
+
     async def test_file_log_connects_hook_context_model_decision_and_renderer_delivery(self):
         import logging
         from pet_daemon.cognition import PERSONA

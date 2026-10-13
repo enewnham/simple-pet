@@ -104,6 +104,8 @@ All tool events count pending calls. The pet reports `working` while any remain 
 
 Sessions use native identifiers and timestamps. Stale lanes expire after the configured interval. Conversation and session history stay in memory. A restart begins a fresh history.
 
+Prompt submission, individual session completion, and failures trigger observations. Each observation includes every tracked session and the triggering event. A completion reaction describes that session, with the pet staying busy while other sessions work. Routine observations cover ongoing work. The persona favors brief acknowledgements at the start and finish, and occasional comments during active work. Ordinary tool updates do not invalidate an observation, while new turns, outcomes, or failure recovery can discard stale commentary.
+
 ## Behavior logs
 
 The daemon appends structured JSON Lines to `logs/pet-daemon.jsonl`. Set `log_file` in your local config to choose another path. Restart the daemon to enable logging after updating the code. Logs rotate at 10 MiB, keeping three backups, and the repository ignores `logs/`.
@@ -150,7 +152,7 @@ examples/pet-run git commit -m 'Add parser'
 printf 'hello\n' | examples/pet-run cat
 ```
 
-It uses a unique session for each invocation. Failures automatically schedule a daemon observation. Persona judgment determines whether an automatic observation speaks.
+It uses a unique session for each invocation. Failures automatically schedule a daemon observation.
 
 ## Sprite packs
 

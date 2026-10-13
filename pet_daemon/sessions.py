@@ -287,6 +287,10 @@ class Sessions:
             self.convergence = None
         return changed
 
+    def observation_context(self):
+        return {key: (lane.generation, lane.active, lane.outcome, lane.goal, bool(self._current_failure(lane)))
+                for key, lane in self.lanes.items()}
+
     def snapshot(self):
         now = self.clock()
         return {
