@@ -14,7 +14,7 @@ usage() {
 Usage: scripts/fetch-assets.sh [--pet NAME] [--source DIRECTORY | --zip FILE] [--output PATH] [--ref COMMIT]
 
 Fetch OpenPets and extract PNG frames with native macOS image libraries.
-The default pet is the bundled Hoodie Cat. --source uses an existing checkout.
+--source uses an existing checkout or pet package. Select it with --pet NAME.
 --zip imports a local downloaded pet archive. Its pet ID supplies the default name.
 --pet NAME looks in assets/pets/NAME, apps/desktop/assets/pets/NAME, or pets/NAME.
 A source pet package can also be supplied directly with --source.
@@ -51,6 +51,11 @@ if [[ -n "$ref" && ( -n "$source_dir" || -n "$zip_file" ) ]]; then
     exit 2
 fi
 
+if [[ -z "$zip_file" && -z "$pet" ]]; then
+    echo "Select a pet with --pet NAME or --zip FILE." >&2
+    exit 2
+fi
+
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/pet-assets.XXXXXX")"
 trap 'rm -rf "$work_dir"' EXIT
 if [[ -n "$zip_file" ]]; then
@@ -66,7 +71,6 @@ elif [[ -z "$source_dir" ]]; then
         git -C "$source_dir" checkout --quiet --detach FETCH_HEAD
     fi
 fi
-[[ -n "$pet" ]] || pet="builtin"
 [[ -n "$output_dir" ]] || output_dir="$repo_root/assets/pets/$pet"
 [[ -d "$source_dir" ]] || { echo "Source directory does not exist: $source_dir" >&2; exit 1; }
 source_dir="$(cd "$source_dir" && pwd)"

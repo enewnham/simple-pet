@@ -222,8 +222,7 @@ func run() throws {
     let commit = CommandLine.arguments[4]
     let origin = CommandLine.arguments.count == 6 && !CommandLine.arguments[5].isEmpty ? CommandLine.arguments[5] : nil
     guard safeName(pet) else { throw AssetError("Use a pet directory name without slashes.") }
-    let candidates = (pet == "builtin" ? [root.appendingPathComponent("apps/desktop/assets")] :
-        ["assets/pets", "apps/desktop/assets/pets", "pets"].map { root.appendingPathComponent($0).appendingPathComponent(pet) }) + [root]
+    let candidates = ["assets/pets", "apps/desktop/assets/pets", "pets"].map { root.appendingPathComponent($0).appendingPathComponent(pet) } + [root]
     guard let source = candidates.first(where: { candidate in
         manager.fileExists(atPath: candidate.path) &&
             (candidate != root || ["manifest.json", "pet.json", "idle", "idle.png", "rest", "rest.png", "spritesheet.webp", "spritesheet.png"]

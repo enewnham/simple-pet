@@ -12,11 +12,11 @@ defer { try? manager.removeItem(at: temporary) }
 guard CommandLine.arguments.count == 2 else { fatalError("Usage: asset-import-tests PATH_TO_IMPORTER") }
 let importer = URL(fileURLWithPath: CommandLine.arguments[1]).standardizedFileURL
 let source = temporary.appendingPathComponent("source")
-let pet = source.appendingPathComponent("apps/desktop/assets")
+let pet = source.appendingPathComponent("assets/pets/fixture")
 let output = temporary.appendingPathComponent("output")
 try manager.createDirectory(at: pet, withIntermediateDirectories: true)
 
-func invoke(_ selectedPet: String = "builtin", root: URL? = nil, origin: String? = nil) throws -> Int32 {
+func invoke(_ selectedPet: String = "fixture", root: URL? = nil, origin: String? = nil) throws -> Int32 {
     let process = Process()
     process.executableURL = importer
     process.arguments = [(root ?? source).path, output.path, selectedPet, "fixture-commit"]

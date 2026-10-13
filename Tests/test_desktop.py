@@ -18,8 +18,9 @@ from pet_daemon.daemon import Daemon
 class DesktopTests(unittest.IsolatedAsyncioTestCase):
     async def test_native_renderer_and_daemon_round_trip_hooks_motion_and_sdk_speech(self):
         root = Path(__file__).resolve().parents[1]
+        selected = Config.load(root / "pet.config.json")
         with tempfile.TemporaryDirectory(dir="/tmp", prefix="pet-desktop-") as directory:
-            config = Config(pet_dir=root / "assets/pets/builtin", overlay_binary=root / ".build/pet-overlay",
+            config = Config(pet_dir=selected.pet_dir, overlay_binary=root / ".build/pet-overlay",
                             daemon_socket=directory + "/daemon.sock", overlay_socket=directory + "/overlay.sock",
                             observation_seconds=(3600, 3600), speech_ttl=1)
             config.behavior.repeat_range = (1, 1)

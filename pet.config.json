@@ -1,5 +1,5 @@
 {
-  "pet_dir": "assets/pets/builtin",
+  "pet_dir": "assets/pets/rainbow-terminal-cat",
   "overlay_binary": ".build/pet-overlay",
   "model": "claude-haiku-5-5",
   "observation_seconds": [60, 90],

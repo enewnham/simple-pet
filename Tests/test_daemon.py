@@ -258,7 +258,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             max_retries=0,
             http_client=httpx.AsyncClient(transport=httpx.MockTransport(self.transport)),
         )
-        self.config = Config()
+        self.config = Config(pet_dir="fixture")
         self.pack = self.make_pack({"calm": "rest", "hop": "celebrate", "peek": "attention", "left": "walk-left", "right": "walk-right"})
         self.cognition = Cognition(self.client, self.config, self.pack)
         self.clock = Clock()

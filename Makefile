@@ -34,7 +34,7 @@ desktop-check: setup build
 	PET_DESKTOP_CHECK=1 uv run python -m unittest discover -s Tests -p test_desktop.py -v
 
 assets:
-	scripts/fetch-assets.sh
+	scripts/fetch-assets.sh $(ARGS)
 
 clean:
 	swift package clean

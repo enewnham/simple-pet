@@ -48,7 +48,7 @@ class BehaviorConfig:
 
 @dataclass
 class Config:
-    pet_dir: Path = Path("assets/pets/builtin")
+    pet_dir: Path
     overlay_binary: Path = Path(".build/pet-overlay")
     daemon_socket: str = "/tmp/pet-daemon.sock"
     overlay_socket: str = "/tmp/pet.sock"

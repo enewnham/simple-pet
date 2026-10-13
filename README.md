@@ -9,7 +9,7 @@ Requires macOS 12+, Swift 5.9+, Git, and [uv](https://docs.astral.sh/uv/). uv in
 ```sh
 make setup
 make build
-scripts/fetch-assets.sh
+scripts/fetch-assets.sh --zip ~/Downloads/rainbow-terminal-cat.zip
 export ANTHROPIC_API_KEY='your-api-key'
 bin/pet-daemon
 ```
@@ -32,7 +32,7 @@ Configuration is loaded once. Pet selection stays fixed for the run. Restart aft
 
 | Setting | Default |
 | --- | --- |
-| `pet_dir` | `assets/pets/builtin` |
+| `pet_dir` | Required sprite pack path |
 | `overlay_binary` | `.build/pet-overlay` |
 | `daemon_socket` | `/tmp/pet-daemon.sock` |
 | `overlay_socket` | `/tmp/pet.sock` |
@@ -140,12 +140,11 @@ It uses a unique session for each invocation. Failures automatically schedule a 
 The fetch script imports existing artwork from [OpenPets](https://github.com/OpenPetsHQ/openpets):
 
 ```sh
-scripts/fetch-assets.sh --pet builtin
 scripts/fetch-assets.sh --pet NAME --source /path/to/openpets
 scripts/fetch-assets.sh --source /path/to/custom-pack --pet custom
 scripts/fetch-assets.sh --zip ~/Downloads/pet.zip
 scripts/fetch-assets.sh --zip ~/Downloads/pet.zip --pet my-pet
-scripts/fetch-assets.sh --ref COMMIT
+scripts/fetch-assets.sh --pet NAME --ref COMMIT
 ```
 
 ZIP files can contain the pet files at the archive root or inside one top-level folder. The default name comes from `pet.json` (`id`), `manifest.json` (`pet`), or the ZIP filename. Use `--pet` to choose a name.
@@ -201,7 +200,7 @@ Run the native desktop smoke check explicitly in a logged-in macOS session:
 make desktop-check
 ```
 
-It uses the built renderer, imported builtin sprites, temporary sockets, and a fake API to verify movement, hooks, long speech, expiry, and cleanup. It does not require API credentials.
+It uses the built renderer, the configured sprites, temporary sockets, and a fake API to verify movement, hooks, long speech, expiry, and cleanup. It does not require API credentials.
 
 For a live API and desktop check, start the daemon with your API key and run:
 

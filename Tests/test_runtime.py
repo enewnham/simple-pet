@@ -234,7 +234,7 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(config.behavior.repeat_range, [2, 4])
 
     def test_rejects_invalid_intervals_and_shared_socket_before_startup(self):
-        for config in (Config(observation_seconds=(90, 60)), Config(history_pairs=0),
-                       Config(daemon_socket="/tmp/same", overlay_socket="/tmp/same")):
+        for config in (Config(pet_dir=Path("fixture"), observation_seconds=(90, 60)), Config(pet_dir=Path("fixture"), history_pairs=0),
+                       Config(pet_dir=Path("fixture"), daemon_socket="/tmp/same", overlay_socket="/tmp/same")):
             with self.subTest(config=config), self.assertRaises(ValueError):
                 config.validate()
