@@ -154,7 +154,7 @@ Default output is `assets/pets/NAME`, which is gitignored. Set `pet_dir` to the 
 
 Standard sheets supply idle, left/right running, waving, jumping, failure, waiting, running, and review clips. V2 sheets can also supply sixteen gaze poses. Named PNG folders and explicit custom manifests can supply fewer clips. A rest pose is required. Missing reactions use the existing rest pose; packs without left/right walking sprites stay stationary.
 
-The importer validates referenced frames before replacing installed clip data. It preserves unrelated output files. Generated packs include a manifest and source provenance. Supplied license and attribution files are copied with the sprites.
+The importer validates referenced frames before replacing installed clip data. It preserves unrelated output files. Generated packs include a manifest and source provenance.
 
 A custom normalized manifest declares actual clip capabilities:
 

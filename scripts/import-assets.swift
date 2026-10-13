@@ -234,7 +234,6 @@ func run() throws {
     guard !resolvedSource.path.hasPrefix(resolvedOutput.path + "/"), resolvedSource != resolvedOutput else {
         throw AssetError("Output must be separate from the source pet.")
     }
-    let license = root.appendingPathComponent("LICENSE")
     let parent = output.deletingLastPathComponent()
     try manager.createDirectory(at: parent, withIntermediateDirectories: true)
     let staging = parent.appendingPathComponent(".pet-assets-\(UUID().uuidString)")
@@ -252,31 +251,7 @@ func run() throws {
     metadata["sourcePath"] = source == root ? "." : String(source.path.dropFirst(root.path.count + 1))
     let json = try JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted, .sortedKeys])
     try json.write(to: staging.appendingPathComponent("manifest.json"))
-    if source != root, manager.fileExists(atPath: license.path) {
-        try manager.copyItem(at: license, to: staging.appendingPathComponent("LICENSE.OpenPets"))
-    }
-    let petLicense = source.appendingPathComponent("LICENSE")
-    if manager.fileExists(atPath: petLicense.path) {
-        try manager.copyItem(at: petLicense, to: staging.appendingPathComponent("LICENSE.Pet"))
-    }
-    let sourceAttribution = source.appendingPathComponent("ATTRIBUTION.md")
-    if manager.fileExists(atPath: sourceAttribution.path) {
-        try manager.copyItem(at: sourceAttribution, to: staging.appendingPathComponent("ATTRIBUTION.Source.md"))
-    }
-    let attribution = """
-    # Sprite attribution
-
-    Source: \(metadata["source"]!)
-    Commit: \(commit)
-    Pet: \(pet)
-    Source path: \(metadata["sourcePath"]!)
-
-    Preserve the license files when distributing these frames.
-    See manifest.json for clip roles and timing.
-
-    """
-    try attribution.write(to: staging.appendingPathComponent("ATTRIBUTION.md"), atomically: true, encoding: .utf8)
-    let generated = Set(["clips", "manifest.json", "LICENSE.OpenPets", "LICENSE.Pet", "ATTRIBUTION.md", "ATTRIBUTION.Source.md"])
+    let generated = Set(["clips", "manifest.json"])
     if manager.fileExists(atPath: output.path) {
         for entry in try manager.contentsOfDirectory(at: output, includingPropertiesForKeys: nil) where !generated.contains(entry.lastPathComponent) {
             try manager.copyItem(at: entry, to: staging.appendingPathComponent(entry.lastPathComponent))

@@ -19,7 +19,7 @@ The default pet is the bundled Hoodie Cat. --source uses an existing checkout.
 --pet NAME looks in assets/pets/NAME, apps/desktop/assets/pets/NAME, or pets/NAME.
 A source pet package can also be supplied directly with --source.
 The default output is assets/pets/NAME. Generated clips and metadata are replaced.
-Supplied licenses and attribution are preserved. Custom packs can declare clips in manifest.json.
+Custom packs can declare clips in manifest.json.
 EOF
 }
 

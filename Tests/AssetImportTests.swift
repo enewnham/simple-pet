@@ -15,7 +15,6 @@ let source = temporary.appendingPathComponent("source")
 let pet = source.appendingPathComponent("apps/desktop/assets")
 let output = temporary.appendingPathComponent("output")
 try manager.createDirectory(at: pet, withIntermediateDirectories: true)
-try "Fixture license\n".write(to: source.appendingPathComponent("LICENSE"), atomically: true, encoding: .utf8)
 
 func invoke(_ selectedPet: String = "builtin", root: URL? = nil, origin: String? = nil) throws -> Int32 {
     let process = Process()
@@ -86,7 +85,6 @@ for (id, count, red, role, duration) in expected {
     }
 }
 try require(v1["commit"] as? String == "fixture-commit", "Record source provenance.")
-try require(try String(contentsOf: output.appendingPathComponent("LICENSE.OpenPets"), encoding: .utf8) == "Fixture license\n", "Preserve the source license.")
 try "keep me".write(to: output.appendingPathComponent("unrelated.txt"), atomically: true, encoding: .utf8)
 
 try writeSheet(height: 2288)
@@ -121,7 +119,6 @@ try require(try String(contentsOf: output.appendingPathComponent("unrelated.txt"
 let custom = temporary.appendingPathComponent("custom")
 try manager.createDirectory(at: custom, withIntermediateDirectories: true)
 try manager.copyItem(at: output.appendingPathComponent("clips/idle/000.png"), to: custom.appendingPathComponent("pose.png"))
-try "Custom license".write(to: custom.appendingPathComponent("LICENSE"), atomically: true, encoding: .utf8)
 let customManifest: [String: Any] = ["pet": "custom", "rest": "calm", "clips": [
     "calm": ["frames": ["pose.png"], "fps": 1.0, "role": "rest"],
     "bounce": ["frames": ["pose.png"], "fps": 2.0, "role": "celebrate", "max_repeats": 2],
@@ -130,12 +127,8 @@ try writeObject(customManifest, to: custom.appendingPathComponent("manifest.json
 try require(try invoke("custom", root: custom) == 0, "Accept direct custom packs with explicit semantic metadata.")
 let installed = try readManifest()["clips"] as! [String: [String: Any]]
 try require(installed["bounce"]?["max_repeats"] as? Int == 2, "Preserve custom repetition limits.")
-try require(try String(contentsOf: output.appendingPathComponent("LICENSE.Pet"), encoding: .utf8) == "Custom license", "Preserve a direct package's supplied license.")
-try require(!manager.fileExists(atPath: output.appendingPathComponent("LICENSE.OpenPets").path), "Keep direct package licensing separate from the upstream checkout.")
-try "Authored by Fixture Artist".write(to: custom.appendingPathComponent("ATTRIBUTION.md"), atomically: true, encoding: .utf8)
 try require(try invoke("custom", root: custom, origin: "/downloads/custom-pet.zip") == 0, "Accept an original local ZIP path as provenance.")
 try require(try readManifest()["source"] as? String == "/downloads/custom-pet.zip", "Preserve the original ZIP path rather than its extraction directory.")
-try require(try String(contentsOf: output.appendingPathComponent("ATTRIBUTION.Source.md"), encoding: .utf8) == "Authored by Fixture Artist", "Preserve a package's authored attribution.")
 let saved = try Data(contentsOf: output.appendingPathComponent("manifest.json"))
 try manager.removeItem(at: custom.appendingPathComponent("pose.png"))
 try require(try invoke("custom", root: custom) != 0, "Reject custom packs with missing referenced frames.")
@@ -151,7 +144,7 @@ try manager.copyItem(at: pet.appendingPathComponent("spritesheet.png"), to: stor
 let storeMetadata: [String: Any] = [
     "id": "store-pet", "displayName": "Store Pet", "description": "A downloaded companion",
     "spritesheetPath": "spritesheet.png", "spriteVersionNumber": 2,
-    "sourceUrl": "https://pets.example/pets/store-pet", "license": "Author supplied terms",
+    "sourceUrl": "https://pets.example/pets/store-pet",
 ]
 try writeObject(storeMetadata, to: store.appendingPathComponent("pet.json"))
 try require(try invoke("store-pet", root: store) == 0, "Import a store-style package containing only metadata and its sheet.")
@@ -159,11 +152,8 @@ let storeManifest = try readManifest()
 let preservedPackage = storeManifest["package"] as! [String: Any]
 try require(preservedPackage["id"] as? String == "store-pet", "Preserve the package identity in manifest provenance.")
 try require(preservedPackage["displayName"] as? String == "Store Pet", "Preserve the package display name.")
-try require(preservedPackage["license"] as? String == "Author supplied terms", "Preserve declared package license metadata without inventing terms.")
 try require(storeManifest["source"] as? String == "https://pets.example/pets/store-pet", "Use the package's declared source when no origin is supplied.")
 try require(storeManifest["sourcePath"] as? String == ".", "Keep the direct package source path relative to its package root.")
-try require(!manager.fileExists(atPath: output.appendingPathComponent("LICENSE.Pet").path), "Keep absent package license files absent after replacement.")
-try require(!manager.fileExists(atPath: output.appendingPathComponent("LICENSE.OpenPets").path), "Keep absent upstream license files absent for store packages.")
 let zipOrigin = "/downloads/store-pet.zip"
 try require(try invoke("store-pet", root: store, origin: zipOrigin) == 0, "Accept the original ZIP path as source origin.")
 let downloadedManifest = try readManifest()
