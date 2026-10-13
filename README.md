@@ -241,6 +241,8 @@ pet-notify speak --context "The desktop pet is running and the validation suite 
 
 Watch for speech and its expiry, drag the pet, and exercise the parallel-session examples. Observation logs include token and prompt-cache usage.
 
-## Attribution
+## License and attribution
 
-Simple Pet is inspired by [OpenPets](https://github.com/OpenPetsHQ/openpets). The OpenPets copyright and full MIT license notice are included in [assets/LICENSE.OpenPets](assets/LICENSE.OpenPets).
+Simple Pet is a fork and rebuild of [OpenPets](https://github.com/OpenPetsHQ/openpets), simplified into a native macOS desktop pet with a local Python daemon. Credit goes to the OpenPets authors for the original project and artwork.
+
+Simple Pet is licensed under the [MIT license](LICENSE). The license retains OpenPets' copyright notice and includes Elliot Newnham's notice for modifications. The original OpenPets license is also preserved in [assets/LICENSE.OpenPets](assets/LICENSE.OpenPets).
