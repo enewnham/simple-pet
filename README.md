@@ -36,12 +36,15 @@ Configuration is loaded once. Pet selection stays fixed for the run. Restart aft
 | `pet_dir` | Required sprite pack path |
 | `persona` | Deadpan, slightly snarky desktop companion |
 | `log_file` | `logs/pet-daemon.jsonl` |
+| `memory_file` | `state/pet-memory.json` |
 | `overlay_binary` | `.build/pet-overlay` |
 | `daemon_socket` | `/tmp/pet-daemon.sock` |
 | `overlay_socket` | `/tmp/pet.sock` |
 | `model` | `claude-haiku-5-5` |
 | `observation_seconds` | Random interval between 20 and 40 |
-| `history_pairs` | 8 complete user/assistant pairs |
+| `summary_interval` | Summarize 32 older exchanges when 64 accumulate, retaining 32 verbatim |
+| `summary_summary_interval` | Consolidate 8 older summaries when 16 accumulate, retaining 8 verbatim |
+| `compaction_max_tokens` | 1024 summary API output tokens |
 | `speech_ttl` | 5 seconds |
 | `request_timeout` | 20 seconds |
 | `stale_seconds` | 3600 seconds |
@@ -114,7 +117,17 @@ pet-notify --session demo --call tests --status done
 
 All tool events count pending calls. The pet reports `working` while any remain and `idle` otherwise, including reasoning and human-input gaps. Errors preempt ordinary behavior briefly. Turn completion is tracked separately, so a tool gap does not count as pipeline convergence. Cancelled and stale work do not count as clean completion.
 
-Sessions use native identifiers and timestamps. Stale lanes expire after the configured interval. Conversation and session history stay in memory. A restart begins a fresh history.
+Sessions use native identifiers and timestamps. Stale lanes expire after the configured interval. Live session tracking starts fresh on restart.
+
+The pet saves its conversation, including private thoughts, to `memory_file` after each valid model response and replaces the file atomically. Memory has three parts: long-term memory, ordered summary chunks, and recent user/assistant exchanges. When raw exchanges reach twice `summary_interval`, the next observation asks the configured model to summarize the oldest `summary_interval` exchanges into one new chunk. It appends that chunk and keeps the remaining exchanges verbatim. This summary request includes only the exchanges being retired.
+
+When chunks reach twice `summary_summary_interval`, the model combines the oldest `summary_summary_interval` chunks with existing long-term memory. It replaces long-term memory and keeps the remaining chunks unchanged. `compaction_max_tokens` sets the output budget for either kind of summary. A failed summary keeps its source messages and retries on a later observation.
+
+On restart, the same pet resumes all three parts of memory. Historical messages keep their exact content. The pet infers their age from observation timestamps and uses the current snapshot for active work and outcomes. Each summary includes the timestamp of the latest observation it summarizes.
+
+Requests enable five-minute caching for the system prompt and conversation. A separate cache marker follows the latest summary chunk so the memory prefix remains reusable when raw exchanges become a new chunk. Between summaries, each observation appends to the same conversation prefix. Consolidating chunks changes long-term memory and requires a fresh memory cache write. Each summarization and observation request has its own `request_timeout` budget.
+
+Memory paths are relative to the configuration file. The default `state/` directory is gitignored. Use a separate file for each pet if switching between pets. A file saved for another pet is ignored. Unreadable files or invalid JSON start an empty conversation with a warning. Save failures log a warning. Delete the file while the daemon is stopped to reset the conversation.
 
 Prompt submission, individual session completion, and failures trigger observations. Each observation includes every tracked session and the triggering event. A completion reaction describes that session, with the pet staying busy while other sessions work. Routine observations cover ongoing work. The persona favors brief acknowledgements at the start and finish, and frequent short comments during active work. Ordinary tool updates do not invalidate an observation, while new turns, outcomes, or failure recovery can discard stale commentary.
 
@@ -122,7 +135,7 @@ Prompt submission, individual session completion, and failures trigger observati
 
 The daemon appends structured JSON Lines to `logs/pet-daemon.jsonl`. Set `log_file` in your local config to choose another path. Restart the daemon to enable logging after updating the code. Logs rotate at 10 MiB, keeping three backups, and the repository ignores `logs/`.
 
-Each line has a UTC timestamp, event, level, and run ID. Observation events share an observation ID. The log includes startup settings and sprite capabilities, hook packets and session snapshots, complete model requests (persona, rolling history, snapshot, and response schema), model responses and token usage, thoughts, speech, gesture decisions, discarded responses, animation repeats, movement targets, completion, interruptions, and errors. Renderer status records capture screen and interaction changes rather than every polling update.
+Each line has a UTC timestamp, event, level, and run ID. Observation events share an observation ID. The log includes startup settings and sprite capabilities, hook packets and session snapshots, complete model requests (persona, history, snapshot, and response schema), model responses and token usage, compaction requests and responses, memory summaries, thoughts, speech, gesture decisions, discarded responses, animation repeats, movement targets, completion, interruptions, and errors. Renderer status records capture screen and interaction changes rather than every polling update.
 
 These local logs contain the task and tool excerpts supplied by hooks and the pet's conversation. API keys and HTTP headers are not logged.
 

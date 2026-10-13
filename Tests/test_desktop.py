@@ -22,7 +22,7 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory(dir="/tmp", prefix="pet-desktop-") as directory:
             config = Config(pet_dir=selected.pet_dir, overlay_binary=root / ".build/pet-overlay",
                             daemon_socket=directory + "/daemon.sock", overlay_socket=directory + "/overlay.sock",
-                            observation_seconds=(3600, 3600), speech_ttl=1)
+                            observation_seconds=(3600, 3600), speech_ttl=1, memory_file=Path(directory) / "memory.json")
             config.behavior.repeat_range = (1, 1)
             config.behavior.gesture_cooldown = 0.05
             config.behavior.idle_pause = config.behavior.working_pause = (0.05, 0.05)

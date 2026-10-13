@@ -18,10 +18,11 @@ from pet_daemon.daemon import Daemon, bind_socket
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=")
 
 
-def reply(speak=None, gesture=None):
+def reply(speak=None, gesture=None, summary=None):
+    result = {"summary": summary} if summary is not None else {"thought": "Observed current work.", "speak": speak, "gesture": gesture}
     return httpx.Response(200, json={
         "id": "msg_fixture", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
-        "content": [{"type": "text", "text": json.dumps({"thought": "Observed current work.", "speak": speak, "gesture": gesture})}],
+        "content": [{"type": "text", "text": json.dumps(result)}],
         "stop_reason": "end_turn", "stop_sequence": None,
         "usage": {"input_tokens": 100, "output_tokens": 20},
     })
@@ -36,22 +37,27 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             "still": {"frames": ["pixel.png"], "fps": 1, "role": "rest"},
         }}))
         self.config = Config(pet_dir=root, daemon_socket=str(root / "daemon.sock"), overlay_socket=str(root / "overlay.sock"),
-                             observation_seconds=(3600, 3600), request_timeout=2)
+                             observation_seconds=(3600, 3600), request_timeout=2, memory_file=root / "memory.json")
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
         self.requests = []
         self.http_status = 200
         self.speech = "The tests have reconsidered."
         self.slow = False
+        self.delay = 0
 
         async def handler(request):
-            self.requests.append(json.loads(request.content))
+            body = json.loads(request.content)
+            self.requests.append(body)
             self.entered.set()
+            if self.delay:
+                await asyncio.sleep(self.delay)
             if self.slow:
                 await self.release.wait()
             if self.http_status != 200:
                 return httpx.Response(self.http_status, json={"type": "error", "error": {"type": "api_error", "message": "fixture failure"}})
-            return reply(self.speech)
+            summary = "Remember the parser work." if "summary" in body["output_config"]["format"]["schema"]["properties"] else None
+            return reply(self.speech, summary=summary)
 
         self.client = AsyncAnthropic(api_key="test-fixture", max_retries=0,
                                      http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
@@ -254,6 +260,21 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(json.dumps(packet).encode()), 2048)
         self.assertEqual(packet["text"], self.speech)
 
+    async def test_delivers_speech_when_both_summary_levels_and_observation_use_separate_timeout_budgets(self):
+        self.config.summary_interval = 1
+        self.config.summary_summary_interval = 1
+        for index in range(3):
+            await self.daemon.cognition.observe(self.daemon.sessions.snapshot(), f"seed-{index}")
+        self.assertEqual(self.daemon.cognition.compaction_requests_due, 2)
+        self.config.request_timeout = 0.3
+        self.delay = 0.24
+        await self.daemon.observe("explicit", "Inspect progress")
+        packet = await self.packet(lambda packet: "text" in packet)
+        self.assertEqual(packet["text"], self.speech)
+        self.assertEqual(len(self.daemon.cognition.history), 4)
+        self.assertEqual(len(self.daemon.cognition.summaries), 1)
+        self.assertIsNotNone(self.daemon.cognition.summary)
+
     async def test_wrapper_failure_preserves_exit_detail_through_session_end(self):
         root = Path(__file__).resolve().parents[1]
         env = dict(os.environ, PET_DAEMON_SOCKET=self.config.daemon_socket, PET_COMMENTARY="")
@@ -303,13 +324,17 @@ class ConfigurationTests(unittest.TestCase):
     def test_loads_startup_paths_relative_to_config_and_configurable_timing(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "pet.json"
-            path.write_text(json.dumps({"pet_dir": "pets/other", "observation_seconds": [15, 25], "history_pairs": 6, "persona": "A calm garden companion.", "log_file": "analysis/pet.jsonl",
+            path.write_text(json.dumps({"pet_dir": "pets/other", "observation_seconds": [15, 25], "summary_interval": 6, "summary_summary_interval": 3, "compaction_max_tokens": 512, "persona": "A calm garden companion.", "log_file": "analysis/pet.jsonl", "memory_file": "state/companion.json",
                                         "behavior": {"repeat_range": [2, 4], "roaming": False}}))
             config = Config.load(path)
             self.assertEqual(config.pet_dir, Path(directory).resolve() / "pets/other")
             self.assertEqual(config.log_file, Path(directory).resolve() / "analysis/pet.jsonl")
+            self.assertEqual(config.memory_file, Path(directory).resolve() / "state/companion.json")
             self.assertEqual(config.persona, "A calm garden companion.")
             self.assertEqual(config.observation_seconds, [15, 25])
+            self.assertEqual(config.summary_interval, 6)
+            self.assertEqual(config.summary_summary_interval, 3)
+            self.assertEqual(config.compaction_max_tokens, 512)
             self.assertFalse(config.behavior.roaming)
             self.assertEqual(config.behavior.repeat_range, [2, 4])
 
@@ -318,8 +343,15 @@ class ConfigurationTests(unittest.TestCase):
             with self.subTest(persona=persona), self.assertRaises(ValueError):
                 Config(pet_dir=Path("fixture"), persona=persona).validate()
 
+    def test_rejects_invalid_compaction_settings(self):
+        for settings in ({"summary_interval": 0}, {"summary_interval": True},
+                         {"summary_summary_interval": 0}, {"summary_summary_interval": 8.5},
+                         {"compaction_max_tokens": 0}, {"compaction_max_tokens": True}):
+            with self.subTest(settings=settings), self.assertRaises(ValueError):
+                Config(pet_dir=Path("fixture"), **settings).validate()
+
     def test_rejects_invalid_intervals_and_shared_socket_before_startup(self):
-        for config in (Config(pet_dir=Path("fixture"), observation_seconds=(90, 60)), Config(pet_dir=Path("fixture"), history_pairs=0),
+        for config in (Config(pet_dir=Path("fixture"), observation_seconds=(90, 60)), Config(pet_dir=Path("fixture"), summary_interval=0),
                        Config(pet_dir=Path("fixture"), daemon_socket="/tmp/same", overlay_socket="/tmp/same")):
             with self.subTest(config=config), self.assertRaises(ValueError):
                 config.validate()

@@ -179,10 +179,11 @@ class Daemon:
             revision = self.sessions.revision
             observation_context = self.sessions.observation_context()
             trace("observation.started", reason=reason, revision=revision)
+            timeout = self.config.request_timeout * (1 + self.cognition.compaction_requests_due)
             try:
                 result = await asyncio.wait_for(
                     self.cognition.observe({**self.sessions.snapshot(), "trigger": trigger}, reason, context),
-                    timeout=self.config.request_timeout,
+                    timeout=timeout,
                 )
                 if context is None and observation_context != self.sessions.observation_context():
                     trace("observation.discarded", reason="session_changed", requested_revision=revision, revision=self.sessions.revision, decision=result)

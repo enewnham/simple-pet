@@ -58,12 +58,15 @@ class Config:
     pet_dir: Path
     persona: str = DEFAULT_PERSONA
     log_file: Path = Path("logs/pet-daemon.jsonl")
+    memory_file: Path = Path("state/pet-memory.json")
     overlay_binary: Path = Path(".build/pet-overlay")
     daemon_socket: str = "/tmp/pet-daemon.sock"
     overlay_socket: str = "/tmp/pet.sock"
     model: str = "claude-haiku-5-5"
     observation_seconds: tuple = (20, 40)
-    history_pairs: int = 8
+    summary_interval: int = 32
+    summary_summary_interval: int = 8
+    compaction_max_tokens: int = 1024
     speech_ttl: float = 5
     request_timeout: float = 20
     stale_seconds: float = 3600
@@ -79,7 +82,7 @@ class Config:
             raise ValueError("Configuration must be a JSON object")
         behavior = BehaviorConfig(**data.pop("behavior", {}))
         config = cls(**data, behavior=behavior)
-        for name in ("pet_dir", "overlay_binary", "log_file"):
+        for name in ("pet_dir", "overlay_binary", "log_file", "memory_file"):
             value = Path(getattr(config, name)).expanduser()
             setattr(config, name, (path.parent / value).resolve())
         config.validate()
@@ -89,7 +92,7 @@ class Config:
         self.behavior.validate()
         if not interval(self.observation_seconds):
             raise ValueError("observation_seconds must be a positive [minimum, maximum]")
-        for name in ("history_pairs", "max_tokens"):
+        for name in ("summary_interval", "summary_summary_interval", "max_tokens", "compaction_max_tokens"):
             if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be a positive integer")
         for name in ("speech_ttl", "request_timeout", "stale_seconds", "completed_retention_seconds"):

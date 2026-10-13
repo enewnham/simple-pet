@@ -1,3 +1,6 @@
 {
-  "pet_dir": "assets/pets/my-pet"
+  "pet_dir": "assets/pets/my-pet",
+  "summary_interval": 32,
+  "summary_summary_interval": 8,
+  "compaction_max_tokens": 1024
 }

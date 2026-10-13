@@ -13,3 +13,4 @@ assets/LICENSE.*
 assets/ATTRIBUTION.md
 pet.config.json
 logs/
+state/
