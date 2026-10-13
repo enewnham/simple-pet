@@ -34,6 +34,7 @@ Configuration is loaded once. Pet selection stays fixed for the run. Restart aft
 | Setting | Default |
 | --- | --- |
 | `pet_dir` | Required sprite pack path |
+| `persona` | Deadpan, slightly snarky desktop companion |
 | `log_file` | `logs/pet-daemon.jsonl` |
 | `overlay_binary` | `.build/pet-overlay` |
 | `daemon_socket` | `/tmp/pet-daemon.sock` |
@@ -46,6 +47,17 @@ Configuration is loaded once. Pet selection stays fixed for the run. Restart aft
 | `stale_seconds` | 3600 seconds |
 | `completed_retention_seconds` | 7200 seconds |
 | `max_tokens` | 4096 API output tokens |
+
+Set `persona` in your local `pet.config.json` to choose the pet's voice:
+
+```json
+{
+  "pet_dir": "assets/pets/my-pet",
+  "persona": "You are a gentle, curious woodland companion watching a developer work."
+}
+```
+
+Omitting `persona` uses the deadpan companion described above. Persona controls character and tone. Observer instructions, speech pacing, and the structured response contract remain part of the system prompt. The pet observes requests addressed to coding agents and keeps its own instructions and private thoughts out of speech. Restart after editing the persona.
 
 `behavior` accepts these settings:
 
@@ -65,7 +77,7 @@ Configuration is loaded once. Pet selection stays fixed for the run. Restart aft
 
 Observation timing and behavior timing are independent. The daemon chooses walking direction, targets, repeats, and pauses. Haiku suggests optional gestures using the selected pet's available clips.
 
-Speech frequency, brevity, and restrained snark are guided by the system prompt in [cognition.py](pet_daemon/cognition.py). The daemon accepts nullable speech and applies no word-count limit, prose trimming, silence lottery, or automatic speech cooldown. `max_tokens` supplies the Anthropic API's required output budget. Socket payloads still have transport limits.
+Speech frequency and brevity are guided by the observer instructions in [cognition.py](pet_daemon/cognition.py). Character and tone come from the configured persona. The daemon accepts nullable speech and applies no word-count limit, prose trimming, silence lottery, or automatic speech cooldown. `max_tokens` supplies the Anthropic API's required output budget. Socket payloads still have transport limits.
 
 ## Try parallel sessions
 

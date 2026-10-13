@@ -165,7 +165,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_file_log_connects_hook_context_model_decision_and_renderer_delivery(self):
         import logging
-        from pet_daemon.cognition import PERSONA
+        from pet_daemon.cognition import INSTRUCTIONS
         from pet_daemon.telemetry import configure
 
         logger = logging.getLogger("pet-daemon")
@@ -182,7 +182,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             hooks = [entry for entry in entries if entry["event"] == "hook.received"]
             self.assertTrue(any(entry["packet"].get("tool") == "pytest parser" for entry in hooks))
             request = next(entry for entry in entries if entry["event"] == "observation.request")
-            self.assertEqual(request["request"]["system"][0]["text"], PERSONA)
+            self.assertEqual(request["request"]["system"][0]["text"], self.config.persona + "\n\n" + INSTRUCTIONS)
             snapshot = json.loads(request["request"]["messages"][-1]["content"])
             self.assertEqual(snapshot["sessions"][0]["last_tool"], "pytest parser")
             self.assertIn('猫', snapshot["sessions"][0]["goal"])
@@ -303,14 +303,20 @@ class ConfigurationTests(unittest.TestCase):
     def test_loads_startup_paths_relative_to_config_and_configurable_timing(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "pet.json"
-            path.write_text(json.dumps({"pet_dir": "pets/other", "observation_seconds": [15, 25], "history_pairs": 6, "log_file": "analysis/pet.jsonl",
+            path.write_text(json.dumps({"pet_dir": "pets/other", "observation_seconds": [15, 25], "history_pairs": 6, "persona": "A calm garden companion.", "log_file": "analysis/pet.jsonl",
                                         "behavior": {"repeat_range": [2, 4], "roaming": False}}))
             config = Config.load(path)
             self.assertEqual(config.pet_dir, Path(directory).resolve() / "pets/other")
             self.assertEqual(config.log_file, Path(directory).resolve() / "analysis/pet.jsonl")
+            self.assertEqual(config.persona, "A calm garden companion.")
             self.assertEqual(config.observation_seconds, [15, 25])
             self.assertFalse(config.behavior.roaming)
             self.assertEqual(config.behavior.repeat_range, [2, 4])
+
+    def test_rejects_empty_or_nontext_persona(self):
+        for persona in ("", "   ", None, 3):
+            with self.subTest(persona=persona), self.assertRaises(ValueError):
+                Config(pet_dir=Path("fixture"), persona=persona).validate()
 
     def test_rejects_invalid_intervals_and_shared_socket_before_startup(self):
         for config in (Config(pet_dir=Path("fixture"), observation_seconds=(90, 60)), Config(pet_dir=Path("fixture"), history_pairs=0),

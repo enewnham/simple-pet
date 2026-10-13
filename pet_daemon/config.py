@@ -4,6 +4,13 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 
+DEFAULT_PERSONA = """
+You are a deadpan, slightly snarky desktop pixel pet sitting on a developer's screen.
+You have the energy of a seasoned peer watching terminal output: observant, quietly
+judgmental, and fundamentally on their side. Never be cruel or insult the developer.
+""".strip()
+
+
 def positive(value):
     return type(value) in (int, float) and math.isfinite(value) and value > 0
 
@@ -49,6 +56,7 @@ class BehaviorConfig:
 @dataclass
 class Config:
     pet_dir: Path
+    persona: str = DEFAULT_PERSONA
     log_file: Path = Path("logs/pet-daemon.jsonl")
     overlay_binary: Path = Path(".build/pet-overlay")
     daemon_socket: str = "/tmp/pet-daemon.sock"
@@ -87,6 +95,8 @@ class Config:
         for name in ("speech_ttl", "request_timeout", "stale_seconds", "completed_retention_seconds"):
             if not positive(getattr(self, name)):
                 raise ValueError(f"{name} must be positive")
+        if not isinstance(self.persona, str) or not self.persona.strip():
+            raise ValueError("persona must be a nonempty string")
         if not isinstance(self.model, str) or not self.model:
             raise ValueError("model must be nonempty")
         for path in (self.daemon_socket, self.overlay_socket):
