@@ -60,6 +60,10 @@ examples/pet-run pytest
 
 Edit `pet.config.json` and restart the daemon to apply changes. Paths are relative to the configuration file. See [pet.config.example.json](pet.config.example.json) for all settings and defaults. Set `pet_dir` to your imported sprite pack.
 
+Conversation exchanges and summaries are saved to `memory_file`. Claude requests use a one-hour prompt cache. During active work, `summary_interval` controls how many older exchanges become a memory while recent exchanges remain in the conversation. After `idle_compaction_seconds` without a conversation exchange (55 minutes by default), all remaining exchanges become a memory. Idle memory compaction produces no speech, and routine observations run only while a task is active. `summary_summary_interval` controls consolidation of older memories.
+
+Computer sleep pauses API requests and cancels in-flight requests. Completed exchanges remain saved. After wake or a daemon restart, elapsed wall time determines whether the conversation needs compaction before its next observation. Memory compaction runs after wake when due, even if the cloud cache has expired. The pet's short nap animations follow their own behavior settings.
+
 ## Development checks
 
 Run the automated checks and compile the renderer:

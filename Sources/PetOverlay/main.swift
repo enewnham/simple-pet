@@ -42,6 +42,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var server: SocketServer?
     private var sender: SocketSender?
     private var signals: [DispatchSourceSignal] = []
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var systemSleeping = false
     private var statusTimer: Timer?
     private var motionTimer: Timer?
     private var motion: WindowMotion?
@@ -92,9 +94,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.sender?.send(["kind": "renderer", "event": "click"])
             }
             window.orderFrontRegardless()
+            let workspaceNotifications = NSWorkspace.shared.notificationCenter
+            workspaceObservers.append(workspaceNotifications.addObserver(
+                forName: NSWorkspace.willSleepNotification, object: nil, queue: .main
+            ) { [weak self] _ in self?.systemSleepChanged(true) })
+            workspaceObservers.append(workspaceNotifications.addObserver(
+                forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+            ) { [weak self] _ in self?.systemSleepChanged(false) })
             let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
-                self?.stopIfPaused()
-                self?.status()
+                guard let self = self, !self.systemSleeping else { return }
+                self.stopIfPaused()
+                self.status()
             }
             RunLoop.main.add(timer, forMode: .common)
             statusTimer = timer
@@ -122,6 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private var paused: Bool {
+        if systemSleeping { return true }
         guard let panel = panel else { return true }
         let pointer = NSEvent.mouseLocation
         let rect = view?.petFrameInScreen ?? panel.frame
@@ -177,7 +188,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sender?.send(["kind": "renderer", "event": event, "command_id": id, "result": result])
     }
 
+    private func systemSleepChanged(_ sleeping: Bool) {
+        systemSleeping = sleeping
+        sender?.send(["kind": "renderer", "event": sleeping ? "system_sleep" : "system_wake"])
+        if sleeping { stopMotion() }
+        lastStatusTime = -.infinity
+        status(force: true)
+    }
+
     private func status(force: Bool = false) {
+        guard !systemSleeping || force else { return }
         guard let panel = panel else { return }
         let now = ProcessInfo.processInfo.systemUptime
         let pointer = NSEvent.mouseLocation
@@ -190,7 +210,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "width": petFrame.width, "height": petFrame.height,
             "screen": ["x": bounds.minX, "y": bounds.minY, "width": bounds.width, "height": bounds.height],
             "pointer": ["x": pointer.x, "y": pointer.y, "moving": now - pointerMovedAt < 0.3],
-            "dragging": dragging, "menu": menu, "speech": model.text != nil, "sleeping": model.sleeping
+            "dragging": dragging, "menu": menu, "speech": model.text != nil, "sleeping": model.sleeping,
+            "system_sleeping": systemSleeping
         ]
         let encoded = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
         if now - lastStatusTime >= 0.1 && (force || encoded != lastStatus || now - lastStatusTime >= 1) {
@@ -201,6 +222,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        let workspaceNotifications = NSWorkspace.shared.notificationCenter
+        for observer in workspaceObservers { workspaceNotifications.removeObserver(observer) }
+        workspaceObservers.removeAll()
         statusTimer?.invalidate()
         stopMotion()
         server?.stop()

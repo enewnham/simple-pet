@@ -19,7 +19,7 @@ PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4
 
 
 def reply(speak=None, gesture=None, summary=None):
-    result = {"summary": summary} if summary is not None else {"thought": "Observed current work.", "speak": speak, "gesture": gesture}
+    result = {"thought": summary, "speak": None, "gesture": None} if summary is not None else {"thought": "Observed current work.", "speak": speak, "gesture": gesture}
     return httpx.Response(200, json={
         "id": "msg_fixture", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
         "content": [{"type": "text", "text": json.dumps(result)}],
@@ -57,7 +57,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 await self.release.wait()
             if self.http_status != 200:
                 return httpx.Response(self.http_status, json={"type": "error", "error": {"type": "api_error", "message": "fixture failure"}})
-            summary = "Remember the parser work." if "summary" in body["output_config"]["format"]["schema"]["properties"] else None
+            summary = "Remember the parser work." if "memory_compaction" in json.loads(body["messages"][-1]["content"]) else None
             speech = self.speech
             if summary is None:
                 reason = json.loads(body["messages"][-1]["content"])["reason"]
@@ -163,7 +163,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         snapshot = json.loads(self.requests[0]["messages"][-1]["content"])
         self.assertEqual(snapshot["reason"], "click")
         schema = self.requests[0]["output_config"]["format"]["schema"]
-        self.assertEqual(schema["properties"]["speak"], {"type": "string"})
+        self.assertEqual(schema["properties"]["speak"], {"anyOf": [{"type": "string"}, {"type": "null"}]})
 
     async def test_napping_pauses_routine_commentary_and_click_wakes_for_speech(self):
         self.use_clock()
@@ -237,6 +237,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_click_during_a_silent_observation_gets_a_fresh_comment(self):
         self.slow = True
         self.speech_by_reason["routine"] = None
+        self.event("tool_start", call="checks", tool="pytest")
+        await self.wait_for(lambda: self.daemon.sessions.active)
         self.daemon.next_observation = self.daemon.clock()
         await asyncio.wait_for(self.entered.wait(), 1)
         self.send({"kind": "renderer", "event": "click"})
@@ -247,6 +249,151 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(speech["text"], self.speech)
         reasons = [json.loads(request["messages"][-1]["content"])["reason"] for request in self.requests]
         self.assertEqual(reasons, ["routine", "click"])
+
+    async def test_idle_conversation_compacts_once_at_fifty_five_minutes_without_speech(self):
+        self.use_clock()
+        self.daemon.next_observation = self.now
+        await self.daemon.cognition.observe(self.daemon.sessions.snapshot(), "seed")
+        original = self.daemon.cognition.history.copy()
+        self.now += 3299
+        self.daemon.next_prune = 0
+        await self.wait_for(lambda: self.daemon.next_prune > self.now)
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(self.daemon.cognition.history, original)
+        self.now += 1
+        await self.wait_for(lambda: not self.daemon.cognition.history)
+        await self.wait_for(lambda: self.daemon.request_task is None)
+        saved = json.loads(self.config.memory_file.read_text())
+        self.assertEqual(saved["messages"], [])
+        self.assertEqual(len(saved["summaries"]), 1)
+        self.assertEqual(len(self.requests), 2)
+        selection = json.loads(self.requests[-1]["messages"][-1]["content"])["memory_compaction"]
+        self.assertEqual(selection["exchange_count"], len(original) // 2)
+        self.now += 7200
+        self.daemon.next_prune = 0
+        await self.wait_for(lambda: self.daemon.next_prune > self.now)
+        self.assertEqual(len(self.requests), 2)
+        self.assertFalse(any("text" in packet for packet in await self.drain()))
+
+    async def test_long_computer_sleep_compacts_after_wake_using_wall_time(self):
+        self.use_clock()
+        self.wall_now = self.now
+        self.daemon.cognition.clock = lambda: self.wall_now
+        await self.daemon.cognition.observe(self.daemon.sessions.snapshot(), "seed")
+        saved = self.config.memory_file.read_text()
+        self.send({"kind": "renderer", "event": "system_sleep"})
+        await self.wait_for(lambda: self.daemon.system_sleeping)
+        self.wall_now += 86400
+        self.send_status(system_sleeping=True, x=101)
+        await self.wait_for(lambda: self.daemon.behavior.status["x"] == 101)
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(self.config.memory_file.read_text(), saved)
+        self.send({"kind": "renderer", "event": "system_wake"})
+        await self.wait_for(lambda: not self.daemon.cognition.history)
+        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(self.now, 1000)
+        self.assertFalse(any("text" in packet for packet in await self.drain()))
+        self.send({"kind": "renderer", "event": "click"})
+        speech = await self.packet(lambda packet: "text" in packet)
+        self.assertEqual(speech["text"], self.speech)
+        self.assertEqual(len(self.requests), 3)
+        snapshot = json.loads(self.requests[-1]["messages"][-1]["content"])
+        self.assertEqual(snapshot["observed_at"], self.wall_now)
+        self.assertIn("compacted_memory", json.loads(self.requests[-1]["messages"][0]["content"][0]["text"]))
+
+    async def test_short_computer_sleep_preserves_raw_history_and_status_recovers_wake(self):
+        self.use_clock()
+        self.wall_now = self.now
+        self.daemon.cognition.clock = lambda: self.wall_now
+        await self.daemon.cognition.observe(self.daemon.sessions.snapshot(), "seed")
+        original = self.daemon.cognition.history.copy()
+        self.send_status(system_sleeping=True, x=101)
+        await self.wait_for(lambda: self.daemon.system_sleeping)
+        self.wall_now += 600
+        self.send_status(system_sleeping=False, x=102)
+        await self.wait_for(lambda: not self.daemon.system_sleeping)
+        self.send({"kind": "renderer", "event": "click"})
+        await self.packet(lambda packet: "text" in packet)
+        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(self.requests[-1]["messages"][:-1], original)
+        self.assertEqual(self.daemon.cognition.summaries, [])
+
+    async def test_computer_sleep_cancels_observation_without_losing_completed_history(self):
+        await self.daemon.cognition.observe(self.daemon.sessions.snapshot(), "seed")
+        original = self.daemon.cognition.history.copy()
+        saved = self.config.memory_file.read_text()
+        self.entered.clear()
+        self.slow = True
+        self.send({"kind": "speak", "context": "Inspect the build"})
+        await asyncio.wait_for(self.entered.wait(), 1)
+        self.send({"kind": "renderer", "event": "system_sleep"})
+        await self.wait_for(lambda: self.daemon.system_sleeping and self.daemon.request_task is None)
+        self.assertEqual(self.daemon.cognition.history, original)
+        self.assertEqual(self.config.memory_file.read_text(), saved)
+        self.assertFalse(self.daemon.loop_task.done())
+        self.release.set()
+        self.assertFalse(any("text" in packet for packet in await self.drain()))
+        self.send({"kind": "renderer", "event": "system_wake"})
+        self.send({"kind": "renderer", "event": "click"})
+        await self.packet(lambda packet: "text" in packet)
+        self.assertEqual(self.requests[-1]["messages"][:-1], original)
+
+    async def test_idle_compaction_failure_keeps_history_and_waits_before_retrying(self):
+        self.use_clock()
+        await self.daemon.cognition.observe(self.daemon.sessions.snapshot(), "seed")
+        original = self.daemon.cognition.history.copy()
+        saved = self.config.memory_file.read_text()
+        self.http_status = 500
+        with self.assertLogs("pet-daemon", level="WARNING"):
+            self.now += 3300
+            await self.wait_for(lambda: self.daemon.next_memory_retry > self.now)
+        self.assertEqual(self.daemon.cognition.history, original)
+        self.assertEqual(self.config.memory_file.read_text(), saved)
+        self.now += 59
+        self.daemon.next_prune = 0
+        await self.wait_for(lambda: self.daemon.next_prune > self.now)
+        self.assertEqual(len(self.requests), 2)
+        self.http_status = 200
+        self.now += 1
+        await self.wait_for(lambda: not self.daemon.cognition.history)
+        self.assertEqual(len(self.requests), 3)
+
+    async def test_malformed_saved_history_keeps_daemon_running_for_new_commentary(self):
+        await self.daemon.close()
+        self.config.memory_file.write_text(json.dumps({
+            "pet": "quiet", "messages": [{"role": "user", "content": "{}"},
+                                           {"role": "assistant", "content": "Remember the parser."}],
+        }))
+        with self.assertLogs("pet-daemon", level="WARNING"):
+            self.daemon = Daemon(self.config, self.client, rng=random.Random(7))
+        await self.daemon.start()
+        self.send_status()
+        await self.packet(lambda packet: packet.get("state") == "idle")
+        self.assertEqual(self.daemon.cognition.history, [])
+        self.assertFalse(self.daemon.loop_task.done())
+        self.send({"kind": "renderer", "event": "click"})
+        speech = await self.packet(lambda packet: "text" in packet)
+        self.assertEqual(speech["text"], self.speech)
+        self.assertEqual(len(json.loads(self.config.memory_file.read_text())["messages"]), 2)
+
+    async def test_computer_sleep_cancels_compaction_and_retries_after_wake(self):
+        self.use_clock()
+        await self.daemon.cognition.observe(self.daemon.sessions.snapshot(), "seed")
+        original = self.daemon.cognition.history.copy()
+        saved = self.config.memory_file.read_text()
+        self.entered.clear()
+        self.slow = True
+        self.now += 3300
+        await asyncio.wait_for(self.entered.wait(), 1)
+        self.send({"kind": "renderer", "event": "system_sleep"})
+        await self.wait_for(lambda: self.daemon.system_sleeping and self.daemon.request_task is None)
+        self.assertEqual(self.daemon.cognition.history, original)
+        self.assertEqual(self.config.memory_file.read_text(), saved)
+        self.release.set()
+        self.send({"kind": "renderer", "event": "system_wake"})
+        await self.wait_for(lambda: not self.daemon.cognition.history)
+        self.assertEqual(len(self.requests), 3)
+        self.assertFalse(any("text" in packet for packet in await self.drain()))
 
     async def test_completion_reacts_to_one_session_while_other_tools_keep_working(self):
         self.event("tool_start", harness="codex", call="checks", tool="pytest")
@@ -602,6 +749,14 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_idle_message_interval_defaults_to_five_minutes(self):
         self.assertEqual(Config(pet_dir=Path("fixture")).idle_message_seconds, 300)
+
+    def test_idle_compaction_interval_defaults_to_fifty_five_minutes(self):
+        self.assertEqual(Config(pet_dir=Path("fixture")).idle_compaction_seconds, 3300)
+
+    def test_rejects_invalid_idle_compaction_intervals(self):
+        for seconds in (0, -1, True, "3300", None, float("nan"), float("inf"), 3600, 7200):
+            with self.subTest(seconds=seconds), self.assertRaisesRegex(ValueError, "idle_compaction_seconds"):
+                Config(pet_dir=Path("fixture"), idle_compaction_seconds=seconds).validate()
 
     def test_rejects_nonpositive_or_nonfinite_idle_message_intervals(self):
         for seconds in (0, -1, True, "300", None, float("nan"), float("inf")):

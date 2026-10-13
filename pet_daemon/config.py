@@ -70,6 +70,7 @@ class Config:
     idle_message_seconds: float = 300
     summary_interval: int = 32
     summary_summary_interval: int = 8
+    idle_compaction_seconds: float = 55 * 60
     compaction_max_tokens: int = 1024
     speech_ttl: float = 15
     request_timeout: float = 20
@@ -99,9 +100,11 @@ class Config:
         for name in ("summary_interval", "summary_summary_interval", "max_tokens", "compaction_max_tokens"):
             if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be a positive integer")
-        for name in ("idle_message_seconds", "speech_ttl", "request_timeout", "stale_seconds", "completed_retention_seconds"):
+        for name in ("idle_message_seconds", "idle_compaction_seconds", "speech_ttl", "request_timeout", "stale_seconds", "completed_retention_seconds"):
             if not positive(getattr(self, name)):
                 raise ValueError(f"{name} must be positive")
+        if self.idle_compaction_seconds >= 3600:
+            raise ValueError("idle_compaction_seconds must be shorter than the one-hour cache TTL")
         if not isinstance(self.persona, str) or not self.persona.strip():
             raise ValueError("persona must be a nonempty string")
         if not isinstance(self.model, str) or not self.model:

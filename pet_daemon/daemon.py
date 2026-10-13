@@ -21,6 +21,7 @@ from .telemetry import observation, trace
 log = logging.getLogger("pet-daemon")
 MAX_INPUT_BYTES = 2000
 SPEECH_REPLAY_SECONDS = 60
+MEMORY_RETRY_SECONDS = 60
 
 
 def bind_socket(path):
@@ -87,6 +88,8 @@ class Daemon:
         self.child = None
         self.loop_task = None
         self.request_task = None
+        self.system_sleeping = False
+        self.next_memory_retry = 0
         self.pending = None
         self.manual = None
         self.clicked = False
@@ -159,11 +162,18 @@ class Daemon:
                         self.queue("prompt", packet)
                     elif packet["event"] == "turn_done" or result["convergence"]:
                         self.queue("completion", packet)
-                    self.behavior.tick(self.activity(), self.sessions)
+                    if not self.system_sleeping:
+                        self.behavior.tick(self.activity(), self.sessions)
             elif kind == "renderer":
                 if packet.get("event") == "status":
                     if self.behavior.renderer_status(packet):
-                        self.behavior.tick(self.activity(), self.sessions)
+                        sleeping = packet.get("system_sleeping")
+                        if type(sleeping) is bool:
+                            self.system_sleep_changed(sleeping)
+                        if not self.system_sleeping:
+                            self.behavior.tick(self.activity(), self.sessions)
+                elif packet.get("event") in ("system_sleep", "system_wake"):
+                    self.system_sleep_changed(packet["event"] == "system_sleep")
                 elif packet.get("event") == "click":
                     self.click()
                 else:
@@ -182,6 +192,26 @@ class Daemon:
     def speech_duration(self, speech):
         return max(self.config.speech_ttl, 3 + len(speech.split()) / 2)
 
+    def system_sleep_changed(self, sleeping):
+        if sleeping == self.system_sleeping:
+            return
+        self.system_sleeping = sleeping
+        trace("system.sleep" if sleeping else "system.wake")
+        if sleeping:
+            if self.request_task:
+                self.request_task.cancel()
+            self.last_speech = None
+        else:
+            self.next_memory_retry = 0
+
+    async def maintain_memory(self):
+        with observation():
+            try:
+                await self.cognition.compact()
+            except Exception as error:
+                self.next_memory_retry = self.clock() + MEMORY_RETRY_SECONDS
+                log.warning("Could not compact idle pet memory: %s", error)
+
     def click(self):
         self.behavior.wake("click")
         if self.last_speech and self.clock() - self.last_speech[1] <= SPEECH_REPLAY_SECONDS:
@@ -193,6 +223,8 @@ class Daemon:
             trace("speech.requested", reason="click")
 
     async def observe(self, reason, context=None, ttl=None, trigger=None):
+        if self.system_sleeping:
+            return
         with observation():
             started = self.clock()
             revision = self.sessions.revision
@@ -240,21 +272,23 @@ class Daemon:
                 if changed or removed:
                     trace("sessions.pruned", removed=removed, snapshot=self.sessions.snapshot())
                 self.next_prune = now + 1
-            self.behavior.tick(self.activity(), self.sessions)
+            if not self.system_sleeping:
+                self.behavior.tick(self.activity(), self.sessions)
             if self.request_task and self.request_task.done():
-                self.request_task.result()
+                if not self.request_task.cancelled():
+                    self.request_task.result()
                 self.request_task = None
-            if self.behavior.status and self.request_task is None:
+            if not self.system_sleeping and self.request_task is None:
                 request = None
-                check_in = self.sessions.check_in_due(self.config.idle_message_seconds)
-                if self.manual is not None:
+                check_in = self.sessions.check_in_due(self.config.idle_message_seconds) if self.behavior.status else []
+                if self.behavior.status and self.manual is not None:
                     context, ttl = self.manual
                     self.manual = None
                     request = ("explicit", context, ttl)
-                elif self.clicked:
+                elif self.behavior.status and self.clicked:
                     self.clicked = False
                     request = ("click", None, None)
-                elif self.pending and now >= self.pending[1]:
+                elif self.behavior.status and self.pending and now >= self.pending[1]:
                     reason, _, trigger = self.pending
                     self.pending = None
                     valid = reason != "failure" or self.sessions.failed
@@ -266,7 +300,9 @@ class Daemon:
                     request = ("check_in", None, None, {"sessions": check_in})
                     for key in check_in:
                         self.sessions.lanes[key].last_check_in = now
-                elif now >= self.next_observation and not self.behavior.sleeping:
+                elif (self.cognition.idle_compaction_due or (not self.cognition.history and self.cognition.compaction_requests_due)) and now >= self.next_memory_retry:
+                    self.request_task = asyncio.create_task(self.maintain_memory())
+                elif self.behavior.status and self.sessions.active and now >= self.next_observation and not self.behavior.sleeping:
                     request = ("routine", None, None)
                 if request:
                     self.next_observation = now + self.rng.uniform(*self.config.observation_seconds)

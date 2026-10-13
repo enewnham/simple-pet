@@ -14,6 +14,7 @@
   "idle_message_seconds": 300,
   "summary_interval": 32,
   "summary_summary_interval": 8,
+  "idle_compaction_seconds": 3300,
   "compaction_max_tokens": 1024,
   "speech_ttl": 15,
   "request_timeout": 20,
