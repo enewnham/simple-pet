@@ -64,10 +64,11 @@ class Config:
     overlay_socket: str = "/tmp/pet.sock"
     model: str = "claude-haiku-5-5"
     observation_seconds: tuple = (20, 40)
+    idle_message_seconds: float = 300
     summary_interval: int = 32
     summary_summary_interval: int = 8
     compaction_max_tokens: int = 1024
-    speech_ttl: float = 5
+    speech_ttl: float = 15
     request_timeout: float = 20
     stale_seconds: float = 3600
     completed_retention_seconds: float = 7200
@@ -95,7 +96,7 @@ class Config:
         for name in ("summary_interval", "summary_summary_interval", "max_tokens", "compaction_max_tokens"):
             if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be a positive integer")
-        for name in ("speech_ttl", "request_timeout", "stale_seconds", "completed_retention_seconds"):
+        for name in ("idle_message_seconds", "speech_ttl", "request_timeout", "stale_seconds", "completed_retention_seconds"):
             if not positive(getattr(self, name)):
                 raise ValueError(f"{name} must be positive")
         if not isinstance(self.persona, str) or not self.persona.strip():

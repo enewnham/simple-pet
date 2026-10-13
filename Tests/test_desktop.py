@@ -97,7 +97,7 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                         "tool_name": "Shell", "tool_input": {"command": "pytest"},
                     })
                     await wait_for(lambda: len(daemon.sessions.lanes) == 2 and daemon.sessions.working)
-                    await cli("speak", "--context", "Observe these parallel parser tasks")
+                    await cli("speak", "--context", "Observe these parallel parser tasks", "--ttl", "1")
                     await asyncio.wait_for(entered.wait(), 2)
                     await cli("--session", "build", "--status", "done")
                     await wait_for(lambda: daemon.sessions.lanes["cli:build"].finished)

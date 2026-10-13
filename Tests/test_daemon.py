@@ -243,6 +243,103 @@ class SessionsTests(unittest.TestCase):
         self.assertFalse(self.sessions.lanes)
         self.assertFalse(self.sessions.aliases)
 
+    def test_checks_each_active_tasks_quiet_time_independently(self):
+        self.event("tool_start", call="build", tool="Build")
+        self.clock.advance(299)
+        self.event("tool_start", session="other", harness="codex", call="lint", tool="Lint")
+        self.assertEqual(self.sessions.check_in_due(300), [])
+        self.clock.advance(1)
+        self.assertEqual(self.sessions.check_in_due(300), ["claude:main"])
+        snapshots = {lane["id"]: lane for lane in self.sessions.snapshot()["sessions"]}
+        self.assertEqual(snapshots["claude:main"]["quiet_seconds"], 300)
+        self.assertEqual(snapshots["codex:other"]["quiet_seconds"], 1)
+        self.assertIsNone(snapshots["claude:main"]["waiting_seconds"])
+        self.event("progress", progress="Build still running")
+        self.assertEqual(self.sessions.check_in_due(300), [])
+
+    def test_waiting_age_survives_progress_and_duplicate_waiting_events(self):
+        self.event("waiting", call="question", tool="AskUserQuestion", progress="Choose a strategy")
+        self.assertTrue(self.sessions.active)
+        self.assertFalse(self.sessions.working)
+        self.clock.advance(150)
+        self.event("progress", progress="Strategy choice pending")
+        self.clock.advance(149)
+        self.event("waiting", call="question", tool="AskUserQuestion")
+        self.assertEqual(self.sessions.check_in_due(300), [])
+        self.clock.advance(1)
+        self.assertEqual(self.sessions.check_in_due(300), ["claude:main"])
+        snapshot = self.sessions.snapshot()["sessions"][0]
+        self.assertEqual(snapshot["waiting_seconds"], 300)
+        self.assertEqual(snapshot["quiet_seconds"], 1)
+        self.event("tool_done", call="question", progress="Strategy chosen")
+        self.assertEqual(self.sessions.check_in_due(300), [])
+        self.assertIsNone(self.sessions.snapshot()["sessions"][0]["waiting_seconds"])
+
+    def test_each_question_starts_its_own_waiting_timer(self):
+        self.event("waiting", call="first", tool="AskUserQuestion")
+        self.clock.advance(299)
+        self.event("waiting", call="second", tool="AskUserQuestion")
+        self.clock.advance(1)
+        self.assertEqual(self.sessions.check_in_due(300), [])
+        self.assertEqual(self.sessions.snapshot()["sessions"][0]["waiting_seconds"], 1)
+        self.clock.advance(299)
+        self.assertEqual(self.sessions.check_in_due(300), ["claude:main"])
+
+    def test_unanswered_questions_survive_unrelated_tool_results_until_matching_reply(self):
+        self.event("waiting", call="question", tool="AskUserQuestion", progress="Choose a strategy")
+        self.clock.advance(100)
+        self.event("tool_start", call="read", tool="Read")
+        self.event("tool_done", call="read")
+        self.clock.advance(100)
+        self.event("tool_start", call="test", tool="pytest")
+        self.event("tool_error", call="test", detail="Assertion failed")
+        self.clock.advance(100)
+        self.assertEqual(self.sessions.check_in_due(300), ["claude:main"])
+        snapshot = self.sessions.snapshot()["sessions"][0]
+        self.assertTrue(snapshot["waiting_for_input"])
+        self.assertEqual(snapshot["waiting_seconds"], 300)
+        self.event("tool_done", call="question", progress="Strategy chosen")
+        self.assertFalse(self.sessions.snapshot()["sessions"][0]["waiting_for_input"])
+        self.event("tool_start", call="deploy", tool="Shell")
+        self.event("waiting", call="deploy", tool="PermissionRequest", progress="Approve deployment")
+        self.clock.advance(300)
+        self.assertEqual(self.sessions.check_in_due(300), ["claude:main"])
+        self.event("tool_done", call="deploy", progress="Deployment approved and completed")
+        snapshot = self.sessions.snapshot()["sessions"][0]
+        self.assertFalse(snapshot["waiting_for_input"])
+        self.assertIsNone(snapshot["waiting_seconds"])
+        self.assertFalse(self.sessions.working)
+        self.assertEqual(self.sessions.check_in_due(300), [])
+
+    def test_check_in_attempts_repeat_after_the_interval_and_reset_on_new_turn(self):
+        self.event("intent", turn="first", goal="Run checks")
+        self.clock.advance(300)
+        self.assertEqual(self.sessions.check_in_due(300), ["claude:main"])
+        lane = self.sessions.lanes["claude:main"]
+        lane.last_check_in = self.clock()
+        self.clock.advance(299)
+        self.assertEqual(self.sessions.check_in_due(300), [])
+        self.clock.advance(1)
+        self.assertEqual(self.sessions.check_in_due(300), ["claude:main"])
+        self.event("intent", turn="second", goal="Run another build")
+        self.assertIsNone(lane.last_check_in)
+        self.assertEqual(self.sessions.check_in_due(300), [])
+        self.clock.advance(300)
+        self.assertEqual(self.sessions.check_in_due(300), ["claude:main"])
+
+    def test_idle_completed_cancelled_and_stale_sessions_do_not_get_check_ins(self):
+        self.assertEqual(self.sessions.check_in_due(30), [])
+        self.event("session_start", session="idle")
+        self.event("intent", session="completed", goal="Run checks")
+        self.event("turn_done", session="completed")
+        self.event("intent", session="cancelled", goal="Build")
+        self.event("interrupt", session="cancelled")
+        self.event("tool_start", session="stale", call="build", tool="Build")
+        self.clock.advance(60)
+        self.sessions.prune()
+        self.assertEqual(self.sessions.lanes["claude:stale"].outcome, "stale")
+        self.assertEqual(self.sessions.check_in_due(30), [])
+
 
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jWZkAAAAASUVORK5CYII=")
 

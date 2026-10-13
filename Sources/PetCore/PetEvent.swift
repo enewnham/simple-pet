@@ -70,7 +70,7 @@ public final class PetModel {
                     self?.onChange?()
                 }
                 expiration = work
-                DispatchQueue.main.asyncAfter(deadline: .now() + (event.ttl ?? 5), execute: work)
+                DispatchQueue.main.asyncAfter(deadline: .now() + (event.ttl ?? 15), execute: work)
             }
         }
         onChange?()

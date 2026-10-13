@@ -88,6 +88,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.stopIfPaused()
                 self?.status(force: true)
             }
+            view.onClick = { [weak self] in
+                self?.sender?.send(["kind": "renderer", "event": "click"])
+            }
             window.orderFrontRegardless()
             let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
                 self?.stopIfPaused()
@@ -111,13 +114,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private var screenBounds: CGRect {
-        (panel?.screen ?? NSScreen.main ?? NSScreen.screens.first)?.visibleFrame ?? .zero
+        let petFrame = view?.petFrameInScreen
+        let screen = petFrame.flatMap { frame in
+            NSScreen.screens.first { $0.frame.contains(NSPoint(x: frame.midX, y: frame.minY + 52)) }
+        }
+        return (screen ?? panel?.screen ?? NSScreen.main ?? NSScreen.screens.first)?.visibleFrame ?? .zero
     }
 
     private var paused: Bool {
         guard let panel = panel else { return true }
         let pointer = NSEvent.mouseLocation
-        let rect = panel.frame
+        let rect = view?.petFrameInScreen ?? panel.frame
         let dx = pointer.x - rect.midX
         let dy = pointer.y - (rect.minY + 52)
         return dragging || menu || model.text != nil || model.state == .error || hypot(dx, dy) <= options.pointerRadius
@@ -177,9 +184,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if pointer != previousPointer { pointerMovedAt = now }
         previousPointer = pointer
         let bounds = screenBounds
+        let petFrame = view?.petFrameInScreen ?? panel.frame
         let payload: [String: Any] = [
-            "kind": "renderer", "event": "status", "x": panel.frame.minX, "y": panel.frame.minY,
-            "width": panel.frame.width, "height": panel.frame.height,
+            "kind": "renderer", "event": "status", "x": petFrame.minX, "y": petFrame.minY,
+            "width": petFrame.width, "height": petFrame.height,
             "screen": ["x": bounds.minX, "y": bounds.minY, "width": bounds.width, "height": bounds.height],
             "pointer": ["x": pointer.x, "y": pointer.y, "moving": now - pointerMovedAt < 0.3],
             "dragging": dragging, "menu": menu, "speech": model.text != nil

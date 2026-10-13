@@ -20,6 +20,7 @@ from .telemetry import observation, trace
 
 log = logging.getLogger("pet-daemon")
 MAX_INPUT_BYTES = 2000
+SPEECH_REPLAY_SECONDS = 60
 
 
 def bind_socket(path):
@@ -88,6 +89,8 @@ class Daemon:
         self.request_task = None
         self.pending = None
         self.manual = None
+        self.clicked = False
+        self.last_speech = None
         self.error_until = 0
         self.next_prune = 0
         self.next_observation = clock() + self.rng.uniform(*config.observation_seconds)
@@ -161,36 +164,57 @@ class Daemon:
                 if packet.get("event") == "status":
                     if self.behavior.renderer_status(packet):
                         self.behavior.tick(self.activity(), self.sessions)
+                elif packet.get("event") == "click":
+                    self.click()
                 else:
                     trace("renderer.feedback", packet=packet)
                     self.behavior.completion(packet)
             elif kind == "speak" and isinstance(packet.get("context"), str):
-                ttl = packet.get("ttl", self.config.speech_ttl)
-                if type(ttl) in (int, float) and math.isfinite(ttl) and ttl >= 0:
+                ttl = packet.get("ttl")
+                if ttl is None or (type(ttl) in (int, float) and math.isfinite(ttl) and ttl >= 0):
                     self.manual = (packet["context"], ttl)
                     trace("speech.requested", context=packet["context"], ttl=ttl)
         except (ValueError, KeyError, TypeError, UnicodeError) as error:
             trace("input.rejected", error=str(error))
             log.debug("Ignoring malformed datagram")
 
+    def speech_duration(self, speech):
+        return max(self.config.speech_ttl, 3 + len(speech.split()) / 2)
+
+    def click(self):
+        if self.last_speech and self.clock() - self.last_speech[1] <= SPEECH_REPLAY_SECONDS:
+            speech, _ = self.last_speech
+            self.emit({"text": speech, "ttl": self.speech_duration(speech)})
+            trace("speech.replayed", text=speech)
+        else:
+            self.clicked = True
+            trace("speech.requested", reason="click")
+
     async def observe(self, reason, context=None, ttl=None, trigger=None):
         with observation():
             started = self.clock()
             revision = self.sessions.revision
-            observation_context = self.sessions.observation_context()
+            include_activity = reason == "check_in"
+            keys = trigger["sessions"] if include_activity else None
+            observation_context = self.sessions.observation_context(include_activity, keys)
             trace("observation.started", reason=reason, revision=revision)
             timeout = self.config.request_timeout * (1 + self.cognition.compaction_requests_due)
             try:
                 result = await asyncio.wait_for(
-                    self.cognition.observe({**self.sessions.snapshot(), "trigger": trigger}, reason, context),
+                    self.cognition.observe({**self.sessions.snapshot(keys), "trigger": trigger}, reason, context),
                     timeout=timeout,
                 )
-                if context is None and observation_context != self.sessions.observation_context():
+                if context is None and observation_context != self.sessions.observation_context(include_activity, keys):
                     trace("observation.discarded", reason="session_changed", requested_revision=revision, revision=self.sessions.revision, decision=result)
                     log.info("kept observation in history; discarded stale automatic response")
                     return
                 if result["speak"] is not None:
-                    self.emit({"text": result["speak"], "ttl": self.config.speech_ttl if ttl is None else ttl})
+                    speech = result["speak"]
+                    reading_seconds = self.speech_duration(speech)
+                    delivered = self.emit({"text": speech, "ttl": reading_seconds if ttl is None else ttl})
+                    if delivered and speech.strip() and ttl != 0:
+                        self.last_speech = (speech, self.clock())
+                        self.clicked = False
                 if result["gesture"] is not None:
                     accepted = self.behavior.gesture(result["gesture"], self.sessions)
                     trace("observation.gesture", gesture=result["gesture"], accepted=accepted)
@@ -218,10 +242,14 @@ class Daemon:
                 self.request_task = None
             if self.behavior.status and self.request_task is None:
                 request = None
+                check_in = self.sessions.check_in_due(self.config.idle_message_seconds)
                 if self.manual is not None:
                     context, ttl = self.manual
                     self.manual = None
                     request = ("explicit", context, ttl)
+                elif self.clicked:
+                    self.clicked = False
+                    request = ("click", None, None)
                 elif self.pending and now >= self.pending[1]:
                     reason, _, trigger = self.pending
                     self.pending = None
@@ -230,6 +258,10 @@ class Daemon:
                         request = (reason, None, None, trigger)
                     else:
                         trace("observation.skipped", reason=reason, snapshot=self.sessions.snapshot())
+                elif check_in:
+                    request = ("check_in", None, None, {"sessions": check_in})
+                    for key in check_in:
+                        self.sessions.lanes[key].last_check_in = now
                 elif now >= self.next_observation:
                     request = ("routine", None, None)
                 if request:

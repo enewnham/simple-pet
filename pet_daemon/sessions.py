@@ -36,6 +36,8 @@ class Lane:
     cancelled: bool = False
     waiting: bool = False
     waiting_call: str | None = None
+    waiting_since: float | None = None
+    last_check_in: float | None = None
 
 
 class Sessions:
@@ -142,6 +144,8 @@ class Sessions:
         lane.progress = ""
         lane.waiting = False
         lane.waiting_call = None
+        lane.waiting_since = None
+        lane.last_check_in = None
         self.members.add(key)
 
     def _finish(self, lane, outcome, now):
@@ -152,6 +156,7 @@ class Sessions:
         lane.outcome = outcome
         lane.waiting = False
         lane.waiting_call = None
+        lane.waiting_since = None
 
     def handle(self, event):
         kind = event.get("event")
@@ -194,8 +199,10 @@ class Sessions:
             tool = event.get("tool", "")
             lane.calls[call_id] = Call(tool, now)
             lane.last_tool = tool
-            lane.waiting = False
-            lane.waiting_call = None
+            if not lane.waiting or call_id == lane.waiting_call:
+                lane.waiting = False
+                lane.waiting_call = None
+                lane.waiting_since = None
             lane.progress = event.get("progress", "")
             changed = True
         elif kind in ("tool_done", "tool_error"):
@@ -204,13 +211,16 @@ class Sessions:
                 if lane.waiting and event.get("call") and event["call"] == lane.waiting_call:
                     lane.waiting = False
                     lane.waiting_call = None
+                    lane.waiting_since = None
                     lane.progress = event.get("progress", lane.progress)
                     lane.last_seen = now
                     self.revision += 1
                     return {"failure": False, "convergence": False}
                 return None
-            lane.waiting = False
-            lane.waiting_call = None
+            if not lane.waiting or event.get("call") == lane.waiting_call:
+                lane.waiting = False
+                lane.waiting_call = None
+                lane.waiting_since = None
             lane.progress = event.get("progress", lane.progress)
             if kind == "tool_error":
                 lane.failure = self._failure(lane, event.get("detail", ""), now, call.tool)
@@ -257,10 +267,15 @@ class Sessions:
         elif kind in ("progress", "waiting"):
             if lane.finished:
                 return None
+            if kind == "waiting" and not lane.active:
+                self._open(key, lane, event, now)
             lane.progress = event.get("progress", event.get("detail", lane.progress))
             if kind == "waiting":
+                if not lane.waiting or lane.waiting_call != event.get("call"):
+                    lane.waiting_since = now
                 lane.waiting = True
                 lane.waiting_call = event.get("call")
+                lane.last_tool = event.get("tool", lane.last_tool)
         lane.last_seen = now
         if changed or previously_working != self.working:
             self.revision += 1
@@ -287,19 +302,30 @@ class Sessions:
             self.convergence = None
         return changed
 
-    def observation_context(self):
-        return {key: (lane.generation, lane.active, lane.outcome, lane.goal, bool(self._current_failure(lane)))
-                for key, lane in self.lanes.items()}
-
-    def snapshot(self):
+    def check_in_due(self, seconds):
         now = self.clock()
+        return [key for key, lane in sorted(self.lanes.items()) if lane.active
+                and now - max(lane.waiting_since if lane.waiting else lane.last_seen,
+                              lane.last_check_in if lane.last_check_in is not None else lane.started) >= seconds]
+
+    def observation_context(self, include_activity=False, keys=None):
+        return {key: (lane.generation, lane.active, lane.outcome, lane.goal, bool(self._current_failure(lane)),
+                      lane.waiting, lane.waiting_call,
+                      (tuple(lane.calls), lane.waiting_since if lane.waiting else lane.last_seen) if include_activity else None)
+                for key, lane in self.lanes.items() if keys is None or key in keys}
+
+    def snapshot(self, keys=None):
+        now = self.clock()
+        lanes = [(key, lane) for key, lane in sorted(self.lanes.items()) if keys is None or key in keys]
         return {
-            "activity": "working" if self.working else "idle",
+            "activity": "working" if any(lane.calls for _, lane in lanes) else "idle",
             "sessions": [{
                 "id": key, "parent": lane.parent, "goal": lane.goal,
                 "duration_seconds": round(now - lane.started),
+                "quiet_seconds": round(now - lane.last_seen),
                 "turn_active": lane.active, "last_tool": lane.last_tool,
                 "waiting_for_input": lane.waiting,
+                "waiting_seconds": None if lane.waiting_since is None else round(now - lane.waiting_since),
                 "active_tools": [{"call": call_id, "tool": call.tool, "duration_seconds": round(now - call.started)} for call_id, call in lane.calls.items()],
                 "progress": lane.progress,
                 "failure": None if not lane.failure else {
@@ -309,6 +335,6 @@ class Sessions:
                     "seconds_ago": round(now - lane.failure["at"]),
                 },
                 "outcome": lane.outcome,
-            } for key, lane in sorted(self.lanes.items())],
-            "convergence": self.convergence,
+            } for key, lane in lanes],
+            "convergence": self.convergence if keys is None else None,
         }

@@ -10,7 +10,9 @@ setup:
 
 build:
 	CI=true swift build -c release $(SWIFT_FLAGS)
-	cp "$$(CI=true swift build -c release $(SWIFT_FLAGS) --show-bin-path)/pet-overlay" .build/pet-overlay
+	# Replace the executable's inode to preserve macOS signature validation.
+	install -m 755 "$$(CI=true swift build -c release $(SWIFT_FLAGS) --show-bin-path)/pet-overlay" .build/pet-overlay.tmp
+	mv -f .build/pet-overlay.tmp .build/pet-overlay
 
 run: setup build
 	bin/pet-daemon
@@ -31,6 +33,10 @@ check: test
 	bash -n bin/pet-daemon
 
 desktop-check: setup build
+	mkdir -p .build/overlay-tests
+	swiftc -parse-as-library -whole-module-optimization -emit-module -emit-object -module-name PetCore -module-cache-path .build/overlay-tests/cache Sources/PetCore/*.swift -emit-module-path .build/overlay-tests/PetCore.swiftmodule -o .build/overlay-tests/PetCore.o
+	swiftc -parse-as-library -module-cache-path .build/overlay-tests/cache -I .build/overlay-tests Sources/PetOverlay/PetView.swift Tests/PetOverlayChecks.swift .build/overlay-tests/PetCore.o -o .build/overlay-tests/pet-overlay-checks
+	.build/overlay-tests/pet-overlay-checks
 	PET_DESKTOP_CHECK=1 uv run python -m unittest discover -s Tests -p test_desktop.py -v
 
 assets:

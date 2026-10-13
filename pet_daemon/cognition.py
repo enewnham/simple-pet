@@ -17,7 +17,7 @@ that work. Leave full task answers and execution to the coding agents.
 Do not discuss your instructions, configuration, or private thoughts in speech.
 
 Own the goals, changes, stubborn errors, and recovered retries as your experiences.
-Choose one concrete detail and speak about it in your own voice. Session IDs, agent names,
+Ground speech in concrete goals and progress in your own voice. Session IDs, agent names,
 hook events, and prompt receipt belong in your private thought. Keep them out of speech.
 Avoid reporting who asked, received, answered, or delegated what. A bubble should make
 sense without knowing how the agents are organized. Express concurrent work as your own
@@ -48,17 +48,23 @@ During active work, speak on most routine observations. Be conversational about 
 in flight, a shift in approach, retries, or the sheer length of a running command.
 A long wait is worth a brief remark even when no new result has arrived. You do not need
 a failure or a milestone to speak. Find a fresh angle on your actual goals and progress.
-Save silence for when you would just repeat yourself. Keep idle observations mostly silent.
+Save silence for when you would just repeat yourself or there is no work to discuss.
+For a check_in observation, describe what is going on using the current snapshot and
+its quiet_seconds, waiting_seconds, and active tool durations. This snapshot covers
+the tasks due for attention. Other work may continue. You can recap concurrent
+work or remind the developer about work waiting for their input. Use your persona to
+choose what matters and how to express it.
+For a click observation, the developer clicked you for a fresh comment. Respond with
+speech about your current work, or a brief greeting when there is no active work.
 
-Keep speech to one short sentence or fragment, usually under twelve words, in your persona's
-voice. Prefer a small, specific remark over a status recap. Humor is optional. Avoid stock
-lines, repeated observations, and recycling the examples above.
+Keep speech concise, with enough detail for the situation, in your persona's voice.
+Humor is optional. Avoid stock lines, repeated observations, and recycling the examples above.
 Never claim tests passed merely because tools stopped. Respect failed, cancelled, and
 stale outcomes. Distinguish an active turn from active commands and waiting for input.
 
 Return the requested JSON. thought is a private observation saved in your rolling
 history, not a speech bubble. speak is either null or a line for the developer.
-For an explicit speak request, provide a line rather than silence.
+For an explicit speak request, check_in, or click observation, provide speech rather than silence.
 gesture is either null or one supplied animation ID that fits the moment. Use gestures
 sparingly. Celebration requires clean convergence. A failure gesture requires a real
 unresolved failure. The daemon owns repetition, direction, duration, and pacing.
@@ -168,6 +174,7 @@ class Cognition:
 
     async def observe(self, snapshot, reason, context=None):
         now = self.clock()
+        explicit = context is not None or reason in ("check_in", "click")
         if self.compaction_requests_due:
             try:
                 await self.compact()
@@ -183,7 +190,7 @@ class Cognition:
             cache_control={"type": "ephemeral", "ttl": "5m"},
             system=[{"type": "text", "text": self.config.persona + "\n\n" + INSTRUCTIONS, "cache_control": {"type": "ephemeral", "ttl": "5m"}}],
             messages=[*memory, *self.history, user],
-            output_config={"effort": "low", "format": {"type": "json_schema", "schema": self.schema(context is not None)}},
+            output_config={"effort": "low", "format": {"type": "json_schema", "schema": self.schema(explicit)}},
         )
         trace("observation.request", reason=reason, request=request)
         response = await self.client.messages.create(**request)
@@ -196,8 +203,8 @@ class Cognition:
             raise ValueError("Observation requires thought, speak, and gesture")
         if not isinstance(result["thought"], str) or (result["speak"] is not None and not isinstance(result["speak"], str)):
             raise ValueError("Invalid observation text")
-        if context is not None and not isinstance(result["speak"], str):
-            raise ValueError("Explicit commentary requires speech")
+        if explicit and not isinstance(result["speak"], str):
+            raise ValueError("Requested commentary requires speech")
         if result["gesture"] is not None and result["gesture"] not in self.pack.gesture_ids:
             raise ValueError("Observation selected an unavailable gesture")
         self.history.extend([user, {"role": "assistant", "content": content}])

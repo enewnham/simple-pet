@@ -1,5 +1,7 @@
 {
   "pet_dir": "assets/pets/my-pet",
+  "speech_ttl": 15,
+  "idle_message_seconds": 300,
   "summary_interval": 32,
   "summary_summary_interval": 8,
   "compaction_max_tokens": 1024
