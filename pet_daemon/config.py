@@ -54,7 +54,7 @@ class Config:
     daemon_socket: str = "/tmp/pet-daemon.sock"
     overlay_socket: str = "/tmp/pet.sock"
     model: str = "claude-haiku-5-5"
-    observation_seconds: tuple = (60, 90)
+    observation_seconds: tuple = (20, 40)
     history_pairs: int = 8
     speech_ttl: float = 5
     request_timeout: float = 20

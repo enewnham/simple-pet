@@ -39,7 +39,7 @@ Configuration is loaded once. Pet selection stays fixed for the run. Restart aft
 | `daemon_socket` | `/tmp/pet-daemon.sock` |
 | `overlay_socket` | `/tmp/pet.sock` |
 | `model` | `claude-haiku-5-5` |
-| `observation_seconds` | Random interval between 60 and 90 |
+| `observation_seconds` | Random interval between 20 and 40 |
 | `history_pairs` | 8 complete user/assistant pairs |
 | `speech_ttl` | 5 seconds |
 | `request_timeout` | 20 seconds |
@@ -104,7 +104,7 @@ All tool events count pending calls. The pet reports `working` while any remain 
 
 Sessions use native identifiers and timestamps. Stale lanes expire after the configured interval. Conversation and session history stay in memory. A restart begins a fresh history.
 
-Prompt submission, individual session completion, and failures trigger observations. Each observation includes every tracked session and the triggering event. A completion reaction describes that session, with the pet staying busy while other sessions work. Routine observations cover ongoing work. The persona favors brief acknowledgements at the start and finish, and occasional comments during active work. Ordinary tool updates do not invalidate an observation, while new turns, outcomes, or failure recovery can discard stale commentary.
+Prompt submission, individual session completion, and failures trigger observations. Each observation includes every tracked session and the triggering event. A completion reaction describes that session, with the pet staying busy while other sessions work. Routine observations cover ongoing work. The persona favors brief acknowledgements at the start and finish, and frequent short comments during active work. Ordinary tool updates do not invalidate an observation, while new turns, outcomes, or failure recovery can discard stale commentary.
 
 ## Behavior logs
 
