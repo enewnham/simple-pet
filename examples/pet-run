@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -u
+
+if [ "$#" -eq 0 ]; then
+  printf 'Usage: pet-run COMMAND [ARG ...]\n' >&2
+  exit 2
+fi
+
+pet_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+pet_notify="$pet_root/bin/pet-notify"
+pet_session="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+pet_call=command
+pet_outcome=error
+
+pet_lifecycle() {
+  python3 - "$pet_notify" "$pet_session" "$1" "$pet_outcome" <<'PY_EVENT'
+import runpy, sys
+client = runpy.run_path(sys.argv[1])
+client["send"]({"kind": "event", "harness": "cli", "session": sys.argv[2],
+                "event": sys.argv[3], "outcome": sys.argv[4], "manual": True})
+PY_EVENT
+}
+
+pet_interrupt() {
+  pet_outcome=cancelled
+  pet_lifecycle interrupt
+  if [ -n "${pet_child:-}" ]; then
+    kill -TERM "$pet_child" 2>/dev/null || true
+    wait "$pet_child" 2>/dev/null || true
+  fi
+  exit "$1"
+}
+trap 'pet_interrupt 130' INT
+trap 'pet_interrupt 143' TERM
+trap 'pet_lifecycle session_end' EXIT
+"$pet_notify" intent --session "$pet_session" --text "$*"
+"$pet_notify" --session "$pet_session" --status start --call "$pet_call" --tool "$*"
+"$@" <&0 &
+pet_child=$!
+if wait "$pet_child"; then
+  pet_result=0
+  pet_outcome=success
+  "$pet_notify" --session "$pet_session" --status done --call "$pet_call"
+else
+  pet_result=$?
+  "$pet_notify" --session "$pet_session" --status error --call "$pet_call" --detail "Exit code $pet_result"
+fi
+exit "$pet_result"

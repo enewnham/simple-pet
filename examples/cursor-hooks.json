@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "pet-hook cursor sessionStart",
+        "timeout": 2
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "pet-hook cursor sessionEnd",
+        "timeout": 2
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "pet-hook cursor beforeSubmitPrompt",
+        "timeout": 2
+      }
+    ],
+    "preToolUse": [
+      {
+        "command": "pet-hook cursor preToolUse",
+        "timeout": 2
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "pet-hook cursor postToolUse",
+        "timeout": 2
+      }
+    ],
+    "postToolUseFailure": [
+      {
+        "command": "pet-hook cursor postToolUseFailure",
+        "timeout": 2
+      }
+    ],
+    "stop": [
+      {
+        "command": "pet-hook cursor stop",
+        "timeout": 2
+      }
+    ],
+    "subagentStart": [
+      {
+        "command": "pet-hook cursor subagentStart",
+        "timeout": 2
+      }
+    ],
+    "subagentStop": [
+      {
+        "command": "pet-hook cursor subagentStop",
+        "timeout": 2
+      }
+    ],
+    "afterAgentResponse": [
+      {
+        "command": "pet-hook cursor afterAgentResponse",
+        "timeout": 2
+      }
+    ],
+    "afterAgentThought": [
+      {
+        "command": "pet-hook cursor afterAgentThought",
+        "timeout": 2
+      }
+    ]
+  }
+}

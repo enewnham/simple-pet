@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+pet_root="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+if [[ -z "$UV_CACHE_DIR" ]]; then
+  export UV_CACHE_DIR="$pet_root/.cache/uv"
+fi
+if [[ -z "$UV_PYTHON_INSTALL_DIR" ]]; then
+  export UV_PYTHON_INSTALL_DIR="$pet_root/.cache/uv/python"
+fi
+export PYTHONPATH="$pet_root:$PYTHONPATH"
+exec uv run --project "$pet_root" python -m pet_daemon "$@"

@@ -1,0 +1,13 @@
+.build/
+.venv/
+.cache/
+.DS_Store
+.env
+.env.*
+!.env.example
+__pycache__/
+assets/*/
+assets/openpets-source.json
+assets/manifest.json
+assets/LICENSE.*
+assets/ATTRIBUTION.md
