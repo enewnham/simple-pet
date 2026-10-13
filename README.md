@@ -75,4 +75,4 @@ Run `make desktop-check` in a logged-in macOS session to test the renderer. Chec
 
 Simple Pet is a fork and rebuild of [OpenPets](https://github.com/OpenPetsHQ/openpets). Credit goes to the OpenPets authors for the original project and artwork.
 
-Simple Pet is licensed under the [MIT license](LICENSE), retaining OpenPets’ copyright notice and adding Elliot Newnham’s notice for modifications. The original license is preserved in [assets/LICENSE.OpenPets](assets/LICENSE.OpenPets).
+Simple Pet is licensed under the [MIT license](LICENSE), retaining OpenPets’ copyright notice.
