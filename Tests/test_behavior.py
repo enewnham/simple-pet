@@ -73,7 +73,7 @@ class BehaviorTests(unittest.TestCase):
     def status(self, **values):
         return {'kind': 'renderer', 'event': 'status', 'x': 100, 'y': 100, 'width': 200, 'height': 160,
                 'screen': {'x': 0, 'y': 0, 'width': 600, 'height': 400},
-                'pointer': {'x': 2000, 'y': 2000, 'moving': False},
+                'pointer': {'x': 2000, 'y': 2000},
                 'dragging': False, 'menu': False, 'speech': False} | values
 
     def start(self):

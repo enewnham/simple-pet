@@ -62,7 +62,6 @@ class Sessions:
         self.lanes = {}
         self.aliases = {}
         self.child_calls = {}
-        self.revision = 0
         self.members = set()
         self.convergence = None
 
@@ -214,7 +213,6 @@ class Sessions:
                 return None
         now = self.clock()
         previously_active = self.active
-        previously_working = self.working
         key, lane = self._lane(event, now)
         turn = event.get("turn")
         if turn and lane.turn and turn != lane.turn and kind not in ("intent", "session_start", "subagent_start", "subagent_done", "session_end"):
@@ -225,7 +223,6 @@ class Sessions:
             return None
         failure = False
         event_activity = lane.phase or "command"
-        changed = False
         if kind == "session_start":
             if lane.finished:
                 lane.finished = False
@@ -243,7 +240,6 @@ class Sessions:
                 lane.first_prompt = parent.first_prompt
                 lane.session_context = parent.session_context
                 lane.goal = lane.session_context or lane.first_prompt
-            changed = True
         elif kind == "tool_start":
             if not event.get("call"):
                 return None
@@ -266,7 +262,6 @@ class Sessions:
                 lane.waiting_call = None
                 lane.waiting_since = None
             lane.progress = event.get("progress", "")
-            changed = True
         elif kind in ("tool_done", "tool_error"):
             call = lane.calls.pop(event.get("call"), None)
             if call is None:
@@ -276,7 +271,6 @@ class Sessions:
                     lane.waiting_since = None
                     lane.progress = "" if kind == "tool_error" else event.get("progress", lane.progress)
                     lane.last_seen = now
-                    self.revision += 1
                     return {"failure": False, "convergence": False, "session": key, "activity": event_activity}
                 return None
             event_activity = call.activity
@@ -288,7 +282,6 @@ class Sessions:
             if kind == "tool_error":
                 lane.failure = self._failure(lane, call.activity, now, call.tool)
                 failure = True
-                changed = True
             elif event.get("outcome") == "cancelled":
                 lane.cancelled = True
             elif call.activity in lane.failures:
@@ -296,11 +289,9 @@ class Sessions:
                 recovered["resolved"] = True
                 unresolved = [item for item in lane.failures.values() if not item["resolved"]]
                 lane.failure = max(unresolved, key=lambda item: item["at"]) if unresolved else recovered
-                changed = True
             if event.get("manual") and not lane.calls:
                 outcome = "error" if self._current_failure(lane) else "cancelled" if lane.cancelled else "success"
                 self._finish(lane, outcome, now)
-                changed = True
         elif kind in ("turn_done", "subagent_done", "turn_error", "interrupt", "session_end"):
             if lane.finished and kind != "session_end":
                 return None
@@ -332,7 +323,6 @@ class Sessions:
                     child = self.lanes[child_key]
                     if child.active:
                         self._finish(child, "cancelled", now)
-            changed = True
         elif kind in ("progress", "waiting"):
             if lane.finished:
                 return None
@@ -346,8 +336,6 @@ class Sessions:
                 lane.waiting_call = event.get("call")
                 lane.last_tool = event.get("tool", lane.last_tool)
         lane.last_seen = now
-        if changed or previously_working != self.working:
-            self.revision += 1
         convergence = previously_active and not self.active
         if convergence:
             self.convergence = [{"id": member, "outcome": self.lanes[member].outcome} for member in sorted(self.members) if member in self.lanes]
@@ -367,7 +355,6 @@ class Sessions:
         self.child_calls = {name: key for name, key in self.child_calls.items() if key not in obsolete}
         self.members.difference_update(obsolete)
         if changed:
-            self.revision += 1
             self.convergence = None
         return changed
 

@@ -159,10 +159,9 @@ def main():
         payload = {}
     if not isinstance(payload, dict):
         payload = {}
-    if os.environ.get("PET_COMMENTARY") != "1":
-        result = update(args.harness, args.event, payload)
-        if result:
-            CLIENT["send"](result)
+    result = update(args.harness, args.event, payload)
+    if result:
+        CLIENT["send"](result)
     response = {"continue": True} if args.harness == "cursor" and args.event == "beforeSubmitPrompt" else {}
     print(json.dumps(response))
 

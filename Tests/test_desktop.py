@@ -46,7 +46,6 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(200, json={
                     "id": "msg_desktop", "type": "message", "role": "assistant", "model": config.model,
                     "content": [{"type": "text", "text": json.dumps({
-                        "thought": "Two coding streams are being observed.",
                         "speak": speech if explicit else None, "gesture": "waving" if explicit else None, "session_context": None,
                     })}],
                     "stop_reason": "end_turn", "stop_sequence": None,
@@ -57,7 +56,7 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                                       http_client=httpx.AsyncClient(transport=httpx.MockTransport(provider))) as client:
                 daemon = Daemon(config, client, rng=random.Random(7))
                 task = asyncio.create_task(daemon.run())
-                env = dict(os.environ, PET_DAEMON_SOCKET=config.daemon_socket, PET_COMMENTARY="")
+                env = dict(os.environ, PET_DAEMON_SOCKET=config.daemon_socket)
 
                 async def wait_for(condition, timeout=5):
                     async def wait():

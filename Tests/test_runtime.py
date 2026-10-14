@@ -19,7 +19,7 @@ PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4
 
 
 def reply(speak=None, gesture=None, session_context=None):
-    result = {"thought": "Observed current work.", "speak": speak, "gesture": gesture, "session_context": session_context}
+    result = {"speak": speak, "gesture": gesture, "session_context": session_context}
     return httpx.Response(200, json={
         "id": "msg_fixture", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
         "content": [{"type": "text", "text": json.dumps(result)}],
@@ -91,7 +91,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     def send_status(self, **extra):
         self.send({"kind": "renderer", "event": "status", "x": 100, "y": 100, "width": 200, "height": 160,
                    "screen": {"x": 0, "y": 0, "width": 1000, "height": 800},
-                   "pointer": {"x": 2000, "y": 2000, "moving": False}, "dragging": False, "menu": False, "speech": False, **extra})
+                   "pointer": {"x": 2000, "y": 2000}, "dragging": False, "menu": False, "speech": False, **extra})
 
     async def packet(self, predicate, timeout=1):
         async def receive():
@@ -748,7 +748,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_wrapper_failure_records_command_activity_without_diagnostics(self):
         root = Path(__file__).resolve().parents[1]
-        env = dict(os.environ, PET_DAEMON_SOCKET=self.config.daemon_socket, PET_COMMENTARY="")
+        env = dict(os.environ, PET_DAEMON_SOCKET=self.config.daemon_socket)
         child = await asyncio.create_subprocess_exec(str(root / "examples/pet-run"), "/bin/sh", "-c", "exit 7", env=env)
         self.assertEqual(await child.wait(), 7)
         await self.wait_for(lambda: bool(self.daemon.sessions.lanes) and all(lane.finished for lane in self.daemon.sessions.lanes.values()))

@@ -62,7 +62,6 @@ For check_in, click, or a non-null context, supply speech. Otherwise use null wh
 would repeat yourself or have no supported subject.
 
 Return JSON matching the supplied schema:
-- thought: One short private observation about the response you chose.
 - speak: A brief line in your configured voice, or null.
 - gesture: A supplied gesture ID, or null. Use running for active work, review for
   investigation, waiting for a pause or input, failed for an unresolved failure,
@@ -97,8 +96,8 @@ class Cognition:
         gesture = {"anyOf": [{"type": "string", "enum": self.pack.gesture_ids}, {"type": "null"}]} if self.pack.gesture_ids else {"type": "null"}
         return {
             "type": "object",
-            "properties": {"thought": {"type": "string"}, "speak": nullable_string, "gesture": gesture, "session_context": nullable_string},
-            "required": ["thought", "speak", "gesture", "session_context"],
+            "properties": {"speak": nullable_string, "gesture": gesture, "session_context": nullable_string},
+            "required": ["speak", "gesture", "session_context"],
             "additionalProperties": False,
         }
 
@@ -200,9 +199,9 @@ class Cognition:
             raise ValueError(f"Observation ended with {response.stop_reason}")
         content = "".join(block.text for block in response.content if block.type == "text")
         result = json.loads(content)
-        if not isinstance(result, dict) or set(result) != {"thought", "speak", "gesture", "session_context"}:
-            raise ValueError("Observation requires thought, speak, gesture, and session_context")
-        if not isinstance(result["thought"], str) or (result["speak"] is not None and not isinstance(result["speak"], str)):
+        if not isinstance(result, dict) or set(result) != {"speak", "gesture", "session_context"}:
+            raise ValueError("Observation requires speak, gesture, and session_context")
+        if result["speak"] is not None and not isinstance(result["speak"], str):
             raise ValueError("Invalid observation text")
         if result["session_context"] is not None and not isinstance(result["session_context"], str):
             raise ValueError("Invalid session context")

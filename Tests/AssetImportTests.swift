@@ -62,7 +62,9 @@ func pixel(_ path: String) throws -> [Int] {
 }
 
 try writeSheet(height: 1872)
-try require(try invoke() == 0, "Import a V1 sheet without V2 metadata.")
+try require(try invoke() != 0, "Reject sheets without the V2 gaze rows.")
+try writeSheet(height: 2288)
+try require(try invoke() == 0, "Import a V2 sheet without version metadata.")
 let expected: [(String, Int, Int, String, Double)] = [
     ("idle", 6, 0, "rest", 5.5), ("running-right", 8, 20, "walk-right", 1.06),
     ("running-left", 8, 40, "walk-left", 1.06), ("waving", 4, 60, "greeting", 0.7),
@@ -70,11 +72,11 @@ let expected: [(String, Int, Int, String, Double)] = [
     ("waiting", 6, 120, "attention", 1.01), ("running", 6, 140, "work", 0.82),
     ("review", 6, 160, "attention", 1.03),
 ]
-let v1 = try readManifest()
-let v1Clips = v1["clips"] as! [String: [String: Any]]
-try require(v1Clips.count == 9 && v1["gaze"] == nil, "Import all nine V1 clips without invented gaze capabilities.")
+let sheet = try readManifest()
+let sheetClips = sheet["clips"] as! [String: [String: Any]]
+try require(sheetClips.count == 25 && (sheet["gaze"] as! [String]).count == 16, "Import nine animations and sixteen gaze poses.")
 for (id, count, red, role, duration) in expected {
-    let clip = v1Clips[id]!
+    let clip = sheetClips[id]!
     let paths = clip["frames"] as! [String]
     try require(paths.count == count, "Keep \(id)'s authored frame count.")
     try require(clip["role"] as? String == role, "Declare the \(id) semantic role.")
@@ -84,7 +86,7 @@ for (id, count, red, role, duration) in expected {
         try require(channels[0] == red && channels[1] == index * 20, "Select the \(id) row and preserve frame order.")
     }
 }
-try require(v1["commit"] as? String == "fixture-commit", "Record source provenance.")
+try require(sheet["commit"] as? String == "fixture-commit", "Record source provenance.")
 try "keep me".write(to: output.appendingPathComponent("unrelated.txt"), atomically: true, encoding: .utf8)
 
 try writeSheet(height: 2288)
@@ -165,4 +167,4 @@ let savedStore = try Data(contentsOf: output.appendingPathComponent("manifest.js
 try manager.removeItem(at: store.appendingPathComponent("spritesheet.png"))
 try require(try invoke("store-pet", root: store, origin: zipOrigin) != 0, "Reject a store package with a missing sheet.")
 try require(try Data(contentsOf: output.appendingPathComponent("manifest.json")) == savedStore, "Preserve the installed pack after a store package fails validation.")
-print("Asset import checks passed: V1, V2, sparse packs, custom packs, store packages, provenance, and failed replacement.")
+print("Asset import checks passed: V2 sheets, sparse packs, custom packs, store packages, provenance, and failed replacement.")

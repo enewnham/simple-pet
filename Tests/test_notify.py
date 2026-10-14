@@ -27,7 +27,6 @@ class NotifyTests(unittest.TestCase):
         self.listener.settimeout(2)
         self.environment = os.environ.copy()
         self.environment["PET_DAEMON_SOCKET"] = self.socket_path
-        self.environment.pop("PET_COMMENTARY", None)
 
     def tearDown(self):
         self.listener.close()
@@ -278,12 +277,8 @@ class NotifyTests(unittest.TestCase):
             packet = self.receive()
             self.assertEqual((packet["event"], packet["call"]), ("waiting", "question"))
 
-    def test_imported_claude_hooks_and_recursion_keep_neutral_response(self):
+    def test_imported_claude_hooks_do_not_duplicate_cursor_events(self):
         self.run_hook("claude", "PreToolUse", {"session_id": "worker", "cursor_version": "2.0"})
-        self.assert_quiet()
-        self.environment["PET_COMMENTARY"] = "1"
-        result = self.run_hook("cursor", "beforeSubmitPrompt", {"conversation_id": "worker", "prompt": "goal"})
-        self.assertEqual(json.loads(result.stdout), {"continue": True})
         self.assert_quiet()
 
     def test_invalid_payloads_do_not_affect_agent_decisions(self):

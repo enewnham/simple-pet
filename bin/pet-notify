@@ -40,7 +40,7 @@ def encode(payload):
 
 def send(payload):
     data = encode(payload)
-    if data is None or os.environ.get("PET_COMMENTARY") == "1":
+    if data is None:
         return False
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as client:

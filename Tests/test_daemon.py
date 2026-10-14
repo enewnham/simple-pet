@@ -528,7 +528,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             result, stop = response
         else:
             result = {
-                "thought": "The refactor is progressing.", "speak": None, "gesture": None, "session_context": None,
+                "speak": None, "gesture": None, "session_context": None,
             }
             stop = "end_turn"
         content = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
@@ -568,9 +568,8 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("cache_control", body)
         schema = body["output_config"]["format"]["schema"]
         self.assertEqual(schema["properties"]["gesture"]["anyOf"][0]["enum"], ["hop", "peek"])
-        self.assertEqual(set(schema["required"]), {"thought", "speak", "gesture", "session_context"})
+        self.assertEqual(set(schema["required"]), {"speak", "gesture", "session_context"})
         self.assertFalse(schema["additionalProperties"])
-        self.assertNotIn("maxLength", schema["properties"]["thought"])
         snapshot = json.loads(body["messages"][-1]["content"])
         self.assertEqual(snapshot["sessions"][0]["first_prompt"], "Refactor batch inserts")
         self.assertEqual(snapshot["pet"], "fixture-pet")
@@ -583,19 +582,17 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_explicit_commentary_requires_speech_and_preserves_full_text(self):
         speech = "The compiler has produced an unusually elaborate complaint. " * 20
-        thought = "An observation about a stubborn refactor. " * 20
-        self.responses.append(({"thought": thought, "speak": speech, "gesture": "peek", "session_context": None}, "end_turn"))
+        self.responses.append(({"speak": speech, "gesture": "peek", "session_context": None}, "end_turn"))
         result = await self.observe("explicit", "The compiler complained again")
         schema = self.requests[-1][1]["output_config"]["format"]["schema"]
         self.assertEqual(schema["properties"]["speak"], {"anyOf": [{"type": "string"}, {"type": "null"}]})
         self.assertEqual(result["speak"], speech)
-        self.assertEqual(result["thought"], thought)
         self.assertEqual(self.cognition.memory.speech(), [])
         snapshot = json.loads(self.requests[-1][1]["messages"][-1]["content"])
         self.assertEqual(snapshot["context"], "The compiler complained again")
 
     async def test_each_request_contains_one_current_observation_and_no_generated_history(self):
-        self.responses.append(({"thought": "Private interpretation", "speak": "Undelivered remark", "gesture": None, "session_context": None}, "end_turn"))
+        self.responses.append(({"speak": "Undelivered remark", "gesture": None, "session_context": None}, "end_turn"))
         await self.observe()
         await self.observe("routine")
         messages = self.requests[-1][1]["messages"]
@@ -606,7 +603,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_prompt_bounds_unicode_context_and_session_data(self):
         self.sessions.handle({"harness": "claude", "session": "worker", "event": "intent", "goal": "猫" * 100000})
-        self.responses.append(({"thought": "Working", "speak": "The parser is progressing.", "gesture": None, "session_context": None}, "end_turn"))
+        self.responses.append(({"speak": "The parser is progressing.", "gesture": None, "session_context": None}, "end_turn"))
         await self.observe("routine", "🐈" * 100000)
         content = self.requests[-1][1]["messages"][0]["content"]
         request = {**self.requests[-1][1], "timeout": self.config.request_timeout}
@@ -671,7 +668,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.sessions.handle({"harness": "codex", "session": "focus", "event": "intent", "goal": "Validate parser behavior"})
         snapshot = self.sessions.snapshot()
         snapshot["trigger"] = {"harness": "codex", "session": "focus", "event": "intent"}
-        self.responses.append(({"thought": "Parser validation is pending", "speak": None, "gesture": None,
+        self.responses.append(({"speak": None, "gesture": None,
                                 "session_context": "Parser validation awaits the next checks."}, "end_turn"))
         result = await self.cognition.observe(snapshot, "prompt")
         payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
@@ -684,19 +681,19 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_rejects_invalid_results_without_recording_speech(self):
         invalid = [
-            ({"thought": "Working", "speak": None, "gesture": "missing", "session_context": None}, "end_turn"),
-            ({"thought": "Working", "speak": None, "session_context": None}, "end_turn"),
-            ({"thought": "Working", "speak": None, "gesture": None, "session_context": 5}, "end_turn"),
-            ({"thought": 5, "speak": None, "gesture": None, "session_context": None}, "end_turn"),
+            ({"speak": None, "gesture": "missing", "session_context": None}, "end_turn"),
+            ({"speak": None, "session_context": None}, "end_turn"),
+            ({"speak": None, "gesture": None, "session_context": 5}, "end_turn"),
+            ({"speak": 5, "gesture": None, "session_context": None}, "end_turn"),
             ("{unfinished", "end_turn"),
-            ({"thought": "Working", "speak": None, "gesture": None, "session_context": None}, "max_tokens"),
+            ({"speak": None, "gesture": None, "session_context": None}, "max_tokens"),
         ]
         for response in invalid:
             self.responses.append(response)
             with self.assertRaises(ValueError):
                 await self.observe()
             self.assertEqual(self.cognition.memory.speech(), [])
-        self.responses.append(({"thought": "Working", "speak": None, "gesture": None, "session_context": None}, "end_turn"))
+        self.responses.append(({"speak": None, "gesture": None, "session_context": None}, "end_turn"))
         with self.assertRaises(ValueError):
             await self.observe("explicit", "Please speak")
         self.assertEqual(self.cognition.memory.speech(), [])

@@ -195,7 +195,7 @@ class Daemon:
                         self.queue("completion", trigger)
                     if not self.system_sleeping:
                         self.behavior.tick(self.activity(), self.sessions)
-                trace("hook.received", packet=packet, result=result, revision=self.sessions.revision, snapshot=self.sessions.snapshot())
+                trace("hook.received", packet=packet, result=result, snapshot=self.sessions.snapshot())
             elif kind == "renderer":
                 if packet.get("event") == "status":
                     if self.behavior.renderer_status(packet):
@@ -279,11 +279,10 @@ class Daemon:
         with observation():
             started = self.clock()
             sessions = self.sessions
-            revision = self.sessions.revision
             include_activity = reason == "check_in"
             keys = trigger["sessions"] if include_activity else None
             observation_context = self.sessions.observation_context(include_activity, keys)
-            trace("observation.started", reason=reason, revision=revision)
+            trace("observation.started", reason=reason)
             self.last_reaction_state = self.sessions.reaction_state()
             timeout = self.config.request_timeout
             try:
@@ -295,7 +294,7 @@ class Daemon:
                     trace("observation.discarded", reason="memory_cleared")
                     return
                 if context is None and observation_context != self.sessions.observation_context(include_activity, keys):
-                    trace("observation.discarded", reason="session_changed", requested_revision=revision, revision=self.sessions.revision, decision=result)
+                    trace("observation.discarded", reason="session_changed", decision=result)
                     log.info("discarded stale automatic response")
                     return
                 summary = result["session_context"]

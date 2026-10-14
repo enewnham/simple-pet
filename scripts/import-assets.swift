@@ -150,16 +150,11 @@ func extract(source: URL, staging: URL) throws -> [String: Any] {
     var result: [String: Any] = ["rest": "idle"]
     if let sheetURL {
         let image = try decodeImage(sheetURL)
-        let version: Int
         if let value = pet["spriteVersionNumber"] {
             guard let number = value as? Int, number == 2 else { throw AssetError("spriteVersionNumber must be 2 when present.") }
-            version = number
-        } else {
-            version = sheetURL.lastPathComponent == "default-pet-spritesheet.webp" ? 2 : 1
         }
-        let height = version == 2 ? 2288 : 1872
-        guard image.width == 1536, image.height == height else {
-            throw AssetError("Expected a V\(version) 1536x\(height) sheet, got \(image.width)x\(image.height).")
+        guard image.width == 1536, image.height == 2288 else {
+            throw AssetError("Expected a V2 1536x2288 sheet, got \(image.width)x\(image.height).")
         }
         for animation in animations {
             let images = try (0..<animation.count).map { index -> CGImage in
@@ -171,18 +166,16 @@ func extract(source: URL, staging: URL) throws -> [String: Any] {
             clips[animation.id] = try saveClip(animation.id, images: images, fps: Double(animation.count) / animation.duration,
                                                role: animation.role, staging: staging)
         }
-        if version == 2 {
-            var gaze: [String] = []
-            for index in 0..<16 {
-                let id = String(format: "gaze-%02d", index)
-                let rect = CGRect(x: (index % 8) * 192, y: (9 + index / 8) * 208, width: 192, height: 208)
-                guard let frame = image.cropping(to: rect) else { throw AssetError("Cannot crop \(id).") }
-                clips[id] = try saveClip(id, images: [frame], fps: 1, role: "gaze", staging: staging, maxRepeats: 1)
-                gaze.append(id)
-            }
-            result["gaze"] = gaze
-            if let anchor = pet["gazeAnchor"] { result["gazeAnchor"] = anchor }
+        var gaze: [String] = []
+        for index in 0..<16 {
+            let id = String(format: "gaze-%02d", index)
+            let rect = CGRect(x: (index % 8) * 192, y: (9 + index / 8) * 208, width: 192, height: 208)
+            guard let frame = image.cropping(to: rect) else { throw AssetError("Cannot crop \(id).") }
+            clips[id] = try saveClip(id, images: [frame], fps: 1, role: "gaze", staging: staging, maxRepeats: 1)
+            gaze.append(id)
         }
+        result["gaze"] = gaze
+        if let anchor = pet["gazeAnchor"] { result["gazeAnchor"] = anchor }
     } else {
         for entry in try manager.contentsOfDirectory(at: source, includingPropertiesForKeys: [.isDirectoryKey]) {
             let name = entry.pathExtension.lowercased() == "png" ? entry.deletingPathExtension().lastPathComponent : entry.lastPathComponent

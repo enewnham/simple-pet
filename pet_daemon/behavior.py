@@ -290,7 +290,7 @@ class Behavior:
             trace("behavior.routine", state=state, next_action=self.next_action, gesture_after=self.gesture_after)
             if self.rng.random() < 0.5 and self._walk():
                 return
-            candidates = self.pack.role("work", "attention") if state == "working" else self.pack.role("greeting", "gesture")
+            candidates = self.pack.role("greeting", "gesture")
             if candidates and now >= self.gesture_after:
                 self._play(self.rng.choice(candidates))
                 return

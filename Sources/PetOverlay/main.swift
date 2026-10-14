@@ -50,8 +50,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var latestMotion = -1
     private var dragging = false
     private var menu = false
-    private var previousPointer = NSEvent.mouseLocation
-    private var pointerMovedAt = 0.0
     private var lastStatus: Data?
     private var lastStatusTime = 0.0
 
@@ -201,15 +199,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let panel = panel else { return }
         let now = ProcessInfo.processInfo.systemUptime
         let pointer = NSEvent.mouseLocation
-        if pointer != previousPointer { pointerMovedAt = now }
-        previousPointer = pointer
         let bounds = screenBounds
         let petFrame = view?.petFrameInScreen ?? panel.frame
         let payload: [String: Any] = [
             "kind": "renderer", "event": "status", "x": petFrame.minX, "y": petFrame.minY,
             "width": petFrame.width, "height": petFrame.height,
             "screen": ["x": bounds.minX, "y": bounds.minY, "width": bounds.width, "height": bounds.height],
-            "pointer": ["x": pointer.x, "y": pointer.y, "moving": now - pointerMovedAt < 0.3],
+            "pointer": ["x": pointer.x, "y": pointer.y],
             "dragging": dragging, "menu": menu, "speech": model.text != nil, "sleeping": model.sleeping,
             "system_sleeping": systemSleeping
         ]
