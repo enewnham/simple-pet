@@ -2,6 +2,8 @@
 
 A native macOS desktop pet that speaks about your coding agents’ work. A local Python daemon tracks tasks and uses Claude Haiku for commentary. Swift/AppKit renders the pet. Purposefully simplified and opinonated.
 
+![Simple Pet demo](docs/media/simple-pet.webp)
+
 - Tracks concurrent work across Claude Code, Codex, Cursor CLI, and command wrappers.
 - Speaks in a configurable persona and remembers work and recent remarks across restarts.
 - Roams, reacts to work, and takes short naps when idle.
