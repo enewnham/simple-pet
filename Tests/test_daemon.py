@@ -851,7 +851,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         summary = json.loads(self.summary_requests[-1][1]["messages"][0]["content"])
         self.assertEqual(summary["first_prompt"], "Validate parser behavior")
         self.assertNotIn("Refactor batch inserts", json.dumps(summary))
-        self.assertEqual(set(summary), {"first_prompt", "recent_requests", "progress", "session_context"})
+        self.assertEqual(set(summary), {"first_prompt", "recent_requests", "session_context"})
         self.assertEqual(self.summary_requests[-1][1]["system"], [{"type": "text", "text": SUMMARY_INSTRUCTIONS}])
         self.assertEqual(self.summary_requests[-1][1]["output_config"]["format"]["schema"]["required"], ["session_context"])
         focus = next(session for session in snapshot["sessions"] if session["id"] == "codex:focus")

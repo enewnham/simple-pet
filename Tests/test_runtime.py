@@ -488,7 +488,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(self.summary_requests[0]["messages"][0]["content"])
         self.assertEqual(payload["first_prompt"], initial)
         self.assertEqual(payload["recent_requests"], [initial])
-        self.assertEqual(payload["progress"], "")
+        self.assertNotIn("progress", payload)
         self.assertEqual(payload["session_context"], "")
         saved = self.daemon.cognition.memory.context("cli:one")
         self.assertTrue(saved["first_summary_attempted"])
