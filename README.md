@@ -74,45 +74,6 @@ or `explicit`. An empty array disables summaries. Set `summarize_first_request_o
 to `true` to override this array and summarize only the initial prompt of each session.
 The initial summary gets one attempt, including across daemon restarts.
 
-Prompt excerpts retain up to 1,000 characters within the hook packet's 1,999-byte limit.
-Long prompts use sentence ranking to prioritize requests and questions, preserving
-selected sentences in their original order and marking omitted text. Excerpts can
-miss relevant instructions. Summaries use the configured remote model.
-
-The pet shares the rhythm of active tasks with short review and work animations, then
-rests between stretches. Work bursts last about 12–25 seconds, rounded to whole animation
-cycles and limited by the sprite pack's repeat cap. During sustained work, the pet can
-take a short walk after roughly four minutes without movement. It reacts to the third
-unresolved failure in the same activity
-category and to failed turns. Recovery and completed tasks earn a brief acknowledgment,
-even while another task continues. Ordinary tool calls stay quiet.
-
-Automatic commentary has a 90-second cooldown, controlled by
-`behavior.automatic_speech_cooldown_seconds`. Each input wait can earn one reminder that
-bypasses this cooldown. Click the pet for a fresh response. Clicks and explicit speech
-requests take priority over automatic commentary.
-
-Wandering stays within `behavior.roaming_radius` pixels of the startup position or the
-position established after dragging. Speech, nearby pointers, dragging, and menus stop
-movement. Naps require every task to be inactive and at least two quiet minutes. Failed
-completed tasks can rest and nap. New work or interaction wakes the pet.
-
-Animation choices use a preferred pose, one alternative, then the pack's rest pose.
-Custom clips with the matching role can stand in for the named poses.
-
-| Expression | Preferred pose | Alternative |
-| --- | --- | --- |
-| Starting or investigating | `review` | `running` |
-| Working | `running` | `review` |
-| Waiting for input | `waiting` | `review` |
-| Trouble or failure | `failed` | `review` |
-| Recovery or success | `jumping` | `waving` |
-| Clicking | `waving` | `review` |
-| Cancellation | `review` | `idle` |
-
-Clicks, dragging, menus, speech, and nearby pointers interrupt quiet time. The quiet
-period starts again after the interaction ends.
-
 Clear the running pet's memory with:
 
 ```sh
