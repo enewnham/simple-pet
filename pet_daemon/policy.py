@@ -68,7 +68,8 @@ CATALOGUE = (
     BehaviorSpec("attentive", "rest", lambda o: o.waiting and not o.working, lambda o: 0.85),
     BehaviorSpec("observe", "gaze", lambda o: o.pointer_recent and not o.interacting, lambda o: 0.45),
     BehaviorSpec("roam", "walk", lambda o: o.can_roam,
-                 lambda o: (0.2 + 0.5 * o.restlessness) * (0.5 if o.active else 1)),
+                 lambda o: 0.2 + 0.6 * o.restlessness if o.working
+                 else (0.2 + 0.5 * o.restlessness) * (0.5 if o.active else 1)),
     BehaviorSpec("nap", "sleep", lambda o: o.can_nap, lambda o: 0.9 * o.rest_pressure ** 2),
 )
 

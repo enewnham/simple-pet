@@ -29,6 +29,7 @@ class RandomChoices:
     def __init__(self):
         self.angle = 0
         self.walk = False
+        self.repeat_minimum = False
         self.repeat_calls = []
 
     def random(self):
@@ -39,7 +40,7 @@ class RandomChoices:
 
     def randint(self, low, high):
         self.repeat_calls.append((low, high))
-        return high
+        return low if self.repeat_minimum else high
 
     def choice(self, choices):
         return choices[0]
@@ -163,6 +164,51 @@ class BehaviorTests(unittest.TestCase):
         self.clock.advance(.1)
         behavior.tick('working', self.sessions)
         self.assertEqual(self.animations()[-1]['id'], 'quiet-pose')
+
+    def test_work_burst_lasts_for_the_sampled_duration_in_whole_cycles(self):
+        behavior = self.make_behavior({'busy': {'role': 'work', 'frames': 41, 'fps': 50}},
+                                      work_burst_seconds=(12, 25))
+        self.rng.repeat_minimum = True
+        self.start()
+        behavior.tick('working', self.sessions)
+        start = self.animations()[-1]
+        behavior.completion({'event': 'animation', 'command_id': start['command_id'], 'result': 'finished'})
+        self.clock.advance(1)
+        behavior.tick('working', self.sessions)
+        burst = self.animations()[-1]
+        self.assertEqual((burst['id'], burst['repeats']), ('busy', 15))
+        self.advance(behavior, 11, 'working')
+        self.assertEqual(self.animations()[-1], burst)
+
+    def test_work_burst_honors_the_pack_repeat_limit(self):
+        behavior = self.make_behavior({'busy': {'role': 'work', 'frames': 8, 'fps': 10, 'max_repeats': 3}},
+                                      work_burst_seconds=(12, 25))
+        self.start()
+        behavior.tick('working', self.sessions)
+        start = self.animations()[-1]
+        behavior.completion({'event': 'animation', 'command_id': start['command_id'], 'result': 'finished'})
+        self.clock.advance(1)
+        behavior.tick('working', self.sessions)
+        self.assertEqual(self.animations()[-1]['repeats'], 3)
+
+    def test_long_work_walks_between_bursts_and_resumes_focus(self):
+        behavior = self.make_behavior({'busy': {'role': 'work'},
+                                       'west': {'role': 'walk-left'}, 'east': {'role': 'walk-right'}})
+        self.start()
+        for _ in range(600):
+            behavior.tick('working', self.sessions)
+            if behavior.pending and behavior.pending['kind'] == 'walk':
+                break
+            self.clock.advance(1)
+        else:
+            self.fail('The working pet did not walk')
+        self.assertTrue(self.sessions.working)
+        self.assertGreaterEqual(self.clock() - 100, 225)
+        command = behavior.pending['id']
+        behavior.completion({'event': 'motion', 'command_id': command, 'result': 'finished'})
+        self.clock.advance(1)
+        behavior.tick('working', self.sessions)
+        self.assertEqual(self.animations()[-1]['id'], 'busy')
 
     def test_reactions_preempt_and_play_one_cycle_during_other_work(self):
         behavior = self.make_behavior({'hello': {'role': 'greeting'}, 'uh-oh': {'role': 'error'},

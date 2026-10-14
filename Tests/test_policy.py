@@ -33,15 +33,21 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(set(self.select_many(observation)), {'rest', 'roam'})
         self.assertEqual(set(self.select_many(observation, 'rest')), {'roam'})
 
-    def test_active_work_reduces_roaming_and_prefers_focus(self):
-        observation = replace(self.observation, active=True, working=True, can_roam=True, restlessness=1)
+    def test_recent_movement_keeps_active_work_focused(self):
+        observation = replace(self.observation, active=True, working=True, can_roam=True, restlessness=0)
         self.assertEqual(set(self.select_many(observation)), {'focus'})
         candidates = {candidate.name: candidate for candidate in self.policy.candidates(observation)}
-        self.assertAlmostEqual(candidates['roam'].score, .35)
+        self.assertAlmostEqual(candidates['roam'].score, .2)
         self.assertEqual(candidates['focus'].role, 'work')
         investigating = replace(observation, investigating=True)
         selected = self.policy.select(investigating, None, random.Random(123), lambda _: True)
         self.assertEqual((selected.name, selected.role), ('focus', 'attention'))
+
+    def test_sustained_work_can_walk_and_focus(self):
+        observation = replace(self.observation, active=True, working=True, can_roam=True, restlessness=1)
+        self.assertEqual(set(self.select_many(observation, 'focus')), {'focus', 'roam'})
+        after_walk = replace(observation, restlessness=0)
+        self.assertEqual(set(self.select_many(after_walk, 'roam')), {'focus'})
 
     def test_waiting_keeps_attention_without_work_or_roaming(self):
         observation = replace(self.observation, active=True, waiting=True, can_roam=True, restlessness=1)

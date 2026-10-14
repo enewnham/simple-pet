@@ -147,12 +147,18 @@ class Behavior:
         return not self.status or any(self.status[name] for name in ("speech", "dragging", "menu")) or self._near_pointer()
 
     def _play(self, clip, name, kind="gesture", seconds=None):
-        budget = self.config.repeat_budget if seconds is None else seconds
-        minimum, maximum = self.config.repeat_range
-        maximum = min(maximum if seconds is None else max(1, math.floor(seconds / clip.seconds)),
-                      clip.max_repeats or math.inf, max(1, math.floor(budget / clip.seconds)))
-        minimum = min(minimum, maximum)
-        repeats = 1 if kind in ("error", "success", "reaction") else self.rng.randint(minimum, maximum)
+        if kind in ("error", "success", "reaction"):
+            repeats = 1
+        elif seconds is not None:
+            repeats = max(1, math.ceil(seconds / clip.seconds))
+            if clip.max_repeats is not None:
+                repeats = min(repeats, clip.max_repeats)
+        else:
+            minimum, maximum = self.config.repeat_range
+            maximum = min(maximum, clip.max_repeats or math.inf,
+                          max(1, math.floor(self.config.repeat_budget / clip.seconds)))
+            minimum = min(minimum, maximum)
+            repeats = self.rng.randint(minimum, maximum)
         command = self._next_id()
         duration = clip.seconds * repeats
         self.execution.start(Action(name, command, "animation", self.clock() + duration + 1, clip.role, kind))

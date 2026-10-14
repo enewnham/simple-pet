@@ -80,7 +80,10 @@ selected sentences in their original order and marking omitted text. Excerpts ca
 miss relevant instructions. Summaries use the configured remote model.
 
 The pet shares the rhythm of active tasks with short review and work animations, then
-rests between stretches. It reacts to the third unresolved failure in the same activity
+rests between stretches. Work bursts last about 12–25 seconds, rounded to whole animation
+cycles and limited by the sprite pack's repeat cap. During sustained work, the pet can
+take a short walk after roughly four minutes without movement. It reacts to the third
+unresolved failure in the same activity
 category and to failed turns. Recovery and completed tasks earn a brief acknowledgment,
 even while another task continues. Ordinary tool calls stay quiet.
 
