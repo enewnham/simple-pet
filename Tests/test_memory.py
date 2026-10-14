@@ -186,6 +186,23 @@ class MemoryTests(unittest.TestCase):
         self.assertNotIn("detail", columns)
         self.assertNotIn("error_signature", columns)
 
+    def test_schema_version_mismatch_recreates_memory(self):
+        self.event("Parser inspection completed")
+        self.memory.save_context("codex:one", "Refactor parser", "Keep its API stable", ["Refactor parser"])
+        self.memory.record_speech("Parser work", "prompt")
+        self.memory.close()
+        with sqlite3.connect(self.path) as database:
+            database.execute("ALTER TABLE contexts DROP COLUMN request_count")
+            database.execute("ALTER TABLE contexts DROP COLUMN first_summary_attempted")
+            database.execute("PRAGMA user_version = 3")
+        self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
+        self.assertIsNone(self.memory.context("codex:one"))
+        self.assertEqual(self.memory.recent(), [])
+        self.assertEqual(self.memory.speech(), [])
+        self.assertEqual(self.memory.projects(["/repo/parser"]), [])
+        self.memory.save_context("codex:one", "Review hooks", "Hook review", ["Review hooks"], 1, True)
+        self.assertTrue(self.memory.context("codex:one")["first_summary_attempted"])
+
     def test_session_context_survives_restart_with_its_original_anchor(self):
         self.memory.save_context("codex:one", "Refactor parser", "Parser refactor awaits validation", ["Refactor parser", "Check edge cases"])
         self.memory.close()

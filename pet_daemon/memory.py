@@ -5,7 +5,11 @@ import time
 from pathlib import Path
 
 from .activity import activity, result_summary
+from .prompts import select_prompt
 from .telemetry import trace
+
+
+SCHEMA_VERSION = 4
 
 
 def bounded(value, limit=240):
@@ -24,7 +28,7 @@ class Memory:
         path.chmod(0o600)
         self.db.row_factory = sqlite3.Row
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version != 3:
+        if version != SCHEMA_VERSION:
             self.db.executescript("""
                 DROP TRIGGER IF EXISTS events_insert;
                 DROP TRIGGER IF EXISTS events_delete;
@@ -62,10 +66,11 @@ class Memory:
             CREATE TABLE IF NOT EXISTS contexts (
                 pet TEXT NOT NULL, session TEXT NOT NULL, first_prompt TEXT NOT NULL,
                 session_context TEXT NOT NULL, recent_requests TEXT NOT NULL, timestamp REAL NOT NULL,
+                request_count INTEGER NOT NULL DEFAULT 0, first_summary_attempted INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(pet, session)
             );
-            PRAGMA user_version = 3;
         """)
+        self.db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.prune()
 
     def prune(self):
@@ -159,19 +164,23 @@ class Memory:
         return result
 
     def context(self, session):
-        row = self.db.execute("SELECT first_prompt,session_context,recent_requests FROM contexts WHERE pet=? AND session=?", (self.pet, session)).fetchone()
+        row = self.db.execute("SELECT first_prompt,session_context,recent_requests,request_count,first_summary_attempted FROM contexts WHERE pet=? AND session=?", (self.pet, session)).fetchone()
         if row is None:
             return None
         return {"first_prompt": row["first_prompt"], "session_context": row["session_context"],
-                "recent_requests": json.loads(row["recent_requests"])}
+                "recent_requests": json.loads(row["recent_requests"]), "request_count": row["request_count"],
+                "first_summary_attempted": bool(row["first_summary_attempted"])}
 
-    def save_context(self, session, first_prompt, summary, recent_requests):
-        requests = [bounded(request) for request in recent_requests[-4:]]
+    def save_context(self, session, first_prompt, summary, recent_requests, request_count=None, first_summary_attempted=False):
+        requests = [select_prompt(request) for request in recent_requests[-4:]]
+        count = len(requests) if request_count is None else request_count
         with self.db:
-            self.db.execute("""INSERT INTO contexts VALUES (?,?,?,?,?,?) ON CONFLICT(pet,session) DO UPDATE SET
+            self.db.execute("""INSERT INTO contexts VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(pet,session) DO UPDATE SET
                 first_prompt=excluded.first_prompt, session_context=excluded.session_context,
-                recent_requests=excluded.recent_requests, timestamp=excluded.timestamp""",
-                (self.pet, session, bounded(first_prompt), bounded(summary, 400), json.dumps(requests), self.clock()))
+                recent_requests=excluded.recent_requests, timestamp=excluded.timestamp,
+                request_count=excluded.request_count, first_summary_attempted=excluded.first_summary_attempted""",
+                (self.pet, session, select_prompt(first_prompt), bounded(summary, 400), json.dumps(requests), self.clock(),
+                 count, first_summary_attempted))
         self.prune()
 
     def record_speech(self, text, reason):

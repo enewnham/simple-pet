@@ -163,16 +163,25 @@ class Daemon:
                         lane.context_loaded = True
                         try:
                             stored = self.cognition.memory.context(key)
+                            if stored is None:
+                                for alias in packet.get("aliases", []):
+                                    stored = self.cognition.memory.context(f"{packet['harness']}:{alias}")
+                                    if stored is not None:
+                                        break
                             if stored:
-                                lane.first_prompt = stored["first_prompt"] or lane.first_prompt
+                                if stored["request_count"] or not lane.request_count:
+                                    lane.first_prompt = stored["first_prompt"] or lane.first_prompt
                                 lane.session_context = stored["session_context"]
                                 lane.recent_requests = [*stored["recent_requests"], *lane.recent_requests][-4:]
+                                lane.request_count += stored["request_count"]
+                                lane.first_summary_attempted = stored["first_summary_attempted"]
                                 lane.goal = lane.session_context or lane.first_prompt
                         except sqlite3.Error as error:
                             log.warning("Could not restore pet session context: %s", error)
                     if packet["event"] in ("intent", "subagent_start") and lane.first_prompt:
                         try:
-                            self.cognition.memory.save_context(key, lane.first_prompt, lane.session_context, lane.recent_requests)
+                            self.cognition.memory.save_context(key, lane.first_prompt, lane.session_context, lane.recent_requests,
+                                                               lane.request_count, lane.first_summary_attempted)
                         except sqlite3.Error as error:
                             log.warning("Could not save pet session context: %s", error)
                     state = {"id": key, "repo": lane.repo, "goal": lane.goal, "last_tool": lane.last_tool, "outcome": lane.outcome, "activity": result["activity"]}
@@ -293,8 +302,21 @@ class Daemon:
             self.last_reaction_state = self.sessions.reaction_state()
             timeout = self.config.request_timeout
             try:
+                snapshot = {**self.sessions.snapshot(), "trigger": trigger, "sleeping": self.behavior.sleeping}
+                selected = self.cognition.selected_sessions(snapshot)
+                focus_snapshot = selected[0] if selected else None
+                if (self.config.summarize_first_request_only
+                        and self.cognition.should_summarize(focus_snapshot, reason)):
+                    focus = self.sessions.lanes[focus_snapshot["id"]]
+                    focus.first_summary_attempted = True
+                    try:
+                        self.cognition.memory.save_context(focus_snapshot["id"], focus.first_prompt, focus.session_context,
+                                                           focus.recent_requests, focus.request_count, True)
+                    except sqlite3.Error as error:
+                        log.warning("Could not save pet session context: %s", error)
+                        focus_snapshot["first_summary_attempted"] = True
                 result = await asyncio.wait_for(
-                    self.cognition.observe({**self.sessions.snapshot(), "trigger": trigger, "sleeping": self.behavior.sleeping}, reason, context),
+                    self.cognition.observe(snapshot, reason, context),
                     timeout=timeout,
                 )
                 if sessions is not self.sessions:
@@ -312,7 +334,8 @@ class Daemon:
                         focus.session_context = bounded(summary, 400)
                         focus.goal = focus.session_context or focus.first_prompt
                         try:
-                            self.cognition.memory.save_context(result["context_session"], focus.first_prompt, focus.session_context, focus.recent_requests)
+                            self.cognition.memory.save_context(result["context_session"], focus.first_prompt, focus.session_context,
+                                                               focus.recent_requests, focus.request_count, focus.first_summary_attempted)
                         except sqlite3.Error as error:
                             log.warning("Could not save pet session context: %s", error)
                         trace("memory.context_updated", session=result["context_session"])

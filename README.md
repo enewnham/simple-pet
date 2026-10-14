@@ -66,6 +66,17 @@ The pet remembers recent work and remarks across restarts. Use `memory_retention
 and `memory_max_events` to limit how much history it keeps. Customize `persona` to change
 its voice.
 
+Session context is summarized on each user prompt. Set `summarize_on` to an array of
+commentary reasons: `prompt`, `completion`, `routine`, `failure`, `check_in`, `click`,
+or `explicit`. An empty array disables summaries. Set `summarize_first_request_only`
+to `true` to override this array and summarize only the initial prompt of each session.
+The initial summary gets one attempt, including across daemon restarts.
+
+Prompt excerpts retain up to 1,000 characters within the hook packet's 1,999-byte limit.
+Long prompts use sentence ranking to prioritize requests and questions, preserving
+selected sentences in their original order and marking omitted text. Excerpts can
+miss relevant instructions. Summaries use the configured remote model.
+
 The pet thinks before starting work, celebrates successes, and reacts to failures and
 long waits. After a quiet stretch, it may wave for attention. Click it to hear a recent
 remark or get a fresh response. After extended idleness, a click also earns a greeting.

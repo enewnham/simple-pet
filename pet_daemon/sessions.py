@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 
 from .activity import activity
+from .prompts import select_prompt
 
 
 EVENTS = {
@@ -30,6 +31,8 @@ class Lane:
     recent_requests: list = field(default_factory=list)
     session_context: str = ""
     context_loaded: bool = False
+    request_count: int = 0
+    first_summary_attempted: bool = False
     repo: str = ""
     phase: str = ""
     last_tool: str = ""
@@ -133,6 +136,9 @@ class Sessions:
                 lane.first_prompt = lane.first_prompt or other.first_prompt
                 lane.session_context = lane.session_context or other.session_context
                 lane.recent_requests = lane.recent_requests or other.recent_requests
+                lane.request_count += other.request_count
+                lane.first_summary_attempted = lane.first_summary_attempted or other.first_summary_attempted
+                lane.context_loaded = lane.context_loaded or other.context_loaded
                 lane.repo = lane.repo or other.repo
                 if other.active:
                     for category, failure in other.failures.items():
@@ -231,9 +237,10 @@ class Sessions:
             if not lane.active or new_native_turn or (kind == "intent" and turn and turn != lane.turn):
                 self._open(key, lane, event, now)
             if event.get("goal"):
-                request = " ".join(event["goal"].split())[:240]
-                lane.first_prompt = lane.first_prompt or request
+                request = select_prompt(event["goal"])
+                lane.first_prompt = request if lane.request_count == 0 else lane.first_prompt
                 lane.recent_requests = [*lane.recent_requests, request][-4:]
+                lane.request_count += 1
                 lane.goal = lane.session_context or lane.first_prompt
             elif kind == "subagent_start" and not lane.first_prompt and lane.parent in self.lanes:
                 parent = self.lanes[lane.parent]
@@ -365,7 +372,7 @@ class Sessions:
                               lane.last_check_in if lane.last_check_in is not None else lane.started) >= seconds]
 
     def observation_context(self, include_activity=False, keys=None):
-        return {key: (lane.generation, lane.active, lane.outcome, lane.goal, bool(self._current_failure(lane)),
+        return {key: (lane.generation, lane.active, lane.outcome, lane.goal, tuple(lane.recent_requests), bool(self._current_failure(lane)),
                       lane.waiting, lane.waiting_call,
                       (tuple(lane.calls), lane.waiting_since if lane.waiting else lane.last_seen) if include_activity else None)
                 for key, lane in self.lanes.items() if keys is None or key in keys}
@@ -379,6 +386,7 @@ class Sessions:
                 "id": key, "parent": lane.parent, "goal": lane.goal, "repo": lane.repo, "phase": lane.phase,
                 "first_prompt": lane.first_prompt, "session_context": lane.session_context,
                 "recent_requests": list(lane.recent_requests), "generation": lane.generation,
+                "request_count": lane.request_count, "first_summary_attempted": lane.first_summary_attempted,
                 "duration_seconds": round(now - lane.started),
                 "quiet_seconds": round(now - lane.last_seen),
                 "turn_active": lane.active, "last_tool": lane.last_tool,

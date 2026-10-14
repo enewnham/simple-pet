@@ -10,6 +10,8 @@ You have the energy of a seasoned peer tackling the work: focused, wry about you
 stubborn bugs, and fundamentally on the developer's side. Never be cruel or insult them.
 """.strip()
 
+OBSERVATION_REASONS = frozenset({"prompt", "completion", "routine", "failure", "check_in", "click", "explicit"})
+
 
 def positive(value):
     return type(value) in (int, float) and math.isfinite(value) and value > 0
@@ -67,6 +69,8 @@ class Config:
     daemon_socket: str = "/tmp/pet-daemon.sock"
     overlay_socket: str = "/tmp/pet.sock"
     model: str = "claude-haiku-5-5"
+    summarize_on: list[str] = field(default_factory=lambda: ["prompt"])
+    summarize_first_request_only: bool = False
     observation_seconds: tuple = (20, 40)
     idle_message_seconds: float = 300
     prompt_max_bytes: int = 16000
@@ -95,6 +99,12 @@ class Config:
 
     def validate(self):
         self.behavior.validate()
+        if not isinstance(self.summarize_on, list) or any(
+            not isinstance(reason, str) or reason not in OBSERVATION_REASONS for reason in self.summarize_on
+        ):
+            raise ValueError("summarize_on must be an array of commentary reasons")
+        if type(self.summarize_first_request_only) is not bool:
+            raise ValueError("summarize_first_request_only must be a boolean")
         if not interval(self.observation_seconds):
             raise ValueError("observation_seconds must be a positive [minimum, maximum]")
         for name in ("prompt_max_bytes", "memory_retention_days", "memory_max_events", "max_tokens"):

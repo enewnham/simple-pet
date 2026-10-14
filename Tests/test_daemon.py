@@ -783,6 +783,29 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all("parser tokenization" in event["summary"] for event in memory["recalled_events"]))
         self.assertEqual([row["text"] for row in memory["dispatched_speech"]], ["Visible remark 5", "Visible remark 6", "Visible remark 7"])
 
+    async def test_summary_triggers_follow_configuration_without_changing_commentary(self):
+        self.config.summarize_on = ["completion", "routine", "failure", "check_in", "click", "explicit"]
+        for reason in ("prompt", *self.config.summarize_on):
+            with self.subTest(reason=reason):
+                self.responses.append(({"speak": "Working on the parser."}, "end_turn"))
+                await self.cognition.observe(self.sessions.snapshot(), reason)
+        self.assertEqual(len(self.summary_requests), 6)
+        self.assertEqual(len(self.observation_requests), 7)
+        self.config.summarize_on = []
+        await self.cognition.observe(self.sessions.snapshot(), "prompt")
+        self.assertEqual(len(self.summary_requests), 6)
+        self.assertEqual(len(self.observation_requests), 8)
+
+    async def test_small_budget_bounds_long_requests_while_retaining_the_latest_instruction(self):
+        self.config.prompt_max_bytes = 8000
+        for index in range(4):
+            self.sessions.handle({"harness": "claude", "session": "worker", "event": "intent",
+                                  "goal": ("Historical context with JSON escapes \x00. " * 30) + f"Fix parser issue {index}."})
+        await self.cognition.observe(self.sessions.snapshot(), "prompt")
+        for _, body in (self.observation_requests[-1], self.summary_requests[-1]):
+            self.assertLessEqual(len(json.dumps(body, ensure_ascii=False).encode()), self.config.prompt_max_bytes)
+            self.assertIn("Fix parser issue 3", body["messages"][0]["content"])
+
     async def test_summary_uses_only_the_focused_session(self):
         self.sessions.handle({"harness": "codex", "session": "focus", "event": "intent", "goal": "Validate parser behavior"})
         snapshot = self.sessions.snapshot()

@@ -365,6 +365,65 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         packet = await self.packet(lambda packet: "text" in packet)
         self.assertEqual(packet["text"], self.speech)
 
+    async def test_summary_updates_on_each_prompt_and_skips_completion_by_default(self):
+        self.session_context = "Keep the parser API compatible."
+        self.event("intent", goal="Refactor the parser")
+        await self.packet(lambda packet: packet.get("text") == self.speech)
+        await self.wait_for(lambda: self.daemon.request_task is None)
+        self.event("intent", goal="Investigate the parser timeout")
+        await self.packet(lambda packet: packet.get("text") == self.speech)
+        await self.wait_for(lambda: self.daemon.request_task is None)
+        self.assertEqual(len(self.summary_requests), 2)
+        payload = json.loads(self.summary_requests[-1]["messages"][0]["content"])
+        self.assertEqual(payload["recent_requests"][-1], "Investigate the parser timeout")
+        self.assertEqual(payload["session_context"], self.session_context)
+        await self.daemon.observe("completion")
+        self.assertEqual(len(self.summary_requests), 2)
+        self.assertEqual(len(self.requests), 3)
+
+    async def test_first_request_summary_overrides_triggers_and_survives_a_failed_attempt_and_restart(self):
+        self.config.summarize_first_request_only = True
+        self.config.summarize_on = []
+        self.summary_status = 500
+        initial = "Refactor the parser while keeping the public interface unchanged. " * 8
+        self.event("intent", goal=initial)
+        await self.packet(lambda packet: packet.get("text") == self.speech)
+        await self.wait_for(lambda: self.daemon.request_task is None)
+        self.assertEqual(len(self.summary_requests), 1)
+        payload = json.loads(self.summary_requests[0]["messages"][0]["content"])
+        self.assertEqual(payload["first_prompt"], initial)
+        self.assertEqual(payload["recent_requests"], [initial])
+        self.assertEqual(payload["progress"], "")
+        self.assertEqual(payload["session_context"], "")
+        saved = self.daemon.cognition.memory.context("cli:one")
+        self.assertTrue(saved["first_summary_attempted"])
+        self.assertEqual(saved["first_prompt"], initial)
+        await self.daemon.observe("prompt")
+        self.assertEqual(len(self.summary_requests), 1)
+        await self.daemon.close()
+        self.daemon = Daemon(self.config, self.client, rng=random.Random(7))
+        await self.daemon.start()
+        self.send_status()
+        await self.packet(lambda packet: packet.get("state") == "idle")
+        self.config.summarize_on = ["prompt", "completion", "explicit"]
+        self.summary_status = 200
+        self.event("intent", goal="Debug the timeout")
+        await self.packet(lambda packet: packet.get("text") == self.speech)
+        await self.wait_for(lambda: self.daemon.request_task is None)
+        lane = self.daemon.sessions.lanes["cli:one"]
+        self.assertEqual(lane.first_prompt, initial)
+        self.assertEqual(lane.request_count, 2)
+        for reason in ("completion", "explicit"):
+            await self.daemon.observe(reason, "Parser work")
+        self.assertEqual(len(self.summary_requests), 1)
+        await self.drain()
+        self.event("intent", session="another", goal="Review hooks")
+        await self.packet(lambda packet: packet.get("text") == self.speech)
+        await self.wait_for(lambda: self.daemon.request_task is None)
+        self.assertEqual(len(self.summary_requests), 2)
+        payload = json.loads(self.summary_requests[-1]["messages"][0]["content"])
+        self.assertEqual(payload["first_prompt"], "Review hooks")
+
     async def test_summary_update_persists_without_speech_and_reaches_the_next_prompt(self):
         self.use_clock()
         self.speech = None
@@ -386,6 +445,48 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session["first_prompt"], "Refactor the parser")
         self.assertEqual(session["session_context"], "Parser refactor awaits validation.")
         self.assertEqual(len(self.requests), 2)
+
+    async def test_first_request_summary_restores_bookkeeping_from_a_session_alias(self):
+        self.config.summarize_first_request_only = True
+        self.daemon.cognition.memory.save_context("cli:old-id", "Review hooks", "Hook review", ["Review hooks"], 1, True)
+        self.event("intent", session="new-id", aliases=["old-id"], goal="Check hook edge cases")
+        await self.packet(lambda packet: packet.get("text") == self.speech)
+        await self.wait_for(lambda: self.daemon.request_task is None)
+        self.assertEqual(self.summary_requests, [])
+        lane = self.daemon.sessions.lanes["cli:new-id"]
+        self.assertEqual(lane.first_prompt, "Review hooks")
+        self.assertEqual(lane.request_count, 2)
+        self.assertTrue(lane.first_summary_attempted)
+
+    async def test_first_request_summary_uses_the_initial_prompt_when_followups_are_queued_together(self):
+        self.config.summarize_first_request_only = True
+        for goal in ("Refactor the parser", "Keep its API unchanged"):
+            self.daemon.receive(json.dumps({"kind": "event", "event": "intent", "harness": "cli",
+                                           "session": "one", "goal": goal}).encode())
+        await self.packet(lambda packet: packet.get("text") == self.speech)
+        await self.wait_for(lambda: self.daemon.request_task is None)
+        self.assertEqual(len(self.summary_requests), 1)
+        payload = json.loads(self.summary_requests[0]["messages"][0]["content"])
+        self.assertEqual(payload["first_prompt"], "Refactor the parser")
+        self.assertEqual(payload["recent_requests"], ["Refactor the parser"])
+        self.assertNotIn("Keep its API unchanged", json.dumps(payload))
+
+    async def test_subagent_inherited_context_does_not_consume_its_first_request_summary(self):
+        self.config.summarize_first_request_only = True
+        self.event("intent", goal="Refactor the parser")
+        await self.packet(lambda packet: packet.get("text") == self.speech)
+        await self.wait_for(lambda: self.daemon.request_task is None)
+        self.event("subagent_start", session="child", parent="one")
+        await self.packet(lambda packet: packet.get("text") == self.speech)
+        await self.wait_for(lambda: self.daemon.request_task is None)
+        self.assertEqual(len(self.summary_requests), 1)
+        self.event("intent", session="child", goal="Inspect parser edge cases")
+        await self.packet(lambda packet: packet.get("text") == self.speech)
+        await self.wait_for(lambda: self.daemon.request_task is None)
+        self.assertEqual(len(self.summary_requests), 2)
+        payload = json.loads(self.summary_requests[-1]["messages"][0]["content"])
+        self.assertEqual(payload["first_prompt"], "Inspect parser edge cases")
+        self.assertNotIn("Refactor the parser", json.dumps(payload))
 
     async def test_interleaved_sessions_keep_separate_summaries_and_shared_commentary(self):
         self.session_context = "Keep the parser API stable."
@@ -442,11 +543,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["trigger"]["goal"], "Explain the counter limits")
 
     async def test_followup_during_observation_refuses_stale_summary(self):
+        self.daemon.cognition.memory.save_context("cli:one", "Refactor the parser", "Keep its API stable", ["Refactor the parser"])
         self.slow = True
         self.session_context = "Stale parser summary."
         self.event("intent", goal="Refactor the parser", turn="first")
         await asyncio.wait_for(self.entered.wait(), 1)
-        self.event("intent", goal="Keep the parser API unchanged", turn="first")
+        self.event("intent", goal="Keep the parser API unchanged", turn="first", manual=True)
         await self.wait_for(lambda: "Keep the parser API unchanged" in self.daemon.sessions.lanes["cli:one"].recent_requests)
         self.session_context = None
         self.release.set()
@@ -455,6 +557,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(lane.session_context, "Stale parser summary.")
         self.assertEqual(lane.first_prompt, "Refactor the parser")
         self.assertIn("Keep the parser API unchanged", lane.recent_requests)
+        self.assertEqual(len(self.daemon.cognition.memory.speech()), 1)
 
     async def test_explicit_speech_cannot_overwrite_context_after_a_followup(self):
         self.event("intent", goal="Refactor the parser", turn="first")
@@ -912,6 +1015,24 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_summary_defaults_run_on_prompts(self):
+        config = Config(pet_dir=Path("fixture"))
+        self.assertEqual(config.summarize_on, ["prompt"])
+        self.assertFalse(config.summarize_first_request_only)
+
+    def test_summary_reasons_accept_every_commentary_trigger_and_an_empty_array(self):
+        for reasons in ([], ["prompt", "completion", "routine", "failure", "check_in", "click", "explicit"]):
+            with self.subTest(reasons=reasons):
+                Config(pet_dir=Path("fixture"), summarize_on=reasons).validate()
+
+    def test_summary_configuration_rejects_unknown_reasons_and_nonboolean_flags(self):
+        for reasons in ("prompt", None, ["intent"], [None], [[]]):
+            with self.subTest(reasons=reasons), self.assertRaisesRegex(ValueError, "summarize_on"):
+                Config(pet_dir=Path("fixture"), summarize_on=reasons).validate()
+        for value in (1, 0, "true", None):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "summarize_first_request_only"):
+                Config(pet_dir=Path("fixture"), summarize_first_request_only=value).validate()
+
     def test_loads_startup_paths_relative_to_config_and_configurable_timing(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "pet.json"

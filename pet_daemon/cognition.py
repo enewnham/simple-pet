@@ -4,6 +4,7 @@ import logging
 import time
 
 from .memory import Memory, bounded
+from .prompts import select_prompt
 from .telemetry import trace
 
 
@@ -33,6 +34,7 @@ when useful, while grounding this remark in focus_session. One session finishing
 leave another working. omitted_sessions counts sessions outside the payload.
 first_prompt is the historical starting point. session_context is an inferred summary
 and may be stale. Prefer current requests and progress over it.
+Prompt excerpts containing [omitted] are incomplete and may exclude relevant instructions.
 
 Use each session's state to establish live activity. turn_active can be true even when top-level
 activity is idle or active_tools is empty. active_tools lists running calls, last_tool
@@ -66,6 +68,7 @@ session_context. Follow the latest requests and correct stale context. Keep the 
 and relevant decisions in at most two short sentences. Exclude live status, failure
 diagnoses, commentary, and private thoughts. Return session_context as null if its
 summary needs no update. Return JSON matching the supplied schema.
+Prompt excerpts containing [omitted] are incomplete. Do not assume omitted instructions.
 """.strip()
 CACHE_CONTROL = {"type": "ephemeral", "ttl": "1h"}
 
@@ -130,9 +133,9 @@ class Cognition:
         record = {key: session[key] for key in ("duration_seconds", "quiet_seconds", "turn_active", "waiting_for_input", "waiting_seconds", "outcome") if key in session}
         for key in ("id", "parent", "last_tool", "progress", "repo", "phase"):
             record[key] = bounded(session.get(key), 240 if key in ("goal", "progress") else 120)
-        record["first_prompt"] = bounded(session.get("first_prompt"))
+        record["first_prompt"] = select_prompt(session.get("first_prompt", ""))
         record["session_context"] = bounded(session.get("session_context"), 400)
-        record["recent_requests"] = [bounded(request) for request in session.get("recent_requests", [])[-4:]]
+        record["recent_requests"] = [select_prompt(request) for request in session.get("recent_requests", [])[-4:]]
         failure = session.get("failure")
         record["failure"] = None if not failure else {
             **{key: failure[key] for key in ("resolved", "current_turn", "seconds_ago", "activity", "count") if key in failure},
@@ -211,26 +214,51 @@ class Cognition:
                 payload["omitted_sessions"]["active"] += bool(removed.get("turn_active"))
             elif payload["focus_session"] and len(payload["focus_session"]["recent_requests"]) > 1:
                 payload["focus_session"]["recent_requests"].pop(0)
+            elif payload["focus_session"] and len(payload["focus_session"]["first_prompt"]) > 120:
+                text = payload["focus_session"]["first_prompt"]
+                payload["focus_session"]["first_prompt"] = select_prompt(text, limit=len(text) // 2)
             elif payload["context"] and len(payload["context"]) > 240:
                 payload["context"] = payload["context"][:len(payload["context"]) // 2]
             elif memory["dispatched_speech"]:
                 memory["dispatched_speech"].pop()
+            elif payload["focus_session"] and payload["focus_session"]["recent_requests"] and len(payload["focus_session"]["recent_requests"][-1]) > 120:
+                text = payload["focus_session"]["recent_requests"][-1]
+                payload["focus_session"]["recent_requests"][-1] = select_prompt(text, limit=len(text) // 2)
             else:
                 raise ValueError("Persona, schema, and triggering state exceed prompt_max_bytes")
             request = self.request(payload, self.system(payload))
         return request
 
+    def should_summarize(self, focus, reason):
+        if not focus:
+            return False
+        if self.config.summarize_first_request_only:
+            return (reason == "prompt" and focus.get("request_count", 0) > 0
+                    and not focus.get("first_summary_attempted", False))
+        return reason in self.config.summarize_on
+
     async def summarize(self, focus):
         record = self.session_record(focus)
         payload = {key: record[key] for key in ("first_prompt", "recent_requests", "progress", "session_context")}
+        if self.config.summarize_first_request_only:
+            payload.update(recent_requests=[record["first_prompt"]], progress="", session_context="")
         request = self.request(payload, [{"type": "text", "text": SUMMARY_INSTRUCTIONS}])
         request["output_config"]["format"]["schema"] = {
             "type": "object",
             "properties": {"session_context": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
             "required": ["session_context"], "additionalProperties": False,
         }
-        if encoded_size(request) > self.config.prompt_max_bytes:
-            raise ValueError("Session summary exceeds prompt_max_bytes")
+        while encoded_size(request) > self.config.prompt_max_bytes:
+            if len(payload["recent_requests"]) > 1:
+                payload["recent_requests"].pop(0)
+            elif len(payload["first_prompt"]) > 120:
+                payload["first_prompt"] = select_prompt(payload["first_prompt"], limit=len(payload["first_prompt"]) // 2)
+            elif payload["recent_requests"] and len(payload["recent_requests"][-1]) > 120:
+                text = payload["recent_requests"][-1]
+                payload["recent_requests"][-1] = select_prompt(text, limit=len(text) // 2)
+            else:
+                raise ValueError("Session summary exceeds prompt_max_bytes")
+            request["messages"][0]["content"] = json.dumps(payload, ensure_ascii=False)
         result = await self.complete(request, "summary")
         if set(result) != {"session_context"} or (result["session_context"] is not None and not isinstance(result["session_context"], str)):
             raise ValueError("Invalid session context")
@@ -257,7 +285,7 @@ class Cognition:
         focus = selected[0] if selected else None
         request = self.bounded_request(self.prompt(snapshot, reason, context))
         summary = None
-        if focus and reason in ("prompt", "completion"):
+        if self.should_summarize(focus, reason):
             result, summary = await asyncio.gather(self.complete(request, reason), self.summarize(focus), return_exceptions=True)
             if isinstance(result, Exception):
                 raise result

@@ -107,9 +107,9 @@ def update(harness, event, payload):
     if tool:
         result["tool"] = tool
     if normalized == "intent":
-        result["goal"] = excerpt(payload.get("prompt"))
+        result["goal"] = string(payload.get("prompt"))
     elif normalized == "subagent_start" and payload.get("task"):
-        result["goal"] = excerpt(payload.get("task"))
+        result["goal"] = string(payload.get("task"))
     if normalized == "tool_start" and tool_name in INPUT_TOOLS:
         result["event"] = "waiting"
     response = payload.get("tool_response")

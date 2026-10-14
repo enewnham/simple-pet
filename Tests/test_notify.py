@@ -150,13 +150,31 @@ class NotifyTests(unittest.TestCase):
 
     def test_native_prompt_and_progress_excerpts_are_bounded(self):
         self.run_hook("claude", "UserPromptSubmit", {"session_id": "worker", "prompt": "x" * 1000})
-        self.assertEqual(len(self.receive()["goal"]), 240)
+        self.assertEqual(len(self.receive()["goal"]), 1000)
         self.run_hook("codex", "Stop", {"session_id": "worker", "turn_id": "turn-one",
                       "last_assistant_message": "y" * 1000, "transcript_path": "/must/not/read"})
         packet = self.receive()
         self.assertEqual(len(packet["progress"]), 240)
         self.assertEqual(packet["turn"], "turn-one")
         self.assertNotIn("transcript_path", packet)
+
+    def test_long_hook_prompt_keeps_the_final_request(self):
+        prompt = "Background details. " * 100 + "Fix the parser for UTF-8 input."
+        self.run_hook("claude", "UserPromptSubmit", {"session_id": "worker", "prompt": prompt})
+        goal = self.receive()["goal"]
+        self.assertLessEqual(len(goal), 1000)
+        self.assertIn("Fix the parser for UTF-8 input.", goal)
+        self.assertIn("[omitted]", goal)
+
+    def test_cli_intent_keeps_unicode_request_within_packet_limit(self):
+        prompt = "背景。 " * 400 + "Fix parser/猫.py for 🐈 input."
+        session = "worker-" + "s" * 400
+        self.run_client("intent", "--session", session, "--text", prompt)
+        packet = self.receive()
+        goal = packet["goal"]
+        self.assertEqual(packet["session"], session)
+        self.assertIn("Fix parser/猫.py for 🐈 input.", goal)
+        self.assertLessEqual(len(goal), 1000)
 
     def test_claude_stop_failure_closes_the_turn_as_error(self):
         self.run_hook("claude", "StopFailure", {"session_id": "worker", "error": "API error"})

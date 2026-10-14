@@ -5,7 +5,13 @@ import argparse
 import json
 import math
 import os
+from pathlib import Path
 import socket
+import sys
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from pet_daemon.prompts import select_prompt
 
 
 MAX_DATAGRAM_BYTES = 1999
@@ -14,6 +20,9 @@ EXCERPT_FIELDS = ("progress", "goal", "tool", "context")
 
 def encode(payload):
     payload = payload.copy()
+    original_goal = payload.get("goal")
+    if isinstance(original_goal, str):
+        payload["goal"] = select_prompt(original_goal)
 
     def serialized():
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -24,6 +33,12 @@ def encode(payload):
             break
         value = payload.get(field)
         if not isinstance(value, str):
+            continue
+        if field == "goal":
+            payload[field] = ""
+            available = MAX_DATAGRAM_BYTES - len(serialized()) + 2
+            payload[field] = select_prompt(original_goal, max_bytes=available)
+            data = serialized()
             continue
         low, high = 0, len(value)
         while low < high:
