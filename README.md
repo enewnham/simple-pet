@@ -64,13 +64,15 @@ Edit `pet.config.json` and restart the daemon to apply changes. Paths are relati
 
 Factual events, project context, and dispatched speech are saved in SQLite at `memory_file`.
 Each session keeps its first captured prompt, four recent requests, and a short evolving
-task summary. Haiku can update the focused session's summary in its speech response.
+task summary. On new prompts and turn completion, a separate Haiku request updates
+the focused session's summary using only that session's evidence.
 The summary describes current intent, while the first prompt remains a historical anchor.
 These fields survive restarts without restoring live calls or activity. Stale responses
 do not overwrite newer session context.
 
-Each request includes bounded current session state, five recent events, three dispatched
-remarks, and at most two relevant older events from the same project directory. Historical
+Commentary requests identify one focused session and include compact context for up to
+two other sessions, five recent events, three dispatched remarks, and at most two
+relevant older events from the same project directory. Historical
 lookup uses explicit task goals and SQLite FTS5. Stored memory does not establish live
 activity after a restart. Memory schema changes discard stored data without migration.
 

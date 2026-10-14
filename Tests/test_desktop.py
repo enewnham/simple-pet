@@ -46,7 +46,7 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(200, json={
                     "id": "msg_desktop", "type": "message", "role": "assistant", "model": config.model,
                     "content": [{"type": "text", "text": json.dumps({
-                        "speak": speech if explicit else None, "gesture": "waving" if explicit else None, "session_context": None,
+                        "speak": speech if explicit else None, "gesture": "waving" if explicit else None,
                     })}],
                     "stop_reason": "end_turn", "stop_sequence": None,
                     "usage": {"input_tokens": 100, "output_tokens": 20},

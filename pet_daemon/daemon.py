@@ -186,7 +186,7 @@ class Daemon:
                     if result["failure"]:
                         self.error_until = self.clock() + self.config.behavior.error_seconds
                         if lane.failure["count"] in (1, 3, 5):
-                            self.queue("failure", trigger)
+                            self.queue("failure", {**trigger, "generation": lane.generation})
                         else:
                             trace("observation.skipped", reason="repeated_failure")
                     elif packet["event"] in ("intent", "subagent_start"):
@@ -287,7 +287,7 @@ class Daemon:
             timeout = self.config.request_timeout
             try:
                 result = await asyncio.wait_for(
-                    self.cognition.observe({**self.sessions.snapshot(keys), "trigger": trigger, "sleeping": self.behavior.sleeping}, reason, context),
+                    self.cognition.observe({**self.sessions.snapshot(), "trigger": trigger, "sleeping": self.behavior.sleeping}, reason, context),
                     timeout=timeout,
                 )
                 if sessions is not self.sessions:
@@ -361,13 +361,17 @@ class Daemon:
                 elif self.behavior.status and self.pending and now >= self.pending[1]:
                     reason, _, trigger = self.pending
                     self.pending = None
-                    valid = reason != "failure" or self.sessions.failed
+                    valid = True
+                    if reason == "failure":
+                        lane = self.sessions.lanes.get(trigger["target_session"])
+                        failure = lane.failures.get(trigger["activity"]) if lane else None
+                        valid = bool(failure and not failure["resolved"] and failure["generation"] == trigger["generation"])
                     if valid:
                         request = (reason, None, None, trigger)
                     else:
                         trace("observation.skipped", reason=reason, snapshot=self.sessions.snapshot())
                 elif check_in:
-                    request = ("check_in", None, None, {"sessions": check_in})
+                    request = ("check_in", None, None, {"sessions": check_in, "target_session": check_in[0]})
                     for key in check_in:
                         self.sessions.lanes[key].last_check_in = now
                 elif self.behavior.status and self.sessions.active and now >= self.next_observation and not self.behavior.sleeping:

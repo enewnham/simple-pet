@@ -1,0 +1,35 @@
+# Codebase guide
+
+Simple Pet is a macOS desktop companion for coding agents. A Python daemon tracks
+agent activity and generates commentary with Claude Haiku. A Swift/AppKit overlay
+renders the pet. They communicate over local Unix datagram sockets.
+
+Start with [README.md](README.md) for setup, agent hooks, configuration, and development
+checks. [Makefile](Makefile) defines the check and build commands.
+
+## Follow the work
+
+- **Agent input:** [scripts/pet-hook](scripts/pet-hook) adapts harness events.
+  [bin/pet-notify](bin/pet-notify) sends commands. [examples/](examples/) contains
+  harness hook configurations and a command wrapper.
+- **Daemon coordination:** [pet_daemon/daemon.py](pet_daemon/daemon.py) receives
+  events, schedules commentary, and sends renderer commands.
+- **Activity and animation:** [pet_daemon/sessions.py](pet_daemon/sessions.py)
+  tracks turns and tool calls. [pet_daemon/behavior.py](pet_daemon/behavior.py)
+  controls movement, gestures, and naps.
+- **Commentary and memory:** [pet_daemon/cognition.py](pet_daemon/cognition.py)
+  builds model requests and interprets responses.
+  [pet_daemon/memory.py](pet_daemon/memory.py) stores bounded SQLite history.
+- **Renderer:** [Sources/PetCore/](Sources/PetCore/) defines events and socket
+  handling. [Sources/PetOverlay/](Sources/PetOverlay/) contains the AppKit app and view.
+- **Configuration and sprites:** [pet_daemon/config.py](pet_daemon/config.py) and
+  [pet_daemon/sprites.py](pet_daemon/sprites.py) load settings and packs.
+  [pet.config.example.json](pet.config.example.json) lists settings.
+  [scripts/fetch-assets.sh](scripts/fetch-assets.sh) starts asset import.
+
+## Find verification
+
+[Tests/](Tests/) contains Python unit and runtime checks alongside Swift core,
+overlay, and asset checks. Start with `test_runtime.py` for daemon integration behavior
+or the test named after the module you are changing. See the README's development
+checks for automated checks, renderer builds, and desktop verification.

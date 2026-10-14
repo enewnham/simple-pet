@@ -485,6 +485,8 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.directory = Path(self.temporary.name)
         self.requests = []
         self.observation_requests = []
+        self.summary_requests = []
+        self.summary = None
         self.responses = []
         self.client = anthropic.AsyncAnthropic(
             api_key="test-key",
@@ -514,6 +516,15 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
 
     def transport(self, request):
         body = json.loads(request.content)
+        summary = body["output_config"]["format"]["schema"]["required"] == ["session_context"]
+        if summary:
+            self.summary_requests.append((request, body))
+            result = {"session_context": self.summary}
+            return httpx.Response(200, json={
+                "id": "msg_summary", "type": "message", "role": "assistant", "model": self.config.model,
+                "content": [{"type": "text", "text": json.dumps(result)}], "stop_reason": "end_turn", "stop_sequence": None,
+                "usage": {"input_tokens": 100, "output_tokens": 20},
+            })
         self.requests.append((request, body))
         self.observation_requests.append((request, body))
         responses = self.responses
@@ -528,7 +539,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             result, stop = response
         else:
             result = {
-                "speak": None, "gesture": None, "session_context": None,
+                "speak": None, "gesture": None,
             }
             stop = "end_turn"
         content = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
@@ -568,10 +579,10 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("cache_control", body)
         schema = body["output_config"]["format"]["schema"]
         self.assertEqual(schema["properties"]["gesture"]["anyOf"][0]["enum"], ["hop", "peek"])
-        self.assertEqual(set(schema["required"]), {"speak", "gesture", "session_context"})
+        self.assertEqual(set(schema["required"]), {"speak", "gesture"})
         self.assertFalse(schema["additionalProperties"])
         snapshot = json.loads(body["messages"][-1]["content"])
-        self.assertEqual(snapshot["sessions"][0]["first_prompt"], "Refactor batch inserts")
+        self.assertEqual(snapshot["focus_session"]["first_prompt"], "Refactor batch inserts")
         self.assertEqual(snapshot["pet"], "fixture-pet")
 
     async def test_rest_only_pack_uses_null_only_gesture_schema(self):
@@ -582,7 +593,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_explicit_commentary_requires_speech_and_preserves_full_text(self):
         speech = "The compiler has produced an unusually elaborate complaint. " * 20
-        self.responses.append(({"speak": speech, "gesture": "peek", "session_context": None}, "end_turn"))
+        self.responses.append(({"speak": speech, "gesture": "peek"}, "end_turn"))
         result = await self.observe("explicit", "The compiler complained again")
         schema = self.requests[-1][1]["output_config"]["format"]["schema"]
         self.assertEqual(schema["properties"]["speak"], {"anyOf": [{"type": "string"}, {"type": "null"}]})
@@ -592,7 +603,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["context"], "The compiler complained again")
 
     async def test_each_request_contains_one_current_observation_and_no_generated_history(self):
-        self.responses.append(({"speak": "Undelivered remark", "gesture": None, "session_context": None}, "end_turn"))
+        self.responses.append(({"speak": "Undelivered remark", "gesture": None}, "end_turn"))
         await self.observe()
         await self.observe("routine")
         messages = self.requests[-1][1]["messages"]
@@ -603,7 +614,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_prompt_bounds_unicode_context_and_session_data(self):
         self.sessions.handle({"harness": "claude", "session": "worker", "event": "intent", "goal": "猫" * 100000})
-        self.responses.append(({"speak": "The parser is progressing.", "gesture": None, "session_context": None}, "end_turn"))
+        self.responses.append(({"speak": "The parser is progressing.", "gesture": None}, "end_turn"))
         await self.observe("routine", "🐈" * 100000)
         content = self.requests[-1][1]["messages"][0]["content"]
         request = {**self.requests[-1][1], "timeout": self.config.request_timeout}
@@ -621,15 +632,27 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         snapshot["trigger"] = {"harness": "codex", "session": "worker-7", "event": "tool_error", "detail": "Parser assertion failed"}
         await self.cognition.observe(snapshot, "failure")
         payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
-        self.assertEqual(payload["sessions"][0]["id"], "codex:worker-7")
-        self.assertLessEqual(len(payload["sessions"]), 3)
-        self.assertGreaterEqual(payload["other_sessions"]["active"], 5)
+        self.assertEqual(payload["focus_session"]["id"], "codex:worker-7")
+        self.assertLessEqual(len(payload["other_sessions"]), 2)
+        self.assertGreaterEqual(payload["omitted_sessions"]["active"], 5)
         self.assertEqual(payload["trigger"]["event"], "tool_error")
         self.assertNotIn("Parser assertion failed", json.dumps(payload))
-        target = payload["sessions"][0]
+        target = payload["focus_session"]
         self.assertEqual(len(target["active_tools"]), 3)
         self.assertEqual(target["other_active_tools"], 2)
         self.assertTrue(all(tool["duration_seconds"] == 120 for tool in target["active_tools"]))
+
+    async def test_completed_sessions_keep_results_without_full_request_history(self):
+        self.sessions.handle({"harness": "codex", "session": "done", "event": "intent", "goal": "Document the renderer"})
+        self.sessions.handle({"harness": "codex", "session": "done", "event": "turn_done", "progress": "Renderer docs verified"})
+        await self.observe()
+        payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
+        completed = payload["other_sessions"][0]
+        self.assertEqual(completed["goal"], "Document the renderer")
+        self.assertEqual(completed["progress"], "Renderer docs verified")
+        self.assertEqual(completed["outcome"], "success")
+        self.assertNotIn("recent_requests", completed)
+        self.assertNotIn("first_prompt", completed)
 
     async def test_small_prompt_budget_preserves_trigger_over_older_memory(self):
         self.config.prompt_max_bytes = 8000
@@ -643,7 +666,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         body = self.requests[-1][1]
         self.assertLessEqual(len(json.dumps({**body, "timeout": self.config.request_timeout}, ensure_ascii=False).encode("utf-8")), 8000)
         payload = json.loads(body["messages"][0]["content"])
-        self.assertEqual(payload["sessions"][0]["id"], "codex:worker-7")
+        self.assertEqual(payload["focus_session"]["id"], "codex:worker-7")
         self.assertEqual(payload["trigger"]["event"], "tool_error")
         self.assertNotIn("The parser failed", json.dumps(payload))
         self.assertLess(len(payload["memory"]["recent_events"]), 5)
@@ -664,16 +687,20 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all("parser tokenization" in event["summary"] for event in memory["recalled_events"]))
         self.assertEqual([row["text"] for row in memory["dispatched_speech"]], ["Visible remark 5", "Visible remark 6", "Visible remark 7"])
 
-    async def test_context_update_targets_only_the_first_selected_session(self):
+    async def test_summary_uses_only_the_focused_session(self):
         self.sessions.handle({"harness": "codex", "session": "focus", "event": "intent", "goal": "Validate parser behavior"})
         snapshot = self.sessions.snapshot()
         snapshot["trigger"] = {"harness": "codex", "session": "focus", "event": "intent"}
-        self.responses.append(({"speak": None, "gesture": None,
-                                "session_context": "Parser validation awaits the next checks."}, "end_turn"))
+        self.summary = "Parser validation awaits the next checks."
         result = await self.cognition.observe(snapshot, "prompt")
         payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
-        self.assertEqual(payload["sessions"][0]["id"], "codex:focus")
+        self.assertEqual(payload["focus_session"]["id"], "codex:focus")
         self.assertEqual(result["context_session"], "codex:focus")
+        self.assertEqual(result["session_context"], self.summary)
+        summary = json.loads(self.summary_requests[-1][1]["messages"][0]["content"])
+        self.assertEqual(summary["first_prompt"], "Validate parser behavior")
+        self.assertNotIn("Refactor batch inserts", json.dumps(summary))
+        self.assertEqual(set(summary), {"first_prompt", "recent_requests", "progress", "session_context"})
         focus = next(session for session in snapshot["sessions"] if session["id"] == "codex:focus")
         self.assertEqual(result["context_version"], (focus["generation"], focus["first_prompt"], tuple(focus["recent_requests"]), focus["session_context"]))
         schema = self.requests[-1][1]["output_config"]["format"]["schema"]
@@ -681,19 +708,19 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_rejects_invalid_results_without_recording_speech(self):
         invalid = [
-            ({"speak": None, "gesture": "missing", "session_context": None}, "end_turn"),
-            ({"speak": None, "session_context": None}, "end_turn"),
-            ({"speak": None, "gesture": None, "session_context": 5}, "end_turn"),
-            ({"speak": 5, "gesture": None, "session_context": None}, "end_turn"),
+            ({"speak": None, "gesture": "missing"}, "end_turn"),
+            ({"speak": None}, "end_turn"),
+            ({"speak": None, "gesture": None, "extra": 5}, "end_turn"),
+            ({"speak": 5, "gesture": None}, "end_turn"),
             ("{unfinished", "end_turn"),
-            ({"speak": None, "gesture": None, "session_context": None}, "max_tokens"),
+            ({"speak": None, "gesture": None}, "max_tokens"),
         ]
         for response in invalid:
             self.responses.append(response)
             with self.assertRaises(ValueError):
                 await self.observe()
             self.assertEqual(self.cognition.memory.speech(), [])
-        self.responses.append(({"speak": None, "gesture": None, "session_context": None}, "end_turn"))
+        self.responses.append(({"speak": None, "gesture": None}, "end_turn"))
         with self.assertRaises(ValueError):
             await self.observe("explicit", "Please speak")
         self.assertEqual(self.cognition.memory.speech(), [])
