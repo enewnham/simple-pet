@@ -117,6 +117,30 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             except BlockingIOError:
                 return result
 
+    async def test_clear_memory_cancels_commentary_and_starts_fresh_sessions(self):
+        self.slow = True
+        self.event("intent", goal="Improve parser", repo="/repo/parser")
+        await asyncio.wait_for(self.entered.wait(), 1)
+        memory = self.daemon.cognition.memory
+        memory.record_speech("Remember the parser", "prompt")
+        self.send({"kind": "clear_memory"})
+        await self.packet(lambda packet: packet.get("text") == "" and packet.get("ttl") == 0)
+        self.release.set()
+        await self.wait_for(lambda: self.daemon.request_task is None)
+        self.assertEqual(self.daemon.sessions.snapshot()["sessions"], [])
+        self.assertEqual(memory.recent(), [])
+        self.assertEqual(memory.speech(), [])
+        self.assertEqual(memory.projects(["/repo/parser"]), [])
+        self.assertIsNone(memory.context("cli:one"))
+        self.assertIsNone(self.daemon.last_speech)
+        self.assertFalse(any(packet.get("text") for packet in await self.drain()))
+        self.slow = False
+        self.event("intent", goal="Write documentation", repo="/repo/parser")
+        await self.packet(lambda packet: packet.get("text") == self.speech)
+        lane = self.daemon.sessions.lanes["cli:one"]
+        self.assertEqual(lane.first_prompt, "Write documentation")
+        self.assertNotIn("Improve parser", json.dumps(memory.recent()))
+
     def use_clock(self):
         self.now = 1000.0
         clock = lambda: self.now
@@ -139,6 +163,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.daemon.sessions.working)
         self.assertFalse(self.release.is_set())
         self.event("tool_done", session="two", harness="cursor", call="lint")
+        await self.wait_for(lambda: not self.daemon.sessions.lanes["cursor:two"].calls)
+        self.assertEqual(self.daemon.activity(), "working")
+        self.event("turn_done", session="two", harness="cursor")
         await self.packet(lambda packet: packet.get("state") == "idle")
         self.release.set()
         speech = await self.packet(lambda packet: "text" in packet)
@@ -195,7 +222,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.packet(lambda packet: packet.get("sleeping") is False)
         speech = await self.packet(lambda packet: "text" in packet)
         self.assertEqual(speech["text"], self.speech)
-        self.assertFalse(self.daemon.sessions.working)
+        self.assertTrue(self.daemon.sessions.working)
         self.assertFalse(self.daemon.behavior.sleeping)
 
     async def test_click_replays_recent_speech_and_requests_fresh_speech_after_a_minute(self):
@@ -598,7 +625,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.now += 300
         await asyncio.wait_for(self.entered.wait(), 1)
         self.event("tool_done", harness="codex", call="checks", progress="Tests passed")
-        await self.wait_for(lambda: not self.daemon.sessions.working)
+        await self.wait_for(lambda: not self.daemon.sessions.lanes["codex:one"].calls)
+        self.assertEqual(self.daemon.activity(), "working")
         self.release.set()
         await self.wait_for(lambda: self.daemon.request_task is None)
         self.assertEqual(self.daemon.cognition.memory.speech(), [])
@@ -638,7 +666,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             hooks = [entry for entry in entries if entry["event"] == "hook.received"]
             self.assertTrue(any(entry["packet"].get("tool") == "pytest parser" for entry in hooks))
             request = next(entry for entry in entries if entry["event"] == "observation.request")
-            self.assertEqual(request["request"]["system"][0]["text"], self.config.persona + "\n\n" + INSTRUCTIONS)
+            self.assertEqual(request["request"]["system"][0]["text"], "<persona>\n" + self.config.persona + "\n</persona>\n\n" + INSTRUCTIONS)
             snapshot = json.loads(request["request"]["messages"][-1]["content"])
             self.assertEqual(snapshot["sessions"][0]["last_tool"], "pytest parser")
             self.assertIn('猫', snapshot["sessions"][0]["first_prompt"])

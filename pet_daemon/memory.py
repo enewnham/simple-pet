@@ -183,5 +183,10 @@ class Memory:
         rows = self.db.execute("SELECT text,reason,timestamp FROM speech WHERE pet=? ORDER BY id DESC LIMIT ?", (self.pet, limit)).fetchall()
         return [dict(row) for row in reversed(rows)]
 
+    def clear(self):
+        with self.db:
+            for table in ("events", "projects", "speech", "contexts"):
+                self.db.execute(f"DELETE FROM {table} WHERE pet=?", (self.pet,))
+
     def close(self):
         self.db.close()

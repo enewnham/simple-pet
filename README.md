@@ -74,6 +74,17 @@ remarks, and at most two relevant older events from the same project directory. 
 lookup uses explicit task goals and SQLite FTS5. Stored memory does not establish live
 activity after a restart. Memory schema changes discard stored data without migration.
 
+Clear the running pet's knowledge with:
+
+```sh
+bin/pet-notify clear-memory
+```
+
+This erases the current pet's saved events, project context, session prompts, summaries,
+and speech history. It resets tracked sessions, clears the speech bubble, and cancels
+pending commentary. Agent hooks build fresh knowledge as events arrive. The daemon
+must be running. Set `PET_DAEMON_SOCKET` if it uses a custom socket path.
+
 `prompt_max_bytes` caps the serialized request, including the persona and response schema.
 It is a byte limit, not an exact token limit. `memory_retention_days` and `memory_max_events`
 limit stored history. The daemon preserves the triggering session when trimming context.

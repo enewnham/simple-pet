@@ -125,7 +125,7 @@ class BehaviorTests(unittest.TestCase):
         self.assertEqual([command['id'] for command in self.animations()], ['quiet-pose'])
         self.assertFalse(behavior.gesture('jumping', self.sessions))
 
-    def test_work_burst_returns_to_rest_while_tools_continue(self):
+    def test_work_bursts_resume_after_breaks_throughout_an_active_turn(self):
         behavior = self.make_behavior({'busy-pose': {'role': 'work', 'frames': 2, 'fps': 2}})
         self.start()
         behavior.tick('working', self.sessions)
@@ -137,6 +137,44 @@ class BehaviorTests(unittest.TestCase):
         behavior.tick('working', self.sessions)
         self.assertEqual(self.animations()[-1]['id'], 'quiet-pose')
         self.assertTrue(self.sessions.working)
+        self.sessions.handle({'harness': 'cli', 'event': 'tool_done', 'session': 'one', 'call': 'build'})
+        for _ in range(3):
+            self.clock.advance(99)
+            behavior.tick('working', self.sessions)
+            self.assertEqual(self.animations()[-1]['id'], 'quiet-pose')
+            self.clock.advance(1)
+            behavior.tick('working', self.sessions)
+            self.assertEqual(self.animations()[-1]['id'], 'busy-pose')
+            self.clock.advance(2)
+            behavior.tick('working', self.sessions)
+            self.assertEqual(self.animations()[-1]['id'], 'quiet-pose')
+        self.finish()
+        self.clock.advance(100)
+        behavior.tick('idle', self.sessions)
+        self.assertEqual(self.animations()[-1]['id'], 'quiet-pose')
+
+    def test_working_roams_between_typing_stretches_and_completes_the_walk(self):
+        behavior = self.make_behavior({'busy': {'role': 'work'}, 'west': {'role': 'walk-left'}, 'east': {'role': 'walk-right'}},
+                                      working_pause=(1, 1), walk_seconds=(6, 6))
+        self.start()
+        behavior.tick('working', self.sessions)
+        self.clock.advance(2)
+        behavior.tick('working', self.sessions)
+        self.rng.walk = True
+        self.clock.advance(1)
+        behavior.tick('working', self.sessions)
+        motion = self.output[-1]['motion']
+        self.assertEqual(motion['seconds'], 6)
+        self.clock.advance(5)
+        behavior.tick('working', self.sessions)
+        self.assertEqual(self.output[-1]['motion'], motion)
+        self.clock.advance(1)
+        behavior.completion({'event': 'motion', 'command_id': motion['command_id'], 'result': 'finished'})
+        behavior.tick('working', self.sessions)
+        self.rng.walk = False
+        self.clock.advance(1)
+        behavior.tick('working', self.sessions)
+        self.assertEqual(self.animations()[-1]['id'], 'busy')
 
     def test_idle_debounce_and_minimum_dwell_preserve_a_brief_work_pose(self):
         behavior = self.make_behavior({'busy-pose': {'role': 'work'}})
@@ -250,14 +288,17 @@ class BehaviorTests(unittest.TestCase):
         self.assertIsNone(behavior.pending)
         self.assertEqual(self.animations()[-1]['id'], 'quiet-pose')
 
-    def test_work_gesture_requires_pending_tools_but_attention_can_follow_reasoning(self):
+    def test_work_gesture_follows_an_active_turn_and_pauses_for_input(self):
         behavior = self.make_behavior({'busy-pose': {'role': 'work'}, 'ponder': {'role': 'attention'}})
         self.sessions.handle({'harness': 'cli', 'event': 'intent', 'session': 'one', 'goal': 'Plan changes'})
         self.assertTrue(self.sessions.active)
-        self.assertFalse(self.sessions.working)
-        behavior.tick('idle', self.sessions)
+        self.assertTrue(self.sessions.working)
+        behavior.tick('working', self.sessions)
+        self.assertEqual(self.animations()[-1]['id'], 'busy-pose')
+        self.sessions.handle({'harness': 'cli', 'event': 'waiting', 'session': 'one', 'call': 'question'})
         self.assertFalse(behavior.gesture('busy-pose', self.sessions))
-        self.assertEqual(self.animations()[-1]['id'], 'quiet-pose')
+        self.clock.advance(3)
+        behavior.tick('idle', self.sessions)
         self.assertTrue(behavior.gesture('ponder', self.sessions))
         self.assertEqual(self.animations()[-1]['id'], 'ponder')
 

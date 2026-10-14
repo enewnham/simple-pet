@@ -32,6 +32,31 @@ class MemoryTests(unittest.TestCase):
         self.assertNotIn("The parser checks passed.", json.dumps(self.memory.recent()))
         self.assertEqual(self.path.read_bytes()[:16], b"SQLite format 3\x00")
 
+    def test_clear_erases_saved_knowledge_for_the_current_pet(self):
+        other = Memory(self.path, "other-pet", clock=lambda: self.now)
+        event = {"harness": "codex", "session": "one", "event": "intent",
+                 "repo": "/repo/parser", "goal": "Improve parser"}
+        try:
+            for memory in (self.memory, other):
+                memory.record_event(event)
+                memory.record_speech("Parser work", "prompt")
+                memory.save_context("codex:one", "Improve parser", "Parser work", ["Improve parser"])
+            self.memory.clear()
+            self.memory.close()
+            self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
+            self.assertEqual(self.memory.recent(), [])
+            self.assertEqual(self.memory.speech(), [])
+            self.assertEqual(self.memory.projects(["/repo/parser"]), [])
+            self.assertIsNone(self.memory.context("codex:one"))
+            self.assertTrue(other.recent())
+            self.assertTrue(other.speech())
+            self.assertTrue(other.projects(["/repo/parser"]))
+            self.assertIsNotNone(other.context("codex:one"))
+            self.memory.record_event(event)
+            self.assertEqual(len(self.memory.recent()), 1)
+        finally:
+            other.close()
+
     def test_event_count_discards_oldest_facts(self):
         for progress in ("First result", "Second result", "Third result", "Fourth result"):
             self.event(progress)

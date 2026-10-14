@@ -72,6 +72,15 @@ class NotifyTests(unittest.TestCase):
         self.run_client("--session", "worker", "--status", "start")
         self.assertEqual(self.receive()["call"], "single")
 
+    def test_clear_memory_sends_command_and_reports_unavailable_daemon(self):
+        result = self.run_client("clear-memory")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self.receive(), {"kind": "clear_memory"})
+        self.environment["PET_DAEMON_SOCKET"] = str(self.path / "missing.sock")
+        result = self.run_client("clear-memory")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("could not send clear-memory", result.stderr)
+
     def test_speech_only_enqueues_a_daemon_request(self):
         started = time.monotonic()
         result = self.run_client("speak", "--context", "A long and complicated event", "--ttl", "7.5")

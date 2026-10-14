@@ -49,6 +49,10 @@ class Lane:
     waiting_since: float | None = None
     last_check_in: float | None = None
 
+    @property
+    def working(self):
+        return self.active and (not self.waiting or any(call != self.waiting_call for call in self.calls))
+
 
 class Sessions:
     def __init__(self, clock, stale_seconds=3600, retention_seconds=7200):
@@ -64,7 +68,7 @@ class Sessions:
 
     @property
     def working(self):
-        return any(lane.calls for lane in self.lanes.values())
+        return any(lane.working for lane in self.lanes.values())
 
     @property
     def active(self):
@@ -383,7 +387,7 @@ class Sessions:
         now = self.clock()
         lanes = [(key, lane) for key, lane in sorted(self.lanes.items()) if keys is None or key in keys]
         return {
-            "activity": "working" if any(lane.calls for _, lane in lanes) else "idle",
+            "activity": "working" if any(lane.working for _, lane in lanes) else "idle",
             "sessions": [{
                 "id": key, "parent": lane.parent, "goal": lane.goal, "repo": lane.repo, "phase": lane.phase,
                 "first_prompt": lane.first_prompt, "session_context": lane.session_context,

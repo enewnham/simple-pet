@@ -34,8 +34,8 @@ class BehaviorConfig:
     walk_seconds: tuple = (2, 6)
     walk_speed: float = 40
     idle_pause: tuple = (20, 60)
-    working_pause: tuple = (8, 20)
-    work_burst_seconds: tuple = (2, 4)
+    working_pause: tuple = (2, 5)
+    work_burst_seconds: tuple = (12, 25)
     pointer_radius: float = 100
     resume_seconds: float = 3
     gaze_reset_seconds: float = 1.2

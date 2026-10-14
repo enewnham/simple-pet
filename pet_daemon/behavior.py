@@ -154,7 +154,7 @@ class Behavior:
         elif clip.role == "error" and not sessions.failed:
             reason = "no_unresolved_failure"
         elif clip.role == "work" and not sessions.working:
-            reason = "no_active_tools"
+            reason = "no_active_work"
         elif clip.role == "attention" and not sessions.active:
             reason = "no_active_turn"
         if reason:
@@ -270,19 +270,17 @@ class Behavior:
             self.clip = None
             self.baseline_until = None
             self.next_action = now + self.rng.uniform(*self._pause())
-        if changed and state == "working":
-            candidates = self.pack.role("work", "attention")
-            if candidates:
-                self._baseline(self.rng.choice(candidates).id, source="work_burst")
-                self.baseline_until = now + self.rng.uniform(*self.config.work_burst_seconds)
-                trace("behavior.work_burst", clip=self.clip, until=self.baseline_until)
+        if state == "working" and (changed or now >= self.next_action) and not self.status["dragging"] and not self.status["menu"]:
+            if not changed and self.rng.random() < 0.5 and self._walk():
                 return
-        if state == "working" and now >= self.next_action:
-            candidates = self.pack.role("work", "attention")
+            candidates = self.pack.role("work") or self.pack.role("attention")
             if candidates:
                 self._baseline(self.rng.choice(candidates).id, source="work_burst")
                 self.baseline_until = now + self.rng.uniform(*self.config.work_burst_seconds)
                 trace("behavior.work_burst", clip=self.clip, until=self.baseline_until)
+            else:
+                self.next_action = now + self.rng.uniform(*self._pause())
+                self._baseline(self.pack.rest)
             return
         if nap_allowed and now >= self.next_nap:
             self._nap()

@@ -152,7 +152,9 @@ class Daemon:
             if not isinstance(packet, dict):
                 return
             kind = packet.get("kind")
-            if kind == "event":
+            if kind == "clear_memory":
+                self.clear_memory()
+            elif kind == "event":
                 result = self.sessions.handle(packet)
                 if result:
                     key = result["session"]
@@ -219,6 +221,26 @@ class Daemon:
             trace("input.rejected", error=str(error))
             log.debug("Ignoring malformed datagram")
 
+    def clear_memory(self):
+        try:
+            self.cognition.memory.clear()
+        except sqlite3.Error as error:
+            log.warning("Could not clear pet memory: %s", error)
+            return
+        if self.request_task:
+            self.request_task.cancel()
+        self.sessions = Sessions(self.clock, self.config.stale_seconds, self.config.completed_retention_seconds)
+        self.pending = None
+        self.manual = None
+        self.clicked = False
+        self.last_speech = None
+        self.last_reaction_state = None
+        self.error_until = 0
+        self.next_observation = self.clock() + self.rng.uniform(*self.config.observation_seconds)
+        self.emit({"text": "", "ttl": 0})
+        trace("memory.cleared", pet=self.pack.pet)
+        log.info("cleared knowledge for pet=%s", self.pack.pet)
+
     def speech_duration(self, speech):
         return max(self.config.speech_ttl, 3 + len(speech.split()) / 2)
 
@@ -256,6 +278,7 @@ class Daemon:
             return
         with observation():
             started = self.clock()
+            sessions = self.sessions
             revision = self.sessions.revision
             include_activity = reason == "check_in"
             keys = trigger["sessions"] if include_activity else None
@@ -268,6 +291,9 @@ class Daemon:
                     self.cognition.observe({**self.sessions.snapshot(keys), "trigger": trigger, "sleeping": self.behavior.sleeping}, reason, context),
                     timeout=timeout,
                 )
+                if sessions is not self.sessions:
+                    trace("observation.discarded", reason="memory_cleared")
+                    return
                 if context is None and observation_context != self.sessions.observation_context(include_activity, keys):
                     trace("observation.discarded", reason="session_changed", requested_revision=revision, revision=self.sessions.revision, decision=result)
                     log.info("discarded stale automatic response")

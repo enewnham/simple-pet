@@ -47,12 +47,12 @@
       60
     ],
     "working_pause": [
-      8,
-      20
+      2,
+      5
     ],
     "work_burst_seconds": [
-      2,
-      4
+      12,
+      25
     ],
     "pointer_radius": 100,
     "resume_seconds": 3,

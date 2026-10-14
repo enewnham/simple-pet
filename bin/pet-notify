@@ -69,6 +69,7 @@ def main():
     parser.add_argument("--tool")
     parser.add_argument("--exit-code", type=int)
     commands = parser.add_subparsers(dest="command")
+    commands.add_parser("clear-memory", help="clear the running pet's saved knowledge and tracked sessions")
     intent = commands.add_parser("intent", help="record a session's goal")
     intent.add_argument("--session", required=True)
     intent.add_argument("--text", required=True)
@@ -76,7 +77,9 @@ def main():
     speech.add_argument("--context", required=True)
     speech.add_argument("--ttl", type=bubble_seconds)
     args = parser.parse_args()
-    if args.command == "speak":
+    if args.command == "clear-memory":
+        payload = {"kind": "clear_memory"}
+    elif args.command == "speak":
         payload = {"kind": "speak", "context": args.context}
         if args.ttl is not None:
             payload["ttl"] = args.ttl
@@ -95,7 +98,9 @@ def main():
             payload["exit_code"] = args.exit_code
         if args.status != "start":
             payload["outcome"] = "error" if args.status == "error" else "success"
-    send(payload)
+    sent = send(payload)
+    if args.command == "clear-memory" and not sent:
+        parser.exit(1, "pet-notify: could not send clear-memory to the pet daemon\n")
 
 
 if __name__ == "__main__":
