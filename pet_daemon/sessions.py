@@ -141,6 +141,17 @@ class Sessions:
                 lane.context_loaded = lane.context_loaded or other.context_loaded
                 lane.repo = lane.repo or other.repo
                 if other.active:
+                    adopt_waiting = other.waiting and (not lane.waiting or other.waiting_since >= lane.waiting_since)
+                    if adopt_waiting:
+                        lane.waiting = True
+                        lane.waiting_call = other.waiting_call
+                        lane.waiting_since = other.waiting_since
+                        lane.last_check_in = other.last_check_in
+                    if adopt_waiting or other.last_seen > lane.last_seen:
+                        lane.phase = other.phase or lane.phase
+                        lane.last_tool = other.last_tool or lane.last_tool
+                        lane.progress = other.progress or lane.progress
+                    lane.last_seen = max(lane.last_seen, other.last_seen)
                     for category, failure in other.failures.items():
                         if failure["generation"] == other.generation:
                             failure["generation"] = lane.generation
@@ -286,7 +297,7 @@ class Sessions:
                 lane.waiting_call = None
                 lane.waiting_since = None
             lane.progress = "" if kind == "tool_error" or event.get("outcome") == "error" else event.get("progress", lane.progress)
-            if kind == "tool_error":
+            if kind == "tool_error" or event.get("outcome") == "error":
                 lane.failure = self._failure(lane, call.activity, now, call.tool)
                 failure = True
             elif event.get("outcome") == "cancelled":

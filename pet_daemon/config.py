@@ -24,6 +24,8 @@ def interval(value):
 @dataclass
 class BehaviorConfig:
     roaming: bool = True
+    roaming_radius: float = 160
+    automatic_speech_cooldown_seconds: float = 90
     naps: bool = True
     nap_interval: tuple = (120, 240)
     nap_seconds: tuple = (20, 45)
@@ -49,6 +51,8 @@ class BehaviorConfig:
             value = getattr(self, item.name)
             if item.name in ("roaming", "naps"):
                 valid = type(value) is bool
+            elif item.name == "automatic_speech_cooldown_seconds":
+                valid = type(value) in (int, float) and math.isfinite(value) and value >= 0
             elif item.name == "repeat_range":
                 valid = interval(value) and all(type(v) is int for v in value)
             elif isinstance(value, (list, tuple)):

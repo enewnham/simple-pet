@@ -77,10 +77,36 @@ Long prompts use sentence ranking to prioritize requests and questions, preservi
 selected sentences in their original order and marking omitted text. Excerpts can
 miss relevant instructions. Summaries use the configured remote model.
 
-The pet thinks before starting work, celebrates successes, and reacts to failures and
-long waits. After a quiet stretch, it may wave for attention. Click it to hear a recent
-remark or get a fresh response. After extended idleness, a click also earns a greeting.
-Set `behavior.idle_greeting_seconds` to adjust how long it waits before greeting.
+The pet shares the rhythm of active tasks with short review and work animations, then
+rests between stretches. It reacts to the third unresolved failure in the same activity
+category and to failed turns. Recovery and completed tasks earn a brief acknowledgment,
+even while another task continues. Ordinary tool calls stay quiet.
+
+Automatic commentary has a 90-second cooldown, controlled by
+`behavior.automatic_speech_cooldown_seconds`. Each input wait can earn one reminder that
+bypasses this cooldown. Click the pet for a fresh response. Clicks and explicit speech
+requests take priority over automatic commentary.
+
+Wandering stays within `behavior.roaming_radius` pixels of the startup position or the
+position established after dragging. Speech, nearby pointers, dragging, and menus stop
+movement. Naps require every task to be inactive and at least two quiet minutes. Failed
+completed tasks can rest and nap. New work or interaction wakes the pet.
+
+Animation choices use a preferred pose, one alternative, then the pack's rest pose.
+Custom clips with the matching role can stand in for the named poses.
+
+| Expression | Preferred pose | Alternative |
+| --- | --- | --- |
+| Starting or investigating | `review` | `running` |
+| Working | `running` | `review` |
+| Waiting for input | `waiting` | `review` |
+| Trouble or failure | `failed` | `review` |
+| Recovery or success | `jumping` | `waving` |
+| Clicking | `waving` | `review` |
+| Cancellation | `review` | `idle` |
+
+Clicks, dragging, menus, speech, and nearby pointers interrupt quiet time. The quiet
+period starts again after the interaction ends.
 
 Clear the running pet's memory with:
 

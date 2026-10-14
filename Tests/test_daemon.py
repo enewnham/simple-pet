@@ -103,6 +103,28 @@ class SessionsTests(unittest.TestCase):
         self.assertTrue(self.sessions.working)
         self.assertFalse(self.sessions.lanes["claude:child"].calls)
 
+    def test_alias_merge_preserves_the_latest_unanswered_question(self):
+        self.event("intent", session="native", goal="Choose a strategy")
+        self.event("intent", session="temporary", goal="Choose a strategy")
+        self.event("waiting", session="native", call="first", progress="Choose a strategy")
+        self.clock.advance(1)
+        self.event("tool_start", session="temporary", call="read", tool="Read")
+        self.event("tool_done", session="temporary", call="read")
+        self.event("waiting", session="temporary", call="second", progress="Choose a target")
+        temporary = self.sessions.lanes["claude:temporary"]
+        temporary.last_check_in = self.clock()
+        self.event("session_start", session="native", aliases=["temporary"])
+        lane = self.sessions.lanes["claude:native"]
+        self.assertTrue(lane.waiting)
+        self.assertFalse(lane.working)
+        self.assertEqual(lane.waiting_call, "second")
+        self.assertEqual(lane.waiting_since, self.clock())
+        self.assertEqual(lane.last_check_in, self.clock())
+        self.assertEqual(lane.phase, "investigating")
+        self.assertEqual(lane.progress, "Choose a target")
+        self.event("tool_done", session="temporary", call="second")
+        self.assertFalse(lane.waiting)
+
     def test_alias_merge_preserves_active_child_failures_through_completion(self):
         self.event("session_start", session="child")
         self.event("tool_start", session="child-thread", call="tests", tool="pytest")
@@ -170,6 +192,16 @@ class SessionsTests(unittest.TestCase):
         self.assertIsNone(self.event("tool_error", call="current", turn="one", detail="Old result"))
         self.assertTrue(self.sessions.working)
         self.assertEqual(self.sessions.lanes["claude:main"].recent_requests[-1], "Second goal")
+
+    def test_error_outcome_on_tool_completion_records_failure(self):
+        self.event("tool_start", call="checks", tool="pytest")
+        result = self.event("tool_done", call="checks", outcome="error")
+        self.assertTrue(result["failure"])
+        lane = self.sessions.lanes["claude:main"]
+        self.assertEqual(lane.failure["activity"], "testing")
+        self.assertFalse(lane.failure["resolved"])
+        self.event("turn_done")
+        self.assertEqual(lane.outcome, "error")
 
     def test_successful_retry_resolves_same_tool_failure(self):
         self.event("intent", goal="Fix tests")

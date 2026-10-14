@@ -14,6 +14,7 @@ import time
 
 from .behavior import Behavior
 from .cognition import Cognition
+from .episodes import Episodes
 from .memory import bounded
 from .sessions import Sessions
 from .sprites import Pack
@@ -22,7 +23,6 @@ from .telemetry import observation, trace
 
 log = logging.getLogger("pet-daemon")
 MAX_INPUT_BYTES = 2000
-SPEECH_REPLAY_SECONDS = 60
 
 
 def bind_socket(path):
@@ -81,6 +81,10 @@ class Daemon:
         self.rng = rng or random.Random()
         self.pack = Pack(config.pet_dir)
         self.sessions = Sessions(clock, config.stale_seconds, config.completed_retention_seconds)
+        self.episodes = Episodes()
+        self.last_attention_attempt = float("-inf")
+        self.request_reason = None
+        self.request_revision = 0
         self.behavior = Behavior(self.pack, config.behavior, clock, self.rng, self.emit)
         self.cognition = Cognition(client, config, self.pack)
         self.transport = None
@@ -135,8 +139,8 @@ class Daemon:
         now = self.clock()
         if reason == "failure":
             self.pending = (reason, now + 1, trigger)
-        elif not self.pending or self.pending[0] != "failure" or not self.sessions.failed:
-            delay = {"prompt": 0, "completion": 1}[reason]
+        elif reason == "check_in" or not self.pending or self.pending[0] != "failure" or not self.sessions.failed:
+            delay = {"prompt": 0, "completion": 1, "check_in": 0}[reason]
             self.pending = (reason, now + delay, trigger)
 
         trace("observation.queued", reason=reason, scheduled=self.pending)
@@ -192,24 +196,24 @@ class Daemon:
                         self.cognition.memory.record_event(packet, state)
                     except sqlite3.Error as error:
                         log.warning("Could not record pet event: %s", error)
-                    if result["failure"]:
-                        self.error_until = self.clock() + self.config.behavior.error_seconds
-                        if lane.failure["count"] in (1, 3, 5):
-                            self.queue("failure", {**trigger, "generation": lane.generation})
-                        else:
-                            trace("observation.skipped", reason="repeated_failure")
-                    elif packet["event"] in ("intent", "subagent_start"):
-                        self.queue("prompt", trigger)
-                    elif packet["event"] in ("turn_done", "subagent_done") or result["convergence"]:
-                        self.queue("completion", trigger)
+                    episodes = self.episodes.handle(packet, result, self.sessions)
+                    for episode in episodes:
+                        if not self.system_sleeping:
+                            self.behavior.react(episode.kind, self.sessions, key)
+                        episode_trigger = {**trigger, "episode": episode.kind, "generation": episode.generation,
+                                           "serial": episode.serial, "activity": episode.activity}
+                        if episode.kind in ("trouble", "failure"):
+                            self.error_until = self.clock() + self.config.behavior.error_seconds
+                            self.queue("failure", episode_trigger)
+                        elif episode.kind == "start" and packet["event"] in ("intent", "subagent_start"):
+                            self.queue("prompt", episode_trigger)
+                        elif episode.kind == "waiting":
+                            episode_trigger["sessions"] = [key]
+                            self.queue("check_in", episode_trigger)
+                        elif episode.kind in ("success", "cancelled", "recovery"):
+                            self.queue("completion", episode_trigger)
                     if not self.system_sleeping:
                         self.behavior.tick(self.activity(), self.sessions)
-                        if packet["event"] in ("tool_start", "waiting"):
-                            self.behavior.attention(self.sessions, key)
-                        tool_succeeded = packet["event"] == "tool_done" and packet.get("outcome", "success") == "success"
-                        turn_succeeded = packet["event"] in ("turn_done", "subagent_done") and lane.outcome == "success"
-                        if tool_succeeded or turn_succeeded:
-                            self.behavior.success()
                 trace("hook.received", packet=packet, result=result, snapshot=self.sessions.snapshot())
             elif kind == "renderer":
                 if packet.get("event") == "status":
@@ -230,6 +234,8 @@ class Daemon:
                 ttl = packet.get("ttl")
                 if ttl is None or (type(ttl) in (int, float) and math.isfinite(ttl) and ttl >= 0):
                     self.behavior.wake("speech_request")
+                    self.behavior.stop_movement()
+                    self.preempt()
                     self.manual = (packet["context"], ttl)
                     trace("speech.requested", context=packet["context"], ttl=ttl)
         except (ValueError, KeyError, TypeError, UnicodeError) as error:
@@ -245,6 +251,9 @@ class Daemon:
         if self.request_task:
             self.request_task.cancel()
         self.sessions = Sessions(self.clock, self.config.stale_seconds, self.config.completed_retention_seconds)
+        self.episodes = Episodes()
+        self.last_attention_attempt = float("-inf")
+        self.request_revision += 1
         self.pending = None
         self.manual = None
         self.clicked = False
@@ -265,11 +274,14 @@ class Daemon:
         self.system_sleeping = sleeping
         trace("system.sleep" if sleeping else "system.wake")
         if sleeping:
+            self.behavior.suspend("system_sleep")
+            self.request_revision += 1
             if self.request_task:
                 self.request_task.cancel()
             self.last_speech = None
             self.pending = None
         else:
+            self.behavior.resume()
             self.pending = None
             self.sessions.prune()
             for lane in self.sessions.lanes.values():
@@ -278,25 +290,33 @@ class Daemon:
             self.last_reaction_state = self.sessions.reaction_state()
             self.next_observation = self.clock() + self.rng.uniform(*self.config.observation_seconds)
 
+    def preempt(self):
+        self.request_revision += 1
+        if self.request_task:
+            self.request_task.cancel()
+        self.pending = None
+
     def click(self):
         self.behavior.wake("click")
-        self.behavior.greet(self.sessions)
-        if self.last_speech and self.clock() - self.last_speech[1] <= SPEECH_REPLAY_SECONDS:
-            speech, _ = self.last_speech
-            self.emit({"text": speech, "ttl": self.speech_duration(speech)})
-            trace("speech.replayed", text=speech)
-        else:
-            self.clicked = True
-            trace("speech.requested", reason="click")
+        self.behavior.react("click", self.sessions)
+        if self.request_task and self.request_reason == "click" and not self.request_task.done():
+            return
+        self.preempt()
+        self.clicked = True
+        trace("speech.requested", reason="click")
 
     async def observe(self, reason, context=None, ttl=None, trigger=None):
         if self.system_sleeping:
             return
         with observation():
             started = self.clock()
+            revision = self.request_revision
             sessions = self.sessions
             include_activity = reason == "check_in"
-            keys = trigger["sessions"] if include_activity else None
+            keys = trigger.get("sessions") if include_activity and trigger else None
+            episode_key = trigger.get("target_session") if trigger and "episode" in trigger else None
+            if episode_key:
+                keys = [self.sessions.aliases.get(episode_key, episode_key)]
             observation_context = self.sessions.observation_context(include_activity, keys)
             trace("observation.started", reason=reason)
             self.last_reaction_state = self.sessions.reaction_state()
@@ -322,7 +342,15 @@ class Daemon:
                 if sessions is not self.sessions:
                     trace("observation.discarded", reason="memory_cleared")
                     return
-                if context is None and observation_context != self.sessions.observation_context(include_activity, keys):
+                relevant = observation_context == self.sessions.observation_context(include_activity, keys)
+                if episode_key:
+                    canonical = self.sessions.aliases.get(episode_key, episode_key)
+                    before = next(iter(observation_context.values()), None)
+                    current = self.sessions.observation_context(include_activity, [canonical]).get(canonical)
+                    if trigger["episode"] == "waiting" and before is not None and current is not None:
+                        before, current = before[:5], current[:5]
+                    relevant = self.episodes.relevant(trigger, self.sessions) and before == current
+                if revision != self.request_revision or (context is None and not relevant):
                     trace("observation.discarded", reason="session_changed", decision=result)
                     log.info("discarded stale automatic response")
                     return
@@ -345,10 +373,12 @@ class Daemon:
                     speech = result["speak"]
                     if speech.strip() and ttl != 0:
                         self.behavior.wake("speech")
+                        self.behavior.stop_movement()
                     reading_seconds = self.speech_duration(speech)
                     delivered = self.emit({"text": speech, "ttl": reading_seconds if ttl is None else ttl})
                     if delivered and speech.strip() and ttl != 0:
                         self.last_speech = (speech, self.clock())
+                        self.last_attention_attempt = self.clock()
                         self.clicked = False
                         self.cognition.memory.record_speech(speech, reason)
             except asyncio.CancelledError:
@@ -375,9 +405,11 @@ class Daemon:
                 if not self.request_task.cancelled():
                     self.request_task.result()
                 self.request_task = None
+                self.request_reason = None
             if not self.system_sleeping and self.request_task is None:
                 request = None
-                check_in = self.sessions.check_in_due(self.config.idle_message_seconds) if self.behavior.status else []
+                check_in = [key for key in self.sessions.check_in_due(self.config.idle_message_seconds)
+                            if not self.sessions.lanes[key].waiting] if self.behavior.status else []
                 if self.behavior.status and self.manual is not None:
                     context, ttl = self.manual
                     self.manual = None
@@ -388,11 +420,7 @@ class Daemon:
                 elif self.behavior.status and self.pending and now >= self.pending[1]:
                     reason, _, trigger = self.pending
                     self.pending = None
-                    valid = True
-                    if reason == "failure":
-                        lane = self.sessions.lanes.get(trigger["target_session"])
-                        failure = lane.failures.get(trigger["activity"]) if lane else None
-                        valid = bool(failure and not failure["resolved"] and failure["generation"] == trigger["generation"])
+                    valid = self.episodes.relevant(trigger, self.sessions) if trigger and "episode" in trigger else True
                     if valid:
                         request = (reason, None, None, trigger)
                     else:
@@ -401,13 +429,23 @@ class Daemon:
                     request = ("check_in", None, None, {"sessions": check_in, "target_session": check_in[0]})
                     for key in check_in:
                         self.sessions.lanes[key].last_check_in = now
-                elif self.behavior.status and self.sessions.active and now >= self.next_observation and not self.behavior.sleeping:
+                elif self.behavior.status and self.sessions.active and now >= self.next_observation and not self.behavior.sleeping and not any(lane.waiting for lane in self.sessions.lanes.values()):
                     self.next_observation = now + self.rng.uniform(*self.config.observation_seconds)
                     if self.sessions.reaction_state() != self.last_reaction_state:
                         request = ("routine", None, None)
                     else:
                         trace("observation.skipped", reason="unchanged_activity")
+                if request and request[0] not in ("click", "explicit"):
+                    trigger = request[3] if len(request) > 3 else None
+                    waiting = bool(trigger and trigger.get("episode") == "waiting")
+                    cooldown = self.config.behavior.automatic_speech_cooldown_seconds
+                    if not waiting and now - self.last_attention_attempt < cooldown:
+                        trace("observation.skipped", reason="attention_cooldown")
+                        request = None
                 if request:
+                    self.last_attention_attempt = now
+                    self.behavior.stop_movement()
+                    self.request_reason = request[0]
                     self.next_observation = now + self.rng.uniform(*self.config.observation_seconds)
                     trace("observation.scheduled", reason=request[0], next_observation=self.next_observation)
                     self.request_task = asyncio.create_task(self.observe(*request))
