@@ -13,6 +13,7 @@ from anthropic import AsyncAnthropic
 
 from pet_daemon.config import Config
 from pet_daemon.daemon import Daemon, bind_socket
+from pet_daemon.sprites import Pack
 
 
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=")
@@ -179,6 +180,29 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(speech["text"], self.speech)
         self.assertEqual(speech["ttl"], 15)
         self.assertEqual(len(self.requests), 1)
+
+    async def test_successful_calls_celebrate_without_waiting_for_commentary(self):
+        manifest_path = self.config.pet_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["clips"]["hop"] = {"frames": ["pixel.png"], "fps": 1, "role": "celebrate"}
+        manifest_path.write_text(json.dumps(manifest))
+        self.daemon.behavior.pack = Pack(self.config.pet_dir)
+        self.slow = True
+        self.event("intent", goal="Run checks")
+        await asyncio.wait_for(self.entered.wait(), 1)
+        self.event("tool_start", call="tests", tool="pytest")
+        await self.wait_for(lambda: "tests" in self.daemon.sessions.lanes["cli:one"].calls)
+        self.event("tool_done", call="tests", outcome="success")
+        await self.packet(lambda packet: packet.get("animation", {}).get("id") == "hop")
+        self.assertTrue(self.daemon.sessions.active)
+        self.assertFalse(self.release.is_set())
+        await self.drain()
+        self.event("tool_start", call="cancelled", tool="pytest")
+        await self.wait_for(lambda: "cancelled" in self.daemon.sessions.lanes["cli:one"].calls)
+        self.event("tool_done", call="cancelled", outcome="cancelled")
+        await self.wait_for(lambda: not self.daemon.sessions.lanes["cli:one"].calls)
+        packets = await self.drain()
+        self.assertFalse(any(packet.get("animation", {}).get("id") == "hop" for packet in packets))
 
     async def test_prompt_triggers_commentary_without_waiting_for_routine_timer(self):
         self.event("intent", harness="codex", goal="Run local checks")

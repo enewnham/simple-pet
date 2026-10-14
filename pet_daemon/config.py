@@ -28,6 +28,7 @@ class BehaviorConfig:
     repeat_range: tuple = (1, 3)
     repeat_budget: float = 4
     gesture_cooldown: float = 15
+    idle_greeting_seconds: float = 300
     baseline_dwell: float = 2
     idle_debounce: float = 1
     error_seconds: float = 2

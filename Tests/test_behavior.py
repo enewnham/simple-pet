@@ -195,6 +195,7 @@ class BehaviorTests(unittest.TestCase):
     def test_error_preempts_gesture_cooldown_and_recovers_to_current_activity(self):
         behavior = self.make_behavior({'hello': {'role': 'greeting'}, 'uh-oh': {'role': 'error'}, 'busy': {'role': 'work'}})
         behavior.tick('idle', self.sessions)
+        self.assertTrue(behavior.gesture('hello', self.sessions))
         self.assertGreater(behavior.gesture_after, self.clock())
         self.start()
         behavior.tick('error', self.sessions)
@@ -294,13 +295,69 @@ class BehaviorTests(unittest.TestCase):
         self.assertTrue(self.sessions.active)
         self.assertTrue(self.sessions.working)
         behavior.tick('working', self.sessions)
-        self.assertEqual(self.animations()[-1]['id'], 'busy-pose')
+        self.assertEqual(self.animations()[-1]['id'], 'ponder')
         self.sessions.handle({'harness': 'cli', 'event': 'waiting', 'session': 'one', 'call': 'question'})
         self.assertFalse(behavior.gesture('busy-pose', self.sessions))
         self.clock.advance(3)
         behavior.tick('idle', self.sessions)
         self.assertTrue(behavior.gesture('ponder', self.sessions))
         self.assertEqual(self.animations()[-1]['id'], 'ponder')
+
+    def test_thinking_preempts_a_wave_and_leads_directly_into_work(self):
+        behavior = self.make_behavior({'hello': {'role': 'greeting'}, 'waiting': {'role': 'attention'},
+                                       'review': {'role': 'attention'}, 'busy': {'role': 'work'}})
+        behavior.tick('idle', self.sessions)
+        self.assertTrue(behavior.gesture('hello', self.sessions))
+        self.start()
+        behavior.tick('working', self.sessions)
+        self.assertEqual(self.animations()[-1]['id'], 'review')
+        self.assertFalse(behavior.gesture('busy', self.sessions))
+        self.clock.advance(3)
+        behavior.tick('working', self.sessions)
+        self.assertEqual(self.animations()[-1]['id'], 'review')
+        self.clock.advance(1)
+        behavior.tick('working', self.sessions)
+        self.assertEqual(self.animations()[-1]['id'], 'busy')
+
+    def test_failure_interrupts_thinking(self):
+        behavior = self.make_behavior({'review': {'role': 'attention'}, 'uh-oh': {'role': 'error'}})
+        self.start()
+        behavior.tick('working', self.sessions)
+        self.assertEqual(self.animations()[-1]['id'], 'review')
+        self.sessions.handle({'harness': 'cli', 'event': 'tool_error', 'session': 'one', 'call': 'build'})
+        behavior.tick('error', self.sessions)
+        self.assertEqual(self.animations()[-1]['id'], 'uh-oh')
+
+    def test_success_preempts_waving_and_celebrates_while_work_continues(self):
+        behavior = self.make_behavior({'hello': {'role': 'greeting'}, 'hop': {'role': 'celebrate'}})
+        behavior.tick('idle', self.sessions)
+        self.assertTrue(behavior.gesture('hello', self.sessions))
+        self.start()
+        behavior.tick('working', self.sessions)
+        self.sessions.handle({'harness': 'cli', 'event': 'tool_done', 'session': 'one', 'call': 'build'})
+        behavior.success()
+        self.assertEqual(self.animations()[-1]['id'], 'hop')
+        behavior.tick('working', self.sessions)
+        self.assertEqual(self.animations()[-1]['id'], 'hop')
+        self.assertTrue(self.sessions.active)
+
+    def test_idle_wave_waits_five_minutes_and_clicks_can_repeat_the_greeting(self):
+        behavior = self.make_behavior({'hello': {'role': 'greeting'}}, naps=False)
+        behavior.tick('idle', self.sessions)
+        self.clock.advance(299)
+        behavior.tick('idle', self.sessions)
+        self.assertEqual(self.animations()[-1]['id'], 'quiet-pose')
+        self.assertFalse(behavior.greet(self.sessions))
+        self.clock.advance(1)
+        behavior.tick('idle', self.sessions)
+        self.assertEqual(self.animations()[-1]['id'], 'hello')
+        command = self.animations()[-1]['command_id']
+        behavior.completion({'event': 'animation', 'command_id': command, 'result': 'finished'})
+        self.clock.advance(301)
+        behavior.tick('idle', self.sessions)
+        self.assertEqual(self.animations()[-1]['id'], 'quiet-pose')
+        self.assertTrue(behavior.greet(self.sessions))
+        self.assertEqual(self.animations()[-1]['id'], 'hello')
 
     def test_error_gesture_returns_to_rest_after_same_tool_recovery(self):
         behavior = self.make_behavior({'concerned': {'role': 'error', 'frames': 4, 'fps': 2}})

@@ -34,6 +34,7 @@
     ],
     "repeat_budget": 4,
     "gesture_cooldown": 15,
+    "idle_greeting_seconds": 300,
     "baseline_dwell": 2,
     "idle_debounce": 1,
     "error_seconds": 2,

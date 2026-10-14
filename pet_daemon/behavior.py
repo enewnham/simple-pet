@@ -17,7 +17,9 @@ class Behavior:
         self.pending = None
         self.baseline_started = 0
         self.baseline_until = None
+        self.thinking_until = None
         self.idle_since = None
+        self.greeted_idle = False
         self.next_action = 0
         self.gesture_after = 0
         self.clear_since = None
@@ -147,6 +149,8 @@ class Behavior:
             reason = "renderer_unavailable_or_error"
         elif self.status["dragging"] or self.status["menu"]:
             reason = "interaction"
+        elif self.thinking_until is not None and self.clock() < self.thinking_until:
+            reason = "thinking"
         elif self.clock() < self.gesture_after:
             reason = "cooldown"
         elif clip.role == "celebrate" and not sessions.clean_convergence:
@@ -162,6 +166,28 @@ class Behavior:
             return False
         self.wake("gesture")
         self._play(clip, source="observation")
+        return True
+
+    def success(self):
+        if not self.status or self.state == "error" or self.status["dragging"] or self.status["menu"]:
+            return
+        candidates = self.pack.role("celebrate")
+        if candidates:
+            self.wake("success")
+            self.thinking_until = None
+            self._play(self.rng.choice(candidates), kind="success", source="success")
+
+    def greet(self, sessions):
+        if not self.status or sessions.active or self.state != "idle" or self.idle_since is None:
+            return False
+        if self.clock() - self.idle_since < self.config.idle_greeting_seconds or self.status["dragging"] or self.status["menu"]:
+            return False
+        candidates = self.pack.role("greeting")
+        if not candidates:
+            return False
+        self.wake("greeting")
+        self._play(self.rng.choice(candidates), source="greeting")
+        self.greeted_idle = True
         return True
 
     def _walk(self):
@@ -223,11 +249,15 @@ class Behavior:
         elif self.next_nap is None:
             self.next_nap = now + self.rng.uniform(*self.config.nap_interval)
         changed = state != self.state
+        starting_work = changed and state == "working" and self.state in (None, "idle")
         if changed:
             trace("behavior.state", previous=self.state, state=state)
             self.state = state
             self.emit({"state": state})
             self.idle_since = now if state == "idle" else None
+            self.greeted_idle = False
+            if state != "working":
+                self.thinking_until = None
             if state == "error":
                 self._stop("error")
                 candidates = self.pack.role("error")
@@ -248,8 +278,21 @@ class Behavior:
             self.clear_since = now
         if state == "error":
             return
+        if starting_work and not self.status["dragging"] and not self.status["menu"]:
+            candidates = self.pack.role("attention")
+            if candidates:
+                candidates.sort(key=lambda clip: clip.id != "review")
+                self._stop("thinking")
+                self._baseline(candidates[0].id, source="thinking")
+                self.thinking_until = now + self.rng.uniform(4, 7)
+                return
+        if self.thinking_until is not None:
+            if now < self.thinking_until:
+                return
+            self.thinking_until = None
+            self.next_action = now
         if self.pending:
-            if self.pending["kind"] == "error" or (self.pending["role"] == "celebrate" and not sessions.clean_convergence) or (self.pending["role"] == "error" and not sessions.failed):
+            if self.pending["kind"] == "error" or (self.pending["kind"] != "success" and self.pending["role"] == "celebrate" and not sessions.clean_convergence) or (self.pending["role"] == "error" and not sessions.failed):
                 self._stop("activity_changed")
             elif self.pending["kind"] == "gesture" and (self.status["dragging"] or self.status["menu"]):
                 self._stop("interaction")
@@ -285,12 +328,14 @@ class Behavior:
         if nap_allowed and now >= self.next_nap:
             self._nap()
             return
+        if not self.greeted_idle and not self._blocked() and self.greet(sessions):
+            return
         if now >= self.next_action and not self.status["dragging"] and not self.status["menu"]:
             self.next_action = now + self.rng.uniform(*self._pause())
             trace("behavior.routine", state=state, next_action=self.next_action, gesture_after=self.gesture_after)
             if self.rng.random() < 0.5 and self._walk():
                 return
-            candidates = self.pack.role("greeting", "gesture")
+            candidates = self.pack.role("gesture")
             if candidates and now >= self.gesture_after:
                 self._play(self.rng.choice(candidates))
                 return

@@ -62,47 +62,23 @@ examples/pet-run pytest
 
 Edit `pet.config.json` and restart the daemon to apply changes. Paths are relative to the configuration file. See [pet.config.example.json](pet.config.example.json) for all settings and defaults. Set `pet_dir` to your imported sprite pack.
 
-Factual events, project context, and dispatched speech are saved in SQLite at `memory_file`.
-Each session keeps its first captured prompt, four recent requests, and a short evolving
-task summary. On new prompts and turn completion, a separate Haiku request updates
-the focused session's summary using only that session's evidence.
-The summary describes current intent, while the first prompt remains a historical anchor.
-These fields survive restarts without restoring live calls or activity. Stale responses
-do not overwrite newer session context.
+The pet remembers recent work and remarks across restarts. Use `memory_retention_days`
+and `memory_max_events` to limit how much history it keeps. Customize `persona` to change
+its voice.
 
-Commentary requests identify one focused session and include compact context for up to
-two other sessions, five recent events, three dispatched remarks, and at most two
-relevant older events from the same project directory. Historical
-lookup uses explicit task goals and SQLite FTS5. Stored memory does not establish live
-activity after a restart. Memory schema changes discard stored data without migration.
+The pet thinks before starting work, celebrates successes, and reacts to failures and
+long waits. After a quiet stretch, it may wave for attention. Click it to hear a recent
+remark or get a fresh response. After extended idleness, a click also earns a greeting.
+Set `behavior.idle_greeting_seconds` to adjust how long it waits before greeting.
 
-Clear the running pet's knowledge with:
+Clear the running pet's memory with:
 
 ```sh
 bin/pet-notify clear-memory
 ```
 
-This erases the current pet's saved events, project context, session prompts, summaries,
-and speech history. It resets tracked sessions, clears the speech bubble, and cancels
-pending commentary. Agent hooks build fresh knowledge as events arrive. The daemon
-must be running. Set `PET_DAEMON_SOCKET` if it uses a custom socket path.
-
-`prompt_max_bytes` caps the serialized request, including the persona and response schema.
-It is a byte limit, not an exact token limit. `memory_retention_days` and `memory_max_events`
-limit stored history. The daemon preserves the triggering session when trimming context.
-Persona text must fit within 4,000 UTF-8 bytes. Requests use a one-hour cache for the stable
-system prompt and a concise structured response.
-
-The pet reacts to starts, results, meaningful progress, new failures, and prolonged waits.
-Unchanged routine observations make no API call. Repeated failures in the same activity earn reactions
-on occurrences one, three, and five. A successful execution of that activity clears its
-failure count. Unrelated commands do not clear it. Clicks can replay recent speech or request a fresh
-comment. Explicit commentary requests and periodic check-ins remain available.
-
-Computer sleep cancels in-flight requests and pauses generation. Wake discards queued
-reactions and rechecks stale sessions. Factual events remain stored. Only nonempty speech
-successfully sent to the renderer with a nonzero lifetime enters speech memory. Socket
-success records dispatch, not confirmation that the renderer displayed the bubble.
+This clears remembered work, remarks, and the current speech bubble. The pet learns from
+new agent activity. Set `PET_DAEMON_SOCKET` if it uses a custom socket path.
 
 ## Development checks
 

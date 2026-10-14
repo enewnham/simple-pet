@@ -195,6 +195,10 @@ class Daemon:
                         self.queue("completion", trigger)
                     if not self.system_sleeping:
                         self.behavior.tick(self.activity(), self.sessions)
+                        tool_succeeded = packet["event"] == "tool_done" and packet.get("outcome", "success") == "success"
+                        turn_succeeded = packet["event"] in ("turn_done", "subagent_done") and lane.outcome == "success"
+                        if tool_succeeded or turn_succeeded:
+                            self.behavior.success()
                 trace("hook.received", packet=packet, result=result, snapshot=self.sessions.snapshot())
             elif kind == "renderer":
                 if packet.get("event") == "status":
@@ -265,6 +269,7 @@ class Daemon:
 
     def click(self):
         self.behavior.wake("click")
+        self.behavior.greet(self.sessions)
         if self.last_speech and self.clock() - self.last_speech[1] <= SPEECH_REPLAY_SECONDS:
             speech, _ = self.last_speech
             self.emit({"text": speech, "ttl": self.speech_duration(speech)})
