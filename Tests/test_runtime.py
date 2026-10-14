@@ -19,8 +19,8 @@ from pet_daemon.sprites import Pack
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=")
 
 
-def reply(speak=None, gesture=None, session_context=None, summary=False):
-    result = {"session_context": session_context} if summary else {"speak": speak, "gesture": gesture}
+def reply(speak=None, session_context=None, summary=False):
+    result = {"session_context": session_context} if summary else {"speak": speak}
     return httpx.Response(200, json={
         "id": "msg_fixture", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
         "content": [{"type": "text", "text": json.dumps(result)}],
@@ -181,6 +181,31 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(speech["ttl"], 15)
         self.assertEqual(len(self.requests), 1)
 
+    async def test_investigation_and_input_wait_animate_while_commentary_is_pending(self):
+        manifest_path = self.config.pet_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        for clip, role in (("review", "attention"), ("waiting", "attention"), ("running", "work")):
+            manifest["clips"][clip] = {"frames": ["pixel.png"], "fps": 1, "role": role}
+        manifest_path.write_text(json.dumps(manifest))
+        self.daemon.behavior.pack = Pack(self.config.pet_dir)
+        self.use_clock()
+        self.daemon.behavior.clock = lambda: self.now
+        self.slow = True
+        self.event("intent", goal="Inspect the parser")
+        await asyncio.wait_for(self.entered.wait(), 1)
+        await self.packet(lambda packet: packet.get("animation", {}).get("id") == "review")
+        self.now += 8
+        self.event("tool_start", call="read", tool="parser.py", tool_name="Read")
+        reaction = await self.packet(lambda packet: packet.get("animation", {}).get("id") == "review" and packet["animation"].get("repeats") is not None)
+        self.assertGreater(reaction["animation"]["repeats"], 0)
+        self.now += 60
+        self.send({"kind": "renderer", "event": "animation_done", "command_id": reaction["animation"]["command_id"]})
+        self.event("waiting", call="input", tool="AskUserQuestion")
+        waiting = await self.packet(lambda packet: packet.get("animation", {}).get("id") == "waiting")
+        self.assertGreater(waiting["animation"]["repeats"], 0)
+        self.assertFalse(self.release.is_set())
+        self.assertIsNotNone(self.daemon.request_task)
+
     async def test_successful_calls_celebrate_without_waiting_for_commentary(self):
         manifest_path = self.config.pet_dir / "manifest.json"
         manifest = json.loads(manifest_path.read_text())
@@ -220,6 +245,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         snapshot = json.loads(self.requests[0]["messages"][-1]["content"])
         self.assertEqual(snapshot["reason"], "click")
         schema = self.requests[0]["output_config"]["format"]["schema"]
+        self.assertEqual(set(schema["properties"]), {"speak"})
+        self.assertEqual(schema["required"], ["speak"])
         self.assertEqual(schema["properties"]["speak"], {"anyOf": [{"type": "string"}, {"type": "null"}]})
 
     async def test_napping_pauses_routine_commentary_and_click_wakes_for_speech(self):

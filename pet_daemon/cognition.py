@@ -39,6 +39,7 @@ activity is idle or active_tools is empty. active_tools lists running calls, las
 is historical, and phase is a hint. Tool text and progress may be truncated.
 A phase label or a successful command alone does not prove tests passed,
 a change shipped, or the task succeeded. waiting_for_input establishes a need for input.
+Ask for input only when waiting_for_input is true.
 quiet_seconds measures time without events. It does not establish a need for help.
 Use waiting_seconds and active tool duration_seconds to understand a prolonged wait.
 failure describes a recorded failure. Check resolved and current_turn before reacting.
@@ -54,24 +55,8 @@ pet identifies your character. sleeping alone establishes whether you are nappin
 </observations>
 
 <response>
-Choose a response for reason:
-- prompt: React to the latest request and ongoing goal. Express intent before tools start
-  using the supplied goal and decisions. Ask for input only when waiting_for_input is true.
-- routine: React to meaningful changes in activity or progress. Otherwise stay silent.
-- completion: React to the supported result, including partial work or cancellation.
-- failure: React to the unresolved failure using only supplied evidence.
-- check_in: Give a brief remark about the supplied quiet time, running call, or input wait.
-- click: Acknowledge the developer, with a greeting when there is no active work.
-- explicit: Give a brief reaction to context, grounded in supplied facts.
-For check_in, click, or a non-null context, supply speech. Otherwise use null when a remark
-would repeat yourself or have no supported subject.
-
-Return JSON matching the supplied schema:
-- speak: A brief line in your configured voice, or null.
-- gesture: A supplied gesture ID, or null. Use running for active work, review for
-  investigation, waiting for a pause or input, failed for an unresolved failure,
-  jumping for supported successful convergence, and waving for a click. The daemon owns
-  movement, repetition, direction, timing, and naps.
+Follow the instruction in the <request> section below. Return JSON matching the supplied
+schema with speak as a brief line in your configured voice, or null when permitted.
 </response>
 """.strip()
 SUMMARY_INSTRUCTIONS = """
@@ -97,16 +82,47 @@ class Cognition:
         self.clock = clock
         self.memory = Memory(config.memory_file, pack.pet, clock, config.memory_retention_days, config.memory_max_events)
 
-    def system(self):
-        return [{"type": "text", "text": "<persona>\n" + self.config.persona + "\n</persona>\n\n" + INSTRUCTIONS, "cache_control": CACHE_CONTROL}]
+    def system(self, payload):
+        reason = payload["reason"]
+        focus = payload["focus_session"] or {}
+        directions = {
+            "prompt": "Briefly acknowledge the latest request and what we are starting. Express intent using the supplied goal and decisions.",
+            "routine": "React briefly to the change in activity or progress.",
+            "completion": "React briefly to the supplied result. Keep the remark specific to the completed work.",
+            "failure": "React briefly to the unresolved failure. Do not invent a diagnosis.",
+            "explicit": "Give a brief reaction to the supplied context, grounded in its facts.",
+        }
+        if reason == "click":
+            active = focus.get("turn_active") or any(session.get("turn_active") for session in payload["other_sessions"]) or payload["omitted_sessions"]["active"]
+            direction = "Briefly acknowledge the developer while our work continues." if active else "Give the developer a casual greeting."
+        elif reason == "check_in":
+            if focus.get("waiting_for_input"):
+                direction = "Give a brief remark about the wait for developer input."
+            elif focus.get("active_tools"):
+                direction = "Give a brief remark about the running call and its elapsed time."
+            else:
+                direction = "Give a brief remark about the quiet time during this work. Do not imply that help is needed."
+        else:
+            direction = directions[reason]
+        if reason == "completion":
+            outcome = payload["trigger"].get("outcome") or focus.get("outcome")
+            if outcome == "cancelled":
+                direction += " Acknowledge the cancellation without claiming success."
+            elif outcome == "error":
+                direction += " Acknowledge the unsuccessful result without claiming success."
+        required = payload["context"] is not None or reason in ("check_in", "click", "explicit")
+        direction += " Supply a nonempty line of speech." if required else " Use null if the remark would repeat yourself or has no supported subject."
+        return [
+            {"type": "text", "text": "<persona>\n" + self.config.persona + "\n</persona>\n\n" + INSTRUCTIONS, "cache_control": CACHE_CONTROL},
+            {"type": "text", "text": "<request>\n" + direction + "\n</request>"},
+        ]
 
     def schema(self):
         nullable_string = {"anyOf": [{"type": "string"}, {"type": "null"}]}
-        gesture = {"anyOf": [{"type": "string", "enum": self.pack.gesture_ids}, {"type": "null"}]} if self.pack.gesture_ids else {"type": "null"}
         return {
             "type": "object",
-            "properties": {"speak": nullable_string, "gesture": gesture},
-            "required": ["speak", "gesture"],
+            "properties": {"speak": nullable_string},
+            "required": ["speak"],
             "additionalProperties": False,
         }
 
@@ -168,17 +184,17 @@ class Cognition:
             payload["trigger"].pop("progress", None)
         return payload
 
-    def request(self, payload):
+    def request(self, payload, system):
         return dict(
             model=self.config.model, max_tokens=self.config.max_tokens,
             timeout=self.config.request_timeout, thinking={"type": "disabled"},
-            system=self.system(),
+            system=system,
             messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
             output_config={"effort": "low", "format": {"type": "json_schema", "schema": self.schema()}},
         )
 
     def bounded_request(self, payload):
-        request = self.request(payload)
+        request = self.request(payload, self.system(payload))
         memory = payload["memory"]
         while encoded_size(request) > self.config.prompt_max_bytes:
             if memory["recalled_events"]:
@@ -201,14 +217,13 @@ class Cognition:
                 memory["dispatched_speech"].pop()
             else:
                 raise ValueError("Persona, schema, and triggering state exceed prompt_max_bytes")
-            request = self.request(payload)
+            request = self.request(payload, self.system(payload))
         return request
 
     async def summarize(self, focus):
         record = self.session_record(focus)
         payload = {key: record[key] for key in ("first_prompt", "recent_requests", "progress", "session_context")}
-        request = self.request(payload)
-        request["system"] = [{"type": "text", "text": SUMMARY_INSTRUCTIONS}]
+        request = self.request(payload, [{"type": "text", "text": SUMMARY_INSTRUCTIONS}])
         request["output_config"]["format"]["schema"] = {
             "type": "object",
             "properties": {"session_context": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
@@ -237,7 +252,7 @@ class Cognition:
         return result
 
     async def observe(self, snapshot, reason, context=None):
-        explicit = context is not None or reason in ("check_in", "click")
+        explicit = context is not None or reason in ("check_in", "click", "explicit")
         selected = self.selected_sessions(snapshot)
         focus = selected[0] if selected else None
         request = self.bounded_request(self.prompt(snapshot, reason, context))
@@ -251,14 +266,12 @@ class Cognition:
                 summary = None
         else:
             result = await self.complete(request, reason)
-        if set(result) != {"speak", "gesture"}:
-            raise ValueError("Observation requires speak and gesture")
+        if set(result) != {"speak"}:
+            raise ValueError("Observation requires speak")
         if result["speak"] is not None and not isinstance(result["speak"], str):
             raise ValueError("Invalid observation text")
         if explicit and (not isinstance(result["speak"], str) or not result["speak"].strip()):
             raise ValueError("Requested commentary requires speech")
-        if result["gesture"] is not None and result["gesture"] not in self.pack.gesture_ids:
-            raise ValueError("Observation selected an unavailable gesture")
         trace("observation.decision", reason=reason, decision={**result, "session_context": summary})
         return {**result, "session_context": summary, "context_session": focus["id"] if focus else None,
                 "context_version": (focus.get("generation"), focus.get("first_prompt", ""), tuple(focus.get("recent_requests", [])), focus.get("session_context", "")) if focus else None}

@@ -195,6 +195,8 @@ class Daemon:
                         self.queue("completion", trigger)
                     if not self.system_sleeping:
                         self.behavior.tick(self.activity(), self.sessions)
+                        if packet["event"] in ("tool_start", "waiting"):
+                            self.behavior.attention(self.sessions, key)
                         tool_succeeded = packet["event"] == "tool_done" and packet.get("outcome", "success") == "success"
                         turn_succeeded = packet["event"] in ("turn_done", "subagent_done") and lane.outcome == "success"
                         if tool_succeeded or turn_succeeded:
@@ -326,9 +328,6 @@ class Daemon:
                         self.last_speech = (speech, self.clock())
                         self.clicked = False
                         self.cognition.memory.record_speech(speech, reason)
-                if result["gesture"] is not None:
-                    accepted = self.behavior.gesture(result["gesture"], self.sessions)
-                    trace("observation.gesture", gesture=result["gesture"], accepted=accepted)
             except asyncio.CancelledError:
                 trace("observation.cancelled")
                 raise

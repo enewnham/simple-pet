@@ -319,6 +319,22 @@ class BehaviorTests(unittest.TestCase):
         behavior.tick('working', self.sessions)
         self.assertEqual(self.animations()[-1]['id'], 'busy')
 
+    def test_investigation_and_input_wait_choose_their_attention_poses(self):
+        behavior = self.make_behavior({'waiting': {'role': 'attention'}, 'review': {'role': 'attention'},
+                                       'busy': {'role': 'work'}})
+        self.start()
+        behavior.tick('working', self.sessions)
+        self.clock.advance(4)
+        behavior.tick('working', self.sessions)
+        self.sessions.handle({'harness': 'cli', 'event': 'tool_start', 'session': 'one',
+                              'call': 'inspect', 'tool': 'Read file'})
+        self.assertTrue(behavior.attention(self.sessions, 'cli:one'))
+        self.assertEqual(self.animations()[-1]['id'], 'review')
+        self.clock.advance(20)
+        self.sessions.handle({'harness': 'cli', 'event': 'waiting', 'session': 'one', 'call': 'question'})
+        self.assertTrue(behavior.attention(self.sessions, 'cli:one'))
+        self.assertEqual(self.animations()[-1]['id'], 'waiting')
+
     def test_failure_interrupts_thinking(self):
         behavior = self.make_behavior({'review': {'role': 'attention'}, 'uh-oh': {'role': 'error'}})
         self.start()
@@ -410,7 +426,7 @@ class BehaviorTests(unittest.TestCase):
         behavior.tick('idle', self.sessions)
         self.assertTrue(behavior.sleeping)
 
-    def test_naps_use_available_sleep_clips_and_keep_them_out_of_model_gestures(self):
+    def test_naps_use_available_sleep_clips_and_keep_them_out_of_gestures(self):
         behavior = self.make_behavior({'snooze': {'role': 'sleep', 'frames': 4, 'fps': 2}}, nap_interval=(1, 1))
         behavior.tick('idle', self.sessions)
         self.clock.advance(1)

@@ -165,7 +165,7 @@ class Behavior:
             trace("behavior.gesture_rejected", clip=clip_id, reason=reason)
             return False
         self.wake("gesture")
-        self._play(clip, source="observation")
+        self._play(clip, source="reaction")
         return True
 
     def success(self):
@@ -176,6 +176,17 @@ class Behavior:
             self.wake("success")
             self.thinking_until = None
             self._play(self.rng.choice(candidates), kind="success", source="success")
+
+    def attention(self, sessions, key):
+        lane = sessions.lanes[key]
+        if not lane.waiting and lane.phase != "investigating":
+            return False
+        candidates = self.pack.role("attention")
+        if not candidates:
+            return False
+        preferred = "waiting" if lane.waiting else "review"
+        candidates.sort(key=lambda clip: clip.id != preferred)
+        return self.gesture(candidates[0].id, sessions)
 
     def greet(self, sessions):
         if not self.status or sessions.active or self.state != "idle" or self.idle_since is None:
