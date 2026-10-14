@@ -277,6 +277,13 @@ class Behavior:
                 self.baseline_until = now + self.rng.uniform(*self.config.work_burst_seconds)
                 trace("behavior.work_burst", clip=self.clip, until=self.baseline_until)
                 return
+        if state == "working" and now >= self.next_action:
+            candidates = self.pack.role("work", "attention")
+            if candidates:
+                self._baseline(self.rng.choice(candidates).id, source="work_burst")
+                self.baseline_until = now + self.rng.uniform(*self.config.work_burst_seconds)
+                trace("behavior.work_burst", clip=self.clip, until=self.baseline_until)
+            return
         if nap_allowed and now >= self.next_nap:
             self._nap()
             return

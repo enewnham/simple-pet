@@ -55,7 +55,7 @@ class NotifyTests(unittest.TestCase):
     def test_cli_preserves_calls_and_parallel_session_identity(self):
         for status, event in (("start", "tool_start"), ("done", "tool_done"), ("error", "tool_error")):
             result = self.run_client("--session", "worker-one", "--status", status,
-                                     "--call", "test-one", "--tool", "cargo test", "--detail", "result")
+                                     "--call", "test-one", "--tool", "cargo test", "--exit-code", "1")
             self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
             packet = self.receive()
             self.assertEqual(packet["session"], "worker-one")
@@ -63,6 +63,7 @@ class NotifyTests(unittest.TestCase):
             self.assertEqual(packet["event"], event)
             self.assertEqual(packet["harness"], "cli")
             self.assertTrue(packet["manual"])
+            self.assertEqual(packet["exit_code"], 1)
 
     def test_manual_single_call_and_intent_share_session(self):
         self.run_client("intent", "--session", "worker", "--text", 'Fix "quotes" 🐈')
@@ -83,12 +84,11 @@ class NotifyTests(unittest.TestCase):
     def test_unicode_and_escape_excerpts_fit_without_trimming_identifiers(self):
         for text in ("🐈" * 3000, "\x01" * 3000):
             self.run_client("--session", "session-" + "s" * 100, "--call", "call-" + "c" * 100,
-                            "--status", "error", "--detail", text, "--tool", text)
+                            "--status", "error", "--tool", text)
             packet = self.receive()
             self.assertEqual(packet["session"], "session-" + "s" * 100)
             self.assertEqual(packet["call"], "call-" + "c" * 100)
             self.assertTrue(text.startswith(packet["tool"]))
-            self.assertTrue(text.startswith(packet["detail"]))
             self.assertEqual(packet["event"], "tool_error")
 
     def test_oversize_identifiers_are_dropped_whole(self):
@@ -137,8 +137,8 @@ class NotifyTests(unittest.TestCase):
         result = self.run_hook("claude", "PostToolUseFailure", payload)
         self.assertEqual(json.loads(result.stdout), {})
         packet = self.receive()
-        self.assertEqual((packet["event"], packet["detail"], packet["outcome"]),
-                         ("tool_error", "compiler panic", "error"))
+        self.assertEqual((packet["event"], packet["outcome"]), ("tool_error", "error"))
+        self.assertNotIn("compiler panic", json.dumps(packet))
 
     def test_native_prompt_and_progress_excerpts_are_bounded(self):
         self.run_hook("claude", "UserPromptSubmit", {"session_id": "worker", "prompt": "x" * 1000})
@@ -174,6 +174,50 @@ class NotifyTests(unittest.TestCase):
             self.assertEqual(packet["event"], expected)
             self.assertEqual(packet["call"], "call")
 
+    def test_failure_output_is_absent_from_routed_metadata(self):
+        output = "Preparing dependencies\n" * 1000 + "FAIL Tests/auth.test.ts login rejects expired token\nAssertionError: expected 401 received 200"
+        self.run_hook("codex", "PostToolUse", {"session_id": "worker", "cwd": "/src/backend",
+                      "tool_name": "exec_command", "tool_input": {"cmd": "pnpm test auth"},
+                      "tool_response": {"exit_code": 1, "output": output}})
+        packet = self.receive()
+        self.assertEqual(packet["repo"], "/src/backend")
+        self.assertEqual(packet["tool_name"], "exec_command")
+        self.assertEqual(packet["event"], "tool_error")
+        self.assertEqual(packet["tool"], "pnpm test auth")
+        self.assertNotIn("detail", packet)
+        self.assertNotIn("error_signature", packet)
+        self.assertNotIn("AssertionError", json.dumps(packet))
+        self.assertNotIn("progress", packet)
+
+    def test_successful_reads_and_patches_do_not_supply_progress(self):
+        for name in ("Read", "read_file", "functions.read_file", "mcp__files__read_file", "Edit", "apply_patch"):
+            self.run_hook("codex", "PostToolUse", {"session_id": "worker", "tool_name": name,
+                          "tool_response": {"output": "file body or diff patch", "exit_code": 0}})
+            packet = self.receive()
+            self.assertEqual(packet["event"], "tool_done")
+            self.assertNotIn("progress", packet)
+
+    def test_assistant_messages_supply_progress_for_successful_tools(self):
+        for code in (0, 1):
+            self.run_hook("codex", "PostToolUse", {"session_id": "worker",
+                          "last_assistant_message": "Checking authentication",
+                          "tool_response": {"exit_code": code, "stdout": "private output"}})
+            packet = self.receive()
+            if code == 0:
+                self.assertEqual(packet["progress"], "Checking authentication")
+            else:
+                self.assertNotIn("progress", packet)
+            self.assertNotIn("private output", json.dumps(packet))
+
+    def test_failed_content_blocks_are_absent_from_events(self):
+        self.run_hook("codex", "PostToolUse", {"session_id": "worker", "tool_name": "build",
+                      "tool_response": {"isError": True, "content": [
+                          {"type": "text", "text": "Building targets\n" * 100},
+                          {"type": "text", "text": "src/main.swift:42: error: cannot find Widget in scope"}]}})
+        packet = self.receive()
+        self.assertEqual(packet["outcome"], "error")
+        self.assertNotIn("Widget", json.dumps(packet))
+
     def test_cursor_subagent_aliases_link_child_tools(self):
         self.run_hook("cursor", "subagentStop", {"conversation_id": "parent", "subagent_id": "agent",
                       "child_conversation_id": "child", "tool_call_id": "spawn-call"})
@@ -191,15 +235,15 @@ class NotifyTests(unittest.TestCase):
     def test_cursor_tool_output_and_subagent_summary_update_context(self):
         self.run_hook("cursor", "postToolUse", {"conversation_id": "worker", "tool_use_id": "call",
                       "tool_output": json.dumps({"exitCode": 0, "stdout": "All tests passed"})})
-        self.assertEqual(self.receive()["progress"], "All tests passed")
+        self.assertNotIn("progress", self.receive())
         self.run_hook("cursor", "subagentStart", {"conversation_id": "parent", "subagent_id": "child",
                       "task": "Explore authentication", "tool_call_id": "spawn"})
         self.assertEqual(self.receive()["goal"], "Explore authentication")
         self.run_hook("cursor", "subagentStop", {"conversation_id": "parent", "subagent_id": "child",
                       "status": "error", "summary": "Authentication tests failed"})
         packet = self.receive()
-        self.assertEqual((packet["event"], packet["outcome"], packet["progress"]),
-                         ("subagent_done", "error", "Authentication tests failed"))
+        self.assertEqual((packet["event"], packet["outcome"]), ("subagent_done", "error"))
+        self.assertNotIn("progress", packet)
 
     def test_interrupted_tools_finish_without_an_error_alert(self):
         for harness, event, key in (("claude", "PostToolUseFailure", "session_id"),

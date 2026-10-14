@@ -1,77 +1,187 @@
 import json
-import logging
-import math
-import os
+import re
+import sqlite3
+import time
 from pathlib import Path
-import tempfile
 
+from .activity import activity, result_summary
 from .telemetry import trace
 
 
-log = logging.getLogger("pet-daemon")
+def bounded(value, limit=240):
+    return " ".join(str(value or "").split())[:limit]
 
 
-def validate_memory(summary, summaries, history):
-    if not isinstance(history, list) or len(history) % 2:
-        raise ValueError("Memory requires complete conversation exchanges")
-    for index, message in enumerate(history):
-        role = "user" if index % 2 == 0 else "assistant"
-        if not isinstance(message, dict) or message.get("role") != role or not isinstance(message.get("content"), str):
-            raise ValueError("Memory requires alternating user and assistant messages")
-        if role == "user":
-            record = json.loads(message["content"])
-            timestamp = record["observed_at"]
-            if type(timestamp) not in (int, float) or not math.isfinite(timestamp):
-                raise ValueError("Memory requires finite observation timestamps")
-    if not isinstance(summaries, list):
-        raise ValueError("Memory summaries must be a list")
-    groups = (("long_term_memory", [summary] if summary is not None else []), ("compacted_memory", summaries))
-    for kind, messages in groups:
-        for message in messages:
-            if not isinstance(message, dict) or message.get("role") != "user" or not isinstance(message.get("content"), str):
-                raise ValueError("Memory summaries require user messages")
-            record = json.loads(message["content"])
-            text, timestamp = record[kind], record["through_observed_at"]
-            if not isinstance(text, str) or not text.strip() or type(timestamp) not in (int, float) or not math.isfinite(timestamp):
-                raise ValueError("Memory summaries require text and finite timestamps")
-
-
-def load_memory(path, pet):
-    try:
-        data = json.loads(path.read_text())
-        if data["pet"] != pet:
-            trace("memory.skipped", reason="different_pet")
-            return None, [], []
-        history = data["messages"]
-        summary = data.get("summary")
-        summaries = data.get("summaries", [])
-        validate_memory(summary, summaries, history)
-        trace("memory.loaded", history_pairs=len(history) // 2, summaries=len(summaries))
-        return summary, summaries, history
-    except FileNotFoundError:
-        return None, [], []
-    except (OSError, ValueError, KeyError, TypeError, OverflowError) as error:
-        log.warning("Could not load pet memory: %s", error)
-        return None, [], []
-
-
-def save_memory(path, pet, summary, summaries, history):
-    temporary = None
-    try:
+class Memory:
+    def __init__(self, path, pet, clock=time.time, retention_days=30, max_events=10000):
+        self.pet = pet
+        self.clock = clock
+        self.retention_days = retention_days
+        self.max_events = max_events
+        path = Path(path)
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        descriptor, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
-        temporary = Path(name)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump({"pet": pet, "summary": summary, "summaries": summaries, "messages": history}, stream, ensure_ascii=False, allow_nan=False)
-        temporary.replace(path)
-        trace("memory.saved", history_pairs=len(history) // 2)
-        return True
-    except (OSError, ValueError) as error:
-        log.warning("Could not save pet memory: %s", error)
-        return False
-    finally:
-        if temporary is not None:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError as error:
-                log.warning("Could not remove temporary pet memory: %s", error)
+        self.db = sqlite3.connect(path)
+        path.chmod(0o600)
+        self.db.row_factory = sqlite3.Row
+        version = self.db.execute("PRAGMA user_version").fetchone()[0]
+        if version != 3:
+            self.db.executescript("""
+                DROP TRIGGER IF EXISTS events_insert;
+                DROP TRIGGER IF EXISTS events_delete;
+                DROP TABLE IF EXISTS events_fts;
+                DROP TABLE IF EXISTS events;
+                DROP TABLE IF EXISTS projects;
+                DROP TABLE IF EXISTS speech;
+                DROP TABLE IF EXISTS contexts;
+            """)
+        self.db.executescript("""
+            PRAGMA auto_vacuum = INCREMENTAL;
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY, pet TEXT NOT NULL, session TEXT NOT NULL,
+                repo TEXT NOT NULL, event_type TEXT NOT NULL, summary TEXT NOT NULL,
+                goal TEXT NOT NULL, timestamp REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS events_scope ON events(pet, repo, id);
+            CREATE INDEX IF NOT EXISTS events_age ON events(timestamp);
+            CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(goal, content=events, content_rowid=id);
+            CREATE TRIGGER IF NOT EXISTS events_insert AFTER INSERT ON events BEGIN
+                INSERT INTO events_fts(rowid, goal) VALUES (new.id, new.goal);
+            END;
+            CREATE TRIGGER IF NOT EXISTS events_delete AFTER DELETE ON events BEGIN
+                INSERT INTO events_fts(events_fts, rowid, goal) VALUES ('delete', old.id, old.goal);
+            END;
+            CREATE TABLE IF NOT EXISTS projects (
+                pet TEXT NOT NULL, repo TEXT NOT NULL, goal TEXT NOT NULL,
+                last_result TEXT NOT NULL, timestamp REAL NOT NULL,
+                PRIMARY KEY(pet, repo)
+            );
+            CREATE TABLE IF NOT EXISTS speech (
+                id INTEGER PRIMARY KEY, pet TEXT NOT NULL, text TEXT NOT NULL,
+                reason TEXT NOT NULL, timestamp REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS contexts (
+                pet TEXT NOT NULL, session TEXT NOT NULL, first_prompt TEXT NOT NULL,
+                session_context TEXT NOT NULL, recent_requests TEXT NOT NULL, timestamp REAL NOT NULL,
+                PRIMARY KEY(pet, session)
+            );
+            PRAGMA user_version = 3;
+        """)
+        self.prune()
+
+    def prune(self):
+        cutoff = self.clock() - self.retention_days * 86400
+        with self.db:
+            self.db.execute("DELETE FROM events WHERE timestamp < ?", (cutoff,))
+            self.db.execute("DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY id DESC LIMIT -1 OFFSET ?)", (self.max_events,))
+            self.db.execute("DELETE FROM speech WHERE timestamp < ? OR id NOT IN (SELECT id FROM speech ORDER BY id DESC LIMIT 256)", (cutoff,))
+            self.db.execute("DELETE FROM projects WHERE timestamp < ? OR rowid NOT IN (SELECT rowid FROM projects ORDER BY timestamp DESC LIMIT 128)", (cutoff,))
+            self.db.execute("DELETE FROM contexts WHERE timestamp < ? OR rowid NOT IN (SELECT rowid FROM contexts ORDER BY timestamp DESC LIMIT 128)", (cutoff,))
+        self.db.execute("PRAGMA incremental_vacuum(64)")
+
+    def record_event(self, event, session=None):
+        kind = event["event"]
+        state = session or {}
+        repo = bounded(event.get("repo") or state.get("repo"), 1024)
+        identifier = bounded(state.get("id") or f"{event['harness']}:{event['session']}", 256)
+        progress = bounded(event.get("progress"))
+        goal = bounded(event.get("goal") or state.get("goal"))
+        tool = bounded(event.get("tool") or state.get("last_tool"), 160)
+        if kind == "tool_start":
+            return None
+        name = event.get("tool_name", "").lower().rsplit("__", 1)[-1].rsplit(".", 1)[-1]
+        read_only = name in ("read", "read_file", "readfile", "grep", "find", "search", "glob")
+        if kind == "tool_done" and read_only:
+            return None
+        if kind == "progress" and not progress:
+            return None
+        terminal = kind in ("turn_done", "turn_error", "subagent_done", "interrupt", "session_end")
+        outcome = state.get("outcome") if terminal and state.get("outcome") else event.get("outcome")
+        if kind in ("tool_error", "turn_error"):
+            outcome = "error"
+        category = state.get("activity") or activity(tool, event.get("tool_name", ""))
+        if kind == "turn_error":
+            category = "harness"
+        if outcome == "error":
+            progress = ""
+        facts = [kind, goal if kind in ("intent", "subagent_start") else "",
+                 result_summary(category, outcome) if outcome else "",
+                 tool if kind.startswith("tool_") and outcome != "error" else "", progress]
+        summary = bounded(" | ".join(part for part in facts if part), 320)
+        if kind in ("progress", "waiting", "session_start"):
+            previous = self.db.execute("SELECT event_type,summary FROM events WHERE pet=? AND session=? AND repo=? ORDER BY id DESC LIMIT 1",
+                                       (self.pet, identifier, repo)).fetchone()
+            if previous and previous["event_type"] == kind and previous["summary"] == summary:
+                return None
+        timestamp = self.clock()
+        with self.db:
+            cursor = self.db.execute("INSERT INTO events(pet,session,repo,event_type,summary,goal,timestamp) VALUES (?,?,?,?,?,?,?)",
+                                     (self.pet, identifier, repo, kind, summary, goal, timestamp))
+            if repo and goal:
+                self.db.execute("""INSERT INTO projects VALUES (?,?,?,?,?) ON CONFLICT(pet,repo) DO UPDATE SET
+                    goal=excluded.goal, last_result=excluded.last_result, timestamp=excluded.timestamp""",
+                    (self.pet, repo, goal, summary, timestamp))
+        self.prune()
+        trace("memory.event", id=cursor.lastrowid, event_type=kind)
+        return cursor.lastrowid
+
+    def recent(self, limit=5):
+        rows = self.db.execute("""WITH ranked AS (
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY session ORDER BY id DESC) AS rank FROM events WHERE pet=?
+        ) SELECT id, session, repo, event_type, summary, goal, timestamp
+          FROM ranked ORDER BY rank=1 DESC, id DESC LIMIT ?""", (self.pet, limit)).fetchall()
+        return [dict(row) for row in sorted(rows, key=lambda row: row["id"])]
+
+    def recall(self, event, limit=2):
+        if not event or event.get("event") != "intent" or not event.get("repo") or not event.get("goal"):
+            return []
+        repo = bounded(event["repo"], 1024)
+        tokens = re.findall(r"[\w]+", event["goal"])
+        distinctive = list(dict.fromkeys(token for token in tokens if len(token) >= 5 and token.lower() not in
+                                        {"please", "continue", "failed", "error", "build", "tests", "running"}))[:3]
+        if not distinctive:
+            return []
+        query = " AND ".join('"' + token + '"' for token in distinctive)
+        excluded = [row["id"] for row in self.recent()]
+        placeholders = ",".join("?" for _ in excluded) or "NULL"
+        session = bounded(event.get("target_session") or f"{event.get('harness', '')}:{event.get('session', '')}", 256)
+        rows = self.db.execute(f"""SELECT e.* FROM events_fts JOIN events e ON e.id=events_fts.rowid
+            WHERE events_fts MATCH ? AND e.pet=? AND e.repo=? AND e.id NOT IN ({placeholders})
+            ORDER BY e.session=? DESC, bm25(events_fts), e.id DESC LIMIT ?""",
+            (query, self.pet, repo, *excluded, session, limit)).fetchall()
+        return [dict(row) for row in rows]
+
+    def projects(self, repos):
+        result = []
+        for repo in list(dict.fromkeys(repos))[:3]:
+            row = self.db.execute("SELECT repo,goal,last_result,timestamp FROM projects WHERE pet=? AND repo=?", (self.pet, repo)).fetchone()
+            if row:
+                result.append(dict(row))
+        return result
+
+    def context(self, session):
+        row = self.db.execute("SELECT first_prompt,session_context,recent_requests FROM contexts WHERE pet=? AND session=?", (self.pet, session)).fetchone()
+        if row is None:
+            return None
+        return {"first_prompt": row["first_prompt"], "session_context": row["session_context"],
+                "recent_requests": json.loads(row["recent_requests"])}
+
+    def save_context(self, session, first_prompt, summary, recent_requests):
+        requests = [bounded(request) for request in recent_requests[-4:]]
+        with self.db:
+            self.db.execute("""INSERT INTO contexts VALUES (?,?,?,?,?,?) ON CONFLICT(pet,session) DO UPDATE SET
+                first_prompt=excluded.first_prompt, session_context=excluded.session_context,
+                recent_requests=excluded.recent_requests, timestamp=excluded.timestamp""",
+                (self.pet, session, bounded(first_prompt), bounded(summary, 400), json.dumps(requests), self.clock()))
+        self.prune()
+
+    def record_speech(self, text, reason):
+        with self.db:
+            self.db.execute("INSERT INTO speech(pet,text,reason,timestamp) VALUES (?,?,?,?)", (self.pet, text, reason, self.clock()))
+        self.prune()
+
+    def speech(self, limit=3):
+        rows = self.db.execute("SELECT text,reason,timestamp FROM speech WHERE pet=? ORDER BY id DESC LIMIT ?", (self.pet, limit)).fetchall()
+        return [dict(row) for row in reversed(rows)]
+
+    def close(self):
+        self.db.close()

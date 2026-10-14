@@ -43,6 +43,6 @@ if wait "$pet_child"; then
   "$pet_notify" --session "$pet_session" --status done --call "$pet_call"
 else
   pet_result=$?
-  "$pet_notify" --session "$pet_session" --status error --call "$pet_call" --detail "Exit code $pet_result"
+  "$pet_notify" --session "$pet_session" --status error --call "$pet_call" --exit-code "$pet_result"
 fi
 exit "$pet_result"

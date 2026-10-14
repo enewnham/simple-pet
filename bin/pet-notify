@@ -8,8 +8,8 @@ import os
 import socket
 
 
-MAX_DATAGRAM_BYTES = 2000
-EXCERPT_FIELDS = ("progress", "detail", "goal", "tool", "context")
+MAX_DATAGRAM_BYTES = 1999
+EXCERPT_FIELDS = ("progress", "goal", "tool", "context")
 
 
 def encode(payload):
@@ -67,7 +67,7 @@ def main():
     parser.add_argument("--status", choices=("start", "done", "error"))
     parser.add_argument("--call", default="single")
     parser.add_argument("--tool")
-    parser.add_argument("--detail")
+    parser.add_argument("--exit-code", type=int)
     commands = parser.add_subparsers(dest="command")
     intent = commands.add_parser("intent", help="record a session's goal")
     intent.add_argument("--session", required=True)
@@ -91,8 +91,8 @@ def main():
                    "call": args.call, "manual": True}
         if args.tool:
             payload["tool"] = args.tool
-        if args.detail:
-            payload["detail"] = args.detail
+        if args.exit_code is not None:
+            payload["exit_code"] = args.exit_code
         if args.status != "start":
             payload["outcome"] = "error" if args.status == "error" else "success"
     send(payload)

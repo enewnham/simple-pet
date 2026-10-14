@@ -61,22 +61,21 @@ class Config:
     pet_dir: Path
     persona: str = DEFAULT_PERSONA
     log_file: Path = Path("logs/pet-daemon.jsonl")
-    memory_file: Path = Path("state/pet-memory.json")
+    memory_file: Path = Path("state/pet-memory.sqlite3")
     overlay_binary: Path = Path(".build/pet-overlay")
     daemon_socket: str = "/tmp/pet-daemon.sock"
     overlay_socket: str = "/tmp/pet.sock"
     model: str = "claude-haiku-5-5"
     observation_seconds: tuple = (20, 40)
     idle_message_seconds: float = 300
-    summary_interval: int = 32
-    summary_summary_interval: int = 8
-    idle_compaction_seconds: float = 55 * 60
-    compaction_max_tokens: int = 1024
+    prompt_max_bytes: int = 16000
+    memory_retention_days: int = 30
+    memory_max_events: int = 10000
     speech_ttl: float = 15
     request_timeout: float = 20
     stale_seconds: float = 3600
     completed_retention_seconds: float = 7200
-    max_tokens: int = 4096
+    max_tokens: int = 512
     behavior: BehaviorConfig = field(default_factory=BehaviorConfig)
 
     @classmethod
@@ -97,16 +96,18 @@ class Config:
         self.behavior.validate()
         if not interval(self.observation_seconds):
             raise ValueError("observation_seconds must be a positive [minimum, maximum]")
-        for name in ("summary_interval", "summary_summary_interval", "max_tokens", "compaction_max_tokens"):
+        for name in ("prompt_max_bytes", "memory_retention_days", "memory_max_events", "max_tokens"):
             if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be a positive integer")
-        for name in ("idle_message_seconds", "idle_compaction_seconds", "speech_ttl", "request_timeout", "stale_seconds", "completed_retention_seconds"):
+        for name in ("idle_message_seconds", "speech_ttl", "request_timeout", "stale_seconds", "completed_retention_seconds"):
             if not positive(getattr(self, name)):
                 raise ValueError(f"{name} must be positive")
-        if self.idle_compaction_seconds >= 3600:
-            raise ValueError("idle_compaction_seconds must be shorter than the one-hour cache TTL")
+        if self.prompt_max_bytes < 8000:
+            raise ValueError("prompt_max_bytes must be at least 8000")
         if not isinstance(self.persona, str) or not self.persona.strip():
             raise ValueError("persona must be a nonempty string")
+        if len(self.persona.encode("utf-8")) > 4000:
+            raise ValueError("persona must fit within 4000 UTF-8 bytes")
         if not isinstance(self.model, str) or not self.model:
             raise ValueError("model must be nonempty")
         for path in (self.daemon_socket, self.overlay_socket):

@@ -8,11 +8,13 @@ import os
 import random
 import signal
 import socket
+import sqlite3
 import stat
 import time
 
 from .behavior import Behavior
 from .cognition import Cognition
+from .memory import bounded
 from .sessions import Sessions
 from .sprites import Pack
 from .telemetry import observation, trace
@@ -21,7 +23,6 @@ from .telemetry import observation, trace
 log = logging.getLogger("pet-daemon")
 MAX_INPUT_BYTES = 2000
 SPEECH_REPLAY_SECONDS = 60
-MEMORY_RETRY_SECONDS = 60
 
 
 def bind_socket(path):
@@ -89,7 +90,7 @@ class Daemon:
         self.loop_task = None
         self.request_task = None
         self.system_sleeping = False
-        self.next_memory_retry = 0
+        self.last_reaction_state = None
         self.pending = None
         self.manual = None
         self.clicked = False
@@ -153,17 +154,46 @@ class Daemon:
             kind = packet.get("kind")
             if kind == "event":
                 result = self.sessions.handle(packet)
-                trace("hook.received", packet=packet, result=result, revision=self.sessions.revision, snapshot=self.sessions.snapshot())
                 if result:
+                    key = result["session"]
+                    lane = self.sessions.lanes.get(key)
+                    if not lane.context_loaded:
+                        lane.context_loaded = True
+                        try:
+                            stored = self.cognition.memory.context(key)
+                            if stored:
+                                lane.first_prompt = stored["first_prompt"] or lane.first_prompt
+                                lane.session_context = stored["session_context"]
+                                lane.recent_requests = [*stored["recent_requests"], *lane.recent_requests][-4:]
+                                lane.goal = lane.session_context or lane.first_prompt
+                        except sqlite3.Error as error:
+                            log.warning("Could not restore pet session context: %s", error)
+                    if packet["event"] in ("intent", "subagent_start") and lane.first_prompt:
+                        try:
+                            self.cognition.memory.save_context(key, lane.first_prompt, lane.session_context, lane.recent_requests)
+                        except sqlite3.Error as error:
+                            log.warning("Could not save pet session context: %s", error)
+                    state = {"id": key, "repo": lane.repo, "goal": lane.goal, "last_tool": lane.last_tool, "outcome": lane.outcome, "activity": result["activity"]}
+                    trigger = {**packet, "target_session": key, "repo": lane.repo, "activity": result["activity"]}
+                    if packet["event"] in ("turn_done", "turn_error", "subagent_done", "interrupt", "session_end"):
+                        trigger["outcome"] = lane.outcome
+                    try:
+                        self.cognition.memory.record_event(packet, state)
+                    except sqlite3.Error as error:
+                        log.warning("Could not record pet event: %s", error)
                     if result["failure"]:
                         self.error_until = self.clock() + self.config.behavior.error_seconds
-                        self.queue("failure", packet)
-                    elif packet["event"] == "intent":
-                        self.queue("prompt", packet)
-                    elif packet["event"] == "turn_done" or result["convergence"]:
-                        self.queue("completion", packet)
+                        if lane.failure["count"] in (1, 3, 5):
+                            self.queue("failure", trigger)
+                        else:
+                            trace("observation.skipped", reason="repeated_failure")
+                    elif packet["event"] in ("intent", "subagent_start"):
+                        self.queue("prompt", trigger)
+                    elif packet["event"] in ("turn_done", "subagent_done") or result["convergence"]:
+                        self.queue("completion", trigger)
                     if not self.system_sleeping:
                         self.behavior.tick(self.activity(), self.sessions)
+                trace("hook.received", packet=packet, result=result, revision=self.sessions.revision, snapshot=self.sessions.snapshot())
             elif kind == "renderer":
                 if packet.get("event") == "status":
                     if self.behavior.renderer_status(packet):
@@ -201,16 +231,15 @@ class Daemon:
             if self.request_task:
                 self.request_task.cancel()
             self.last_speech = None
+            self.pending = None
         else:
-            self.next_memory_retry = 0
-
-    async def maintain_memory(self):
-        with observation():
-            try:
-                await self.cognition.compact()
-            except Exception as error:
-                self.next_memory_retry = self.clock() + MEMORY_RETRY_SECONDS
-                log.warning("Could not compact idle pet memory: %s", error)
+            self.pending = None
+            self.sessions.prune()
+            for lane in self.sessions.lanes.values():
+                if lane.active:
+                    lane.last_check_in = self.clock()
+            self.last_reaction_state = self.sessions.reaction_state()
+            self.next_observation = self.clock() + self.rng.uniform(*self.config.observation_seconds)
 
     def click(self):
         self.behavior.wake("click")
@@ -232,7 +261,8 @@ class Daemon:
             keys = trigger["sessions"] if include_activity else None
             observation_context = self.sessions.observation_context(include_activity, keys)
             trace("observation.started", reason=reason, revision=revision)
-            timeout = self.config.request_timeout * (1 + self.cognition.compaction_requests_due)
+            self.last_reaction_state = self.sessions.reaction_state()
+            timeout = self.config.request_timeout
             try:
                 result = await asyncio.wait_for(
                     self.cognition.observe({**self.sessions.snapshot(keys), "trigger": trigger, "sleeping": self.behavior.sleeping}, reason, context),
@@ -240,8 +270,22 @@ class Daemon:
                 )
                 if context is None and observation_context != self.sessions.observation_context(include_activity, keys):
                     trace("observation.discarded", reason="session_changed", requested_revision=revision, revision=self.sessions.revision, decision=result)
-                    log.info("kept observation in history; discarded stale automatic response")
+                    log.info("discarded stale automatic response")
                     return
+                summary = result["session_context"]
+                focus = self.sessions.lanes.get(result["context_session"])
+                if summary is not None and summary.strip() and focus:
+                    version = (focus.generation, focus.first_prompt, tuple(focus.recent_requests), focus.session_context)
+                    if version == result["context_version"]:
+                        focus.session_context = bounded(summary, 400)
+                        focus.goal = focus.session_context or focus.first_prompt
+                        try:
+                            self.cognition.memory.save_context(result["context_session"], focus.first_prompt, focus.session_context, focus.recent_requests)
+                        except sqlite3.Error as error:
+                            log.warning("Could not save pet session context: %s", error)
+                        trace("memory.context_updated", session=result["context_session"])
+                    else:
+                        trace("memory.context_discarded", reason="session_changed", session=result["context_session"])
                 if result["speak"] is not None:
                     speech = result["speak"]
                     if speech.strip() and ttl != 0:
@@ -251,6 +295,7 @@ class Daemon:
                     if delivered and speech.strip() and ttl != 0:
                         self.last_speech = (speech, self.clock())
                         self.clicked = False
+                        self.cognition.memory.record_speech(speech, reason)
                 if result["gesture"] is not None:
                     accepted = self.behavior.gesture(result["gesture"], self.sessions)
                     trace("observation.gesture", gesture=result["gesture"], accepted=accepted)
@@ -300,10 +345,12 @@ class Daemon:
                     request = ("check_in", None, None, {"sessions": check_in})
                     for key in check_in:
                         self.sessions.lanes[key].last_check_in = now
-                elif (self.cognition.idle_compaction_due or (not self.cognition.history and self.cognition.compaction_requests_due)) and now >= self.next_memory_retry:
-                    self.request_task = asyncio.create_task(self.maintain_memory())
                 elif self.behavior.status and self.sessions.active and now >= self.next_observation and not self.behavior.sleeping:
-                    request = ("routine", None, None)
+                    self.next_observation = now + self.rng.uniform(*self.config.observation_seconds)
+                    if self.sessions.reaction_state() != self.last_reaction_state:
+                        request = ("routine", None, None)
+                    else:
+                        trace("observation.skipped", reason="unchanged_activity")
                 if request:
                     self.next_observation = now + self.rng.uniform(*self.config.observation_seconds)
                     trace("observation.scheduled", reason=request[0], next_observation=self.next_observation)
@@ -332,6 +379,7 @@ class Daemon:
         if self.identity:
             unlink_owned(self.config.daemon_socket, self.identity)
             self.identity = None
+        self.cognition.memory.close()
 
     async def run(self):
         if not self.config.overlay_binary.is_file() or not os.access(self.config.overlay_binary, os.X_OK):

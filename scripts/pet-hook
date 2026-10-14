@@ -31,8 +31,6 @@ EVENTS = {
     },
 }
 INPUT_TOOLS = ("AskUserQuestion", "request_user_input", "RequestUserInput")
-
-
 def string(*values):
     return next((value for value in values if isinstance(value, str) and value), "")
 
@@ -48,22 +46,6 @@ def object_value(value):
         except ValueError:
             return {}
     return value if isinstance(value, dict) else {}
-
-
-def result_text(value):
-    if isinstance(value, str):
-        return value
-    if not isinstance(value, dict):
-        return ""
-    direct = string(value.get("error"), value.get("stderr"), value.get("output"),
-                    value.get("stdout"), value.get("text"), value.get("message"))
-    if direct:
-        return direct
-    content = value.get("content")
-    if isinstance(content, list):
-        return " ".join(item["text"] for item in content
-                        if isinstance(item, dict) and isinstance(item.get("text"), str))
-    return ""
 
 
 def failed(value):
@@ -97,6 +79,9 @@ def update(harness, event, payload):
     if not session:
         return None
     result = {"kind": "event", "harness": harness, "session": session, "event": normalized}
+    cwd = string(payload.get("cwd"))
+    if cwd:
+        result["repo"] = os.path.normpath(cwd)
     if parent and parent != session:
         result["parent"] = parent
     if aliases:
@@ -113,6 +98,8 @@ def update(harness, event, payload):
     if parent_call:
         result["parent_call"] = parent_call
     tool_name = string(payload.get("tool_name"))
+    if tool_name:
+        result["tool_name"] = tool_name
     tool_input = object_value(payload.get("tool_input"))
     command = string(tool_input.get("command"), tool_input.get("cmd"), tool_input.get("file_path"),
                      tool_input.get("path"), tool_input.get("description"))
@@ -142,23 +129,20 @@ def update(harness, event, payload):
         result["event"] = "tool_done"
         result["outcome"] = "cancelled"
     if result["event"] in ("tool_error", "turn_error"):
-        detail = excerpt(payload.get("error_details"), payload.get("error"), payload.get("error_message"),
-                         result_text(response), payload.get("reason"))
-        if detail:
-            result["detail"] = detail
         result["outcome"] = "error"
     elif result["event"] == "interrupt":
         result["outcome"] = "cancelled"
     elif normalized == "subagent_done" and harness == "cursor":
         result["outcome"] = {"error": "error", "aborted": "cancelled"}.get(status, "success")
-        if result["outcome"] == "error":
-            result["detail"] = excerpt(payload.get("error_message"), payload.get("summary"))
     elif not interrupted and normalized in ("tool_done", "turn_done", "subagent_done"):
         result["outcome"] = "success"
-    progress = excerpt(payload.get("last_assistant_message"), payload.get("text"),
-                       payload.get("response"), payload.get("thought"), payload.get("summary"), result_text(response))
-    if progress and normalized in ("tool_done", "turn_done", "subagent_done", "progress"):
-        result["progress"] = progress
+    if result.get("outcome") != "error" and normalized in ("tool_done", "turn_done", "subagent_done", "progress"):
+        progress = excerpt(payload.get("last_assistant_message"))
+        if normalized != "tool_done":
+            progress = excerpt(progress, payload.get("text"), payload.get("response"),
+                               payload.get("thought"), payload.get("summary"))
+        if progress:
+            result["progress"] = progress
     return result
 
 

@@ -22,7 +22,7 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory(dir="/tmp", prefix="pet-desktop-") as directory:
             config = Config(pet_dir=selected.pet_dir, overlay_binary=root / ".build/pet-overlay",
                             daemon_socket=directory + "/daemon.sock", overlay_socket=directory + "/overlay.sock",
-                            observation_seconds=(3600, 3600), speech_ttl=1, memory_file=Path(directory) / "memory.json")
+                            observation_seconds=(3600, 3600), speech_ttl=1, memory_file=Path(directory) / "memory.sqlite3")
             config.behavior.repeat_range = (1, 1)
             config.behavior.gesture_cooldown = 0.05
             config.behavior.idle_pause = config.behavior.working_pause = (0.05, 0.05)
@@ -47,7 +47,7 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                     "id": "msg_desktop", "type": "message", "role": "assistant", "model": config.model,
                     "content": [{"type": "text", "text": json.dumps({
                         "thought": "Two coding streams are being observed.",
-                        "speak": speech if explicit else None, "gesture": "waving" if explicit else None,
+                        "speak": speech if explicit else None, "gesture": "waving" if explicit else None, "session_context": None,
                     })}],
                     "stop_reason": "end_turn", "stop_sequence": None,
                     "usage": {"input_tokens": 100, "output_tokens": 20},
@@ -118,7 +118,7 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                     await wait_for(lambda: daemon.behavior.status["speech"])
                     self.assertGreater(len(speech.encode()), 2048)
                     await wait_for(lambda: not daemon.behavior.status["speech"])
-                    self.assertTrue(daemon.cognition.history)
+                    self.assertTrue(daemon.cognition.memory.speech())
                     self.assertFalse(daemon.sessions.working)
                     self.assertTrue(any(json.loads(request["messages"][-1]["content"])["reason"] == "explicit" for request in requests))
                 finally:
