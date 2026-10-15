@@ -159,6 +159,43 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.daemon.next_prune = 0
         self.daemon.next_observation = self.now + 3600
 
+    async def test_idle_exercise_speaks_and_click_resets_care(self):
+        manifest_path = self.config.pet_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["clips"]["jumping"] = {"frames": ["pixel.png"], "fps": 1, "role": "celebrate"}
+        manifest_path.write_text(json.dumps(manifest))
+        self.daemon.behavior.pack = Pack(self.config.pet_dir)
+        self.use_clock()
+        behavior = self.daemon.behavior
+        behavior.clock = lambda: self.now
+        behavior.config.naps = False
+        behavior.config.roaming = False
+        behavior.next_care = self.now
+        behavior.next_care_speech = self.now
+        behavior.execution.interrupt()
+        animation = await self.packet(lambda packet: packet.get("animation", {}).get("id") == "jumping")
+        self.assertEqual(animation["animation"]["repeats"], 1)
+        await self.packet(lambda packet: packet.get("text") == self.speech)
+        payload = json.loads(self.requests[-1]["messages"][-1]["content"])
+        self.assertEqual(payload["reason"], "care")
+        self.assertEqual(payload["trigger"]["care"], "exercise")
+        self.send({"kind": "renderer", "event": "click"})
+        await self.wait_for(lambda: len(self.requests) == 2)
+        self.assertEqual(json.loads(self.requests[-1]["messages"][-1]["content"])["reason"], "click")
+        self.assertGreaterEqual(behavior.next_care, self.now + 300)
+        self.assertIsNone(behavior.care_remark)
+
+    async def test_new_work_discards_pending_care_speech(self):
+        self.slow = True
+        task = asyncio.create_task(self.daemon.observe("care", trigger={"care": "consternation"}))
+        self.addCleanup(task.cancel)
+        await asyncio.wait_for(self.entered.wait(), 1)
+        self.event("intent", goal="Review the parser")
+        await self.wait_for(lambda: self.daemon.sessions.active)
+        self.release.set()
+        await task
+        self.assertFalse(any(packet.get("text") == self.speech for packet in await self.drain()))
+
     async def test_real_socket_tracks_parallel_calls_without_model_latency(self):
         self.slow = True
         self.send({"kind": "speak", "context": "Watch these builds"})

@@ -96,7 +96,17 @@ class Cognition:
         }
         if reason == "click":
             active = focus.get("turn_active") or any(session.get("turn_active") for session in payload["other_sessions"]) or payload["omitted_sessions"]["active"]
-            direction = "Briefly acknowledge the developer while our work continues." if active else "Give the developer a casual greeting."
+            if focus.get("waiting_for_input"):
+                direction = "Identify the work waiting longest for developer input. Describe the needed input only when its progress or requests supply it. Otherwise say the work is waiting for input without inventing a question."
+            else:
+                direction = "Briefly acknowledge the developer while our work continues." if active else "Give the developer a casual greeting."
+        elif reason == "care":
+            care = payload["trigger"]["care"]
+            direction = {
+                "exercise": "Give a brief playful remark about stretching or exercising with a few jumps during quiet time.",
+                "attention": "Give a brief playful remark while waving for the developer's attention during quiet time.",
+                "consternation": "Give a brief playful remark about being hungry for tokens or bored. The consternation animation expresses the pet's mood and does not establish an agent failure. Mention work needing review only when waiting_for_input is true, grounded in its supplied progress or requests.",
+            }[care]
         elif reason == "check_in":
             if focus.get("waiting_for_input"):
                 direction = "Give a brief remark about the wait for developer input."
@@ -112,7 +122,7 @@ class Cognition:
                 direction += " Acknowledge the cancellation without claiming success."
             elif outcome == "error":
                 direction += " Acknowledge the unsuccessful result without claiming success."
-        required = payload["context"] is not None or reason in ("check_in", "click", "explicit")
+        required = payload["context"] is not None or reason in ("check_in", "click", "explicit", "care")
         direction += " Supply a nonempty line of speech." if required else " Use null if the remark would repeat yourself or has no supported subject."
         return [
             {"type": "text", "text": "<persona>\n" + self.config.persona + "\n</persona>\n\n" + INSTRUCTIONS, "cache_control": CACHE_CONTROL},
@@ -155,15 +165,20 @@ class Cognition:
         return {key: bounded(event.get(key), 320 if key == "summary" else 120)
                 for key in ("session", "repo", "event_type", "summary")} | {"timestamp": event["timestamp"]}
 
-    def selected_sessions(self, snapshot):
+    def selected_sessions(self, snapshot, reason=None):
         trigger = snapshot.get("trigger") or {}
         target = trigger.get("target_session") or f"{trigger.get('harness', '')}:{trigger.get('session', '')}"
-        return sorted(snapshot.get("sessions", []), key=lambda session: (session["id"] != target, not session.get("turn_active"), -session.get("quiet_seconds", 0)))
+        def priority(session):
+            waiting = reason == "click" and session.get("waiting_for_input", False)
+            return (not waiting, -session.get("waiting_seconds", 0) if waiting else 0,
+                    session["id"] != target, not session.get("turn_active"), -session.get("quiet_seconds", 0))
+
+        return sorted(snapshot.get("sessions", []), key=priority)
 
     def prompt(self, snapshot, reason, context):
         trigger = snapshot.get("trigger") or {}
         sessions = snapshot.get("sessions", [])
-        prioritized = self.selected_sessions(snapshot)
+        prioritized = self.selected_sessions(snapshot, reason)
         selected = prioritized[:3]
         repos = [session.get("repo", "") for session in selected if session.get("repo")]
         payload = {
@@ -174,7 +189,7 @@ class Cognition:
             "other_sessions": [self.other_session_record(session) for session in selected[1:]],
             "omitted_sessions": {"active": sum(bool(session.get("turn_active")) for session in prioritized[3:]), "total": max(0, len(sessions) - 3)},
             "convergence": snapshot.get("convergence") is not None and all(item.get("outcome") == "success" for item in snapshot["convergence"]),
-            "trigger": {key: bounded(trigger[key], 240) for key in ("event", "session", "harness", "goal", "tool", "activity", "progress", "outcome") if key in trigger},
+            "trigger": {key: bounded(trigger[key], 240) for key in ("event", "session", "harness", "goal", "tool", "activity", "progress", "outcome", "care") if key in trigger},
             "memory": {
                 "recent_events": [self.event_record(event) for event in self.memory.recent()],
                 "recalled_events": [self.event_record(event) for event in self.memory.recall(trigger)],
@@ -279,8 +294,8 @@ class Cognition:
         return result
 
     async def observe(self, snapshot, reason, context=None):
-        explicit = context is not None or reason in ("check_in", "click", "explicit")
-        selected = self.selected_sessions(snapshot)
+        explicit = context is not None or reason in ("check_in", "click", "explicit", "care")
+        selected = self.selected_sessions(snapshot, reason)
         focus = selected[0] if selected else None
         request = self.bounded_request(self.prompt(snapshot, reason, context))
         summary = None

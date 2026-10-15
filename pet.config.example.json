@@ -7,7 +7,9 @@
   "daemon_socket": "/tmp/pet-daemon.sock",
   "overlay_socket": "/tmp/pet.sock",
   "model": "claude-haiku-5-5",
-  "summarize_on": ["prompt"],
+  "summarize_on": [
+    "prompt"
+  ],
   "summarize_first_request_only": false,
   "observation_seconds": [
     20,
@@ -62,7 +64,16 @@
     "pointer_radius": 100,
     "resume_seconds": 3,
     "gaze_reset_seconds": 1.2,
-    "gaze_deadzone": 24
+    "gaze_deadzone": 24,
+    "care": true,
+    "care_interval": [
+      300,
+      600
+    ],
+    "care_speech_interval": [
+      2700,
+      5400
+    ]
   },
   "prompt_max_bytes": 16000,
   "memory_retention_days": 30,

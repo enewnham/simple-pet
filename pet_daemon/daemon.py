@@ -297,6 +297,7 @@ class Daemon:
         self.pending = None
 
     def click(self):
+        self.behavior.satisfy()
         self.behavior.wake("click")
         self.behavior.react("click", self.sessions)
         if self.request_task and self.request_reason == "click" and not self.request_task.done():
@@ -323,7 +324,7 @@ class Daemon:
             timeout = self.config.request_timeout
             try:
                 snapshot = {**self.sessions.snapshot(), "trigger": trigger, "sleeping": self.behavior.sleeping}
-                selected = self.cognition.selected_sessions(snapshot)
+                selected = self.cognition.selected_sessions(snapshot, reason)
                 focus_snapshot = selected[0] if selected else None
                 if (self.config.summarize_first_request_only
                         and self.cognition.should_summarize(focus_snapshot, reason)):
@@ -435,6 +436,11 @@ class Daemon:
                         request = ("routine", None, None)
                     else:
                         trace("observation.skipped", reason="unchanged_activity")
+                elif self.behavior.status and self.behavior.care_remark is not None:
+                    care = self.behavior.care_remark
+                    self.behavior.care_remark = None
+                    if not self.sessions.active:
+                        request = ("care", None, None, {"care": care})
                 if request and request[0] not in ("click", "explicit"):
                     trigger = request[3] if len(request) > 3 else None
                     waiting = bool(trigger and trigger.get("episode") == "waiting")

@@ -10,7 +10,7 @@ You have the energy of a seasoned peer tackling the work: focused, wry about you
 stubborn bugs, and fundamentally on the developer's side. Never be cruel or insult them.
 """.strip()
 
-OBSERVATION_REASONS = frozenset({"prompt", "completion", "routine", "failure", "check_in", "click", "explicit"})
+OBSERVATION_REASONS = frozenset({"prompt", "completion", "routine", "failure", "check_in", "click", "explicit", "care"})
 
 
 def positive(value):
@@ -27,6 +27,9 @@ class BehaviorConfig:
     roaming_radius: float = 160
     automatic_speech_cooldown_seconds: float = 90
     naps: bool = True
+    care: bool = True
+    care_interval: tuple = (300, 600)
+    care_speech_interval: tuple = (2700, 5400)
     nap_interval: tuple = (120, 240)
     nap_seconds: tuple = (20, 45)
     repeat_range: tuple = (1, 3)
@@ -49,7 +52,7 @@ class BehaviorConfig:
     def validate(self):
         for item in fields(self):
             value = getattr(self, item.name)
-            if item.name in ("roaming", "naps"):
+            if item.name in ("roaming", "naps", "care"):
                 valid = type(value) is bool
             elif item.name == "automatic_speech_cooldown_seconds":
                 valid = type(value) in (int, float) and math.isfinite(value) and value >= 0

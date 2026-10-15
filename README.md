@@ -12,7 +12,6 @@ A native macOS desktop pet that speaks about your coding agents’ work. A local
 Future plans
 
 - Engage with meeting transcripts and slack conversations
-- Tomogatchi-style care and feeding (with tokens)
 - Open to community contributions
 
 ## Quick start
@@ -70,7 +69,7 @@ its voice.
 
 Session context is summarized on each user prompt. Set `summarize_on` to an array of
 commentary reasons: `prompt`, `completion`, `routine`, `failure`, `check_in`, `click`,
-or `explicit`. An empty array disables summaries. Set `summarize_first_request_only`
+`explicit`, or `care`. An empty array disables summaries. Set `summarize_first_request_only`
 to `true` to override this array and summarize only the initial prompt of each session.
 The initial summary gets one attempt, including across daemon restarts.
 

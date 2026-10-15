@@ -703,6 +703,67 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(payload["omitted_sessions"]["active"], 0)
         self.assertEqual(body["system"][1]["text"], "<request>\nBriefly acknowledge the developer while our work continues. Supply a nonempty line of speech.\n</request>")
 
+    async def test_click_surfaces_the_oldest_input_wait_among_parallel_sessions(self):
+        for index in range(4):
+            self.sessions.handle({"harness": "codex", "session": f"parallel-{index}", "event": "intent", "goal": "Check the parser"})
+        self.sessions.handle({"harness": "codex", "session": "parallel-3", "event": "waiting", "progress": "Choose eager or lazy parsing"})
+        self.clock.advance(30)
+        self.sessions.handle({"harness": "codex", "session": "parallel-2", "event": "waiting"})
+        snapshot = self.sessions.snapshot()
+        snapshot["trigger"] = {"target_session": "claude:worker"}
+        self.responses.append(({"speak": "The parser work needs your choice of eager or lazy parsing."}, "end_turn"))
+        result = await self.cognition.observe(snapshot, "click")
+        body = self.requests[-1][1]
+        payload = json.loads(body["messages"][0]["content"])
+        self.assertEqual(payload["focus_session"]["id"], "codex:parallel-3")
+        self.assertEqual(payload["focus_session"]["progress"], "Choose eager or lazy parsing")
+        self.assertEqual(payload["other_sessions"][0]["id"], "codex:parallel-2")
+        self.assertEqual(payload["omitted_sessions"]["total"], 2)
+        self.assertEqual(result["context_session"], "codex:parallel-3")
+        direction = body["system"][1]["text"]
+        self.assertIn("Describe the needed input only when its progress or requests supply it", direction)
+        self.assertIn("without inventing a question", direction)
+        self.assertNotIn("while our work continues", direction)
+        for reason in ("prompt", "completion", "check_in", "failure"):
+            with self.subTest(reason=reason):
+                selected = self.cognition.prompt(snapshot, reason, None)
+                self.assertEqual(selected["focus_session"]["id"], "claude:worker")
+
+    async def test_click_describes_an_input_wait_without_a_supplied_question(self):
+        self.sessions.handle({"harness": "claude", "session": "worker", "event": "waiting"})
+        self.responses.append(({"speak": "The batch insert work is waiting for your input."}, "end_turn"))
+        await self.observe("click")
+        body = self.requests[-1][1]
+        payload = json.loads(body["messages"][0]["content"])
+        self.assertTrue(payload["focus_session"]["waiting_for_input"])
+        self.assertFalse(payload["focus_session"]["progress"])
+        self.assertIn("Otherwise say the work is waiting for input without inventing a question", body["system"][1]["text"])
+
+    async def test_care_speech_matches_the_activity_and_requires_a_line(self):
+        directions = {
+            "exercise": "stretching or exercising with a few jumps",
+            "attention": "waving for the developer's attention",
+            "consternation": "hungry for tokens or bored",
+        }
+        for care, direction in directions.items():
+            with self.subTest(care=care):
+                snapshot = self.sessions.snapshot()
+                snapshot["trigger"] = {"care": care}
+                self.responses.append(({"speak": "A little stretch."}, "end_turn"))
+                await self.cognition.observe(snapshot, "care")
+                body = self.requests[-1][1]
+                payload = json.loads(body["messages"][0]["content"])
+                self.assertEqual(payload["trigger"]["care"], care)
+                self.assertIn(direction, body["system"][1]["text"])
+                self.assertIn("Supply a nonempty line of speech", body["system"][1]["text"])
+                if care == "consternation":
+                    self.assertIn("does not establish an agent failure", body["system"][1]["text"])
+                    self.assertIn("review only when waiting_for_input is true", body["system"][1]["text"])
+                for speech in (None, " "):
+                    self.responses.append(({"speak": speech}, "end_turn"))
+                    with self.assertRaises(ValueError):
+                        await self.cognition.observe(snapshot, "care")
+
     async def test_check_in_selects_input_wait_running_call_or_quiet_work(self):
         cases = [
             ("quiet", "Give a brief remark about the quiet time during this work. Do not imply that help is needed."),

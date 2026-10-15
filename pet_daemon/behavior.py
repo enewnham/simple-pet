@@ -31,6 +31,43 @@ class Behavior:
         self.next_nap = None
         self.suspension = None
         self.observation = None
+        self.next_care = None
+        self.next_care_speech = None
+        self.care_remark = None
+        self.care_choices = []
+
+    def satisfy(self):
+        self.next_care = self.clock() + self.rng.uniform(*self.config.care_interval)
+        self.next_care_speech = self.clock() + self.rng.uniform(*self.config.care_speech_interval)
+        self.care_remark = None
+        self.care_choices = []
+
+    def _care(self, sessions):
+        if not self.config.care or sessions.working or self.clock() < self.next_care or self._blocked():
+            return False
+        choices = [("exercise", "celebrate", "jumping"), ("attention", "greeting", "waving"),
+                   ("consternation", "error", "failed")]
+        available = [item for item in choices if self.pack.role(item[1])]
+        if sessions.active:
+            available = [item for item in available if item[0] == "consternation"]
+        self.next_care = self.clock() + self.rng.uniform(*self.config.care_interval)
+        if not available:
+            return False
+        if sessions.active:
+            kind, role, preferred = self.rng.choice(available)
+        else:
+            if not self.care_choices:
+                self.care_choices = [item for item in available for _ in range(1 if item[0] == "consternation" else 2)]
+            selected = self.rng.choice(self.care_choices)
+            self.care_choices.remove(selected)
+            kind, role, preferred = selected
+        clip = self._resolve_clip(role, preferred, "idle")
+        self._play(clip, "care", "reaction")
+        if not sessions.active and self.clock() >= self.next_care_speech:
+            self.care_remark = kind
+            self.next_care_speech = self.clock() + self.rng.uniform(*self.config.care_speech_interval)
+        trace("behavior.care", activity=kind)
+        return True
 
     @property
     def pending(self):
@@ -69,6 +106,7 @@ class Behavior:
         self.emit({"stop_motion": True})
 
     def suspend(self, reason):
+        self.care_remark = None
         self.wake(reason)
         self.suspension = reason
         self.execution.suspend()
@@ -77,6 +115,8 @@ class Behavior:
         self._rest()
 
     def resume(self):
+        if self.suspension == "system_sleep":
+            self.satisfy()
         if self.suspension == "interaction":
             self.wake("interaction_finished")
         self.suspension = None
@@ -284,6 +324,12 @@ class Behavior:
             return
         now = self.clock()
         status = self.status
+        if sessions.working:
+            self.next_care = None
+            self.next_care_speech = None
+            self.care_remark = None
+        elif self.next_care is None:
+            self.satisfy()
         if status["dragging"] or status["menu"]:
             if self.suspension is None:
                 self.suspend("interaction")
@@ -366,6 +412,8 @@ class Behavior:
             self._rest()
             return
         if self.execution.phase != "idle":
+            return
+        if state != "error" and self._care(sessions):
             return
         candidate = self.policy.select(self.observation, self.execution.last_completed, self.rng, self._available)
         if candidate.name == "roam" and self._walk():

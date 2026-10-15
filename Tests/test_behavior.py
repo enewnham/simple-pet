@@ -1,6 +1,7 @@
 import base64
 import json
 import math
+import random
 from pathlib import Path
 import tempfile
 import unittest
@@ -113,6 +114,74 @@ class BehaviorTests(unittest.TestCase):
         self.assertEqual(self.rng.repeat_calls, [(1, 2)])
         self.assertEqual(behavior.pending['until'], self.clock() + 3)
         self.assertFalse(behavior.gesture('hop', self.sessions))
+
+    def test_quiet_care_reuses_clips_and_click_satisfies_speech_need(self):
+        behavior = self.make_behavior({'jumping': {'role': 'celebrate'}}, roaming=False,
+                                      care_interval=(10, 10), care_speech_interval=(20, 20))
+        self.advance(behavior, 25)
+        jumps = [animation for animation in self.animations() if animation['id'] == 'jumping']
+        self.assertEqual(len(jumps), 2)
+        self.assertTrue(all(animation['repeats'] == 1 for animation in jumps))
+        self.assertEqual(behavior.care_remark, 'exercise')
+        behavior.satisfy()
+        behavior.react('click', self.sessions)
+        self.assertIsNone(behavior.care_remark)
+        self.advance(behavior, 9)
+        self.assertEqual(len([a for a in self.animations() if a['id'] == 'jumping']), 2)
+
+    def test_work_suppresses_care_and_waiting_only_shows_consternation(self):
+        behavior = self.make_behavior({'jumping': {'role': 'celebrate'}, 'waving': {'role': 'greeting'},
+                                      'failed': {'role': 'error'}}, roaming=False, care_interval=(10, 10))
+        self.start()
+        self.advance(behavior, 30, 'working')
+        self.assertFalse(any(a['id'] in ('jumping', 'waving', 'failed') for a in self.animations()))
+        self.sessions.handle({'harness': 'cli', 'event': 'tool_done', 'session': 'one', 'call': 'build'})
+        self.sessions.handle({'harness': 'cli', 'event': 'waiting', 'session': 'one', 'call': 'question'})
+        self.advance(behavior, 15)
+        self.assertTrue(any(a['id'] == 'failed' for a in self.animations()))
+        self.assertIsNone(behavior.care_remark)
+
+    def test_long_idle_stretch_favors_naps_then_jumping_and_waving(self):
+        behavior = self.make_behavior({'jumping': {'role': 'celebrate'}, 'waving': {'role': 'greeting'},
+                                      'failed': {'role': 'error'}}, roaming=False, naps=True)
+        behavior.rng = random.Random(29)
+        naps = 0
+        for _ in range(24 * 3600):
+            sleeping = behavior.sleeping
+            self.advance(behavior, 1)
+            naps += behavior.sleeping and not sleeping
+        counts = {clip: sum(a['id'] == clip for a in self.animations()) for clip in ('jumping', 'waving', 'failed')}
+        self.assertGreater(naps, sum(counts.values()))
+        self.assertGreater(counts['jumping'], counts['failed'])
+        self.assertGreater(counts['waving'], counts['failed'])
+        self.assertGreater(counts['failed'], 0)
+
+    def test_ninety_idle_minutes_include_each_care_activity(self):
+        behavior = self.make_behavior({'jumping': {'role': 'celebrate'}, 'waving': {'role': 'greeting'},
+                                      'failed': {'role': 'error'}}, roaming=False, naps=True)
+        self.advance(behavior, 90 * 60)
+        clips = [a['id'] for a in self.animations() if a['id'] in ('jumping', 'waving', 'failed')]
+        self.assertGreaterEqual(clips.count('jumping'), 3)
+        self.assertGreaterEqual(clips.count('waving'), 3)
+        self.assertGreaterEqual(clips.count('failed'), 1)
+        self.assertEqual(clips[:5].count('jumping'), 2)
+        self.assertEqual(clips[:5].count('waving'), 2)
+        self.assertEqual(clips[:5].count('failed'), 1)
+
+    def test_computer_sleep_and_interactions_defer_care(self):
+        behavior = self.make_behavior({'jumping': {'role': 'celebrate'}}, roaming=False, care_interval=(10, 10))
+        self.advance(behavior, 5)
+        behavior.suspend('system_sleep')
+        self.clock.advance(3600)
+        behavior.resume()
+        self.advance(behavior, 9)
+        self.assertFalse(any(a['id'] == 'jumping' for a in self.animations()))
+        behavior.renderer_status(self.status(speech=True))
+        self.advance(behavior, 20)
+        self.assertFalse(any(a['id'] == 'jumping' for a in self.animations()))
+        behavior.renderer_status(self.status())
+        self.advance(behavior, 5)
+        self.assertTrue(any(a['id'] == 'jumping' for a in self.animations()))
 
     def test_repeat_budget_keeps_long_clips_complete(self):
         behavior = self.make_behavior({'hop': {'role': 'celebrate', 'frames': 10, 'fps': 2}},
@@ -340,8 +409,8 @@ class BehaviorTests(unittest.TestCase):
         behavior.tick('working', self.sessions)
         self.assertEqual(self.animations()[-1]['id'], 'busy')
 
-    def test_idle_pet_stays_quiet_without_automatic_greetings(self):
-        behavior = self.make_behavior({'hello': {'role': 'greeting'}})
+    def test_idle_pet_stays_quiet_when_care_is_disabled(self):
+        behavior = self.make_behavior({'hello': {'role': 'greeting'}}, care=False)
         behavior.tick('idle', self.sessions)
         self.advance(behavior, 600)
         self.assertEqual({command['id'] for command in self.animations()}, {'quiet-pose'})
