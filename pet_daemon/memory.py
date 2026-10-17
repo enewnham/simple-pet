@@ -17,11 +17,12 @@ def bounded(value, limit=240):
 
 
 class Memory:
-    def __init__(self, path, pet, clock=time.time, retention_days=30, max_events=10000):
+    def __init__(self, path, pet, clock=time.time, retention_days=30, max_events=10000, speech_history_seconds=1800):
         self.pet = pet
         self.clock = clock
         self.retention_days = retention_days
         self.max_events = max_events
+        self.speech_history_seconds = speech_history_seconds
         path = Path(path)
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.db = sqlite3.connect(path)
@@ -82,11 +83,14 @@ class Memory:
         self.prune()
 
     def prune(self):
-        cutoff = self.clock() - self.retention_days * 86400
+        now = self.clock()
+        cutoff = now - self.retention_days * 86400
+        speech_cutoff = now - self.speech_history_seconds
         with self.db:
             self.db.execute("DELETE FROM events WHERE timestamp < ?", (cutoff,))
             self.db.execute("DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY id DESC LIMIT -1 OFFSET ?)", (self.max_events,))
-            self.db.execute("DELETE FROM speech WHERE timestamp < ? OR id NOT IN (SELECT id FROM speech ORDER BY id DESC LIMIT 256)", (cutoff,))
+            self.db.execute("DELETE FROM speech WHERE (pet=? AND timestamp <= ?) OR id NOT IN (SELECT id FROM speech ORDER BY id DESC LIMIT 256)",
+                            (self.pet, speech_cutoff))
             self.db.execute("DELETE FROM projects WHERE timestamp < ? OR rowid NOT IN (SELECT rowid FROM projects ORDER BY timestamp DESC LIMIT 128)", (cutoff,))
             self.db.execute("DELETE FROM contexts WHERE timestamp < ? OR rowid NOT IN (SELECT rowid FROM contexts ORDER BY timestamp DESC LIMIT 128)", (cutoff,))
         self.db.execute("PRAGMA incremental_vacuum(64)")
@@ -214,8 +218,13 @@ class Memory:
         return [json.loads(row["observation"]) for row in rows]
 
     def speech(self, limit=3):
-        rows = self.db.execute("SELECT text,reason,timestamp FROM speech WHERE pet=? ORDER BY id DESC LIMIT ?", (self.pet, limit)).fetchall()
+        rows = self.db.execute("SELECT text,reason,timestamp FROM speech WHERE pet=? AND timestamp > ? ORDER BY id DESC LIMIT ?",
+                               (self.pet, self.clock() - self.speech_history_seconds, limit)).fetchall()
         return [dict(row) for row in reversed(rows)]
+
+    def clear_speech(self):
+        with self.db:
+            self.db.execute("DELETE FROM speech WHERE pet=?", (self.pet,))
 
     def clear(self):
         with self.db:

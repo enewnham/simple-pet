@@ -91,8 +91,9 @@ class Daemon:
         self.last_attention_attempt = float("-inf")
         self.request_reason = None
         self.request_revision = 0
+        self.speech_revision = 0
         self.behavior = Behavior(self.pack, config.behavior, clock, self.rng, self.emit)
-        self.memory = Memory(config.memory_file, self.pack.pet, time.time, config.memory_retention_days, config.memory_max_events)
+        self.memory = Memory(config.memory_file, self.pack.pet, time.time, config.memory_retention_days, config.memory_max_events, speech_history_seconds=config.speech_history_seconds)
         self.cognition = Cognition(client, config, self.pack, memory=self.memory)
         self.repositories = RepositoryTracker(self.memory, local_interval=config.repository_refresh_seconds, github_interval=config.github_refresh_seconds)
         self.process_task = None
@@ -195,7 +196,9 @@ class Daemon:
             if not isinstance(packet, dict):
                 return
             kind = packet.get("kind")
-            if kind == "clear_memory":
+            if kind == "clear_speech":
+                self.clear_speech()
+            elif kind == "clear_memory":
                 self.clear_memory()
             elif kind == "event":
                 result = self.sessions.handle(packet)
@@ -282,6 +285,17 @@ class Daemon:
             trace("input.rejected", error=str(error))
             log.debug("Ignoring malformed datagram")
 
+    def clear_speech(self):
+        try:
+            self.memory.clear_speech()
+        except sqlite3.Error as error:
+            log.warning("Could not clear pet speech: %s", error)
+            return
+        self.speech_revision += 1
+        self.last_speech = None
+        self.emit({"text": "", "ttl": 0})
+        event("speech.cleared", pet=self.pack.pet)
+
     def clear_memory(self):
         try:
             self.memory.clear()
@@ -356,6 +370,7 @@ class Daemon:
             outcome = "failed"
             focus_session = None
             revision = self.request_revision
+            speech_revision = self.speech_revision
             sessions = self.sessions
             include_activity = reason == "check_in"
             keys = trigger.get("sessions") if include_activity and trigger else None
@@ -404,9 +419,6 @@ class Daemon:
                     event("observation.discarded", reason="preempted" if revision != self.request_revision else "subject_changed",
                           trigger=reason, session=focus_session, decision=result)
                     return
-                subject = self.attention.choose_work(snapshot)
-                if subject and subject.kind == "repository" and reason not in ("explicit", "care"):
-                    self.repository_attention[subject.id] = subject.revision
                 summary = result["session_context"]
                 focus = self.sessions.lanes.get(result["context_session"])
                 if summary is not None and summary.strip() and focus:
@@ -422,6 +434,13 @@ class Daemon:
                         trace("memory.context_updated", session=result["context_session"])
                     else:
                         trace("memory.context_discarded", reason="session_changed", session=result["context_session"])
+                if speech_revision != self.speech_revision:
+                    outcome = "discarded"
+                    event("observation.discarded", reason="speech_cleared", trigger=reason, session=focus_session)
+                    return
+                subject = self.attention.choose_work(snapshot)
+                if subject and subject.kind == "repository" and reason not in ("explicit", "care"):
+                    self.repository_attention[subject.id] = subject.revision
                 outcome = "silent"
                 if result["speak"] is not None:
                     speech = result["speak"]

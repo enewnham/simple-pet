@@ -17,7 +17,7 @@ class Cognition(Context):
         self.config = config
         self.pack = pack
         self.clock = clock
-        self.memory = memory if memory is not None else Memory(config.memory_file, pack.pet, clock, config.memory_retention_days, config.memory_max_events)
+        self.memory = memory if memory is not None else Memory(config.memory_file, pack.pet, clock, config.memory_retention_days, config.memory_max_events, speech_history_seconds=config.speech_history_seconds)
 
     def schema(self):
         nullable_string = {"anyOf": [{"type": "string"}, {"type": "null"}]}

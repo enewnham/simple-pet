@@ -49,6 +49,18 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(evidence["local"]["unstaged"], 1)
         self.assertEqual(evidence["pr"]["checks"][0][1], "FAILURE")
 
+    def test_expired_remarks_do_not_enter_repetition_context(self):
+        now = [1000]
+        self.memory.clock = lambda: now[0]
+        self.cognition.clock = lambda: now[0]
+        self.memory.record_speech("Old remark", "routine")
+        now[0] += 1800
+        self.memory.record_speech("Fresh remark", "routine")
+        payload = self.cognition.prompt(self.snapshot, "routine", None)
+        self.assertEqual([row["text"] for row in payload["repetition"]["recent_speech"]], ["Fresh remark"])
+        self.assertNotIn("Old remark", json.dumps(payload))
+        self.assertNotIn("Fresh remark", json.dumps(payload["memory"]))
+
     def test_polling_a_session_does_not_change_its_work_recency(self):
         now = [1.0]
         sessions = Sessions(lambda: now[0])

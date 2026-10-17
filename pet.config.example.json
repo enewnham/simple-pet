@@ -16,6 +16,7 @@
     40
   ],
   "idle_message_seconds": 300,
+  "speech_history_seconds": 1800,
   "speech_ttl": 15,
   "request_timeout": 20,
   "stale_seconds": 3600,

@@ -150,6 +150,73 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lane.first_prompt, "Write documentation")
         self.assertNotIn("Improve parser", json.dumps(memory.recent()))
 
+    async def test_clear_speech_preserves_work_and_forgets_previous_remarks(self):
+        await self.repository_fixture()
+        self.event("intent", goal="Improve parser", repo=str(self.repository_path))
+        await self.packet(lambda packet: packet.get("text") == self.speech)
+        await self.wait_for_repository()
+        await self.wait_for(lambda: self.daemon.request_task is None)
+        self.event("tool_start", call="checks", tool="pytest")
+        await self.wait_for(lambda: bool(self.daemon.sessions.lanes["cli:one"].calls))
+        memory = self.daemon.memory
+        sessions = self.daemon.sessions
+        context = memory.context("cli:one")
+        events = memory.recent()
+        associations = memory.repository_associations()
+        repositories = self.daemon.repositories.signature()
+        last_attempt = self.daemon.last_attention_attempt
+        self.send({"kind": "clear_speech"})
+        await self.packet(lambda packet: packet.get("text") == "" and packet.get("ttl") == 0)
+        self.assertEqual(memory.speech(), [])
+        self.assertIsNone(self.daemon.last_speech)
+        self.assertIs(self.daemon.sessions, sessions)
+        self.assertIn("checks", sessions.lanes["cli:one"].calls)
+        self.assertEqual(memory.context("cli:one"), context)
+        self.assertEqual(memory.recent(), events)
+        self.assertEqual(memory.repository_associations(), associations)
+        self.assertEqual(self.daemon.repositories.signature(), repositories)
+        self.assertEqual(self.daemon.last_attention_attempt, last_attempt)
+        await self.daemon.observe("explicit", "Look at the parser")
+        payload = json.loads(self.requests[-1]["messages"][-1]["content"])
+        self.assertEqual(payload["repetition"]["recent_speech"], [])
+        self.assertEqual(payload["focus_session"]["recent_requests"], ["Improve parser"])
+
+    async def test_clear_speech_discards_pending_remark_and_preserves_session_summary(self):
+        self.slow = True
+        self.session_context = "Keep the parser API stable."
+        self.daemon.memory.record_speech("Earlier remark", "routine")
+        self.event("intent", goal="Improve parser")
+        await self.wait_for(lambda: len(self.requests) == 1 and len(self.summary_requests) == 1)
+        self.send({"kind": "clear_speech"})
+        await self.packet(lambda packet: packet.get("text") == "" and packet.get("ttl") == 0)
+        self.release.set()
+        await self.wait_for(lambda: self.daemon.request_task is None)
+        self.assertEqual(self.daemon.memory.speech(), [])
+        self.assertTrue(self.daemon.sessions.active)
+        self.assertEqual(self.daemon.memory.context("cli:one")["session_context"], self.session_context)
+        self.assertFalse(any(packet.get("text") for packet in await self.drain()))
+        self.slow = False
+        await self.daemon.observe("explicit", "Check again")
+        packet = await self.packet(lambda packet: bool(packet.get("text")))
+        self.assertEqual(packet["text"], self.speech)
+
+    async def test_configured_speech_history_expires_in_model_requests(self):
+        await self.daemon.close()
+        self.config.speech_history_seconds = 10
+        self.daemon = Daemon(self.config, self.client, rng=random.Random(7))
+        await self.daemon.start()
+        self.send_status()
+        await self.packet(lambda packet: packet.get("state") == "idle")
+        now = [1000]
+        self.daemon.memory.clock = lambda: now[0]
+        self.daemon.cognition.clock = lambda: now[0]
+        self.daemon.memory.record_speech("Earlier remark", "routine")
+        now[0] += 10
+        await self.daemon.observe("explicit", "Say hello")
+        payload = json.loads(self.requests[-1]["messages"][-1]["content"])
+        self.assertEqual(payload["repetition"]["recent_speech"], [])
+        self.assertNotIn("Earlier remark", json.dumps(payload))
+
     async def repository_fixture(self):
         from pet_daemon.repositories.git import command
         self.repository_path = Path(self.temp.name) / "repository"
@@ -1286,6 +1353,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_speech_history_window_is_positive_and_defaults_to_thirty_minutes(self):
+        config = Config(pet_dir=Path("fixture"))
+        self.assertEqual(config.speech_history_seconds, 1800)
+        for value in (0, -1, True, "30", float("inf")):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "speech_history_seconds"):
+                Config(pet_dir=Path("fixture"), speech_history_seconds=value).validate()
+
     def test_summary_defaults_run_on_prompts(self):
         config = Config(pet_dir=Path("fixture"))
         self.assertEqual(config.summarize_on, ["prompt"])

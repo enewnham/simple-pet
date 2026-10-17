@@ -32,6 +32,78 @@ class MemoryTests(unittest.TestCase):
         self.assertNotIn("The parser checks passed.", json.dumps(self.memory.recent()))
         self.assertEqual(self.path.read_bytes()[:16], b"SQLite format 3\x00")
 
+    def test_speech_expires_at_thirty_minutes_without_a_prune(self):
+        self.memory.record_speech("First remark", "routine")
+        self.now += 1799
+        self.assertEqual(self.memory.speech()[0]["text"], "First remark")
+        self.now += 1
+        self.assertEqual(self.memory.speech(), [])
+        self.assertEqual(self.memory.db.execute("SELECT COUNT(*) FROM speech").fetchone()[0], 1)
+        self.memory.prune()
+        self.assertEqual(self.memory.db.execute("SELECT COUNT(*) FROM speech").fetchone()[0], 0)
+
+    def test_speech_expiry_survives_restart_and_uses_its_own_retention(self):
+        self.memory.record_speech("Expired remark", "routine")
+        self.now += 1799
+        self.memory.record_speech("Recent remark", "routine")
+        self.memory.close()
+        self.now += 1
+        self.memory = Memory(self.path, "fixture", clock=lambda: self.now, retention_days=0)
+        self.assertEqual([item["text"] for item in self.memory.speech()], ["Recent remark"])
+        self.now += 1
+        self.memory.prune()
+        self.assertEqual([item["text"] for item in self.memory.speech()], ["Recent remark"])
+        self.memory.close()
+        self.memory = Memory(self.path, "fixture", clock=lambda: self.now, speech_history_seconds=1)
+        self.assertEqual(self.memory.speech(), [])
+
+    def test_short_speech_retention_preserves_another_pets_valid_history(self):
+        self.memory.record_speech("Long history remark", "routine")
+        other = Memory(self.path, "short-history-pet", clock=lambda: self.now, speech_history_seconds=60)
+        try:
+            other.record_speech("Short history remark", "routine")
+            self.now += 60
+            other.prune()
+            self.assertEqual(other.speech(), [])
+            self.assertEqual(self.memory.speech()[0]["text"], "Long history remark")
+            self.memory.close()
+            self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
+            self.assertEqual(self.memory.speech()[0]["text"], "Long history remark")
+        finally:
+            other.close()
+
+    def test_speech_history_keeps_the_global_row_limit(self):
+        for index in range(257):
+            self.memory.record_speech(f"Remark {index}", "routine")
+        rows = self.memory.speech(limit=300)
+        self.assertEqual(len(rows), 256)
+        self.assertEqual(rows[0]["text"], "Remark 1")
+        self.assertEqual(rows[-1]["text"], "Remark 256")
+
+    def test_clear_speech_preserves_knowledge_and_other_pet_speech(self):
+        self.event("Parser checks passed", goal="Improve parser")
+        self.memory.record_speech("Parser work", "routine")
+        self.memory.save_context("codex:one", "Improve parser", "Parser summary", ["Improve parser"])
+        self.memory.associate_repository("codex:one", "/repo/parser")
+        self.memory.save_repository("/repo/parser:feature", {"pending": True})
+        other = Memory(self.path, "other-pet", clock=lambda: self.now)
+        try:
+            other.record_speech("Other pet remark", "routine")
+            self.memory.clear_speech()
+            self.assertEqual(self.memory.speech(), [])
+            self.assertEqual(other.speech()[0]["text"], "Other pet remark")
+            self.assertEqual(self.memory.context("codex:one")["session_context"], "Parser summary")
+            self.assertIn("Parser checks passed", json.dumps(self.memory.recent()))
+            self.assertEqual(self.memory.projects(["/repo/parser"])[0]["goal"], "Improve parser")
+            self.assertEqual(self.memory.repository_associations(), [{"session": "codex:one", "worktree": "/repo/parser"}])
+            self.assertEqual(self.memory.load_repositories(), [{"pending": True}])
+            self.memory.close()
+            self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
+            self.assertEqual(self.memory.speech(), [])
+            self.assertTrue(self.memory.recent())
+        finally:
+            other.close()
+
     def test_clear_erases_saved_knowledge_for_the_current_pet(self):
         other = Memory(self.path, "other-pet", clock=lambda: self.now)
         event = {"harness": "codex", "session": "one", "event": "intent",

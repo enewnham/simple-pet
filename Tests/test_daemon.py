@@ -745,7 +745,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         directions = {
             "exercise": "stretch break",
             "attention": "casual greeting",
-            "consternation": "hungry for tokens or bored",
+            "consternation": "quiet stretch",
         }
         for care, direction in directions.items():
             with self.subTest(care=care):
@@ -760,7 +760,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Supply a nonempty line of speech", body["system"][1]["text"])
                 if care == "consternation":
                     self.assertIn("does not establish an agent failure", body["system"][1]["text"])
-                    self.assertIn("review only when waiting_for_input is true", body["system"][1]["text"])
+                    self.assertIn("without asking for work, attention, or a reply", body["system"][1]["text"])
                 for speech in (None, " "):
                     self.responses.append(({"speak": speech}, "end_turn"))
                     with self.assertRaises(ValueError):
@@ -862,7 +862,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("The parser failed", json.dumps(payload))
         self.assertLess(len(payload["memory"]["recent_events"]), 5)
 
-    async def test_prompt_limits_recent_facts_recalled_facts_and_dispatched_speech(self):
+    async def test_prompt_limits_facts_and_separates_recent_speech(self):
         for index in range(4):
             self.cognition.memory.record_event({"harness": "codex", "session": "worker", "event": "intent", "repo": "/repo/parser", "goal": f"Refactor parser tokenization {index}"})
         for index in range(8):
@@ -871,12 +871,15 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         snapshot = self.sessions.snapshot()
         snapshot["trigger"] = {"harness": "codex", "session": "worker", "repo": "/repo/parser", "event": "intent", "goal": "Refactor parser tokenization"}
         await self.cognition.observe(snapshot, "failure")
-        memory = json.loads(self.requests[-1][1]["messages"][0]["content"])["memory"]
+        payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
+        memory = payload["memory"]
+        speech = payload["repetition"]["recent_speech"]
+        self.assertNotIn("Visible remark", json.dumps(memory))
         self.assertEqual(len(memory["recent_events"]), 5)
         self.assertEqual(len(memory["recalled_events"]), 2)
-        self.assertEqual(len(memory["dispatched_speech"]), 3)
+        self.assertEqual(len(speech), 3)
         self.assertTrue(all("parser tokenization" in event["summary"] for event in memory["recalled_events"]))
-        self.assertEqual([row["text"] for row in memory["dispatched_speech"]], ["Visible remark 5", "Visible remark 6", "Visible remark 7"])
+        self.assertEqual([row["text"] for row in speech], ["Visible remark 5", "Visible remark 6", "Visible remark 7"])
 
     async def test_summary_triggers_follow_configuration_without_changing_commentary(self):
         self.config.summarize_on = ["completion", "routine", "failure", "check_in", "click", "explicit"]

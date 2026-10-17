@@ -73,9 +73,10 @@ examples/pet-run pytest
 
 Edit `pet.config.json` and restart the daemon to apply changes. Paths are relative to the configuration file. See [pet.config.example.json](pet.config.example.json) for all settings and defaults. Set `pet_dir` to your imported sprite pack.
 
-The pet remembers recent work and remarks across restarts. Use `memory_retention_days`
-and `memory_max_events` to limit how much history it keeps. Customize `persona` to change
-its voice.
+The pet remembers recent work across restarts. Use `memory_retention_days` and
+`memory_max_events` to limit work history. Customize `persona` to change its voice.
+It uses up to three recent remarks solely to avoid repetition. Remarks expire after
+30 minutes, including across restarts. Set `speech_history_seconds` to change this window.
 
 Session context is summarized on each user prompt. Set `summarize_on` to an array of
 commentary reasons: `prompt`, `completion`, `routine`, `failure`, `check_in`, `click`,
@@ -101,7 +102,15 @@ Configure these intervals with `process_probe_seconds`, `activity_fresh_seconds`
 `repository_refresh_seconds`, and `github_refresh_seconds`. The default model request
 budget remains 16,000 bytes. Repository tracking requires no model calls.
 
-Clear the running pet's memory with:
+Forget recent remarks and dismiss the current bubble with:
+
+```sh
+bin/pet-notify clear-speech
+```
+
+This preserves tracked work, sessions, and repository observations.
+
+Clear the running pet's work memory as well with:
 
 ```sh
 bin/pet-notify clear-memory
