@@ -12,11 +12,15 @@ import sqlite3
 import stat
 import time
 
+from .attention import Attention
 from .behavior import Behavior
 from .cognition import Cognition
 from .episodes import Episodes
-from .memory import bounded
+from .memory import Memory, bounded
 from .sessions import Sessions
+from .processes import ProcessTracker
+from .repositories import RepositoryTracker
+from .work import build_work
 from .sprites import Pack
 from .telemetry import event, observation, trace
 
@@ -80,13 +84,18 @@ class Daemon:
         self.clock = clock
         self.rng = rng or random.Random()
         self.pack = Pack(config.pet_dir)
-        self.sessions = Sessions(clock, config.stale_seconds, config.completed_retention_seconds)
+        self.sessions = Sessions(clock, config.stale_seconds, config.completed_retention_seconds, config.activity_fresh_seconds)
+        self.attention = Attention(config, clock, self.rng)
+        self.processes = ProcessTracker(clock=clock, interval=config.process_probe_seconds)
         self.episodes = Episodes()
         self.last_attention_attempt = float("-inf")
         self.request_reason = None
         self.request_revision = 0
         self.behavior = Behavior(self.pack, config.behavior, clock, self.rng, self.emit)
-        self.cognition = Cognition(client, config, self.pack)
+        self.memory = Memory(config.memory_file, self.pack.pet, time.time, config.memory_retention_days, config.memory_max_events)
+        self.cognition = Cognition(client, config, self.pack, memory=self.memory)
+        self.repositories = RepositoryTracker(self.memory, local_interval=config.repository_refresh_seconds, github_interval=config.github_refresh_seconds)
+        self.process_task = None
         self.transport = None
         self.identity = None
         self.sender = None
@@ -95,6 +104,7 @@ class Daemon:
         self.request_task = None
         self.system_sleeping = False
         self.last_reaction_state = None
+        self.repository_attention = {}
         self.pending = None
         self.manual = None
         self.clicked = False
@@ -136,15 +146,43 @@ class Daemon:
             log.warning("Renderer delivery failed: %s", error)
             return False
 
-    def queue(self, reason, trigger=None):
-        now = self.clock()
-        if reason == "failure":
-            self.pending = (reason, now + 1, trigger)
-        elif reason == "check_in" or not self.pending or self.pending[0] != "failure" or not self.sessions.failed:
-            delay = {"prompt": 0, "completion": 1, "check_in": 0}[reason]
-            self.pending = (reason, now + delay, trigger)
+    @property
+    def pending(self):
+        return self.attention.pending
 
-        trace("observation.queued", reason=reason, scheduled=self.pending)
+    @pending.setter
+    def pending(self, value):
+        self.attention.pending = value
+
+    @property
+    def next_observation(self):
+        return self.attention.next_observation
+
+    @next_observation.setter
+    def next_observation(self, value):
+        self.attention.next_observation = value
+
+    @property
+    def last_attention_attempt(self):
+        return self.attention.last_attempt
+
+    @last_attention_attempt.setter
+    def last_attention_attempt(self, value):
+        self.attention.last_attempt = value
+
+    def queue(self, reason, trigger=None):
+        self.attention.queue(reason, trigger, self.sessions.failed)
+
+    def snapshot(self, trigger=None):
+        snapshot = {**self.sessions.snapshot(), "trigger": trigger, "sleeping": self.behavior.sleeping}
+        repositories = self.repositories.snapshot()
+        snapshot["repositories"] = [{**asdict(item), "pending": item.pending} for item in repositories]
+        snapshot["work"] = build_work(snapshot, repositories, now=time.time())
+        return snapshot
+
+    async def probe_processes(self):
+        result = await self.processes.refresh(self.sessions.process_owners())
+        self.sessions.apply_process_status(result)
 
     def activity(self):
         return "error" if self.clock() < self.error_until else "working" if self.sessions.working else "idle"
@@ -164,13 +202,14 @@ class Daemon:
                 if result:
                     key = result["session"]
                     lane = self.sessions.lanes.get(key)
+                    self.repositories.associate(key, lane.repo)
                     if not lane.context_loaded:
                         lane.context_loaded = True
                         try:
-                            stored = self.cognition.memory.context(key)
+                            stored = self.memory.context(key)
                             if stored is None:
                                 for alias in packet.get("aliases", []):
-                                    stored = self.cognition.memory.context(f"{packet['harness']}:{alias}")
+                                    stored = self.memory.context(f"{packet['harness']}:{alias}")
                                     if stored is not None:
                                         break
                             if stored:
@@ -185,7 +224,7 @@ class Daemon:
                             log.warning("Could not restore pet session context: %s", error)
                     if packet["event"] in ("intent", "subagent_start") and lane.first_prompt:
                         try:
-                            self.cognition.memory.save_context(key, lane.first_prompt, lane.session_context, lane.recent_requests,
+                            self.memory.save_context(key, lane.first_prompt, lane.session_context, lane.recent_requests,
                                                                lane.request_count, lane.first_summary_attempted)
                         except sqlite3.Error as error:
                             log.warning("Could not save pet session context: %s", error)
@@ -194,7 +233,7 @@ class Daemon:
                     if packet["event"] in ("turn_done", "turn_error", "subagent_done", "interrupt", "session_end"):
                         trigger["outcome"] = lane.outcome
                     try:
-                        self.cognition.memory.record_event(packet, state)
+                        self.memory.record_event(packet, state)
                     except sqlite3.Error as error:
                         log.warning("Could not record pet event: %s", error)
                     episodes = self.episodes.handle(packet, result, self.sessions)
@@ -245,13 +284,14 @@ class Daemon:
 
     def clear_memory(self):
         try:
-            self.cognition.memory.clear()
+            self.memory.clear()
         except sqlite3.Error as error:
             log.warning("Could not clear pet memory: %s", error)
             return
         if self.request_task:
             self.request_task.cancel()
-        self.sessions = Sessions(self.clock, self.config.stale_seconds, self.config.completed_retention_seconds)
+        self.repositories.clear()
+        self.sessions = Sessions(self.clock, self.config.stale_seconds, self.config.completed_retention_seconds, self.config.activity_fresh_seconds)
         self.episodes = Episodes()
         self.last_attention_attempt = float("-inf")
         self.request_revision += 1
@@ -260,6 +300,7 @@ class Daemon:
         self.clicked = False
         self.last_speech = None
         self.last_reaction_state = None
+        self.repository_attention = {}
         self.error_until = 0
         self.next_observation = self.clock() + self.rng.uniform(*self.config.observation_seconds)
         self.emit({"text": "", "ttl": 0})
@@ -326,7 +367,8 @@ class Daemon:
             self.last_reaction_state = self.sessions.reaction_state()
             timeout = self.config.request_timeout
             try:
-                snapshot = {**self.sessions.snapshot(), "trigger": trigger, "sleeping": self.behavior.sleeping}
+                snapshot = self.snapshot(trigger)
+                repository_revision = self.repositories.signature()
                 selected = self.cognition.selected_sessions(snapshot, reason)
                 focus_snapshot = selected[0] if selected else None
                 focus_session = focus_snapshot["id"] if focus_snapshot else None
@@ -335,7 +377,7 @@ class Daemon:
                     focus = self.sessions.lanes[focus_snapshot["id"]]
                     focus.first_summary_attempted = True
                     try:
-                        self.cognition.memory.save_context(focus_snapshot["id"], focus.first_prompt, focus.session_context,
+                        self.memory.save_context(focus_snapshot["id"], focus.first_prompt, focus.session_context,
                                                            focus.recent_requests, focus.request_count, True)
                     except sqlite3.Error as error:
                         log.warning("Could not save pet session context: %s", error)
@@ -349,6 +391,7 @@ class Daemon:
                     event("observation.discarded", reason="memory_cleared", trigger=reason, session=focus_session)
                     return
                 relevant = observation_context == self.sessions.observation_context(include_activity, keys)
+                repository_relevant = repository_revision == self.repositories.signature()
                 if episode_key:
                     canonical = self.sessions.aliases.get(episode_key, episode_key)
                     before = next(iter(observation_context.values()), None)
@@ -356,11 +399,14 @@ class Daemon:
                     if trigger["episode"] == "waiting" and before is not None and current is not None:
                         before, current = before[:5], current[:5]
                     relevant = self.episodes.relevant(trigger, self.sessions) and before == current
-                if revision != self.request_revision or (context is None and not relevant):
+                if revision != self.request_revision or (context is None and (not relevant or not repository_relevant)):
                     outcome = "discarded"
-                    event("observation.discarded", reason="preempted" if revision != self.request_revision else "session_changed",
+                    event("observation.discarded", reason="preempted" if revision != self.request_revision else "subject_changed",
                           trigger=reason, session=focus_session, decision=result)
                     return
+                subject = self.attention.choose_work(snapshot)
+                if subject and subject.kind == "repository" and reason not in ("explicit", "care"):
+                    self.repository_attention[subject.id] = subject.revision
                 summary = result["session_context"]
                 focus = self.sessions.lanes.get(result["context_session"])
                 if summary is not None and summary.strip() and focus:
@@ -369,7 +415,7 @@ class Daemon:
                         focus.session_context = bounded(summary, 400)
                         focus.goal = focus.session_context or focus.first_prompt
                         try:
-                            self.cognition.memory.save_context(result["context_session"], focus.first_prompt, focus.session_context,
+                            self.memory.save_context(result["context_session"], focus.first_prompt, focus.session_context,
                                                                focus.recent_requests, focus.request_count, focus.first_summary_attempted)
                         except sqlite3.Error as error:
                             log.warning("Could not save pet session context: %s", error)
@@ -395,7 +441,7 @@ class Daemon:
                         self.last_speech = (speech, self.clock())
                         self.last_attention_attempt = self.clock()
                         self.clicked = False
-                        self.cognition.memory.record_speech(speech, reason)
+                        self.memory.record_speech(speech, reason)
             except asyncio.CancelledError:
                 outcome = "cancelled"
                 trace("observation.cancelled")
@@ -410,6 +456,11 @@ class Daemon:
     async def loop(self):
         while True:
             now = self.clock()
+            self.repositories.tick()
+            if self.process_task is None or self.process_task.done():
+                if self.process_task is not None:
+                    self.process_task.result()
+                self.process_task = asyncio.create_task(self.probe_processes())
             if now >= self.next_prune:
                 previous = set(self.sessions.lanes)
                 changed = self.sessions.prune()
@@ -444,29 +495,41 @@ class Daemon:
                     else:
                         trace("observation.skipped", reason=reason, snapshot=self.sessions.snapshot())
                 elif check_in:
-                    request = ("check_in", None, None, {"sessions": check_in, "target_session": check_in[0]})
-                    for key in check_in:
-                        self.sessions.lanes[key].last_check_in = now
-                elif self.behavior.status and self.sessions.active and now >= self.next_observation and not self.behavior.sleeping and not any(lane.waiting for lane in self.sessions.lanes.values()):
+                    selected = self.attention.choose(self.sessions.snapshot(), "check_in", set(check_in))
+                    key = selected["id"]
+                    request = ("check_in", None, None, {"sessions": [key], "target_session": key})
+                elif self.behavior.status and now >= self.next_observation:
                     self.next_observation = now + self.rng.uniform(*self.config.observation_seconds)
-                    if self.sessions.reaction_state() != self.last_reaction_state:
-                        request = ("routine", None, None)
+                    selected = self.attention.choose(self.sessions.snapshot(), "routine")
+                    snapshot = self.snapshot()
+                    snapshot["work"] = tuple(subject for subject in snapshot["work"] if subject.kind != "repository"
+                                             or self.repository_attention.get(subject.id) != subject.revision)
+                    work = self.attention.choose_work(snapshot)
+                    if work and work.kind == "repository":
+                        request = ("routine", None, None, {"target_repository": work.id})
+                    elif selected and self.sessions.reaction_state() != self.last_reaction_state:
+                        request = ("routine", None, None, {"target_session": selected["id"]})
                     else:
                         trace("observation.skipped", reason="unchanged_activity")
                 elif self.behavior.status and self.behavior.care_remark is not None:
                     care = self.behavior.care_remark
                     self.behavior.care_remark = None
-                    if not self.sessions.active:
+                    if not self.sessions.engaged:
                         request = ("care", None, None, {"care": care})
-                if request and request[0] not in ("click", "explicit"):
+                if request:
                     trigger = request[3] if len(request) > 3 else None
-                    waiting = bool(trigger and trigger.get("episode") == "waiting")
-                    cooldown = self.config.behavior.automatic_speech_cooldown_seconds
-                    if not waiting and now - self.last_attention_attempt < cooldown:
+                    if not self.attention.allowed(request[0], trigger):
                         trace("observation.skipped", reason="attention_cooldown")
                         request = None
                 if request:
-                    self.last_attention_attempt = now
+                    trigger = request[3] if len(request) > 3 else None
+                    snapshot = self.snapshot(trigger)
+                    selected = self.attention.choose(snapshot, request[0])
+                    work = self.attention.choose_work(snapshot)
+                    key = work.id if work and work.kind == "repository" else selected["id"] if selected else None
+                    if request[0] == "check_in" and key in self.sessions.lanes:
+                        self.sessions.lanes[key].last_check_in = now
+                    self.attention.scheduled(key)
                     self.behavior.stop_movement()
                     self.request_reason = request[0]
                     self.next_observation = now + self.rng.uniform(*self.config.observation_seconds)
@@ -476,10 +539,10 @@ class Daemon:
 
     async def close(self):
         event("daemon.stopping", snapshot=self.sessions.snapshot(), sessions=len(self.sessions.lanes))
-        for task in (self.loop_task, self.request_task):
+        for task in (self.loop_task, self.request_task, self.process_task):
             if task:
                 task.cancel()
-        await asyncio.gather(*(task for task in (self.loop_task, self.request_task) if task), return_exceptions=True)
+        await asyncio.gather(*(task for task in (self.loop_task, self.request_task, self.process_task) if task), return_exceptions=True)
         if self.child and self.child.returncode is None:
             self.child.terminate()
             try:
@@ -496,7 +559,8 @@ class Daemon:
         if self.identity:
             unlink_owned(self.config.daemon_socket, self.identity)
             self.identity = None
-        self.cognition.memory.close()
+        await self.repositories.close()
+        self.memory.close()
 
     async def run(self):
         if not self.config.overlay_binary.is_file() or not os.access(self.config.overlay_binary, os.X_OK):

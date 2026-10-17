@@ -13,12 +13,17 @@ checks. [Makefile](Makefile) defines the check and build commands.
   [bin/pet-notify](bin/pet-notify) sends commands. [examples/](examples/) contains
   harness hook configurations and a command wrapper.
 - **Daemon coordination:** [pet_daemon/daemon.py](pet_daemon/daemon.py) receives
-  events, schedules commentary, and sends renderer commands.
+  events, coordinates background observations, and sends renderer commands.
+  [pet_daemon/attention.py](pet_daemon/attention.py) selects commentary subjects and cooldowns.
 - **Activity and animation:** [pet_daemon/sessions.py](pet_daemon/sessions.py)
-  tracks turns and tool calls. [pet_daemon/behavior.py](pet_daemon/behavior.py)
+  tracks turns, tool calls, and ownership. [pet_daemon/processes.py](pet_daemon/processes.py)
+  verifies process identities and liveness. [pet_daemon/behavior.py](pet_daemon/behavior.py)
   controls movement, gestures, and naps.
+- **Repository work:** [pet_daemon/repositories/](pet_daemon/repositories/) caches Git and
+  GitHub observations. [pet_daemon/work.py](pet_daemon/work.py) derives immutable work views.
 - **Commentary and memory:** [pet_daemon/cognition.py](pet_daemon/cognition.py)
-  builds model requests and interprets responses.
+  sends model requests and interprets responses.
+  [pet_daemon/context.py](pet_daemon/context.py) selects and bounds model context.
   [pet_daemon/memory.py](pet_daemon/memory.py) stores bounded SQLite history.
 - **Renderer:** [Sources/PetCore/](Sources/PetCore/) defines events and socket
   handling. [Sources/PetOverlay/](Sources/PetOverlay/) contains the AppKit app and view.

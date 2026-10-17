@@ -48,12 +48,12 @@ class Behavior:
         choices = [("exercise", "celebrate", "jumping"), ("attention", "greeting", "waving"),
                    ("consternation", "error", "failed")]
         available = [item for item in choices if self.pack.role(item[1])]
-        if sessions.active:
+        if sessions.engaged:
             available = [item for item in available if item[0] == "consternation"]
         self.next_care = self.clock() + self.rng.uniform(*self.config.care_interval)
         if not available:
             return False
-        if sessions.active:
+        if sessions.engaged:
             kind, role, preferred = self.rng.choice(available)
         else:
             if not self.care_choices:
@@ -63,7 +63,7 @@ class Behavior:
             kind, role, preferred = selected
         clip = self._resolve_clip(role, preferred, "idle")
         self._play(clip, "care", "reaction")
-        if not sessions.active and self.clock() >= self.next_care_speech:
+        if not sessions.engaged and self.clock() >= self.next_care_speech:
             self.care_remark = kind
             self.next_care_speech = self.clock() + self.rng.uniform(*self.config.care_speech_interval)
         event("behavior.care", activity=kind)
@@ -254,7 +254,7 @@ class Behavior:
         if ((clip.role == "celebrate" and not sessions.clean_convergence)
                 or (clip.role == "error" and not sessions.failed)
                 or (clip.role == "work" and not sessions.working)
-                or (clip.role == "attention" and not sessions.active)):
+                or (clip.role == "attention" and not sessions.engaged)):
             return False
         self.wake("gesture")
         self._interrupt("gesture")
@@ -262,7 +262,7 @@ class Behavior:
         return True
 
     def greet(self, sessions):
-        if (not self.status or sessions.active or self.idle_since is None
+        if (not self.status or sessions.engaged or self.idle_since is None
                 or self.clock() - self.idle_since < self.config.idle_greeting_seconds):
             return False
         accepted = self.react("click", sessions)
@@ -344,7 +344,7 @@ class Behavior:
             self.state = state
             event("behavior.state_changed", state=state)
             self.emit({"state": state})
-        if sessions.active:
+        if sessions.engaged:
             self.inactive_since = None
             self.next_nap = None
             self.idle_since = None
@@ -355,7 +355,7 @@ class Behavior:
             self.next_nap = now + self.rng.uniform(*self.config.nap_interval)
         blocked = self._blocked()
         if blocked:
-            if not sessions.active:
+            if not sessions.engaged:
                 self.inactive_since = now
                 self.next_nap = now + self.rng.uniform(*self.config.nap_interval)
             self.clear_since = None
@@ -366,7 +366,7 @@ class Behavior:
         inactive_seconds = 0 if self.inactive_since is None else now - self.inactive_since
         self.observation = Observation(
             now=now,
-            active=sessions.active,
+            active=sessions.engaged,
             working=sessions.working,
             investigating=any(lane.working and lane.phase == "investigating" for lane in sessions.lanes.values()),
             waiting=any(lane.waiting for lane in sessions.lanes.values()),
@@ -374,7 +374,7 @@ class Behavior:
             pointer_recent=now - self.pointer_moved < self.config.gaze_reset_seconds,
             can_roam=(self.config.roaming and not blocked and self.clear_since is not None
                       and now - self.clear_since >= self.config.resume_seconds),
-            can_nap=(self.config.naps and not sessions.active and not blocked and inactive_seconds >= 120
+            can_nap=(self.config.naps and not sessions.engaged and not blocked and inactive_seconds >= 120
                      and self.next_nap is not None and now >= self.next_nap),
             restlessness=min(1, (now - self.last_movement) / 300),
             rest_pressure=min(1, inactive_seconds / 240),
@@ -386,8 +386,8 @@ class Behavior:
                            for key, lane in sorted(sessions.lanes.items())),
         )
         if self.sleeping:
-            if sessions.active or blocked or now >= self.nap_until:
-                self.wake("activity_or_interaction" if sessions.active or blocked else "nap_finished")
+            if sessions.engaged or blocked or now >= self.nap_until:
+                self.wake("activity_or_interaction" if sessions.engaged or blocked else "nap_finished")
                 self._rest()
                 return
             return

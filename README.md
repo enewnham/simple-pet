@@ -83,6 +83,24 @@ commentary reasons: `prompt`, `completion`, `routine`, `failure`, `check_in`, `c
 to `true` to override this array and summarize only the initial prompt of each session.
 The initial summary gets one attempt, including across daemon restarts.
 
+The pet checks verified agent process owners every ten seconds. An exited or replaced
+owner retires its sessions even when an exit hook is missing. Shared application hosts
+use hook lifecycle events. A live agent with no tool calls or input request becomes
+uncertain after five quiet minutes, permitting idle care and naps. Outstanding tool
+calls remain distinguishable from quiet turns.
+
+Repository tracking follows worktrees reported by hooks. Local Git status refreshes
+every 30 seconds, including edits, conflicts, and locally known ahead/behind counts.
+Install and authenticate `gh` to include PR state, reviews, and checks, refreshed every
+three minutes. Git status uses local refs and does not fetch. Failed queries preserve
+the last successful observation and its age. Pending work and repository associations
+survive agent exit and daemon restart. A merged PR and remaining local edits appear as
+separate evidence. Recent pending work takes precedence over historical session goals.
+
+Configure these intervals with `process_probe_seconds`, `activity_fresh_seconds`,
+`repository_refresh_seconds`, and `github_refresh_seconds`. The default model request
+budget remains 16,000 bytes. Repository tracking requires no model calls.
+
 Clear the running pet's memory with:
 
 ```sh

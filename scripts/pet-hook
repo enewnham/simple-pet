@@ -9,6 +9,10 @@ import runpy
 import sys
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from pet_daemon.processes import discover_owner
+
+
 CLIENT = runpy.run_path(str(Path(__file__).resolve().parents[1] / "bin" / "pet-notify"))
 COMMON_EVENTS = {
     "SessionStart": "session_start", "SessionEnd": "session_end",
@@ -161,6 +165,9 @@ def main():
         payload = {}
     result = update(args.harness, args.event, payload)
     if result:
+        owner = discover_owner(args.harness)
+        if owner:
+            result["owner"] = owner.packet()
         CLIENT["send"](result)
     response = {"continue": True} if args.harness == "cursor" and args.event == "beforeSubmitPrompt" else {}
     print(json.dumps(response))

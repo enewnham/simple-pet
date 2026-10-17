@@ -12,6 +12,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pet_daemon.prompts import select_prompt
+from pet_daemon.processes import discover_owner
 
 
 MAX_DATAGRAM_BYTES = 1999
@@ -113,6 +114,10 @@ def main():
             payload["exit_code"] = args.exit_code
         if args.status != "start":
             payload["outcome"] = "error" if args.status == "error" else "success"
+    if payload.get("kind") == "event":
+        owner = discover_owner("cli")
+        if owner:
+            payload["owner"] = owner.packet()
     sent = send(payload)
     if args.command == "clear-memory" and not sent:
         parser.exit(1, "pet-notify: could not send clear-memory to the pet daemon\n")

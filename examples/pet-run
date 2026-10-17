@@ -9,6 +9,16 @@ fi
 pet_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 pet_notify="$pet_root/bin/pet-notify"
 pet_session="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+export PET_OWNER_PID="$$"
+PET_OWNER_STARTED="$(python3 - "$pet_root" "$$" <<'PY_OWNER'
+import sys
+sys.path.insert(0, sys.argv[1])
+from pet_daemon.processes import process_identity
+identity = process_identity(int(sys.argv[2]))
+print(identity.started if identity else "")
+PY_OWNER
+)"
+export PET_OWNER_STARTED
 pet_call=command
 pet_outcome=error
 
@@ -16,8 +26,12 @@ pet_lifecycle() {
   python3 - "$pet_notify" "$pet_session" "$1" "$pet_outcome" <<'PY_EVENT'
 import runpy, sys
 client = runpy.run_path(sys.argv[1])
-client["send"]({"kind": "event", "harness": "cli", "session": sys.argv[2],
-                "event": sys.argv[3], "outcome": sys.argv[4], "manual": True})
+payload = {"kind": "event", "harness": "cli", "session": sys.argv[2],
+           "event": sys.argv[3], "outcome": sys.argv[4], "manual": True}
+owner = client["discover_owner"]("cli")
+if owner:
+    payload["owner"] = owner.packet()
+client["send"](payload)
 PY_EVENT
 }
 

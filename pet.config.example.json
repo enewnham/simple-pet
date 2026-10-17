@@ -77,5 +77,9 @@
   },
   "prompt_max_bytes": 16000,
   "memory_retention_days": 30,
-  "memory_max_events": 10000
+  "memory_max_events": 10000,
+  "process_probe_seconds": 10,
+  "activity_fresh_seconds": 300,
+  "repository_refresh_seconds": 30,
+  "github_refresh_seconds": 180
 }

@@ -150,10 +150,146 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lane.first_prompt, "Write documentation")
         self.assertNotIn("Improve parser", json.dumps(memory.recent()))
 
+    async def repository_fixture(self):
+        from pet_daemon.repositories.git import command
+        self.repository_path = Path(self.temp.name) / "repository"
+        self.repository_path.mkdir()
+        for args in (("init", "-b", "feature"), ("config", "user.email", "pet@example.test"),
+                     ("config", "user.name", "Pet")):
+            await command("git", *args, cwd=self.repository_path)
+        (self.repository_path / "tracked").write_text("initial\n")
+        await command("git", "add", ".", cwd=self.repository_path)
+        await command("git", "commit", "-m", "Initial", cwd=self.repository_path)
+        (self.repository_path / "tracked").write_text("pending edits\n")
+        self.repository_pr = {"number": 1, "url": "https://example.test/pr/1", "state": "OPEN", "mergedAt": None,
+                              "reviewDecision": "REVIEW_REQUIRED", "statusCheckRollup": []}
+        async def boundary(*args, **kwargs):
+            if args[0] == "gh":
+                return json.dumps([self.repository_pr] if args[2] == "list" else self.repository_pr)
+            return await command(*args, **kwargs)
+        self.repository_boundary = boundary
+        self.daemon.repositories.run = boundary
+
+    async def wait_for_repository(self):
+        await self.wait_for(lambda: any(item.pr for item in self.daemon.repositories.snapshot()), timeout=3)
+        return next(item for item in self.daemon.repositories.snapshot() if item.current)
+
+    async def test_exited_owner_leaves_pending_repository_commentary_while_idle(self):
+        from pet_daemon.processes import process_identity
+        await self.repository_fixture()
+        owner = await asyncio.create_subprocess_exec("sleep", "30")
+        try:
+            identity = await asyncio.to_thread(process_identity, owner.pid)
+            self.assertIsNotNone(identity)
+            self.event("tool_start", call="edit", tool="editing", repo=str(self.repository_path), owner=identity.packet())
+            await self.wait_for_repository()
+        finally:
+            owner.terminate()
+            await owner.wait()
+        self.daemon.processes.checked.clear()
+        await self.wait_for(lambda: self.daemon.sessions.lanes["cli:one"].presence == "exited", timeout=3)
+        self.assertEqual(self.daemon.activity(), "idle")
+        await self.daemon.observe("routine")
+        payload = json.loads(self.requests[-1]["messages"][-1]["content"])
+        self.assertEqual(payload["activity"], "idle")
+        self.assertEqual(payload["focus_session"]["presence"], "exited")
+        self.assertFalse(payload["focus_session"]["turn_active"])
+        self.assertTrue(payload["focus_repository"]["pending"])
+        self.assertEqual(payload["focus_repository"]["pr"]["state"], "OPEN")
+
+    async def test_pull_request_merge_discards_commentary_generated_for_pending_work(self):
+        await self.repository_fixture()
+        self.event("session_start", repo=str(self.repository_path))
+        original = await self.wait_for_repository()
+        self.slow = True
+        task = asyncio.create_task(self.daemon.observe("routine"))
+        self.addCleanup(task.cancel)
+        await asyncio.wait_for(self.entered.wait(), 1)
+        self.repository_pr.update(state="MERGED", mergedAt="2026-10-17T00:00:00Z")
+        self.daemon.repositories.github_interval = 0
+        await self.wait_for(lambda: any(item.pr and item.pr.state == "MERGED" for item in self.daemon.repositories.snapshot()), timeout=3)
+        self.release.set()
+        await task
+        self.assertNotEqual(self.daemon.repositories.snapshot()[0].revision, original.revision)
+        self.assertEqual(self.daemon.memory.speech(), [])
+        self.assertFalse(any(packet.get("text") == self.speech for packet in await self.drain()))
+
+    async def test_pending_repository_associations_survive_daemon_restart(self):
+        await self.repository_fixture()
+        self.event("session_start", repo=str(self.repository_path))
+        original = await self.wait_for_repository()
+        await self.daemon.close()
+        self.daemon = Daemon(self.config, self.client, rng=random.Random(7))
+        self.daemon.repositories.run = self.repository_boundary
+        restored = self.daemon.repositories.snapshot()[0]
+        self.assertEqual(restored.subject, original.subject)
+        self.assertEqual(restored.sessions, ("cli:one",))
+        self.assertTrue(restored.pending)
+        self.assertFalse(self.daemon.sessions.active)
+        await self.daemon.start()
+        self.send_status()
+        await self.packet(lambda packet: packet.get("state") == "idle")
+        await self.daemon.observe("routine")
+        payload = json.loads(self.requests[-1]["messages"][-1]["content"])
+        self.assertIsNone(payload["focus_session"])
+        self.assertEqual(payload["focus_repository"]["pr"]["number"], 1)
+
+    async def test_resting_routine_selects_merged_repository_with_remaining_local_edits(self):
+        await self.repository_fixture()
+        self.event("session_start", repo=str(self.repository_path))
+        await self.wait_for_repository()
+        self.repository_pr.update(state="MERGED", mergedAt="2026-10-17T00:00:00Z")
+        self.daemon.repositories.github_interval = 0
+        await self.wait_for(lambda: any(item.pr and item.pr.state == "MERGED" for item in self.daemon.repositories.snapshot()), timeout=3)
+        self.assertFalse(self.daemon.sessions.working)
+        self.daemon.next_observation = self.daemon.clock()
+        await self.packet(lambda packet: packet.get("text") == self.speech, timeout=3)
+        payload = json.loads(self.requests[-1]["messages"][-1]["content"])
+        self.assertEqual(payload["reason"], "routine")
+        self.assertEqual(payload["activity"], "idle")
+        self.assertEqual(payload["focus_repository"]["pr"]["state"], "MERGED")
+        self.assertEqual(payload["focus_repository"]["local"]["unstaged"], 1)
+        self.assertTrue(payload["focus_repository"]["pending"])
+
+    async def test_due_check_ins_mark_only_the_selected_session(self):
+        self.use_clock()
+        self.config.idle_message_seconds = 5
+        self.slow = True
+        for session in ("one", "two"):
+            self.event("tool_start", session=session, call="run", tool="pytest")
+        await self.wait_for(lambda: len(self.daemon.sessions.lanes) == 2)
+        self.now += 6
+        await asyncio.wait_for(self.entered.wait(), 1)
+        checked = [key for key, lane in self.daemon.sessions.lanes.items() if lane.last_check_in is not None]
+        self.assertEqual(checked, ["cli:one"])
+        payload = json.loads(self.requests[-1]["messages"][-1]["content"])
+        self.assertEqual(payload["focus_session"]["id"], "cli:one")
+        self.release.set()
+        await self.wait_for(lambda: len(self.requests) == 2)
+        payload = json.loads(self.requests[-1]["messages"][-1]["content"])
+        self.assertEqual(payload["focus_session"]["id"], "cli:two")
+
+    async def test_failed_repository_commentary_can_retry_without_new_evidence(self):
+        await self.repository_fixture()
+        self.event("session_start", repo=str(self.repository_path))
+        original = await self.wait_for_repository()
+        self.http_status = 500
+        with self.assertLogs("pet-daemon", level="WARNING"):
+            self.daemon.next_observation = self.daemon.clock()
+            await self.wait_for(lambda: len(self.requests) == 1 and self.daemon.request_task is None)
+        self.assertNotIn(original.subject, self.daemon.repository_attention)
+        self.http_status = 200
+        self.daemon.next_observation = self.daemon.clock()
+        await self.packet(lambda packet: packet.get("text") == self.speech)
+        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(self.daemon.repository_attention[original.subject], original.revision)
+
     def use_clock(self):
         self.now = 1000.0
         clock = lambda: self.now
         self.daemon.clock = clock
+        self.daemon.attention.clock = clock
+        self.daemon.processes.clock = clock
         self.daemon.sessions.clock = clock
         self.daemon.cognition.clock = clock
         self.daemon.next_prune = 0

@@ -85,6 +85,10 @@ class Config:
     memory_max_events: int = 10000
     speech_ttl: float = 15
     request_timeout: float = 20
+    process_probe_seconds: float = 10
+    activity_fresh_seconds: float = 300
+    repository_refresh_seconds: float = 30
+    github_refresh_seconds: float = 180
     stale_seconds: float = 3600
     completed_retention_seconds: float = 7200
     max_tokens: int = 512
@@ -117,7 +121,7 @@ class Config:
         for name in ("prompt_max_bytes", "memory_retention_days", "memory_max_events", "max_tokens"):
             if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be a positive integer")
-        for name in ("idle_message_seconds", "speech_ttl", "request_timeout", "stale_seconds", "completed_retention_seconds"):
+        for name in ("idle_message_seconds", "speech_ttl", "request_timeout", "stale_seconds", "completed_retention_seconds", "process_probe_seconds", "activity_fresh_seconds", "repository_refresh_seconds", "github_refresh_seconds"):
             if not positive(getattr(self, name)):
                 raise ValueError(f"{name} must be positive")
         if self.prompt_max_bytes < 8000:

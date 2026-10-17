@@ -9,7 +9,7 @@ from .prompts import select_prompt
 from .telemetry import trace
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def bounded(value, limit=240):
@@ -28,7 +28,7 @@ class Memory:
         path.chmod(0o600)
         self.db.row_factory = sqlite3.Row
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version != SCHEMA_VERSION:
+        if version not in (4, SCHEMA_VERSION):
             self.db.executescript("""
                 DROP TRIGGER IF EXISTS events_insert;
                 DROP TRIGGER IF EXISTS events_delete;
@@ -68,6 +68,14 @@ class Memory:
                 session_context TEXT NOT NULL, recent_requests TEXT NOT NULL, timestamp REAL NOT NULL,
                 request_count INTEGER NOT NULL DEFAULT 0, first_summary_attempted INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(pet, session)
+            );
+            CREATE TABLE IF NOT EXISTS repository_associations (
+                pet TEXT NOT NULL, session TEXT NOT NULL, worktree TEXT NOT NULL,
+                PRIMARY KEY(pet, session, worktree)
+            );
+            CREATE TABLE IF NOT EXISTS repositories (
+                pet TEXT NOT NULL, worktree TEXT NOT NULL, observation TEXT NOT NULL,
+                PRIMARY KEY(pet, worktree)
             );
         """)
         self.db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -188,13 +196,30 @@ class Memory:
             self.db.execute("INSERT INTO speech(pet,text,reason,timestamp) VALUES (?,?,?,?)", (self.pet, text, reason, self.clock()))
         self.prune()
 
+    def associate_repository(self, session, worktree):
+        with self.db:
+            self.db.execute("INSERT OR IGNORE INTO repository_associations VALUES (?,?,?)", (self.pet, session, worktree))
+
+    def repository_associations(self):
+        rows = self.db.execute("SELECT session,worktree FROM repository_associations WHERE pet=?", (self.pet,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def save_repository(self, worktree, observation):
+        with self.db:
+            self.db.execute("INSERT INTO repositories VALUES (?,?,?) ON CONFLICT(pet,worktree) DO UPDATE SET observation=excluded.observation",
+                            (self.pet, worktree, json.dumps(observation)))
+
+    def load_repositories(self):
+        rows = self.db.execute("SELECT observation FROM repositories WHERE pet=?", (self.pet,)).fetchall()
+        return [json.loads(row["observation"]) for row in rows]
+
     def speech(self, limit=3):
         rows = self.db.execute("SELECT text,reason,timestamp FROM speech WHERE pet=? ORDER BY id DESC LIMIT ?", (self.pet, limit)).fetchall()
         return [dict(row) for row in reversed(rows)]
 
     def clear(self):
         with self.db:
-            for table in ("events", "projects", "speech", "contexts"):
+            for table in ("events", "projects", "speech", "contexts", "repository_associations", "repositories"):
                 self.db.execute(f"DELETE FROM {table} WHERE pet=?", (self.pet,))
 
     def close(self):

@@ -448,14 +448,28 @@ class BehaviorTests(unittest.TestCase):
         self.advance(behavior, 119)
         self.assertFalse(behavior.sleeping)
 
-    def test_active_and_waiting_turns_keep_pet_awake(self):
-        for event in ('intent', 'waiting'):
+    def test_outstanding_tools_and_waiting_turns_keep_pet_awake(self):
+        for event in ('tool_start', 'waiting'):
             with self.subTest(event=event):
                 self.sessions = Sessions(self.clock)
-                self.sessions.handle({'harness': 'cli', 'session': 'one', 'event': event, 'goal': 'Plan changes'})
+                self.sessions.handle({'harness': 'cli', 'session': 'one', 'event': event, 'goal': 'Plan changes', 'call': 'long'})
                 behavior = self.make_behavior(naps=True, nap_interval=(1, 1))
                 self.advance(behavior, 600)
                 self.assertFalse(behavior.sleeping)
+
+    def test_quiet_live_turn_settles_and_naps_after_activity_becomes_uncertain(self):
+        self.sessions.handle({'harness': 'cli', 'session': 'one', 'event': 'intent'})
+        behavior = self.make_behavior(naps=True, nap_interval=(1, 1), nap_seconds=(60, 60))
+        self.advance(behavior, 299)
+        self.assertTrue(self.sessions.working)
+        self.assertFalse(behavior.sleeping)
+        self.wait_for_nap(behavior)
+        self.assertTrue(self.sessions.active)
+        self.assertFalse(self.sessions.working)
+        self.assertTrue(behavior.sleeping)
+        self.sessions.handle({'harness': 'cli', 'session': 'one', 'event': 'progress'})
+        behavior.tick('working', self.sessions)
+        self.assertFalse(behavior.sleeping)
 
     def test_finished_failed_turn_can_settle_and_nap(self):
         self.start()
