@@ -5,6 +5,9 @@ from .policy import ANIMATION_ROLES, Observation, Policy, REACTIONS
 from .telemetry import event, trace
 
 
+REACTION_SECONDS = 2.5
+
+
 class Behavior:
     def __init__(self, pack, config, clock, rng, emit):
         self.pack = pack
@@ -189,8 +192,8 @@ class Behavior:
 
     def _play(self, clip, name, kind="gesture", seconds=None):
         if kind in ("error", "success", "reaction"):
-            repeats = 1
-        elif seconds is not None:
+            seconds = REACTION_SECONDS
+        if seconds is not None:
             repeats = max(1, math.ceil(seconds / clip.seconds))
             if clip.max_repeats is not None:
                 repeats = min(repeats, clip.max_repeats)

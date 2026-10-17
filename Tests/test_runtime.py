@@ -406,7 +406,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         behavior.next_care_speech = self.now
         behavior.execution.interrupt()
         animation = await self.packet(lambda packet: packet.get("animation", {}).get("id") == "jumping")
-        self.assertEqual(animation["animation"]["repeats"], 1)
+        self.assertEqual(animation["animation"]["repeats"], 3)
         await self.packet(lambda packet: packet.get("text") == self.speech)
         payload = json.loads(self.requests[-1]["messages"][-1]["content"])
         self.assertEqual(request_reason(self.requests[-1]), "care")

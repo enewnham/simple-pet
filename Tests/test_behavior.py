@@ -121,7 +121,7 @@ class BehaviorTests(unittest.TestCase):
         self.advance(behavior, 25)
         jumps = [animation for animation in self.animations() if animation['id'] == 'jumping']
         self.assertEqual(len(jumps), 2)
-        self.assertTrue(all(animation['repeats'] == 1 for animation in jumps))
+        self.assertTrue(all(animation['repeats'] == 3 for animation in jumps))
         self.assertEqual(behavior.care_remark, 'exercise')
         behavior.satisfy()
         behavior.react('click', self.sessions)
@@ -279,20 +279,71 @@ class BehaviorTests(unittest.TestCase):
         behavior.tick('working', self.sessions)
         self.assertEqual(self.animations()[-1]['id'], 'busy')
 
-    def test_reactions_preempt_and_play_one_cycle_during_other_work(self):
+    def test_reactions_preempt_and_remain_visible_during_other_work(self):
         behavior = self.make_behavior({'hello': {'role': 'greeting'}, 'uh-oh': {'role': 'error'},
                                        'hop': {'role': 'celebrate'}, 'busy': {'role': 'work'}})
         behavior.gesture('hello', self.sessions)
         self.start()
         behavior.react('trouble')
         self.assertEqual(self.animations()[-1]['id'], 'uh-oh')
-        self.assertEqual(self.animations()[-1]['repeats'], 1)
+        self.assertEqual(self.animations()[-1]['repeats'], 3)
         behavior.react('recovery')
         self.assertEqual(self.animations()[-1]['id'], 'hop')
-        self.assertEqual(self.animations()[-1]['repeats'], 1)
+        self.assertEqual(self.animations()[-1]['repeats'], 3)
         behavior.tick('working', self.sessions)
         self.assertEqual(self.animations()[-1]['id'], 'hop')
         self.assertTrue(self.sessions.active)
+
+    def test_short_reaction_plays_complete_cycles_for_its_visible_duration(self):
+        behavior = self.make_behavior({'hop': {'role': 'celebrate', 'frames': 8, 'fps': 10}})
+        self.assertTrue(behavior.react('success'))
+        animation = self.animations()[-1]
+        self.assertEqual(animation['repeats'], 4)
+        self.assertAlmostEqual(animation['repeats'] * .8, 3.2)
+        self.clock.advance(3.2)
+        behavior.tick('idle', self.sessions)
+        self.assertEqual(behavior.pending['id'], animation['command_id'])
+        self.assertEqual(self.animations()[-1]['id'], 'hop')
+        behavior.completion({'event': 'animation', 'command_id': animation['command_id'], 'result': 'finished'})
+        self.assertIsNone(behavior.pending)
+        self.assertEqual(self.animations()[-1]['id'], 'quiet-pose')
+
+    def test_each_named_reaction_remains_visible_for_short_animation_cycles(self):
+        for kind, clip, role in (
+            ('start', 'review', 'attention'), ('investigation', 'review', 'attention'),
+            ('waiting', 'waiting', 'attention'), ('trouble', 'failed', 'error'),
+            ('failure', 'failed', 'error'), ('recovery', 'jumping', 'celebrate'),
+            ('success', 'jumping', 'celebrate'), ('cancelled', 'review', 'attention'),
+            ('click', 'waving', 'greeting'),
+        ):
+            with self.subTest(reaction=kind):
+                behavior = self.make_behavior({clip: {'role': role, 'fps': 5}})
+                self.assertTrue(behavior.react(kind))
+                animation = self.animations()[-1]
+                self.assertEqual(animation['id'], clip)
+                self.assertEqual(animation['repeats'], 13)
+                self.assertAlmostEqual(animation['repeats'] * .2, 2.6)
+
+    def test_reaction_duration_respects_the_authored_repeat_limit(self):
+        behavior = self.make_behavior({'hop': {'role': 'celebrate', 'frames': 8, 'fps': 10, 'max_repeats': 2}})
+        self.assertTrue(behavior.react('success'))
+        self.assertEqual(self.animations()[-1]['repeats'], 2)
+
+    def test_long_reaction_plays_one_complete_cycle(self):
+        behavior = self.make_behavior({'hop': {'role': 'celebrate', 'frames': 10, 'fps': 2}})
+        self.assertTrue(behavior.react('success'))
+        animation = self.animations()[-1]
+        self.assertEqual(animation['repeats'], 1)
+        self.clock.advance(2.5)
+        behavior.tick('idle', self.sessions)
+        self.assertEqual(behavior.pending['id'], animation['command_id'])
+        self.assertEqual(self.animations()[-1]['id'], 'hop')
+        self.clock.advance(2.5)
+        behavior.tick('idle', self.sessions)
+        self.assertEqual(self.animations()[-1]['id'], 'hop')
+        behavior.completion({'event': 'animation', 'command_id': animation['command_id'], 'result': 'finished'})
+        self.assertIsNone(behavior.pending)
+        self.assertEqual(self.animations()[-1]['id'], 'quiet-pose')
 
     def test_investigation_and_input_wait_use_attention_poses(self):
         behavior = self.make_behavior({'waiting': {'role': 'attention'}, 'review': {'role': 'attention'},
