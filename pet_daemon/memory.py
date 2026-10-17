@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .activity import activity, result_summary
 from .prompts import select_prompt
-from .telemetry import trace
+from .telemetry import verbose
 
 
 SCHEMA_VERSION = 5
@@ -142,7 +142,7 @@ class Memory:
                     goal=excluded.goal, last_result=excluded.last_result, timestamp=excluded.timestamp""",
                     (self.pet, repo, requested_goal, summary, timestamp))
         self.prune()
-        trace("memory.event", id=cursor.lastrowid, event_type=kind)
+        verbose("memory.event", id=cursor.lastrowid, event_type=kind)
         return cursor.lastrowid
 
     def recent(self, limit=5, *, session=None, repo=None, event_types=None):

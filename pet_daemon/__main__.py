@@ -8,7 +8,7 @@ from anthropic import AsyncAnthropic
 
 from .config import Config
 from .daemon import Daemon
-from .telemetry import ConsoleFormatter, configure
+from .telemetry import VERBOSE, ConsoleFormatter, configure
 
 
 async def run(config):
@@ -22,16 +22,20 @@ async def run(config):
 def main():
     parser = argparse.ArgumentParser(prog="pet-daemon", description="Track coding-agent work and run a native Haiku desktop pet")
     parser.add_argument("--config", type=Path, default=Path(__file__).resolve().parents[1] / "pet.config.json")
-    parser.add_argument("--verbose", action="store_true", help="Show debug events on stderr; JSONL always includes debug events")
+    detail = parser.add_mutually_exclusive_group()
+    detail.add_argument("--debug", action="store_true", help="Show debug events on stderr; JSONL includes all levels")
+    detail.add_argument("--verbose", action="store_true", help="Show verbose events and full payloads on stderr; JSONL includes all levels")
     args = parser.parse_args()
     console = logging.StreamHandler()
-    console.setFormatter(ConsoleFormatter(color=console.stream.isatty() and "NO_COLOR" not in os.environ))
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, handlers=[console])
+    console.setFormatter(ConsoleFormatter(color=console.stream.isatty() and "NO_COLOR" not in os.environ, verbose=args.verbose))
+    level = VERBOSE if args.verbose else logging.DEBUG if args.debug else logging.INFO
+    logging.basicConfig(level=level, handlers=[console])
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("anthropic").setLevel(logging.WARNING)
     try:
         config = Config.load(args.config)
-        configure(config.log_file, args.verbose)
+        configure(config.log_file, args.verbose, args.debug)
         asyncio.run(run(config))
     except (OSError, ValueError, TypeError, KeyError, RuntimeError) as error:
         logging.getLogger("pet-daemon").exception("Daemon failed")

@@ -2,7 +2,7 @@ import math
 
 from .execution import Action, Execution
 from .policy import ANIMATION_ROLES, Observation, Policy, REACTIONS
-from .telemetry import event, trace
+from .telemetry import event, trace, verbose
 
 
 REACTION_SECONDS = 2.5
@@ -161,7 +161,7 @@ class Behavior:
         if self.status is None:
             self.state = None
         if self.status is None or any(self.status[name] != packet[name] for name in ("screen", "dragging", "menu", "speech")):
-            trace("renderer.status", packet=packet)
+            verbose("renderer.status", packet=packet)
         if self.preferred_position is None or (self.status and self.status["dragging"] and not packet["dragging"]):
             self.preferred_position = (packet["x"], packet["y"])
             self.last_movement = self.clock()
@@ -190,7 +190,7 @@ class Behavior:
     def _blocked(self):
         return not self.status or any(self.status[name] for name in ("speech", "dragging", "menu")) or self._near_pointer()
 
-    def _play(self, clip, name, kind="gesture", seconds=None):
+    def _play(self, clip, name, kind="gesture", seconds=None, session=None):
         if kind in ("error", "success", "reaction"):
             seconds = REACTION_SECONDS
         if seconds is not None:
@@ -208,6 +208,12 @@ class Behavior:
         self.execution.start(Action(name, command, "animation", self.clock() + duration + 1, clip.role, kind))
         self.clip = clip.id
         self.emit({"stop_motion": True, "animation": {"id": clip.id, "repeats": repeats, "command_id": command}})
+        if kind in ("error", "success", "reaction"):
+            event("behavior.reaction", reaction=name, clip=clip.id, role=clip.role, repeats=repeats,
+                  duration_seconds=round(duration, 3), command_id=command, session=session)
+        else:
+            trace("behavior.animation", activity=name, clip=clip.id, role=clip.role, repeats=repeats,
+                  duration_seconds=round(duration, 3), command_id=command)
         self.gesture_after = self.clock() + duration + self.config.gesture_cooldown
 
     def _resolve_clip(self, role, preferred, fallback):
@@ -238,8 +244,10 @@ class Behavior:
             self._rest()
             self.execution.start(Action(kind, self.command, None, self.clock() + self.config.baseline_dwell,
                                         "rest", REACTIONS[kind].kind))
+            event("behavior.reaction", reaction=kind, clip=clip.id, role="rest", repeats=None,
+                  duration_seconds=self.config.baseline_dwell, command_id=self.command, session=key)
         else:
-            self._play(clip, kind, REACTIONS[kind].kind)
+            self._play(clip, kind, REACTIONS[kind].kind, session=key)
         return True
 
     def success(self):
@@ -302,6 +310,8 @@ class Behavior:
         self.clip = clip.id
         self.emit({"animation": {"id": clip.id, "repeats": clip.max_repeats, "command_id": command},
                    "motion": {"x": x, "y": y, "seconds": seconds, "command_id": command}})
+        trace("behavior.motion", activity="roam", clip=clip.id, duration_seconds=round(seconds, 3),
+              x=round(x, 1), y=round(y, 1), command_id=command)
         return True
 
     def _gaze_clip(self):

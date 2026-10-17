@@ -12,6 +12,8 @@ import time
 
 
 log = logging.getLogger('pet-daemon')
+VERBOSE = 5
+logging.addLevelName(VERBOSE, 'VERBOSE')
 observation_id = contextvars.ContextVar('observation_id', default=None)
 request_usage = contextvars.ContextVar('request_usage', default=None)
 
@@ -36,12 +38,13 @@ class JSONFormatter(logging.Formatter):
 
 
 class ConsoleFormatter(logging.Formatter):
-    COLORS = {logging.DEBUG: '90', logging.INFO: '36', logging.WARNING: '33', logging.ERROR: '31', logging.CRITICAL: '31'}
-    PAYLOADS = {'request', 'response', 'snapshot', 'config', 'clips', 'packet', 'decision', 'monotonic_seconds'}
+    COLORS = {VERBOSE: '90', logging.DEBUG: '90', logging.INFO: '36', logging.WARNING: '33', logging.ERROR: '31', logging.CRITICAL: '31'}
+    PAYLOADS = {'request', 'response', 'snapshot', 'config', 'clips', 'packet', 'decision', 'context', 'scheduled', 'monotonic_seconds'}
 
-    def __init__(self, color=False):
+    def __init__(self, color=False, verbose=False):
         super().__init__()
         self.color = color
+        self.verbose = verbose
 
     def format(self, record):
         timestamp = self.formatTime(record, '%H:%M:%S')
@@ -52,10 +55,11 @@ class ConsoleFormatter(logging.Formatter):
         fields = getattr(record, 'fields', {})
         details = []
         for key, value in fields.items():
-            if key in self.PAYLOADS:
+            payload = key in self.PAYLOADS
+            if payload and not self.verbose:
                 continue
             rendered = json.dumps(value, ensure_ascii=False, default=str, separators=(',', ':'))
-            if len(rendered) > 300:
+            if not payload and len(rendered) > 300:
                 rendered = rendered[:297] + '...'
             details.append(f'{key}={rendered}')
         identifier = observation_id.get()
@@ -69,15 +73,15 @@ class ConsoleFormatter(logging.Formatter):
         return line
 
 
-def configure(path, verbose=False):
+def configure(path, verbose=False, debug=False):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     file = RotatingFileHandler(path, maxBytes=10 * 1024 * 1024, backupCount=3, encoding='utf-8')
     file.setFormatter(JSONFormatter())
     console = logging.StreamHandler()
-    console.setLevel(logging.DEBUG if verbose else logging.INFO)
-    console.setFormatter(ConsoleFormatter(color=sys.stderr.isatty() and 'NO_COLOR' not in os.environ))
-    log.setLevel(logging.DEBUG)
+    console.setLevel(VERBOSE if verbose else logging.DEBUG if debug else logging.INFO)
+    console.setFormatter(ConsoleFormatter(color=sys.stderr.isatty() and 'NO_COLOR' not in os.environ, verbose=verbose))
+    log.setLevel(VERBOSE)
     log.propagate = False
     log.addHandler(file)
     log.addHandler(console)
@@ -91,6 +95,10 @@ def event(name, level=logging.INFO, *, exc_info=None, **fields):
 
 def trace(name, **fields):
     event(name, logging.DEBUG, **fields)
+
+
+def verbose(name, **fields):
+    event(name, VERBOSE, **fields)
 
 
 @contextlib.contextmanager

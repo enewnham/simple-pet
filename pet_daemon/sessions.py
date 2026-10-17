@@ -281,7 +281,7 @@ class Sessions:
         lane.activity_uncertain = False
         lane.last_event = event["event"]
         lane.changed_at = time.time()
-        telemetry.trace("session.event_accepted", session=key, source_session=event["session"],
+        telemetry.verbose("session.event_accepted", session=key, source_session=event["session"],
                         source_event=event["event"], turn=lane.turn, generation=lane.generation,
                         call=event.get("call"), tool=event.get("tool"), active=lane.active,
                         waiting=lane.waiting, active_calls=list(lane.calls))

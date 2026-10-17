@@ -45,7 +45,8 @@ class Attention:
         elif reason == "check_in" or not self.pending or self.pending[0] != "failure" or not failed:
             delay = {"prompt": 0, "completion": 1, "check_in": 0}[reason]
             self.pending = (reason, now + delay, trigger)
-        trace("observation.queued", reason=reason, scheduled=self.pending)
+        trace("observation.queued", reason=self.pending[0], scheduled_at=self.pending[1],
+              session=(self.pending[2] or {}).get("target_session"), scheduled=self.pending)
 
     def choose(self, snapshot, reason="routine", eligible=None):
         candidates = selected_sessions(snapshot, reason)

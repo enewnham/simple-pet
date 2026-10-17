@@ -6,7 +6,7 @@ import time
 from .memory import Memory
 from .context import Context, INSTRUCTIONS, SUMMARY_INSTRUCTIONS, RETRY_INSTRUCTIONS, encoded_size
 from .repetition import repeat_match
-from .telemetry import event, request_usage, trace
+from .telemetry import event, request_usage, trace, verbose
 
 
 log = logging.getLogger("pet-daemon")
@@ -66,10 +66,10 @@ class Cognition(Context):
         return result["session_context"]
 
     async def complete(self, request, reason):
-        trace("observation.request", reason=reason, request=request, request_bytes=encoded_size(request))
+        verbose("observation.request", reason=reason, request=request, request_bytes=encoded_size(request))
         started = time.monotonic()
         response = await self.client.messages.create(**request)
-        trace("observation.response", reason=reason, response=response.model_dump(mode="json"))
+        verbose("observation.response", reason=reason, response=response.model_dump(mode="json"))
         usage = response.usage
         fields = dict(input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
                       cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
@@ -129,7 +129,7 @@ class Cognition(Context):
                           action="acknowledgment" if manual else "silence")
                     if not manual:
                         result = {"speak": None}
-        trace("observation.decision", reason=reason, decision={**result, "session_context": summary})
+        trace("observation.decision", reason=reason, speaks=result["speak"] is not None, summary_updated=summary is not None, decision={**result, "session_context": summary})
         return {**result, "session_context": summary, "context_session": focus["id"] if focus else None,
                 "context_version": context_version}
 

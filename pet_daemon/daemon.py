@@ -23,7 +23,7 @@ from .repositories import RepositoryTracker
 from .work import build_work
 from .sprites import Pack
 from .summarization import summary_text
-from .telemetry import event, observation, trace
+from .telemetry import event, observation, trace, verbose
 
 
 log = logging.getLogger("pet-daemon")
@@ -130,7 +130,7 @@ class Daemon:
         self.sender.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 131072)
         self.sender.setblocking(False)
         self.loop_task = asyncio.create_task(self.loop())
-        trace("daemon.started", config=asdict(self.config), pet=self.pack.pet,
+        verbose("daemon.started", config=asdict(self.config), pet=self.pack.pet,
               clips={key: asdict(clip) for key, clip in self.pack.clips.items()}, next_observation=self.next_observation)
         event("daemon.listening", socket=self.config.daemon_socket, pet=self.pack.pet, model=self.config.model,
               stale_seconds=self.config.stale_seconds, retention_seconds=self.config.completed_retention_seconds)
@@ -141,7 +141,7 @@ class Daemon:
         try:
             data = json.dumps(packet, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
             self.sender.sendto(data, self.config.overlay_socket)
-            trace("renderer.command", packet=packet)
+            verbose("renderer.command", packet=packet)
             return True
         except (OSError, ValueError) as error:
             trace("renderer.delivery_failed", packet=packet, error=str(error))
@@ -258,7 +258,7 @@ class Daemon:
                             self.queue("completion", episode_trigger)
                     if not self.system_sleeping:
                         self.behavior.tick(self.activity(), self.sessions)
-                trace("hook.received", packet=packet, result=result, snapshot=self.sessions.snapshot())
+                verbose("hook.received", packet=packet, result=result, snapshot=self.sessions.snapshot())
             elif kind == "renderer":
                 if packet.get("event") == "status":
                     if self.behavior.renderer_status(packet):
@@ -272,7 +272,8 @@ class Daemon:
                 elif packet.get("event") == "click":
                     self.click()
                 else:
-                    trace("renderer.feedback", packet=packet)
+                    trace("renderer.feedback", command_id=packet.get("command_id"), feedback=packet.get("event"),
+                          result=packet.get("result"), packet=packet)
                     self.behavior.completion(packet)
             elif kind == "speak" and isinstance(packet.get("context"), str):
                 ttl = packet.get("ttl")
