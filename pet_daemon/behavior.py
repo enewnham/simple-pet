@@ -2,7 +2,7 @@ import math
 
 from .execution import Action, Execution
 from .policy import ANIMATION_ROLES, Observation, Policy, REACTIONS
-from .telemetry import trace
+from .telemetry import event, trace
 
 
 class Behavior:
@@ -66,7 +66,7 @@ class Behavior:
         if not sessions.active and self.clock() >= self.next_care_speech:
             self.care_remark = kind
             self.next_care_speech = self.clock() + self.rng.uniform(*self.config.care_speech_interval)
-        trace("behavior.care", activity=kind)
+        event("behavior.care", activity=kind)
         return True
 
     @property
@@ -130,6 +130,7 @@ class Behavior:
             return
         self.nap_until = None
         self.emit({"sleeping": False})
+        event("behavior.woke", reason=reason)
         self._interrupt(reason)
         self._rest()
 
@@ -341,6 +342,7 @@ class Behavior:
         starting = state == "working" and self.state in (None, "idle")
         if state != self.state:
             self.state = state
+            event("behavior.state_changed", state=state)
             self.emit({"state": state})
         if sessions.active:
             self.inactive_since = None
@@ -420,6 +422,7 @@ class Behavior:
             return
         if candidate.name == "nap":
             self.nap_until = now + self.rng.uniform(*self.config.nap_seconds)
+            event("behavior.napping", duration_seconds=round(self.nap_until - now, 2))
             self.emit({"sleeping": True, "stop_motion": True})
             self._rest()
             self.execution.start(Action("nap", self.command, None, self.nap_until, "rest", "nap"))

@@ -31,6 +31,16 @@ bin/pet-daemon
 
 The daemon runs in the foreground. Press Ctrl-C to stop it. Use `make run` for subsequent runs.
 
+Console logs show timestamps, levels, session lifecycles, and commentary outcomes with
+timing and token usage. Run `bin/pet-daemon --verbose` to include hook routing and debug
+events. Levels use color in a terminal. Set `NO_COLOR=1` to disable color.
+
+The `log_file` setting controls the rotating JSONL log, which defaults to
+`logs/pet-daemon.jsonl`. It includes debug events, full model requests and responses,
+and renderer packets. Observation IDs connect requests to their decisions and delivery.
+Session logs identify alias merges, ignored hooks, stale turns, and retention removal
+to help diagnose sessions that remain after an agent exits.
+
 ## Connect your agents
 
 Add the client and hook adapter to PATH before launching your harness:

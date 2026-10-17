@@ -5,7 +5,7 @@ import time
 
 from .memory import Memory, bounded
 from .prompts import select_prompt
-from .telemetry import trace
+from .telemetry import event, request_usage, trace
 
 
 log = logging.getLogger("pet-daemon")
@@ -280,17 +280,26 @@ class Cognition:
 
     async def complete(self, request, reason):
         trace("observation.request", reason=reason, request=request, request_bytes=encoded_size(request))
+        started = time.monotonic()
         response = await self.client.messages.create(**request)
         trace("observation.response", reason=reason, response=response.model_dump(mode="json"))
+        usage = response.usage
+        fields = dict(input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
+                      cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
+                      cache_write_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0)
+        collected = request_usage.get()
+        if collected is not None:
+            collected[reason] = fields
+        event("observation.usage", level=logging.DEBUG, reason=reason,
+              duration_seconds=round(time.monotonic() - started, 3), **fields)
         if response.stop_reason != "end_turn":
             raise ValueError(f"Observation ended with {response.stop_reason}")
         content = "".join(block.text for block in response.content if block.type == "text")
         result = json.loads(content)
         if not isinstance(result, dict):
             raise ValueError("Observation requires an object")
-        usage = response.usage
-        log.info("observation %s tokens input=%s output=%s cache_read=%s cache_write=%s", reason, usage.input_tokens, usage.output_tokens,
-                 getattr(usage, "cache_read_input_tokens", 0), getattr(usage, "cache_creation_input_tokens", 0))
+        if reason == "summary":
+            event("observation.summary", duration_seconds=round(time.monotonic() - started, 3), **fields)
         return result
 
     async def observe(self, snapshot, reason, context=None):

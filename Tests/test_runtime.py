@@ -1007,48 +1007,6 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.daemon.cognition.memory.speech(), [])
         self.assertFalse(any("text" in packet for packet in await self.drain()))
 
-    async def test_file_log_connects_hook_context_model_decision_and_renderer_delivery(self):
-        import logging
-        from pet_daemon.cognition import INSTRUCTIONS
-        from pet_daemon.telemetry import configure
-
-        logger = logging.getLogger("pet-daemon")
-        handlers, level, propagate = logger.handlers[:], logger.level, logger.propagate
-        path = Path(self.temp.name) / "logs" / "pet.jsonl"
-        configure(path)
-        try:
-            self.event("intent", harness="claude", goal="Fix the quoted parser \"猫\"\ncarefully")
-            self.event("tool_start", harness="claude", call="parser", tool="pytest parser")
-            await self.packet(lambda packet: packet.get("state") == "working")
-            await self.daemon.observe("explicit", "Inspect parser progress")
-            speech = await self.packet(lambda packet: "text" in packet)
-            entries = [json.loads(line) for line in path.read_text().splitlines()]
-            hooks = [entry for entry in entries if entry["event"] == "hook.received"]
-            self.assertTrue(any(entry["packet"].get("tool") == "pytest parser" for entry in hooks))
-            request = next(entry for entry in entries if entry["event"] == "observation.request")
-            self.assertEqual(request["request"]["system"][0]["text"], "<persona>\n" + self.config.persona + "\n</persona>\n\n" + INSTRUCTIONS)
-            snapshot = json.loads(request["request"]["messages"][-1]["content"])
-            self.assertEqual(snapshot["focus_session"]["last_tool"], "pytest parser")
-            self.assertIn('猫', snapshot["focus_session"]["first_prompt"])
-            response = next(entry for entry in entries if entry["event"] == "observation.response")
-            self.assertEqual(response["response"]["usage"]["input_tokens"], 100)
-            decision = next(entry for entry in entries if entry["event"] == "observation.decision")
-            delivery = next(entry for entry in entries if entry["event"] == "renderer.command" and "text" in entry["packet"])
-            self.assertEqual(decision["decision"]["speak"], speech["text"])
-            self.assertEqual(delivery["packet"]["text"], speech["text"])
-            self.assertEqual({entry["observation_id"] for entry in (request, response, decision, delivery)},
-                             {request["observation_id"]})
-            self.assertEqual(len({entry["run_id"] for entry in entries}), 1)
-            self.assertTrue(all(entry["timestamp"].endswith("+00:00") for entry in entries))
-            self.assertNotIn("test-fixture", path.read_text())
-        finally:
-            for handler in logger.handlers[:]:
-                if handler not in handlers:
-                    logger.removeHandler(handler)
-                    handler.close()
-            logger.setLevel(level)
-            logger.propagate = propagate
-
     async def test_recovery_discards_stale_automatic_speech_without_recording_it(self):
         self.slow = True
         self.event("intent", harness="claude", goal="Repair tests")

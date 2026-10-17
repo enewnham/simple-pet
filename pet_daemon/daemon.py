@@ -18,7 +18,7 @@ from .episodes import Episodes
 from .memory import bounded
 from .sessions import Sessions
 from .sprites import Pack
-from .telemetry import observation, trace
+from .telemetry import event, observation, trace
 
 
 log = logging.getLogger("pet-daemon")
@@ -120,7 +120,8 @@ class Daemon:
         self.loop_task = asyncio.create_task(self.loop())
         trace("daemon.started", config=asdict(self.config), pet=self.pack.pet,
               clips={key: asdict(clip) for key, clip in self.pack.clips.items()}, next_observation=self.next_observation)
-        log.info("listening at %s; pet=%s model=%s", self.config.daemon_socket, self.pack.pet, self.config.model)
+        event("daemon.listening", socket=self.config.daemon_socket, pet=self.pack.pet, model=self.config.model,
+              stale_seconds=self.config.stale_seconds, retention_seconds=self.config.completed_retention_seconds)
 
     def emit(self, packet):
         if self.sender is None:
@@ -272,7 +273,7 @@ class Daemon:
         if sleeping == self.system_sleeping:
             return
         self.system_sleeping = sleeping
-        trace("system.sleep" if sleeping else "system.wake")
+        event("system.sleep" if sleeping else "system.wake")
         if sleeping:
             self.behavior.suspend("system_sleep")
             self.request_revision += 1
@@ -309,8 +310,10 @@ class Daemon:
     async def observe(self, reason, context=None, ttl=None, trigger=None):
         if self.system_sleeping:
             return
-        with observation():
+        with observation() as usage:
             started = self.clock()
+            outcome = "failed"
+            focus_session = None
             revision = self.request_revision
             sessions = self.sessions
             include_activity = reason == "check_in"
@@ -326,6 +329,7 @@ class Daemon:
                 snapshot = {**self.sessions.snapshot(), "trigger": trigger, "sleeping": self.behavior.sleeping}
                 selected = self.cognition.selected_sessions(snapshot, reason)
                 focus_snapshot = selected[0] if selected else None
+                focus_session = focus_snapshot["id"] if focus_snapshot else None
                 if (self.config.summarize_first_request_only
                         and self.cognition.should_summarize(focus_snapshot, reason)):
                     focus = self.sessions.lanes[focus_snapshot["id"]]
@@ -341,7 +345,8 @@ class Daemon:
                     timeout=timeout,
                 )
                 if sessions is not self.sessions:
-                    trace("observation.discarded", reason="memory_cleared")
+                    outcome = "discarded"
+                    event("observation.discarded", reason="memory_cleared", trigger=reason, session=focus_session)
                     return
                 relevant = observation_context == self.sessions.observation_context(include_activity, keys)
                 if episode_key:
@@ -352,8 +357,9 @@ class Daemon:
                         before, current = before[:5], current[:5]
                     relevant = self.episodes.relevant(trigger, self.sessions) and before == current
                 if revision != self.request_revision or (context is None and not relevant):
-                    trace("observation.discarded", reason="session_changed", decision=result)
-                    log.info("discarded stale automatic response")
+                    outcome = "discarded"
+                    event("observation.discarded", reason="preempted" if revision != self.request_revision else "session_changed",
+                          trigger=reason, session=focus_session, decision=result)
                     return
                 summary = result["session_context"]
                 focus = self.sessions.lanes.get(result["context_session"])
@@ -370,6 +376,7 @@ class Daemon:
                         trace("memory.context_updated", session=result["context_session"])
                     else:
                         trace("memory.context_discarded", reason="session_changed", session=result["context_session"])
+                outcome = "silent"
                 if result["speak"] is not None:
                     speech = result["speak"]
                     if speech.strip() and ttl != 0:
@@ -377,18 +384,28 @@ class Daemon:
                         self.behavior.stop_movement()
                     reading_seconds = self.speech_duration(speech)
                     delivered = self.emit({"text": speech, "ttl": reading_seconds if ttl is None else ttl})
+                    if not delivered:
+                        outcome = "delivery_failed"
+                    else:
+                        outcome = "spoken" if speech.strip() and ttl != 0 else "suppressed"
+                    event("speech.delivered" if delivered else "speech.delivery_failed",
+                          level=logging.INFO if delivered else logging.WARNING,
+                          session=focus_session, text=speech, ttl=reading_seconds if ttl is None else ttl)
                     if delivered and speech.strip() and ttl != 0:
                         self.last_speech = (speech, self.clock())
                         self.last_attention_attempt = self.clock()
                         self.clicked = False
                         self.cognition.memory.record_speech(speech, reason)
             except asyncio.CancelledError:
+                outcome = "cancelled"
                 trace("observation.cancelled")
                 raise
             except Exception as error:
-                log.warning("Observation failed: %s", error, exc_info=True)
+                event("observation.failed", level=logging.WARNING, reason=reason, session=focus_session,
+                      error=str(error), exc_info=True)
             finally:
-                trace("observation.finished", duration_seconds=self.clock() - started)
+                event("observation.finished", reason=reason, session=focus_session, outcome=outcome,
+                      duration_seconds=round(self.clock() - started, 3), **usage.get(reason, {}))
 
     async def loop(self):
         while True:
@@ -458,7 +475,7 @@ class Daemon:
             await asyncio.sleep(0.05)
 
     async def close(self):
-        trace("daemon.stopping", snapshot=self.sessions.snapshot())
+        event("daemon.stopping", snapshot=self.sessions.snapshot(), sessions=len(self.sessions.lanes))
         for task in (self.loop_task, self.request_task):
             if task:
                 task.cancel()
