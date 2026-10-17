@@ -16,7 +16,7 @@ from pet_daemon.processes import discover_owner
 
 
 MAX_DATAGRAM_BYTES = 1999
-EXCERPT_FIELDS = ("progress", "goal", "tool", "context")
+EXCERPT_FIELDS = ("progress", "goal", "tool", "context", "sentiment_text")
 
 
 def encode(payload):

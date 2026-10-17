@@ -14,6 +14,7 @@ EVENTS = {
     "subagent_done", "progress", "waiting",
 }
 HARNESS = {"cli", "claude", "codex", "cursor"}
+SENTIMENT_CONTEXT_SECONDS = 300
 
 
 @dataclass
@@ -39,6 +40,9 @@ class Lane:
     context_loaded: bool = False
     request_count: int = 0
     first_summary_attempted: bool = False
+    user_sentiment: float | None = None
+    sentiment_seen: float = float("-inf")
+    sentiment_identity: tuple | None = None
     repo: str = ""
     phase: str = ""
     last_tool: str = ""
@@ -157,6 +161,10 @@ class Sessions:
                 lane.recent_requests = lane.recent_requests or other.recent_requests
                 lane.request_count += other.request_count
                 lane.first_summary_attempted = lane.first_summary_attempted or other.first_summary_attempted
+                if other.sentiment_seen > lane.sentiment_seen:
+                    lane.user_sentiment = other.user_sentiment
+                    lane.sentiment_seen = other.sentiment_seen
+                    lane.sentiment_identity = other.sentiment_identity
                 lane.context_loaded = lane.context_loaded or other.context_loaded
                 lane.repo = lane.repo or other.repo
                 lane.owner = lane.owner or other.owner
@@ -295,7 +303,7 @@ class Sessions:
         kind = event.get("event")
         if event.get("harness") not in HARNESS or kind not in EVENTS or not isinstance(event.get("session"), str) or not event["session"]:
             return self._ignored(event, "invalid_event")
-        for name in ("parent", "parent_call", "call", "turn", "tool", "goal", "progress", "repo", "tool_name"):
+        for name in ("parent", "parent_call", "call", "turn", "tool", "goal", "progress", "repo", "tool_name", "sentiment_text"):
             if name in event and not isinstance(event[name], str):
                 return self._ignored(event, f"invalid_{name}")
         now = self.clock()
@@ -530,6 +538,8 @@ class Sessions:
                 "first_prompt": lane.first_prompt, "session_context": lane.session_context,
                 "recent_requests": list(lane.recent_requests), "generation": lane.generation,
                 "request_count": lane.request_count, "first_summary_attempted": lane.first_summary_attempted,
+                **({"user_sentiment": {"compound": lane.user_sentiment, "seconds_ago": round(now - lane.sentiment_seen)}}
+                   if lane.user_sentiment is not None and now - lane.sentiment_seen < SENTIMENT_CONTEXT_SECONDS else {}),
                 "duration_seconds": round(now - lane.started),
                 "quiet_seconds": round(now - lane.last_seen),
                 "turn_active": lane.active, "last_tool": lane.last_tool,

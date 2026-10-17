@@ -56,6 +56,7 @@ REACTIONS = {
     "waiting": ReactionSpec("attention", "waiting", 3, fallback="review"),
     "trouble": ReactionSpec("error", "failed", 4, "error", "review"),
     "failure": ReactionSpec("error", "failed", 4, "error", "review"),
+    "frustration": ReactionSpec("error", "failed", 2),
     "recovery": ReactionSpec("celebrate", "jumping", 4, "success", "waving"),
     "success": ReactionSpec("celebrate", "jumping", 4, "success", "waving"),
     "cancelled": ReactionSpec("attention", "review", 3, fallback="idle"),

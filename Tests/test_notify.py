@@ -71,6 +71,19 @@ class NotifyTests(unittest.TestCase):
         self.run_client("--session", "worker", "--status", "start")
         self.assertEqual(self.receive()["call"], "single")
 
+    def test_hook_preserves_user_sentiment_prose_before_prompt_compression(self):
+        for harness, event, identity in (
+                ("claude", "UserPromptSubmit", {"session_id": "worker"}),
+                ("codex", "UserPromptSubmit", {"session_id": "worker"}),
+                ("cursor", "beforeSubmitPrompt", {"conversation_id": "worker"})):
+            with self.subTest(harness=harness):
+                prompt = 'This is terrible.\n```\n' + 'error = "awful"\n' * 500 + '```\nPlease fix the parser.'
+                result = self.run_hook(harness, event, {**identity, "prompt": prompt})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                packet = self.receive()
+                self.assertEqual(packet["sentiment_text"], 'This is terrible.\nPlease fix the parser.')
+                self.assertIn('Please fix the parser.', packet["goal"])
+
     def test_clear_memory_sends_command_and_reports_unavailable_daemon(self):
         result = self.run_client("clear-memory")
         self.assertEqual(result.returncode, 0)

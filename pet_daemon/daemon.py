@@ -23,6 +23,7 @@ from .repositories import RepositoryTracker
 from .work import build_work
 from .sprites import Pack
 from .summarization import summary_text
+from .sentiment import analyzer, sentiment_score, NEGATIVE_THRESHOLD, REACTION_CHANCE, COOLDOWN_SECONDS, DUPLICATE_SECONDS
 from .telemetry import event, observation, trace, verbose
 
 
@@ -112,6 +113,8 @@ class Daemon:
         self.clicked = False
         self.last_speech = None
         self.error_until = 0
+        self.sentiment_after = float("-inf")
+        analyzer()
         self.next_prune = 0
         self.next_observation = clock() + self.rng.uniform(*config.observation_seconds)
         self.stopping = asyncio.Event()
@@ -256,6 +259,8 @@ class Daemon:
                             self.queue("check_in", episode_trigger)
                         elif episode.kind in ("success", "cancelled", "recovery"):
                             self.queue("completion", episode_trigger)
+                    if packet["event"] == "intent" and not lane.parent:
+                        self.react_to_sentiment(packet, key, lane)
                     if not self.system_sleeping:
                         self.behavior.tick(self.activity(), self.sessions)
                 verbose("hook.received", packet=packet, result=result, snapshot=self.sessions.snapshot())
@@ -286,6 +291,34 @@ class Daemon:
         except (ValueError, KeyError, TypeError, UnicodeError) as error:
             trace("input.rejected", error=str(error))
             log.debug("Ignoring malformed datagram")
+
+    def react_to_sentiment(self, packet, key, lane):
+        if not self.config.behavior.sentiment_reactions:
+            return
+        now = self.clock()
+        text = packet.get("sentiment_text", packet.get("goal", ""))
+        identity = (packet.get("turn"), text)
+        if lane.sentiment_identity == identity and (packet.get("turn") or now - lane.sentiment_seen < DUPLICATE_SECONDS):
+            trace("sentiment.evaluated", session=key, decision="duplicate")
+            return
+        lane.sentiment_identity = identity
+        lane.sentiment_seen = now
+        score = sentiment_score(text)
+        lane.user_sentiment = score if score <= NEGATIVE_THRESHOLD else None
+        if score > NEGATIVE_THRESHOLD:
+            decision = "neutral"
+        elif now < self.sentiment_after:
+            decision = "cooldown"
+        elif self.system_sleeping:
+            decision = "sleeping"
+        elif self.rng.random() >= REACTION_CHANCE:
+            decision = "chance"
+        elif self.behavior.react("frustration", self.sessions, key):
+            self.sentiment_after = now + COOLDOWN_SECONDS
+            decision = "played"
+        else:
+            decision = "blocked"
+        trace("sentiment.evaluated", session=key, compound=score, decision=decision)
 
     def clear_speech(self):
         try:
@@ -318,6 +351,7 @@ class Daemon:
         self.last_reaction_state = None
         self.repository_attention = {}
         self.error_until = 0
+        self.sentiment_after = float("-inf")
         self.next_observation = self.clock() + self.rng.uniform(*self.config.observation_seconds)
         self.emit({"text": "", "ttl": 0})
         trace("memory.cleared", pet=self.pack.pet)

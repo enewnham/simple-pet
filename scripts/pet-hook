@@ -11,6 +11,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pet_daemon.processes import discover_owner
+from pet_daemon.user_text import sentiment_excerpt
 
 
 CLIENT = runpy.run_path(str(Path(__file__).resolve().parents[1] / "bin" / "pet-notify"))
@@ -112,6 +113,8 @@ def update(harness, event, payload):
         result["tool"] = tool
     if normalized == "intent":
         result["goal"] = string(payload.get("prompt"))
+        if not parent:
+            result["sentiment_text"] = sentiment_excerpt(result["goal"])
     elif normalized == "subagent_start" and payload.get("task"):
         result["goal"] = string(payload.get("task"))
     if normalized == "tool_start" and tool_name in INPUT_TOOLS:

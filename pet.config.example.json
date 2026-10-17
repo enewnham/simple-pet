@@ -67,6 +67,7 @@
     "gaze_reset_seconds": 1.2,
     "gaze_deadzone": 24,
     "care": true,
+    "sentiment_reactions": true,
     "care_interval": [
       300,
       600

@@ -12,6 +12,7 @@ checks. [Makefile](Makefile) defines the check and build commands.
 - **Agent input:** [scripts/pet-hook](scripts/pet-hook) adapts harness events.
   [bin/pet-notify](bin/pet-notify) sends commands. [examples/](examples/) contains
   harness hook configurations and a command wrapper.
+  [pet_daemon/user_text.py](pet_daemon/user_text.py) extracts bounded user prose for sentiment scoring.
 - **Daemon coordination:** [pet_daemon/daemon.py](pet_daemon/daemon.py) receives
   events, coordinates background observations, and sends renderer commands.
   [pet_daemon/attention.py](pet_daemon/attention.py) selects commentary subjects and cooldowns.
@@ -19,6 +20,8 @@ checks. [Makefile](Makefile) defines the check and build commands.
   tracks turns, tool calls, and ownership. [pet_daemon/processes.py](pet_daemon/processes.py)
   verifies process identities and liveness. [pet_daemon/behavior.py](pet_daemon/behavior.py)
   controls movement, gestures, and naps.
+  [pet_daemon/sentiment.py](pet_daemon/sentiment.py) scores user prose with VADER using the
+  [bundled lexicon](pet_daemon/data/README.md). The daemon selects sentiment reactions and cooldowns.
 - **Repository work:** [pet_daemon/repositories/](pet_daemon/repositories/) caches Git and
   GitHub observations. [pet_daemon/work.py](pet_daemon/work.py) derives immutable work views.
 - **Commentary and memory:** [pet_daemon/cognition.py](pet_daemon/cognition.py)

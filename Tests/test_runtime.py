@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import random
+import runpy
 import socket
 import tempfile
 import unittest
@@ -151,6 +152,116 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 result.append(json.loads(self.overlay.recv(65536)))
             except BlockingIOError:
                 return result
+
+    def install_sentiment_clips(self):
+        path = self.config.pet_dir / 'manifest.json'
+        manifest = json.loads(path.read_text())
+        for name, role in [('failed', 'error'), ('review', 'attention'), ('jumping', 'celebrate')]:
+            manifest['clips'][name] = {'frames': ['pixel.png'], 'fps': 1, 'role': role}
+        path.write_text(json.dumps(manifest))
+        self.daemon.pack = self.daemon.behavior.pack = Pack(self.config.pet_dir)
+
+    async def test_hook_frustration_plays_once_without_marking_work_failed(self):
+        self.install_sentiment_clips()
+        self.slow = True
+        self.daemon.rng = random.Random(1)
+        root = Path(__file__).resolve().parents[1]
+        hook = runpy.run_path(str(root / 'scripts' / 'pet-hook'))
+        packet = hook['update']('claude', 'UserPromptSubmit', {
+            'session_id': 'frustrated', 'prompt': 'This is terrible. Stop making this worse.'})
+        encoded = hook['CLIENT']['encode'](packet)
+        self.daemon.receive(encoded)
+        reaction = await self.packet(lambda item: item.get('animation', {}).get('id') == 'failed')
+        self.assertEqual(reaction['animation']['repeats'], 3)
+        self.assertEqual(self.daemon.behavior.execution.action.name, 'frustration')
+        self.assertFalse(self.daemon.sessions.failed)
+        self.assertEqual(self.daemon.error_until, 0)
+        snapshot = self.daemon.sessions.snapshot()
+        payload = self.daemon.cognition.prompt(snapshot, 'prompt', None)
+        self.assertLessEqual(payload['focus_session']['user_sentiment']['compound'], -0.45)
+
+        self.daemon.receive(encoded)
+        self.daemon.rng = random.Random(1)
+        packet['session'] = 'another'
+        self.daemon.receive(hook['CLIENT']['encode'](packet))
+        self.assertFalse(any(item.get('animation', {}).get('id') == 'failed' for item in await self.drain()))
+
+    async def test_skipped_frustration_is_not_retried_by_duplicate_hooks(self):
+        self.install_sentiment_clips()
+        packet = {'kind': 'event', 'harness': 'claude', 'session': 'frustrated', 'event': 'intent',
+                  'goal': 'This is terrible. Stop making this worse.'}
+        self.daemon.rng = random.Random(2)
+        self.daemon.receive(json.dumps(packet).encode())
+        self.daemon.rng = random.Random(1)
+        self.daemon.receive(json.dumps(packet).encode())
+        self.assertFalse(any(item.get('animation', {}).get('id') == 'failed' for item in await self.drain()))
+
+    async def test_sentiment_cooldown_expires_and_a_neutral_prompt_clears_the_signal(self):
+        self.install_sentiment_clips()
+        self.slow = True
+        now = [self.daemon.clock()]
+        clock = lambda: now[0]
+        self.daemon.clock = self.daemon.sessions.clock = self.daemon.behavior.clock = clock
+        packet = {'kind': 'event', 'harness': 'claude', 'session': 'frustrated', 'event': 'intent',
+                  'turn': 'first', 'goal': 'This is terrible. Stop making this worse.'}
+        self.daemon.rng = random.Random(1)
+        self.daemon.receive(json.dumps(packet).encode())
+        self.assertEqual(self.daemon.sentiment_after, now[0] + 90)
+        self.assertTrue(any(item.get('animation', {}).get('id') == 'failed' for item in await self.drain()))
+
+        now[0] += 89
+        self.daemon.behavior.tick(self.daemon.activity(), self.daemon.sessions)
+        packet['turn'] = 'second'
+        self.daemon.rng = random.Random(1)
+        self.daemon.receive(json.dumps(packet).encode())
+        self.assertFalse(any(item.get('animation', {}).get('id') == 'failed' for item in await self.drain()))
+
+        now[0] += 2
+        packet['turn'] = 'third'
+        self.daemon.rng = random.Random(1)
+        self.daemon.receive(json.dumps(packet).encode())
+        self.assertTrue(any(item.get('animation', {}).get('id') == 'failed' for item in await self.drain()))
+        now[0] += 100
+        self.assertIn('user_sentiment', self.daemon.sessions.snapshot()['sessions'][0])
+        self.daemon.behavior.tick(self.daemon.activity(), self.daemon.sessions)
+        self.daemon.rng = random.Random(1)
+        self.daemon.receive(json.dumps(packet).encode())
+        self.assertFalse(any(item.get('animation', {}).get('id') == 'failed' for item in await self.drain()))
+
+        packet.update(turn='fourth', goal='Thank you, this looks great.')
+        self.daemon.receive(json.dumps(packet).encode())
+        self.assertNotIn('user_sentiment', self.daemon.sessions.snapshot()['sessions'][0])
+
+    async def test_subagent_prompts_and_disabled_sentiment_do_not_react(self):
+        self.install_sentiment_clips()
+        packet = {'kind': 'event', 'harness': 'claude', 'session': 'child', 'parent': 'parent',
+                  'event': 'intent', 'goal': 'This is terrible. Stop making this worse.'}
+        self.daemon.rng = random.Random(1)
+        self.daemon.receive(json.dumps(packet).encode())
+        self.assertFalse(any(item.get('animation', {}).get('id') == 'failed' for item in await self.drain()))
+        self.assertNotIn('user_sentiment', self.daemon.sessions.snapshot()['sessions'][0])
+        self.config.behavior.sentiment_reactions = False
+        packet.pop('parent')
+        packet['session'] = 'disabled'
+        self.daemon.receive(json.dumps(packet).encode())
+        self.assertFalse(any(item.get('animation', {}).get('id') == 'failed' for item in await self.drain()))
+
+    async def test_blocked_frustration_is_dropped_and_respects_reaction_priority(self):
+        self.install_sentiment_clips()
+        packet = {'kind': 'event', 'harness': 'claude', 'session': 'frustrated', 'event': 'intent',
+                  'goal': 'This is terrible. Stop making this worse.'}
+        self.daemon.behavior.status['menu'] = True
+        self.daemon.rng = random.Random(1)
+        self.daemon.receive(json.dumps(packet).encode())
+        self.daemon.behavior.status['menu'] = False
+        self.daemon.behavior.tick(self.daemon.activity(), self.daemon.sessions)
+        self.assertFalse(any(item.get('animation', {}).get('id') == 'failed' for item in await self.drain()))
+        self.daemon.behavior.react('success')
+        packet['session'] = 'another'
+        self.daemon.rng = random.Random(1)
+        self.daemon.receive(json.dumps(packet).encode())
+        self.assertEqual(self.daemon.behavior.execution.action.name, 'success')
+        self.assertFalse(any(item.get('animation', {}).get('id') == 'failed' for item in await self.drain()))
 
     async def test_clear_memory_cancels_commentary_and_starts_fresh_sessions(self):
         self.slow = True

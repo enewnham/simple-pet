@@ -28,6 +28,7 @@ class BehaviorConfig:
     automatic_speech_cooldown_seconds: float = 90
     naps: bool = True
     care: bool = True
+    sentiment_reactions: bool = True
     care_interval: tuple = (300, 600)
     care_speech_interval: tuple = (2700, 5400)
     nap_interval: tuple = (120, 240)
@@ -52,7 +53,7 @@ class BehaviorConfig:
     def validate(self):
         for item in fields(self):
             value = getattr(self, item.name)
-            if item.name in ("roaming", "naps", "care"):
+            if item.name in ("roaming", "naps", "care", "sentiment_reactions"):
                 valid = type(value) is bool
             elif item.name == "automatic_speech_cooldown_seconds":
                 valid = type(value) in (int, float) and math.isfinite(value) and value >= 0
