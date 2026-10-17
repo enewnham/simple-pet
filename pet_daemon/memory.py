@@ -101,7 +101,8 @@ class Memory:
         repo = bounded(event.get("repo") or state.get("repo"), 1024)
         identifier = bounded(state.get("id") or f"{event['harness']}:{event['session']}", 256)
         progress = bounded(event.get("progress"))
-        goal = bounded(event.get("goal") or state.get("goal"))
+        requested_goal = bounded(event.get("goal"))
+        goal = requested_goal or bounded(state.get("goal"))
         tool = bounded(event.get("tool") or state.get("last_tool"), 160)
         if kind == "tool_start":
             return None
@@ -116,12 +117,15 @@ class Memory:
         if kind in ("tool_error", "turn_error"):
             outcome = "error"
         category = state.get("activity") or activity(tool, event.get("tool_name", ""))
-        if kind == "turn_error":
+        if terminal:
             category = "harness"
         if outcome == "error":
             progress = ""
+        result = result_summary(category, outcome) if outcome else ""
+        if terminal and outcome == "success":
+            result = "Turn completed (agent reported success)"
         facts = [kind, goal if kind in ("intent", "subagent_start") else "",
-                 result_summary(category, outcome) if outcome else "",
+                 result,
                  tool if kind.startswith("tool_") and outcome != "error" else "", progress]
         summary = bounded(" | ".join(part for part in facts if part), 320)
         if kind in ("progress", "waiting", "session_start"):
@@ -133,19 +137,35 @@ class Memory:
         with self.db:
             cursor = self.db.execute("INSERT INTO events(pet,session,repo,event_type,summary,goal,timestamp) VALUES (?,?,?,?,?,?,?)",
                                      (self.pet, identifier, repo, kind, summary, goal, timestamp))
-            if repo and goal:
+            if repo and requested_goal:
                 self.db.execute("""INSERT INTO projects VALUES (?,?,?,?,?) ON CONFLICT(pet,repo) DO UPDATE SET
                     goal=excluded.goal, last_result=excluded.last_result, timestamp=excluded.timestamp""",
-                    (self.pet, repo, goal, summary, timestamp))
+                    (self.pet, repo, requested_goal, summary, timestamp))
         self.prune()
         trace("memory.event", id=cursor.lastrowid, event_type=kind)
         return cursor.lastrowid
 
-    def recent(self, limit=5):
-        rows = self.db.execute("""WITH ranked AS (
-            SELECT *, ROW_NUMBER() OVER (PARTITION BY session ORDER BY id DESC) AS rank FROM events WHERE pet=?
+    def recent(self, limit=5, *, session=None, repo=None, event_types=None):
+        filters = ["pet=?"]
+        values = [self.pet]
+        if session is not None:
+            filters.append("session=?")
+            values.append(session)
+        if repo is not None:
+            filters.append("repo=?")
+            values.append(repo)
+        if event_types is not None:
+            kinds = tuple(event_types)
+            if not kinds:
+                return []
+            placeholders = ",".join("?" for _ in kinds)
+            filters.append(f"event_type IN ({placeholders})")
+            values.extend(kinds)
+        where = " AND ".join(filters)
+        rows = self.db.execute(f"""WITH ranked AS (
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY session ORDER BY id DESC) AS rank FROM events WHERE {where}
         ) SELECT id, session, repo, event_type, summary, goal, timestamp
-          FROM ranked ORDER BY rank=1 DESC, id DESC LIMIT ?""", (self.pet, limit)).fetchall()
+          FROM ranked ORDER BY rank=1 DESC, id DESC LIMIT ?""", (*values, limit)).fetchall()
         return [dict(row) for row in sorted(rows, key=lambda row: row["id"])]
 
     def recall(self, event, limit=2):

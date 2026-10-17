@@ -11,6 +11,7 @@ from pet_daemon.cognition import Cognition, INSTRUCTIONS, SUMMARY_INSTRUCTIONS
 from pet_daemon.config import Config
 from pet_daemon.sessions import Sessions
 from pet_daemon.sprites import Pack
+from pet_daemon.telemetry import observation
 
 
 class Clock:
@@ -616,8 +617,8 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(schema["required"], ["speak"])
         self.assertFalse(schema["additionalProperties"])
         snapshot = json.loads(body["messages"][-1]["content"])
-        self.assertEqual(snapshot["focus_session"]["first_prompt"], "Refactor batch inserts")
-        self.assertEqual(snapshot["pet"], "fixture-pet")
+        self.assertEqual(snapshot["focus_session"]["recent_requests"][-1], "Refactor batch inserts")
+        self.assertNotIn("pet", snapshot)
 
     async def test_sends_only_the_instruction_for_the_current_reason(self):
         directions = {
@@ -634,8 +635,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 system = self.requests[-1][1]["system"]
                 self.assertEqual(len(system), 2)
                 self.assertNotIn("cache_control", system[1])
-                speech = " Supply a nonempty line of speech." if reason == "explicit" else " Use null if the remark would repeat yourself or has no supported subject."
-                self.assertEqual(system[1], {"type": "text", "text": "<request>\n" + direction + speech + "\n</request>"})
+                self.assertEqual(system[1], {"type": "text", "text": "<request>\n" + direction + "\n</request>"})
                 for other_reason, other_direction in directions.items():
                     self.assertNotIn(other_direction, system[0]["text"])
                     if other_reason != reason:
@@ -663,7 +663,9 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(text, json.dumps(body["system"]))
         payload = json.loads(body["messages"][0]["content"])
         self.assertEqual(payload["context"], text)
-        self.assertEqual(payload["focus_session"]["recent_requests"][-1], text)
+        self.assertIsNone(payload["focus_session"])
+        self.assertEqual(payload["other_sessions"], [])
+        self.assertIsNone(payload["focus_repository"])
 
     async def test_click_greets_only_when_all_sessions_are_inactive(self):
         snapshot = self.sessions.snapshot()
@@ -682,10 +684,9 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(direction=direction, sessions=len(state["sessions"])):
                 self.responses.append(({"speak": "Hello there."}, "end_turn"))
                 await self.cognition.observe(state, "click")
-                self.assertEqual(self.requests[-1][1]["system"][1]["text"], "<request>\n" + direction + " Supply a nonempty line of speech.\n</request>")
+                self.assertEqual(self.requests[-1][1]["system"][1]["text"], "<request>\n" + direction + "\n</request>")
         payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
-        self.assertFalse(payload["focus_session"]["turn_active"])
-        self.assertTrue(payload["other_sessions"][0]["turn_active"])
+        self.assertTrue(any(session["turn_active"] for session in [payload["focus_session"], *payload["other_sessions"]]))
 
     async def test_click_keeps_active_work_instruction_when_sessions_are_omitted(self):
         for index in range(4):
@@ -695,7 +696,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         snapshot["trigger"] = {"harness": "claude", "session": "worker", "event": "click"}
         snapshot["sessions"][0]["turn_active"] = False
         self.config.prompt_max_bytes = 8000
-        self.config.persona += " Curious and patient." * 115
+        self.config.persona += " Curious and patient." * 145
         self.responses.append(({"speak": "I am still on it."}, "end_turn"))
         await self.cognition.observe(snapshot, "click")
         body = self.requests[-1][1]
@@ -703,7 +704,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(payload["focus_session"]["turn_active"])
         self.assertEqual(payload["other_sessions"], [])
         self.assertGreater(payload["omitted_sessions"]["active"], 0)
-        self.assertEqual(body["system"][1]["text"], "<request>\nBriefly acknowledge the developer while our work continues. Supply a nonempty line of speech.\n</request>")
+        self.assertEqual(body["system"][1]["text"], "<request>\nBriefly acknowledge the developer while our work continues.\n</request>")
 
     async def test_click_surfaces_the_oldest_input_wait_among_parallel_sessions(self):
         for index in range(4):
@@ -717,9 +718,9 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         result = await self.cognition.observe(snapshot, "click")
         body = self.requests[-1][1]
         payload = json.loads(body["messages"][0]["content"])
-        self.assertEqual(payload["focus_session"]["id"], "codex:parallel-3")
+        self.assertNotIn("id", payload["focus_session"])
         self.assertEqual(payload["focus_session"]["progress"], "Choose eager or lazy parsing")
-        self.assertEqual(payload["other_sessions"][0]["id"], "codex:parallel-2")
+        self.assertTrue(payload["other_sessions"][0]["waiting_for_input"])
         self.assertEqual(payload["omitted_sessions"]["total"], 2)
         self.assertEqual(result["context_session"], "codex:parallel-3")
         direction = body["system"][1]["text"]
@@ -729,7 +730,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         for reason in ("prompt", "completion", "check_in", "failure"):
             with self.subTest(reason=reason):
                 selected = self.cognition.prompt(snapshot, reason, None)
-                self.assertEqual(selected["focus_session"]["id"], "claude:worker")
+                self.assertEqual(selected["focus_session"]["recent_requests"][-1], "Refactor batch inserts")
 
     async def test_click_describes_an_input_wait_without_a_supplied_question(self):
         self.sessions.handle({"harness": "claude", "session": "worker", "event": "waiting"})
@@ -755,9 +756,10 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 await self.cognition.observe(snapshot, "care")
                 body = self.requests[-1][1]
                 payload = json.loads(body["messages"][0]["content"])
-                self.assertEqual(payload["trigger"]["care"], care)
+                self.assertNotIn("trigger", payload)
                 self.assertIn(direction, body["system"][1]["text"])
-                self.assertIn("Supply a nonempty line of speech", body["system"][1]["text"])
+                self.assertNotIn("Supply a nonempty line of speech", body["system"][1]["text"])
+                self.assertEqual(body["output_config"]["format"]["schema"]["properties"]["speak"]["type"], "string")
                 if care == "consternation":
                     self.assertIn("does not establish an agent failure", body["system"][1]["text"])
                     self.assertIn("without asking for work, attention, or a reply", body["system"][1]["text"])
@@ -780,14 +782,15 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                     self.sessions.handle({"harness": "claude", "session": "worker", "event": "waiting", "call": "input", "tool": "AskUserQuestion"})
                 self.responses.append(({"speak": "I am waiting here."}, "end_turn"))
                 await self.observe("check_in")
-                self.assertEqual(self.requests[-1][1]["system"][1]["text"], "<request>\n" + direction + " Supply a nonempty line of speech.\n</request>")
+                self.assertEqual(self.requests[-1][1]["system"][1]["text"], "<request>\n" + direction + "\n</request>")
 
     async def test_explicit_commentary_requires_speech_and_preserves_full_text(self):
         speech = "The compiler has produced an unusually elaborate complaint. " * 20
         self.responses.append(({"speak": speech}, "end_turn"))
         result = await self.observe("explicit", "The compiler complained again")
         schema = self.requests[-1][1]["output_config"]["format"]["schema"]
-        self.assertEqual(schema["properties"]["speak"], {"anyOf": [{"type": "string"}, {"type": "null"}]})
+        self.assertEqual(schema["properties"]["speak"]["type"], "string")
+        self.assertIn("description", schema["properties"]["speak"])
         self.assertEqual(result["speak"], speech)
         self.assertEqual(self.cognition.memory.speech(), [])
         snapshot = json.loads(self.requests[-1][1]["messages"][-1]["content"])
@@ -810,7 +813,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         content = self.requests[-1][1]["messages"][0]["content"]
         request = {**self.requests[-1][1], "timeout": self.config.request_timeout}
         self.assertLessEqual(len(json.dumps(request, ensure_ascii=False).encode("utf-8")), self.config.prompt_max_bytes)
-        self.assertEqual(json.loads(content)["reason"], "routine")
+        self.assertNotIn("reason", json.loads(content))
 
     async def test_concurrent_work_keeps_triggering_session_and_active_tool_durations(self):
         for index in range(8):
@@ -823,15 +826,15 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         snapshot["trigger"] = {"harness": "codex", "session": "worker-7", "event": "tool_error", "detail": "Parser assertion failed"}
         await self.cognition.observe(snapshot, "failure")
         payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
-        self.assertEqual(payload["focus_session"]["id"], "codex:worker-7")
+        self.assertEqual(payload["focus_session"]["recent_requests"][-1], "Goal 7")
         self.assertLessEqual(len(payload["other_sessions"]), 2)
         self.assertGreaterEqual(payload["omitted_sessions"]["active"], 5)
-        self.assertEqual(payload["trigger"]["event"], "tool_error")
+        self.assertNotIn("trigger", payload)
         self.assertNotIn("Parser assertion failed", json.dumps(payload))
         target = payload["focus_session"]
         self.assertEqual(len(target["active_tools"]), 3)
         self.assertEqual(target["other_active_tools"], 2)
-        self.assertTrue(all(tool["duration_seconds"] == 120 for tool in target["active_tools"]))
+        self.assertTrue(all(tool["running_for"] == "2 minutes" for tool in target["active_tools"]))
 
     async def test_completed_sessions_keep_results_without_full_request_history(self):
         self.sessions.handle({"harness": "codex", "session": "done", "event": "intent", "goal": "Document the renderer"})
@@ -839,10 +842,10 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         await self.observe()
         payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
         completed = payload["other_sessions"][0]
-        self.assertEqual(completed["goal"], "Document the renderer")
+        self.assertIn("Document the renderer", json.dumps(completed))
         self.assertEqual(completed["progress"], "Renderer docs verified")
         self.assertEqual(completed["outcome"], "success")
-        self.assertNotIn("recent_requests", completed)
+        self.assertNotIn("session_context", completed)
         self.assertNotIn("first_prompt", completed)
 
     async def test_small_prompt_budget_preserves_trigger_over_older_memory(self):
@@ -857,29 +860,73 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         body = self.requests[-1][1]
         self.assertLessEqual(len(json.dumps({**body, "timeout": self.config.request_timeout}, ensure_ascii=False).encode("utf-8")), 8000)
         payload = json.loads(body["messages"][0]["content"])
-        self.assertEqual(payload["focus_session"]["id"], "codex:worker-7")
-        self.assertEqual(payload["trigger"]["event"], "tool_error")
+        self.assertIn("猫", payload["focus_session"]["recent_requests"][-1])
+        self.assertNotIn("trigger", payload)
         self.assertNotIn("The parser failed", json.dumps(payload))
         self.assertLess(len(payload["memory"]["recent_events"]), 5)
 
-    async def test_prompt_limits_facts_and_separates_recent_speech(self):
-        for index in range(4):
-            self.cognition.memory.record_event({"harness": "codex", "session": "worker", "event": "intent", "repo": "/repo/parser", "goal": f"Refactor parser tokenization {index}"})
+    async def test_session_commentary_omits_historical_facts_and_separates_recent_speech(self):
         for index in range(8):
-            self.cognition.memory.record_event({"harness": "codex", "session": "worker", "event": "progress", "repo": "/repo/parser", "progress": f"Current progress {index}"})
+            self.cognition.memory.record_event({"harness": "claude", "session": "worker", "event": "progress", "repo": "/repo/parser", "progress": f"Current progress {index}"})
             self.cognition.memory.record_speech(f"Visible remark {index}", "routine")
+        self.cognition.memory.record_event({"harness": "codex", "session": "unrelated", "event": "intent",
+                                           "repo": "/repo/billing", "goal": "Unrelated billing project"})
         snapshot = self.sessions.snapshot()
-        snapshot["trigger"] = {"harness": "codex", "session": "worker", "repo": "/repo/parser", "event": "intent", "goal": "Refactor parser tokenization"}
+        snapshot["trigger"] = {"harness": "claude", "session": "worker", "repo": "/repo/parser", "event": "intent", "goal": "Refactor parser tokenization"}
         await self.cognition.observe(snapshot, "failure")
         payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
         memory = payload["memory"]
-        speech = payload["repetition"]["recent_speech"]
+        self.assertNotIn("repetition", payload)
         self.assertNotIn("Visible remark", json.dumps(memory))
-        self.assertEqual(len(memory["recent_events"]), 5)
-        self.assertEqual(len(memory["recalled_events"]), 2)
-        self.assertEqual(len(speech), 3)
-        self.assertTrue(all("parser tokenization" in event["summary"] for event in memory["recalled_events"]))
-        self.assertEqual([row["text"] for row in speech], ["Visible remark 5", "Visible remark 6", "Visible remark 7"])
+        self.assertNotIn("Unrelated billing project", json.dumps(payload))
+        self.assertEqual(memory["recent_events"], [])
+        self.assertNotIn("recalled_events", memory)
+        self.assertNotIn("project_context", memory)
+        self.assertNotIn("Visible remark", json.dumps(payload))
+        self.assertEqual([row["text"] for row in self.cognition.memory.speech()], ["Visible remark 5", "Visible remark 6", "Visible remark 7"])
+
+    async def test_speech_payload_omits_internal_identity_and_validation_instructions(self):
+        self.sessions.handle({"harness": "claude", "session": "worker", "event": "tool_start", "call": "private-call", "tool": "pytest"})
+        self.clock.advance(125)
+        self.responses.append(({"speak": "The checks are still running."}, "end_turn"))
+        await self.observe("check_in")
+        body = self.requests[-1][1]
+        payload = json.loads(body["messages"][0]["content"])
+        forbidden = {"id", "session", "harness", "parent", "call", "reason", "trigger", "timestamp", "observed_at",
+                     "duration_seconds", "quiet_seconds", "waiting_seconds", "seconds_ago", "first_prompt", "session_context", "project_context"}
+
+        def check(value):
+            if isinstance(value, dict):
+                self.assertFalse(forbidden.intersection(value))
+                for child in value.values():
+                    check(child)
+            elif isinstance(value, list):
+                for child in value:
+                    check(child)
+
+        check(payload)
+        self.assertNotIn("claude:worker", json.dumps(payload))
+        self.assertNotIn("private-call", json.dumps(payload))
+        system = json.dumps(body["system"])
+        for phrase in ("Return JSON", "supplied schema", "Supply a nonempty", "Use null", "speak contains"):
+            self.assertNotIn(phrase, system)
+        self.assertEqual(body["output_config"]["format"]["type"], "json_schema")
+
+    async def test_idle_click_and_care_keep_work_history_out_of_commentary(self):
+        self.sessions.handle({"harness": "claude", "session": "worker", "event": "turn_done", "progress": "Old task report"})
+        self.cognition.memory.record_event({"harness": "claude", "session": "worker", "event": "intent", "repo": "/old", "goal": "Old checklist"})
+        self.cognition.memory.record_speech("A recent spoken line", "routine")
+        for reason in ("click", "care"):
+            with self.subTest(reason=reason):
+                snapshot = self.sessions.snapshot()
+                snapshot["trigger"] = {"care": "exercise"}
+                self.responses.append(({"speak": "A little stretch."}, "end_turn"))
+                await self.cognition.observe(snapshot, reason)
+                payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
+                self.assertEqual(set(payload), {"activity", "sleeping", "time"})
+                self.assertNotIn("Old checklist", json.dumps(payload))
+                self.assertNotIn("Old task report", json.dumps(payload))
+                self.assertNotIn("A recent spoken line", json.dumps(payload))
 
     async def test_summary_triggers_follow_configuration_without_changing_commentary(self):
         self.config.summarize_on = ["completion", "routine", "failure", "check_in", "click", "explicit"]
@@ -911,19 +958,140 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.summary = "Parser validation awaits the next checks."
         result = await self.cognition.observe(snapshot, "prompt")
         payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
-        self.assertEqual(payload["focus_session"]["id"], "codex:focus")
+        self.assertEqual(payload["focus_session"]["recent_requests"][-1], "Validate parser behavior")
         self.assertEqual(result["context_session"], "codex:focus")
         self.assertEqual(result["session_context"], self.summary)
         summary = json.loads(self.summary_requests[-1][1]["messages"][0]["content"])
-        self.assertEqual(summary["first_prompt"], "Validate parser behavior")
+        self.assertEqual(summary["initial_intent"], "Validate parser behavior")
         self.assertNotIn("Refactor batch inserts", json.dumps(summary))
-        self.assertEqual(set(summary), {"first_prompt", "recent_requests", "session_context"})
+        self.assertEqual(set(summary), {"initial_intent", "recent_requests", "historical_session_context", "current_report", "reported_results"})
         self.assertEqual(self.summary_requests[-1][1]["system"], [{"type": "text", "text": SUMMARY_INSTRUCTIONS}])
         self.assertEqual(self.summary_requests[-1][1]["output_config"]["format"]["schema"]["required"], ["session_context"])
         focus = next(session for session in snapshot["sessions"] if session["id"] == "codex:focus")
-        self.assertEqual(result["context_version"], (focus["generation"], focus["first_prompt"], tuple(focus["recent_requests"]), focus["session_context"]))
+        self.assertEqual(result["context_version"], self.cognition.summary_version(focus))
         schema = self.requests[-1][1]["output_config"]["format"]["schema"]
         self.assertNotIn("context_session", schema["properties"])
+
+    async def test_summary_version_captures_report_evidence_before_generation(self):
+        snapshot = self.sessions.snapshot()
+        focus = snapshot["sessions"][0]
+        before = self.cognition.summary_version(focus)
+
+        def report_arrives():
+            self.sessions.handle({"harness": "claude", "session": "worker", "event": "progress", "progress": "Checks completed"})
+            self.cognition.memory.record_event({"harness": "claude", "session": "worker", "event": "turn_done",
+                                               "outcome": "success", "progress": "An earlier report was recovered"})
+            return {"speak": None}, "end_turn"
+
+        self.responses.append(report_arrives)
+        result = await self.cognition.observe(snapshot, "prompt")
+        self.assertEqual(result["context_version"], before)
+        self.assertNotEqual(result["context_version"], self.cognition.summary_version(self.sessions.snapshot()["sessions"][0]))
+
+    async def test_repeated_automatic_remark_retries_once_and_preserves_generated_summary(self):
+        history = "The parser still needs its edge cases checked."
+        self.cognition.memory.record_speech(history, "routine")
+        self.summary = "The parser review includes edge cases."
+        self.responses.extend([({"speak": history}, "end_turn"), ({"speak": history}, "end_turn")])
+        with observation() as usage:
+            result = await self.observe("prompt")
+        self.assertEqual(usage["prompt"]["input_tokens"], 200)
+        self.assertEqual(usage["prompt"]["output_tokens"], 40)
+        self.assertEqual(usage["summary"]["input_tokens"], 100)
+        self.assertIsNone(result["speak"])
+        self.assertEqual(result["session_context"], self.summary)
+        self.assertEqual(len(self.observation_requests), 2)
+        self.assertEqual(len(self.summary_requests), 1)
+        first, retry = [body for _, body in self.observation_requests]
+        self.assertEqual(first["messages"], retry["messages"])
+        self.assertEqual(first["system"][0], retry["system"][0])
+        self.assertIn(first["system"][1]["text"], retry["system"][1]["text"])
+        self.assertIn("<reconsideration>", retry["system"][1]["text"])
+        self.assertNotIn(history, json.dumps(first))
+        self.assertNotIn(history, json.dumps(retry))
+        self.assertEqual(len(self.cognition.memory.speech()), 1)
+
+    async def test_deliberate_request_delivers_the_retry_even_when_it_repeats(self):
+        history = "Hello, I am here with you."
+        self.cognition.memory.record_speech(history, "click")
+        self.responses.extend([({"speak": history}, "end_turn"), ({"speak": history}, "end_turn")])
+        result = await self.observe("explicit", "Say hello")
+        self.assertEqual(result["speak"], history)
+        self.assertEqual(len(self.observation_requests), 2)
+        self.assertEqual(self.summary_requests, [])
+        self.assertNotIn(history, self.observation_requests[-1][1]["messages"][0]["content"])
+
+    async def test_expired_and_cleared_history_do_not_cause_a_retry(self):
+        history = "The parser still needs its edge cases checked."
+        self.cognition.memory.record_speech(history, "routine")
+        self.clock.advance(self.config.speech_history_seconds)
+        self.responses.append(({"speak": history}, "end_turn"))
+        result = await self.observe("routine")
+        self.assertEqual(result["speak"], history)
+        self.assertEqual(len(self.observation_requests), 1)
+        self.cognition.memory.record_speech(history, "routine")
+        self.cognition.memory.clear_speech()
+        self.responses.append(({"speak": history}, "end_turn"))
+        result = await self.observe("routine")
+        self.assertEqual(result["speak"], history)
+        self.assertEqual(len(self.observation_requests), 2)
+
+    async def test_failed_retry_preserves_the_validated_remark_for_a_deliberate_request(self):
+        history = "Hello, I am here with you."
+        self.cognition.memory.record_speech(history, "click")
+        self.responses.extend([({"speak": history}, "end_turn"), ({"speak": None}, "end_turn")])
+        result = await self.observe("explicit", "Say hello")
+        self.assertEqual(result["speak"], history)
+        self.assertEqual(len(self.observation_requests), 2)
+
+    async def test_failed_automatic_retry_preserves_the_summary_and_declines_speech(self):
+        history = "The parser still needs its edge cases checked."
+        self.cognition.memory.record_speech(history, "routine")
+        self.summary = "The parser review includes edge cases."
+        self.responses.extend([({"speak": history}, "end_turn"), ({"speak": 5}, "end_turn")])
+        with observation() as usage:
+            result = await self.observe("prompt")
+        self.assertEqual(usage["prompt"]["input_tokens"], 200)
+        self.assertEqual(usage["prompt"]["output_tokens"], 40)
+        self.assertEqual(usage["summary"]["input_tokens"], 100)
+        self.assertIsNone(result["speak"])
+        self.assertEqual(result["session_context"], self.summary)
+        self.assertEqual(len(self.observation_requests), 2)
+        self.assertEqual(len(self.summary_requests), 1)
+
+    async def test_retry_accepts_a_new_current_fact_without_using_previous_speech_as_evidence(self):
+        history = "The parser checks report 2 failures."
+        fresh = "The parser checks report 3 failures."
+        self.cognition.memory.record_speech(history, "routine")
+        self.sessions.handle({"harness": "claude", "session": "worker", "event": "progress", "progress": fresh})
+        self.responses.extend([({"speak": history}, "end_turn"), ({"speak": fresh}, "end_turn")])
+        result = await self.observe("routine")
+        self.assertEqual(result["speak"], fresh)
+        self.assertEqual(len(self.observation_requests), 2)
+        self.assertNotIn(history, json.dumps(self.observation_requests[-1][1]))
+        self.assertIn(fresh, self.observation_requests[-1][1]["messages"][0]["content"])
+
+    async def test_retry_refreshes_current_evidence_and_preserves_the_original_summary_version(self):
+        history = "The parser checks report 2 failures."
+        fresh = "The parser checks report 3 failures."
+        self.cognition.memory.record_speech(history, "routine")
+        self.sessions.handle({"harness": "claude", "session": "worker", "event": "progress", "progress": "The parser checks are running"})
+        snapshot = self.sessions.snapshot()
+        before = self.cognition.summary_version(snapshot["sessions"][0])
+
+        def first_reply():
+            self.sessions.handle({"harness": "claude", "session": "worker", "event": "progress", "progress": fresh})
+            return {"speak": history}, "end_turn"
+
+        self.responses.extend([first_reply, ({"speak": fresh}, "end_turn")])
+        result = await self.cognition.observe(snapshot, "routine", refresh=lambda: self.sessions.snapshot())
+        first, retry = [json.loads(body["messages"][0]["content"]) for _, body in self.observation_requests]
+        self.assertEqual(first["focus_session"]["progress"], "The parser checks are running")
+        self.assertEqual(retry["focus_session"]["progress"], fresh)
+        self.assertNotIn(history, json.dumps(retry))
+        self.assertEqual(result["speak"], fresh)
+        self.assertEqual(result["context_version"], before)
+        self.assertNotEqual(result["context_version"], self.cognition.summary_version(self.sessions.snapshot()["sessions"][0]))
 
     async def test_rejects_invalid_results_without_recording_speech(self):
         invalid = [

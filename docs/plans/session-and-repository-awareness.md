@@ -121,3 +121,53 @@ Decisions added or revised: preserve explicit input waits and outstanding tools 
 Validation run and results: make check passes. Ran 295 Python tests with one desktop-only check skipped, Swift core checks, Swift asset-import checks, and shell syntax checks. Scoped process, repository, migration, context-budget, and runtime tests pass. git diff --check passes. Initial check-in and prompt assertion failures were corrected to match uncertain activity and the parallel agent's speech-only prompt changes. Process tests use unsandboxed ps access on macOS.
 Outstanding findings: independent reviews reconciled. Fixed terminal PR rediscovery, fresh CI failure priority, stable recency, explicit/care direction preservation, retry after failed generation, and uncertainty invalidation. Recent pending repository horizon is 24 hours, fresh failure/completion horizon is five minutes. No remaining review findings.
 Next concrete action: none. Implementation, verification, and review are complete.
+
+## Commentary evidence follow-up
+
+Current step: complete.
+Checkout and branch: /Users/elliot/sc/simple-pet, main. Baseline b45e71b, clean.
+Scope: keep application validation in response schemas, project model-facing observations
+without tracking identifiers or precise timestamps, scope history to selected work, and
+include agent-reported results when updating summaries. Initial plans and inferred summaries
+do not establish pending work. Quiet greetings exclude work history.
+Files changed: context, cognition, summarization, memory, daemon, focused tests, and codebase guide.
+Review findings resolved: reject summaries after same-turn progress or terminal reports change.
+Keep repository reactions focused on the selected repository within the request budget.
+Validation: make check passes, including 324 Python tests with one desktop-only skip,
+Swift core checks, asset-import checks, and shell syntax checks. git diff --check passes.
+Outstanding findings: none.
+Next concrete action: none. Changes are verified and uncommitted.
+
+## Situation inputs and durable summaries
+
+Current step: complete.
+Checkout and branch: /Users/elliot/sc/simple-pet, main, with the preceding commentary changes uncommitted.
+Scope: acknowledge the latest request without repository or historical-report context.
+Keep repository reactions focused on Git and PR observations. Preserve explicit commentary
+subjects across request reasons. Summarize durable intent, decisions, and reported results.
+Store complete sentences within the existing limit and retain prior context if none fit.
+Repetition detection remains under discussion. Preserve the configured persona.
+Validation: make check passes, including 333 Python tests with one desktop-only skip,
+Swift core checks, asset-import checks, and shell syntax checks. git diff --check passes.
+Review finding resolved: retain explicit context through quiet greeting paths.
+Outstanding findings: no implementation findings. Repetition handling is covered by the local-check follow-up.
+Next concrete action: none for the approved situation-input and summary changes. Changes are uncommitted.
+
+## Local repetition checks and bounded retry
+
+Current step: complete.
+Checkout and branch: /Users/elliot/sc/simple-pet, main, preserving preceding uncommitted changes.
+Scope: keep previous speech local. Compare generated remarks with recent delivered speech
+using normalized equality and conservative local sentence embeddings. Preserve changed
+counts, outcomes, negation, Git states, and subject words. Retry once with refreshed
+observations and the configured persona. Silence a repeated automatic remark; preserve
+a deliberate acknowledgment. Keep summaries and aggregate API usage across the retry.
+Files changed: cognition, context, daemon, repetition, native similarity executable, build
+commands, codebase guide, and focused tests. No new downloaded models or Python dependencies.
+Validation: native similarity checks and scoped cognition/context/runtime checks pass.
+make build and make check pass. The full check ran 352 Python tests with one desktop-only skip,
+Swift core checks, asset-import checks, and shell syntax checks. A final tighter subject-content
+filter and its added regression pass all 11 native-boundary repetition tests.
+Review finding resolved: protect changed subjects even when embedding similarity is high.
+Outstanding findings: conservative matching intentionally permits uncertain paraphrases.
+Next concrete action: restart the daemon to load the changes. Changes are uncommitted.

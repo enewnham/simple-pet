@@ -162,6 +162,71 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(len(self.memory.recent(limit=2)), 2)
         self.assertEqual(len(self.memory.speech(limit=2)), 2)
 
+    def test_recent_history_filters_subjects_before_ranking_sessions(self):
+        self.memory.max_events = 100
+        self.event("Parser first", session="one", repo="/repo/parser")
+        self.event("Parser second", session="two", repo="/repo/parser")
+        self.event("Billing same session", session="one", repo="/repo/billing")
+        for index in range(6):
+            self.event(f"Unrelated history {index}", session=f"other-{index}", repo="/repo/other")
+        parser = self.memory.recent(limit=2, repo="/repo/parser")
+        self.assertEqual([item["session"] for item in parser], ["codex:one", "codex:two"])
+        self.assertTrue(all(item["repo"] == "/repo/parser" for item in parser))
+        session = self.memory.recent(limit=2, session="codex:one")
+        self.assertEqual([item["repo"] for item in session], ["/repo/parser", "/repo/billing"])
+        intersection = self.memory.recent(session="codex:one", repo="/repo/parser")
+        self.assertEqual(len(intersection), 1)
+        self.assertIn("Parser first", intersection[0]["summary"])
+        self.assertEqual(self.memory.recent(session="codex:missing"), [])
+        self.assertEqual(self.memory.recent(repo="/repo/missing"), [])
+        self.assertEqual(len(self.memory.recent(limit=5)), 5)
+
+    def test_terminal_history_filters_events_before_recent_tool_activity(self):
+        self.memory.max_events = 100
+        for index in range(4):
+            self.event(f"Report {index}", event="turn_done", session="one", outcome="success")
+        self.event("Other report", event="turn_done", session="other", outcome="success")
+        for index in range(8):
+            self.event(f"Later tool {index}", event="tool_done", session="one", tool="build", outcome="success")
+        rows = self.memory.recent(limit=3, session="codex:one", event_types=("turn_done", "turn_error"))
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(all(row["session"] == "codex:one" for row in rows))
+        self.assertTrue(all(row["event_type"] == "turn_done" for row in rows))
+        self.assertEqual([row["summary"].split(" | ")[-1] for row in rows], ["Report 1", "Report 2", "Report 3"])
+        self.assertEqual(self.memory.recent(event_types=()), [])
+        self.assertEqual(self.memory.recent(event_types=("turn_done') OR 1=1 --",)), [])
+
+    def test_project_goal_and_request_time_change_only_for_explicit_requests(self):
+        self.event("", event="intent", goal="Improve parser")
+        original = self.memory.projects(["/repo/parser"])[0]
+        self.now += 30
+        self.memory.record_event({"harness": "codex", "session": "one", "event": "tool_done", "tool": "pytest", "outcome": "success"},
+                                 {"id": "codex:one", "repo": "/repo/parser", "goal": "Stale inherited goal"})
+        self.assertEqual(self.memory.projects(["/repo/parser"])[0], original)
+        self.event("Current progress")
+        self.assertEqual(self.memory.projects(["/repo/parser"])[0], original)
+        self.event("", event="intent", goal="Document parser")
+        updated = self.memory.projects(["/repo/parser"])[0]
+        self.assertEqual(updated["goal"], "Document parser")
+        self.assertGreater(updated["timestamp"], original["timestamp"])
+        self.memory.record_event({"harness": "codex", "session": "unknown", "event": "progress", "progress": "Working"},
+                                 {"id": "codex:unknown", "repo": "/repo/new", "goal": "Inherited task"})
+        self.assertEqual(self.memory.projects(["/repo/new"]), [])
+
+    def test_terminal_hooks_report_turn_completion_without_claiming_tool_success(self):
+        for event in ("turn_done", "subagent_done", "session_end"):
+            with self.subTest(event=event):
+                self.memory.record_event({"harness": "codex", "session": "one", "event": event,
+                                          "outcome": "success", "progress": "Finished reviewing parser behavior"},
+                                         {"id": "codex:one", "last_tool": "pytest", "activity": "testing"})
+                summary = self.memory.recent()[-1]["summary"]
+                self.assertIn("Turn completed (agent reported success)", summary)
+                self.assertIn("Finished reviewing parser behavior", summary)
+                self.assertNotIn("Tests succeeded", summary)
+        self.memory.record_event({"harness": "codex", "session": "one", "event": "tool_done",
+                                  "tool": "pytest", "outcome": "success"})
+        self.assertIn("Tests succeeded", self.memory.recent()[-1]["summary"])
+
     def test_recall_matches_older_goals_within_the_repository(self):
         self.memory.close()
         self.memory = Memory(self.path, "fixture", clock=lambda: self.now, max_events=100)

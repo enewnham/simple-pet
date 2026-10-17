@@ -24,6 +24,10 @@ checks. [Makefile](Makefile) defines the check and build commands.
 - **Commentary and memory:** [pet_daemon/cognition.py](pet_daemon/cognition.py)
   sends model requests and interprets responses.
   [pet_daemon/context.py](pet_daemon/context.py) selects and bounds model context.
+  [pet_daemon/summarization.py](pet_daemon/summarization.py) builds session summaries
+  from requests and agent reports.
+  [pet_daemon/repetition.py](pet_daemon/repetition.py) checks recent speech through the local
+  [similarity helper](Sources/PetSpeechSimilarity/main.swift).
   [pet_daemon/memory.py](pet_daemon/memory.py) stores bounded SQLite history.
 - **Renderer:** [Sources/PetCore/](Sources/PetCore/) defines events and socket
   handling. [Sources/PetOverlay/](Sources/PetOverlay/) contains the AppKit app and view.

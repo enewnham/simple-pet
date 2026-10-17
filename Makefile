@@ -13,6 +13,8 @@ build:
 	# Replace the executable's inode to preserve macOS signature validation.
 	install -m 755 "$$(CI=true swift build -c release $(SWIFT_FLAGS) --show-bin-path)/pet-overlay" .build/pet-overlay.tmp
 	mv -f .build/pet-overlay.tmp .build/pet-overlay
+	install -m 755 "$$(CI=true swift build -c release $(SWIFT_FLAGS) --show-bin-path)/pet-speech-similarity" .build/pet-speech-similarity.tmp
+	mv -f .build/pet-speech-similarity.tmp .build/pet-speech-similarity
 
 run: setup build
 	bin/pet-daemon
@@ -21,6 +23,7 @@ test: setup
 	mkdir -p .build/core-tests
 	swiftc -parse-as-library -module-cache-path .build/core-tests/cache Sources/PetCore/*.swift Tests/PetCoreChecks.swift -o .build/core-tests/pet-core-checks
 	.build/core-tests/pet-core-checks
+	swiftc -O -module-cache-path .build/core-tests/cache Sources/PetSpeechSimilarity/main.swift -o .build/pet-speech-similarity
 	uv run python -m unittest discover -s Tests -v
 	mkdir -p .build/asset-tests
 	swiftc -O -module-cache-path .build/asset-tests/cache scripts/import-assets.swift -o .build/asset-tests/import-assets

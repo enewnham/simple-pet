@@ -22,6 +22,7 @@ from .processes import ProcessTracker
 from .repositories import RepositoryTracker
 from .work import build_work
 from .sprites import Pack
+from .summarization import summary_text
 from .telemetry import event, observation, trace
 
 
@@ -398,7 +399,7 @@ class Daemon:
                         log.warning("Could not save pet session context: %s", error)
                         focus_snapshot["first_summary_attempted"] = True
                 result = await asyncio.wait_for(
-                    self.cognition.observe(snapshot, reason, context),
+                    self.cognition.observe(snapshot, reason, context, refresh=lambda: self.snapshot(trigger)),
                     timeout=timeout,
                 )
                 if sessions is not self.sessions:
@@ -419,12 +420,13 @@ class Daemon:
                     event("observation.discarded", reason="preempted" if revision != self.request_revision else "subject_changed",
                           trigger=reason, session=focus_session, decision=result)
                     return
-                summary = result["session_context"]
+                summary = summary_text(result["session_context"]) if result["session_context"] is not None else None
                 focus = self.sessions.lanes.get(result["context_session"])
                 if summary is not None and summary.strip() and focus:
-                    version = (focus.generation, focus.first_prompt, tuple(focus.recent_requests), focus.session_context)
+                    current = self.sessions.snapshot(keys=[result["context_session"]])["sessions"]
+                    version = self.cognition.summary_version(current[0]) if current else None
                     if version == result["context_version"]:
-                        focus.session_context = bounded(summary, 400)
+                        focus.session_context = summary
                         focus.goal = focus.session_context or focus.first_prompt
                         try:
                             self.memory.save_context(result["context_session"], focus.first_prompt, focus.session_context,
@@ -439,7 +441,8 @@ class Daemon:
                     event("observation.discarded", reason="speech_cleared", trigger=reason, session=focus_session)
                     return
                 subject = self.attention.choose_work(snapshot)
-                if subject and subject.kind == "repository" and reason not in ("explicit", "care"):
+                if (subject and subject.kind == "repository" and context is None and reason not in ("explicit", "care")
+                        and not self.cognition.quiet_greeting(snapshot, reason)):
                     self.repository_attention[subject.id] = subject.revision
                 outcome = "silent"
                 if result["speak"] is not None:
