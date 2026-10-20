@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 import runpy
 import stat
 import struct
@@ -9,13 +8,14 @@ import tempfile
 import unittest
 import zipfile
 import zlib
-
+from collections.abc import Sequence
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 UNPACK = runpy.run_path(str(ROOT / "scripts" / "unpack-assets.py"))["unpack"]
 
 
-def png_chunk(kind, data):
+def png_chunk(kind: bytes, data: bytes) -> bytes:
     return (
         struct.pack(">I", len(data))
         + kind
@@ -33,21 +33,23 @@ PNG = (
 
 
 class ZipAssetTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="pet-zip-")
         self.directory = Path(self.temporary.name)
         self.archive = self.directory / "my-pet.zip"
         self.extracted = self.directory / "extracted"
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def write_zip(self, entries):
+    def write_zip(
+        self, entries: Sequence[tuple[str | zipfile.ZipInfo, str | bytes]]
+    ) -> None:
         with zipfile.ZipFile(self.archive, "w") as archive:
             for name, data in entries:
                 archive.writestr(name, data)
 
-    def test_root_pack_uses_metadata_name(self):
+    def test_root_pack_uses_metadata_name(self) -> None:
         self.write_zip([("pet.json", '{"id":"little-cat"}'), ("idle.png", PNG)])
         result = UNPACK(self.archive, self.extracted)
         self.assertEqual(
@@ -60,7 +62,7 @@ class ZipAssetTests(unittest.TestCase):
         )
         self.assertEqual((self.extracted / "idle.png").read_bytes(), PNG)
 
-    def test_wrapped_pack_ignores_finder_files_and_uses_filename(self):
+    def test_wrapped_pack_ignores_finder_files_and_uses_filename(self) -> None:
         self.write_zip(
             [
                 ("download/idle.png", PNG),
@@ -76,11 +78,11 @@ class ZipAssetTests(unittest.TestCase):
         self.assertFalse((self.extracted / "__MACOSX").exists())
         self.assertFalse((self.extracted / "download" / ".DS_Store").exists())
 
-    def test_manifest_supplies_name(self):
+    def test_manifest_supplies_name(self) -> None:
         self.write_zip([("manifest.json", '{"pet":"quiet-dog"}')])
         self.assertEqual(UNPACK(self.archive, self.extracted)["pet"], "quiet-dog")
 
-    def test_unsafe_paths_are_rejected_before_extraction(self):
+    def test_unsafe_paths_are_rejected_before_extraction(self) -> None:
         for name in ("../outside.png", "/outside.png", "folder\\outside.png"):
             with self.subTest(name=name):
                 self.write_zip([("idle.png", PNG), (name, PNG)])
@@ -88,7 +90,7 @@ class ZipAssetTests(unittest.TestCase):
                     UNPACK(self.archive, self.extracted)
                 self.assertFalse(self.extracted.exists())
 
-    def test_symlinks_and_case_collisions_are_rejected(self):
+    def test_symlinks_and_case_collisions_are_rejected(self) -> None:
         link = zipfile.ZipInfo("idle.png")
         link.create_system = 3
         link.external_attr = (stat.S_IFLNK | 0o777) << 16
@@ -98,12 +100,12 @@ class ZipAssetTests(unittest.TestCase):
                 UNPACK(self.archive, self.extracted)
             self.assertFalse(self.extracted.exists())
 
-    def test_multiple_pets_are_rejected(self):
+    def test_multiple_pets_are_rejected(self) -> None:
         self.write_zip([("one/idle.png", PNG), ("two/idle.png", PNG)])
         with self.assertRaisesRegex(ValueError, "one pet"):
             UNPACK(self.archive, self.extracted)
 
-    def test_corrupt_zip_reports_an_error(self):
+    def test_corrupt_zip_reports_an_error(self) -> None:
         self.archive.write_bytes(b"not a zip")
         result = subprocess.run(
             [
@@ -114,12 +116,13 @@ class ZipAssetTests(unittest.TestCase):
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("ZIP import failed", result.stderr)
 
     @unittest.skipUnless(sys.platform == "darwin", "Asset preparation requires macOS")
-    def test_fetch_script_imports_and_preserves_installed_pack_on_failure(self):
+    def test_fetch_script_imports_and_preserves_installed_pack_on_failure(self) -> None:
         self.write_zip([("pet.json", '{"id":"little-cat"}'), ("idle.png", PNG)])
         output = self.directory / "installed"
         command = [
@@ -129,7 +132,9 @@ class ZipAssetTests(unittest.TestCase):
             "--output",
             str(output),
         ]
-        result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=60, check=False
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         manifest_path = output / "manifest.json"
         manifest = json.loads(manifest_path.read_text())
@@ -139,7 +144,9 @@ class ZipAssetTests(unittest.TestCase):
         self.assertTrue(frame.is_file())
         before = manifest_path.read_bytes()
         self.write_zip([("idle.png", b"broken image")])
-        result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=60, check=False
+        )
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(manifest_path.read_bytes(), before)
         self.assertTrue(frame.is_file())

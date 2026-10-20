@@ -1,4 +1,9 @@
-import json
+import sqlite3
+from collections.abc import Iterable
+from contextlib import AbstractContextManager
+
+type SQLValue = str | int | float | bytes | None
+
 
 from ..work.models import (
     Artifact,
@@ -8,7 +13,14 @@ from ..work.models import (
     WorkItem,
     WorkState,
 )
-from ..work.validation import canonical
+from ..work.serialization import (
+    decode_artifact,
+    decode_evidence,
+    decode_opportunity,
+    encode_artifact,
+    encode_evidence,
+    encode_opportunity,
+)
 from .transactions import transaction
 
 TABLES = (
@@ -25,19 +37,19 @@ TABLES = (
 
 
 class SQLiteWorkRepository:
-    def __init__(self, db, pet):
+    def __init__(self, db: sqlite3.Connection, pet: str) -> None:
         self.db = db
         self.pet = pet
 
-    def transaction(self):
+    def transaction(self) -> AbstractContextManager[None]:
         return transaction(self.db)
 
-    def rows(self, table):
+    def rows(self, table: str) -> list[sqlite3.Row]:
         return self.db.execute(
             f"SELECT * FROM {table} WHERE pet=?", (self.pet,)
         ).fetchall()
 
-    def load(self):
+    def load(self) -> WorkState:
         state = WorkState()
         state.next_evidence_id = self.db.execute(
             "SELECT COALESCE(MAX(id),0)+1 FROM work_evidence"
@@ -60,10 +72,18 @@ class SQLiteWorkRepository:
         state.aliases = {
             row["alias"]: row["session"] for row in self.rows("work_aliases")
         }
-        state.artifacts = {
-            row["id"]: Artifact(row["id"], json.loads(row["data"]), row["version"])
-            for row in self.rows("work_artifacts")
-        }
+        for row in self.rows("work_artifacts"):
+            descriptor = decode_artifact(row["data"])
+            state.artifacts[row["id"]] = Artifact(
+                kind=descriptor.kind,
+                ref=descriptor.ref,
+                repository=descriptor.repository,
+                revision=descriptor.revision,
+                checkout=descriptor.checkout,
+                title=descriptor.title,
+                id=row["id"],
+                version=row["version"],
+            )
         state.links = {
             (row["work_id"], row["artifact_id"]) for row in self.rows("work_links")
         }
@@ -74,26 +94,30 @@ class SQLiteWorkRepository:
                 row["artifact_id"],
                 row["source"],
                 row["kind"],
-                json.loads(row["data"]),
+                decode_evidence(row["source"], row["kind"], row["data"]),
                 row["timestamp"],
             )
             for row in sorted(self.rows("work_evidence"), key=lambda row: row["id"])
         ]
-        state.opportunities = {
-            row["id"]: OpportunityState(
-                row["id"],
-                row["work_id"],
-                row["kind"],
-                row["artifact_id"],
-                row["version"],
-                row["fingerprint"],
-                json.loads(row["data"]),
-                bool(row["active"]),
-                row["surfaced_version"],
-                row["changed_at"],
+        for row in self.rows("work_opportunities"):
+            content = decode_opportunity(row["data"])
+            state.opportunities[row["id"]] = OpportunityState(
+                id=row["id"],
+                work_id=row["work_id"],
+                kind=row["kind"],
+                artifact_id=row["artifact_id"],
+                version=row["version"],
+                fingerprint=row["fingerprint"],
+                intent=content.intent,
+                artifact=content.artifact,
+                evidence=content.evidence,
+                uncertainty=content.uncertainty,
+                next_step=content.next_step,
+                sessions=content.sessions,
+                active=bool(row["active"]),
+                surfaced_version=row["surfaced_version"],
+                changed_at=row["changed_at"],
             )
-            for row in self.rows("work_opportunities")
-        }
         state.surfacings = [
             Surfacing(
                 row["id"],
@@ -106,7 +130,7 @@ class SQLiteWorkRepository:
         ]
         return state
 
-    def save(self, state):
+    def save(self, state: WorkState) -> None:
         pet = self.pet
         self._sync(
             "work_items",
@@ -143,10 +167,10 @@ class SQLiteWorkRepository:
                 (
                     pet,
                     item.id,
-                    item.data["kind"],
-                    item.data["ref"],
-                    item.data["repository"],
-                    canonical(item.data),
+                    item.kind,
+                    item.ref,
+                    item.repository,
+                    encode_artifact(item),
                     item.version,
                 )
                 for item in state.artifacts.values()
@@ -179,7 +203,7 @@ class SQLiteWorkRepository:
                     item.artifact_id,
                     item.source,
                     item.kind,
-                    canonical(item.data),
+                    encode_evidence(item.payload),
                     item.timestamp,
                 )
                 for item in state.evidence
@@ -210,7 +234,7 @@ class SQLiteWorkRepository:
                     item.artifact_id,
                     item.version,
                     item.fingerprint,
-                    canonical(item.data),
+                    encode_opportunity(item),
                     int(item.active),
                     item.surfaced_version,
                     item.changed_at,
@@ -235,7 +259,13 @@ class SQLiteWorkRepository:
             ),
         )
 
-    def _sync(self, table, columns, keys, records):
+    def _sync(
+        self,
+        table: str,
+        columns: tuple[str, ...],
+        keys: tuple[str, ...],
+        records: Iterable[tuple[SQLValue, ...]],
+    ) -> None:
         key_positions = tuple(columns.index(key) for key in keys)
         existing = {
             tuple(row[key] for key in keys): tuple(row[column] for column in columns)
@@ -269,13 +299,6 @@ class SQLiteWorkRepository:
                     (*values, self.pet, *key),
                 )
 
-    def clear(self):
+    def clear(self) -> None:
         for table in TABLES:
             self.db.execute(f"DELETE FROM {table} WHERE pet=?", (self.pet,))
-
-    def clear_legacy(self):
-        for table in ("work_updates", "work_decisions"):
-            if self.db.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
-            ).fetchone():
-                self.db.execute(f"DELETE FROM {table} WHERE pet=?", (self.pet,))

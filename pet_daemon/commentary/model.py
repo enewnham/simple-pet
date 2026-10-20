@@ -1,21 +1,27 @@
 import json
 import logging
 import time
+from dataclasses import asdict
 from typing import Protocol
 
+from anthropic import AsyncAnthropic
+
+from ..telemetry import UsageTokens, event, request_usage, verbose
 from .context import encoded_size
-from ..telemetry import event, request_usage, verbose
+from .contracts import ModelRequest
 
 
 class ModelClient(Protocol):
-    async def complete(self, request: dict, reason: str) -> dict: ...
+    async def complete(
+        self, request: ModelRequest, reason: str
+    ) -> dict[str, object]: ...
 
 
 class AnthropicModelClient:
-    def __init__(self, client):
+    def __init__(self, client: AsyncAnthropic) -> None:
         self.client = client
 
-    async def complete(self, request, reason):
+    async def complete(self, request: ModelRequest, reason: str) -> dict[str, object]:
         verbose(
             "observation.request",
             reason=reason,
@@ -23,31 +29,46 @@ class AnthropicModelClient:
             request_bytes=encoded_size(request),
         )
         started = time.monotonic()
-        response = await self.client.messages.create(**request)
+        response = await self.client.messages.create(
+            model=request["model"],
+            max_tokens=request["max_tokens"],
+            timeout=request["timeout"],
+            thinking=request["thinking"],
+            system=request["system"],
+            messages=[
+                {"role": "user", "content": message["content"]}
+                for message in request["messages"]
+            ],
+            output_config={
+                "effort": request["output_config"]["effort"],
+                "format": {
+                    "type": "json_schema",
+                    "schema": dict(request["output_config"]["format"]["schema"]),
+                },
+            },
+        )
         verbose(
             "observation.response",
             reason=reason,
             response=response.model_dump(mode="json"),
         )
         usage = response.usage
-        fields = dict(
+        tokens = UsageTokens(
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
-            cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
-            cache_write_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
+            cache_read_tokens=usage.cache_read_input_tokens or 0,
+            cache_write_tokens=usage.cache_creation_input_tokens or 0,
         )
         collected = request_usage.get()
         if collected is not None:
-            previous = collected.get(reason, {})
-            collected[reason] = {
-                key: previous.get(key, 0) + value for key, value in fields.items()
-            }
+            previous = collected.get(reason, UsageTokens())
+            collected[reason] = previous + tokens
         event(
             "observation.usage",
             level=logging.DEBUG,
             reason=reason,
             duration_seconds=round(time.monotonic() - started, 3),
-            **fields,
+            **asdict(tokens),
         )
         if response.stop_reason != "end_turn":
             raise ValueError(f"Observation ended with {response.stop_reason}")
@@ -56,11 +77,11 @@ class AnthropicModelClient:
         )
         result = json.loads(content)
         if not isinstance(result, dict):
-            raise ValueError("Observation requires an object")
+            raise ValueError("Observation requires an object")  # noqa: TRY004 - Report malformed JSON values through the validation contract.
         if reason == "summary":
             event(
                 "observation.summary",
                 duration_seconds=round(time.monotonic() - started, 3),
-                **fields,
+                **asdict(tokens),
             )
         return result

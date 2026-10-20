@@ -1,5 +1,138 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .observations import GitObservation, PullRequest
+
+
+@dataclass(frozen=True)
+class RelatedLink:
+    kind: str
+    ref: str
+    relationship: str
+    source: str
+    stack: int | None = None
+    position: int | None = None
+    state: str | None = None
+    is_draft: bool | None = None
+    head: str = ""
+    head_branch: str = ""
+    title: str = ""
+
+
+@dataclass(frozen=True)
+class ArtifactDescriptor:
+    kind: str
+    ref: str
+    repository: str = ""
+    revision: str | None = None
+    checkout: str | None = None
+    title: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class Artifact(ArtifactDescriptor):
+    id: str
+    version: int = 1
+
+    def descriptor(self) -> ArtifactDescriptor:
+        return ArtifactDescriptor(
+            self.kind,
+            self.ref,
+            self.repository,
+            self.revision,
+            self.checkout,
+            self.title,
+        )
+
+
+@dataclass(frozen=True)
+class IntentEvidence:
+    session: str
+    text: str
+
+
+@dataclass(frozen=True)
+class ProgressEvidence:
+    session: str
+    text: str
+
+
+@dataclass(frozen=True)
+class ExecutionEvidence:
+    session: str
+    event: str
+    outcome: str | None
+    tool_name: str | None
+    progress: str | None
+
+
+@dataclass(frozen=True)
+class CheckoutAssociation:
+    checkout: str
+    branch: str
+
+
+@dataclass(frozen=True)
+class PullRequestAssociation:
+    checkout: str
+    branch: str
+
+
+@dataclass(frozen=True)
+class StackAssociation:
+    link: RelatedLink
+    from_ref: str
+
+
+@dataclass(frozen=True)
+class GitHubEvidence:
+    pr: PullRequest | None
+    repository: str
+
+
+@dataclass(frozen=True)
+class AvailabilityEvidence:
+    local_error: str | None
+    github_error: str | None
+
+
+type EvidencePayload = (
+    IntentEvidence
+    | ProgressEvidence
+    | ExecutionEvidence
+    | CheckoutAssociation
+    | PullRequestAssociation
+    | StackAssociation
+    | GitObservation
+    | GitHubEvidence
+    | AvailabilityEvidence
+)
+
+
+@dataclass(frozen=True)
+class EvidenceRecord:
+    source: str
+    kind: str
+    payload: EvidencePayload
+    observed_at: float | None = None
+
+
+@dataclass(frozen=True)
+class ArtifactAccount:
+    artifact: ArtifactDescriptor
+    evidence: tuple[EvidenceRecord, ...]
+
+
+@dataclass(frozen=True)
+class WorkAccount:
+    intent: str
+    revision: str
+    requests: tuple[EvidenceRecord, ...]
+    activity: tuple[EvidenceRecord, ...]
+    artifacts: tuple[ArtifactAccount, ...]
 
 
 @dataclass
@@ -11,29 +144,27 @@ class WorkItem:
 
 
 @dataclass
-class Artifact:
-    id: str
-    data: dict[str, Any]
-    version: int = 1
-
-
-@dataclass
 class Evidence:
     id: int
     work_id: str
     artifact_id: str
     source: str
     kind: str
-    data: dict[str, Any]
+    payload: EvidencePayload
     timestamp: float
 
-    def record(self):
-        return {
-            "source": self.source,
-            "kind": self.kind,
-            "data": self.data,
-            "observed_at": self.timestamp,
-        }
+    def record(self) -> EvidenceRecord:
+        return EvidenceRecord(self.source, self.kind, self.payload, self.timestamp)
+
+
+@dataclass(frozen=True)
+class OpportunityContent:
+    intent: str
+    artifact: ArtifactDescriptor
+    evidence: tuple[EvidenceRecord, ...]
+    uncertainty: tuple[str, ...]
+    next_step: str
+    sessions: tuple[str, ...]
 
 
 @dataclass
@@ -44,7 +175,12 @@ class OpportunityState:
     artifact_id: str
     version: int
     fingerprint: str
-    data: dict[str, Any]
+    intent: str
+    artifact: ArtifactDescriptor
+    evidence: tuple[EvidenceRecord, ...]
+    uncertainty: tuple[str, ...]
+    next_step: str
+    sessions: tuple[str, ...]
     active: bool
     surfaced_version: int
     changed_at: float
@@ -57,12 +193,12 @@ class Opportunity:
     kind: str
     work_id: str
     intent: str
-    artifact: dict
-    evidence: tuple
-    uncertainty: tuple
+    artifact: ArtifactDescriptor
+    evidence: tuple[EvidenceRecord, ...]
+    uncertainty: tuple[str, ...]
     next_step: str
     changed_at: float
-    sessions: tuple
+    sessions: tuple[str, ...]
 
 
 @dataclass
@@ -88,17 +224,18 @@ class WorkState:
     opportunities: dict[str, OpportunityState] = field(default_factory=dict)
     surfacings: list[Surfacing] = field(default_factory=list)
 
-    def current(self, session):
-        return self.items.get(self.sessions.get(session))
+    def current(self, session: str) -> WorkItem | None:
+        identifier = self.sessions.get(session)
+        return self.items.get(identifier) if identifier is not None else None
 
-    def latest(self, work_id, artifact_id):
+    def latest(self, work_id: str, artifact_id: str) -> dict[tuple[str, str], Evidence]:
         records = {}
         for record in self.evidence:
             if record.work_id == work_id and record.artifact_id == artifact_id:
                 records[record.source, record.kind] = record
         return records
 
-    def linked_work(self, artifact_id):
+    def linked_work(self, artifact_id: str) -> set[str]:
         return {
             work_id for work_id, linked_id in self.links if linked_id == artifact_id
         }

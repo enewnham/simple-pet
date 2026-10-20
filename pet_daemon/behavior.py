@@ -1,15 +1,71 @@
 import math
+from collections.abc import Callable, Mapping
+from dataclasses import asdict, dataclass
+from typing import TypeGuard
 
+from .config import BehaviorConfig
 from .execution import Action, Execution
-from .policy import ANIMATION_ROLES, Observation, Policy, REACTIONS
+from .policy import ANIMATION_ROLES, REACTIONS, Candidate, Observation, Policy
+from .runtime import OverlayPacket, Point, RandomSource
+from .sessions import Sessions
+from .sprites import Clip, Pack
 from .telemetry import event, trace, verbose
+
+
+def finite_number(value: object) -> TypeGuard[float]:
+    return (type(value) is int or type(value) is float) and math.isfinite(value)
+
+
+@dataclass(frozen=True)
+class Rectangle(Point):
+    width: float
+    height: float
+
+
+@dataclass(frozen=True)
+class RendererStatus(Rectangle):
+    pointer: Point
+    screen: Rectangle
+    dragging: bool
+    menu: bool
+    speech: bool
+    sleeping: bool
+    system_sleeping: bool
+
+
+def rectangle(packet: Mapping[str, object]) -> Rectangle | None:
+    x, y, width, height = (packet.get(key) for key in ("x", "y", "width", "height"))
+    if (
+        not finite_number(x)
+        or not finite_number(y)
+        or not finite_number(width)
+        or not finite_number(height)
+        or width <= 0
+        or height <= 0
+    ):
+        return None
+    return Rectangle(x=x, y=y, width=width, height=height)
+
+
+def point(packet: Mapping[str, object]) -> Point | None:
+    x, y = packet.get("x"), packet.get("y")
+    if not finite_number(x) or not finite_number(y):
+        return None
+    return Point(x=x, y=y)
 
 
 REACTION_SECONDS = 2.5
 
 
 class Behavior:
-    def __init__(self, pack, config, clock, rng, emit):
+    def __init__(
+        self,
+        pack: Pack,
+        config: BehaviorConfig,
+        clock: Callable[[], float],
+        rng: RandomSource,
+        emit: Callable[[OverlayPacket], object],
+    ) -> None:
         self.pack = pack
         self.config = config
         self.clock = clock
@@ -17,26 +73,26 @@ class Behavior:
         self.emit = emit
         self.policy = Policy()
         self.execution = Execution()
-        self.status = None
-        self.state = None
-        self.clip = None
+        self.status: RendererStatus | None = None
+        self.state: str | None = None
+        self.clip: str | None = None
         self.command = 0
-        self.inactive_since = None
-        self.clear_since = None
+        self.inactive_since: float | None = None
+        self.clear_since: float | None = None
         self.pointer_moved = -math.inf
-        self.last_pointer = None
-        self.preferred_position = None
+        self.last_pointer: tuple[float, float] | None = None
+        self.preferred_position: tuple[float, float] | None = None
         self.last_movement = clock()
-        self.nap_until = None
-        self.next_nap = None
-        self.suspension = None
-        self.observation = None
-        self.next_care = None
-        self.next_care_speech = None
-        self.care_remark = None
-        self.care_choices = []
+        self.nap_until: float | None = None
+        self.next_nap: float | None = None
+        self.suspension: str | None = None
+        self.observation: Observation | None = None
+        self.next_care: float | None = None
+        self.next_care_speech: float | None = None
+        self.care_remark: str | None = None
+        self.care_choices: list[tuple[str, str, str]] = []
 
-    def satisfy(self):
+    def satisfy(self) -> None:
         self.next_care = self.clock() + self.rng.uniform(*self.config.care_interval)
         self.next_care_speech = self.clock() + self.rng.uniform(
             *self.config.care_speech_interval
@@ -44,13 +100,12 @@ class Behavior:
         self.care_remark = None
         self.care_choices = []
 
-    def _care(self, sessions):
-        if (
-            not self.config.care
-            or sessions.working
-            or self.clock() < self.next_care
-            or self._blocked()
-        ):
+    def _care(self, sessions: Sessions) -> bool:
+        if not self.config.care or sessions.working:
+            return False
+        assert self.next_care is not None
+        assert self.next_care_speech is not None
+        if self.clock() < self.next_care or self._blocked():
             return False
         choices = [
             ("exercise", "celebrate", "jumping"),
@@ -86,34 +141,28 @@ class Behavior:
         return True
 
     @property
-    def pending(self):
+    def pending(self) -> Action | None:
         action = self.execution.action
         if action is None or action.event is None:
             return None
-        return {
-            "id": action.command_id,
-            "event": action.event,
-            "kind": action.kind,
-            "role": action.role,
-            "until": action.until,
-        }
+        return action
 
     @property
-    def sleeping(self):
+    def sleeping(self) -> bool:
         return self.nap_until is not None
 
-    def _next_id(self):
+    def _next_id(self) -> int:
         self.command += 1
         return self.command
 
-    def _pause(self):
+    def _pause(self) -> tuple[float, float]:
         return (
             self.config.working_pause
             if self.observation and self.observation.working
             else self.config.idle_pause
         )
 
-    def _rest(self, clip_id=None):
+    def _rest(self, clip_id: str | None = None) -> None:
         clip_id = clip_id or self.pack.rest
         if self.clip != clip_id:
             self.clip = clip_id
@@ -127,18 +176,22 @@ class Behavior:
                 }
             )
 
-    def stop_movement(self):
+    def stop_movement(self) -> None:
         if self.execution.action and self.execution.action.kind == "walk":
             self._interrupt("interaction")
         self.emit({"stop_motion": True})
 
-    def _interrupt(self, reason):
-        trace("behavior.interrupted", reason=reason, pending=self.pending)
+    def _interrupt(self, reason: str) -> None:
+        trace(
+            "behavior.interrupted",
+            reason=reason,
+            pending=asdict(self.pending) if self.pending is not None else None,
+        )
         self.execution.interrupt()
         self.clip = None
         self.emit({"stop_motion": True})
 
-    def suspend(self, reason):
+    def suspend(self, reason: str) -> None:
         self.care_remark = None
         self.wake(reason)
         self.suspension = reason
@@ -147,7 +200,7 @@ class Behavior:
         self.emit({"stop_motion": True})
         self._rest()
 
-    def resume(self):
+    def resume(self) -> None:
         if self.suspension == "system_sleep":
             self.satisfy()
         if self.suspension == "interaction":
@@ -155,7 +208,7 @@ class Behavior:
         self.suspension = None
         self.execution.resume()
 
-    def wake(self, reason):
+    def wake(self, reason: str) -> None:
         if reason != "nap_finished" and self.inactive_since is not None:
             self.inactive_since = self.clock()
         self.next_nap = self.clock() + self.rng.uniform(*self.config.nap_interval)
@@ -167,70 +220,81 @@ class Behavior:
         self._interrupt(reason)
         self._rest()
 
-    def renderer_status(self, packet):
-        for name in ("x", "y", "width", "height"):
-            if type(packet.get(name)) not in (int, float) or not math.isfinite(
-                packet[name]
-            ):
-                return False
-        if packet["width"] <= 0 or packet["height"] <= 0:
-            return False
-        screen, pointer = packet.get("screen"), packet.get("pointer")
-        if not isinstance(screen, dict) or not isinstance(pointer, dict):
-            return False
-        for item, keys in (
-            (screen, ("x", "y", "width", "height")),
-            (pointer, ("x", "y")),
+    def renderer_status(self, packet: Mapping[str, object]) -> bool:
+        dimensions = rectangle(packet)
+        screen_data, pointer_data = packet.get("screen"), packet.get("pointer")
+        if (
+            dimensions is None
+            or not isinstance(screen_data, dict)
+            or not isinstance(pointer_data, dict)
         ):
-            if any(
-                type(item.get(name)) not in (int, float)
-                or not math.isfinite(item[name])
-                for name in keys
-            ):
-                return False
-        if screen["width"] <= 0 or screen["height"] <= 0:
             return False
-        for name in ("dragging", "menu", "speech"):
-            if type(packet.get(name)) is not bool:
-                return False
-        position = (pointer["x"], pointer["y"])
+        screen, pointer = rectangle(screen_data), point(pointer_data)
+        dragging, menu, speech = (
+            packet.get("dragging"),
+            packet.get("menu"),
+            packet.get("speech"),
+        )
+        if (
+            screen is None
+            or pointer is None
+            or type(dragging) is not bool
+            or type(menu) is not bool
+            or type(speech) is not bool
+        ):
+            return False
+        sleeping, system_sleeping = (
+            packet.get("sleeping"),
+            packet.get("system_sleeping"),
+        )
+        if type(sleeping) is not bool or type(system_sleeping) is not bool:
+            return False
+        status = RendererStatus(
+            x=dimensions.x,
+            y=dimensions.y,
+            width=dimensions.width,
+            height=dimensions.height,
+            screen=screen,
+            pointer=pointer,
+            dragging=dragging,
+            menu=menu,
+            speech=speech,
+            sleeping=sleeping,
+            system_sleeping=system_sleeping,
+        )
+        position = (pointer.x, pointer.y)
         if position != self.last_pointer:
             self.pointer_moved = self.clock()
             self.last_pointer = position
         if self.status is None:
             self.state = None
-        if self.status is None or any(
-            self.status[name] != packet[name]
-            for name in ("screen", "dragging", "menu", "speech")
+        if self.status is None or (
+            self.status.screen != status.screen
+            or self.status.dragging != status.dragging
+            or self.status.menu != status.menu
+            or self.status.speech != status.speech
         ):
             verbose("renderer.status", packet=packet)
         if self.preferred_position is None or (
-            self.status and self.status["dragging"] and not packet["dragging"]
+            self.status and self.status.dragging and not status.dragging
         ):
-            self.preferred_position = (packet["x"], packet["y"])
+            self.preferred_position = (status.x, status.y)
             self.last_movement = self.clock()
-        screen = packet["screen"]
         home_x, home_y = self.preferred_position
         self.preferred_position = (
             max(
-                screen["x"],
-                min(
-                    home_x,
-                    max(screen["x"], screen["x"] + screen["width"] - packet["width"]),
-                ),
+                screen.x,
+                min(home_x, max(screen.x, screen.x + screen.width - status.width)),
             ),
             max(
-                screen["y"],
-                min(
-                    home_y,
-                    max(screen["y"], screen["y"] + screen["height"] - packet["height"]),
-                ),
+                screen.y,
+                min(home_y, max(screen.y, screen.y + screen.height - status.height)),
             ),
         )
-        self.status = packet
+        self.status = status
         return True
 
-    def completion(self, packet):
+    def completion(self, packet: Mapping[str, object]) -> None:
         walking = self.execution.action and self.execution.action.kind == "walk"
         if self.execution.completion(
             packet, self.clock(), self.rng.uniform(*self._pause())
@@ -240,24 +304,34 @@ class Behavior:
             self.clip = None
             self._rest()
 
-    def _near_pointer(self):
+    def _near_pointer(self) -> bool:
         status = self.status
+        assert status is not None
         return (
             math.hypot(
-                status["pointer"]["x"] - (status["x"] + status["width"] / 2),
-                status["pointer"]["y"] - (status["y"] + 52),
+                status.pointer.x - (status.x + status.width / 2),
+                status.pointer.y - (status.y + 52),
             )
             <= self.config.pointer_radius
         )
 
-    def _blocked(self):
+    def _blocked(self) -> bool:
         return (
             not self.status
-            or any(self.status[name] for name in ("speech", "dragging", "menu"))
+            or self.status.speech
+            or self.status.dragging
+            or self.status.menu
             or self._near_pointer()
         )
 
-    def _play(self, clip, name, kind, seconds, session=None):
+    def _play(
+        self,
+        clip: Clip,
+        name: str,
+        kind: str,
+        seconds: float,
+        session: str | None = None,
+    ) -> None:
         repeats = max(1, math.ceil(seconds / clip.seconds))
         if clip.max_repeats is not None:
             repeats = min(repeats, clip.max_repeats)
@@ -297,7 +371,7 @@ class Behavior:
                 command_id=command,
             )
 
-    def _resolve_clip(self, role, preferred, fallback):
+    def _resolve_clip(self, role: str, preferred: str, fallback: str) -> Clip:
         for candidate_role, candidate_id in (
             (role, preferred),
             (ANIMATION_ROLES[fallback], fallback),
@@ -310,26 +384,31 @@ class Behavior:
                 return self.rng.choice(candidates)
         return self.pack.clips[self.pack.rest]
 
-    def _reaction_clip(self, kind):
+    def _reaction_clip(self, kind: str) -> Clip:
         spec = REACTIONS[kind]
         return self._resolve_clip(spec.role, spec.preferred, spec.fallback)
 
-    def react(self, kind, sessions=None, key=None):
+    def react(
+        self, kind: str, sessions: Sessions | None = None, key: str | None = None
+    ) -> bool:
         clip = self._reaction_clip(kind)
         if (
             not self.status
             or self.suspension
-            or self.status["dragging"]
-            or self.status["menu"]
+            or self.status.dragging
+            or self.status.menu
         ):
             return False
         current = self.execution.action
-        if current and current.name in REACTIONS:
-            if (
+        if (
+            current
+            and current.name in REACTIONS
+            and (
                 current.name == kind
                 or REACTIONS[kind].priority < REACTIONS[current.name].priority
-            ):
-                return False
+            )
+        ):
+            return False
         self.wake(kind)
         self._interrupt(kind)
         if clip.id == self.pack.rest:
@@ -358,37 +437,39 @@ class Behavior:
             self._play(clip, kind, REACTIONS[kind].kind, REACTION_SECONDS, session=key)
         return True
 
-    def _walk(self):
+    def _walk(self) -> bool:
         status = self.status
+        assert status is not None
+        assert self.preferred_position is not None
         seconds = self.rng.uniform(*self.config.walk_seconds)
         angle = self.rng.uniform(0, 2 * math.pi)
-        x = status["x"] + math.cos(angle) * self.config.walk_speed * seconds
-        y = status["y"] + math.sin(angle) * self.config.walk_speed * seconds
+        x = status.x + math.cos(angle) * self.config.walk_speed * seconds
+        y = status.y + math.sin(angle) * self.config.walk_speed * seconds
         home_x, home_y = self.preferred_position
         distance = math.hypot(x - home_x, y - home_y)
         if distance > self.config.roaming_radius:
             scale = self.config.roaming_radius / distance
             x, y = home_x + (x - home_x) * scale, home_y + (y - home_y) * scale
-        screen = status["screen"]
+        screen = status.screen
         x = max(
-            screen["x"],
-            min(x, max(screen["x"], screen["x"] + screen["width"] - status["width"])),
+            screen.x,
+            min(x, max(screen.x, screen.x + screen.width - status.width)),
         )
         y = max(
-            screen["y"],
-            min(y, max(screen["y"], screen["y"] + screen["height"] - status["height"])),
+            screen.y,
+            min(y, max(screen.y, screen.y + screen.height - status.height)),
         )
-        distance = math.hypot(x - status["x"], y - status["y"])
+        distance = math.hypot(x - status.x, y - status.y)
         if distance < 1:
             return False
         seconds = min(seconds, distance / self.config.walk_speed)
         clip = self.rng.choice(
-            self.pack.role("walk-left" if x < status["x"] else "walk-right")
+            self.pack.role("walk-left" if x < status.x else "walk-right")
         )
         if clip.max_repeats is not None and seconds > clip.seconds * clip.max_repeats:
             scale = clip.seconds * clip.max_repeats / seconds
-            x = status["x"] + (x - status["x"]) * scale
-            y = status["y"] + (y - status["y"]) * scale
+            x = status.x + (x - status.x) * scale
+            y = status.y + (y - status.y) * scale
             seconds = clip.seconds * clip.max_repeats
         command = self._next_id()
         self.last_movement = self.clock()
@@ -419,26 +500,27 @@ class Behavior:
         )
         return True
 
-    def _gaze_clip(self):
+    def _gaze_clip(self) -> str | None:
         if not self.pack.gaze:
             return None
         status = self.status
+        assert status is not None
         anchor = self.pack.gaze_anchor
-        dx = status["pointer"]["x"] - (status["x"] + 52 + 96 * anchor["x"])
-        dy = status["pointer"]["y"] - (status["y"] + 4 + 96 * (1 - anchor["y"]))
+        dx = status.pointer.x - (status.x + 52 + 96 * anchor.x)
+        dy = status.pointer.y - (status.y + 4 + 96 * (1 - anchor.y))
         if math.hypot(dx, dy) <= self.config.gaze_deadzone:
             return None
         index = round(math.atan2(dx, dy) * 16 / (2 * math.pi)) % 16
         return self.pack.gaze[index]
 
-    def _available(self, candidate):
+    def _available(self, candidate: Candidate) -> bool:
         if candidate.name == "roam":
             return bool(self.pack.role("walk-left") and self.pack.role("walk-right"))
         if candidate.name == "observe":
             return self._gaze_clip() is not None
         return True
 
-    def tick(self, state, sessions):
+    def tick(self, state: str, sessions: Sessions) -> None:
         if not self.status:
             return
         now = self.clock()
@@ -449,7 +531,7 @@ class Behavior:
             self.care_remark = None
         elif self.next_care is None:
             self.satisfy()
-        if status["dragging"] or status["menu"]:
+        if status.dragging or status.menu:
             if self.suspension is None:
                 self.suspend("interaction")
             return
@@ -489,7 +571,7 @@ class Behavior:
                 for lane in sessions.lanes.values()
             ),
             waiting=any(lane.waiting for lane in sessions.lanes.values()),
-            interacting=status["speech"],
+            interacting=status.speech,
             pointer_recent=now - self.pointer_moved < self.config.gaze_reset_seconds,
             can_roam=(
                 self.config.roaming
@@ -508,7 +590,7 @@ class Behavior:
             restlessness=min(1, (now - self.last_movement) / 300),
             rest_pressure=min(1, inactive_seconds / 240),
         )
-        if self.sleeping:
+        if self.nap_until is not None:
             if sessions.engaged or blocked or now >= self.nap_until:
                 self.wake(
                     "activity_or_interaction"
@@ -525,7 +607,7 @@ class Behavior:
         current = self.execution.action
         if (
             self.observation.pointer_recent
-            and not status["speech"]
+            and not status.speech
             and self._gaze_clip()
             and (current is None or current.name in ("rest", "observe"))
         ):

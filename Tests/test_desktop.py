@@ -1,12 +1,13 @@
 import asyncio
 import json
 import os
-from pathlib import Path
 import random
 import sys
 import tempfile
 import time
 import unittest
+from collections.abc import Callable
+from pathlib import Path
 
 import httpx
 from anthropic import AsyncAnthropic
@@ -14,6 +15,8 @@ from anthropic import AsyncAnthropic
 from pet_daemon.commentary.context import SITUATIONS
 from pet_daemon.config import Config
 from pet_daemon.daemon import Daemon
+from pet_daemon.types import JSONObject
+from Tests.fixtures import require
 
 
 @unittest.skipUnless(
@@ -23,7 +26,7 @@ from pet_daemon.daemon import Daemon
 class DesktopTests(unittest.IsolatedAsyncioTestCase):
     async def test_native_renderer_and_daemon_round_trip_hooks_motion_and_sdk_speech(
         self,
-    ):
+    ) -> None:
         root = Path(__file__).resolve().parents[1]
         selected = Config.load(root / "pet.config.json")
         with tempfile.TemporaryDirectory(
@@ -49,10 +52,9 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
             requests = []
             speech = "The parser remains unconvinced. 猫 " * 100
 
-            async def provider(request):
+            async def provider(request: httpx.Request) -> httpx.Response:
                 body = json.loads(request.content)
                 requests.append(body)
-                snapshot = json.loads(body["messages"][-1]["content"])
                 summary = body["output_config"]["format"]["schema"]["required"] == [
                     "session_context"
                 ]
@@ -100,8 +102,10 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                 task = asyncio.create_task(daemon.run())
                 env = dict(os.environ, PET_DAEMON_SOCKET=config.daemon_socket)
 
-                async def wait_for(condition, timeout=5):
-                    async def wait():
+                async def wait_for(
+                    condition: Callable[[], bool], timeout: float = 5
+                ) -> None:
+                    async def wait() -> None:
                         while not condition():
                             if task.done():
                                 task.result()
@@ -112,7 +116,7 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
 
                     await asyncio.wait_for(wait(), timeout)
 
-                async def cli(*arguments):
+                async def cli(*arguments: str) -> None:
                     process = await asyncio.create_subprocess_exec(
                         sys.executable,
                         str(root / "bin/pet-notify"),
@@ -121,7 +125,12 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertEqual(await process.wait(), 0)
 
-                async def hook(harness, event, payload, expected=None):
+                async def hook(
+                    harness: str,
+                    event: str,
+                    payload: JSONObject,
+                    expected: JSONObject | None = None,
+                ) -> None:
                     process = await asyncio.create_subprocess_exec(
                         sys.executable,
                         str(root / "scripts/pet-hook"),
@@ -142,38 +151,40 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                         lambda: daemon.application.behavior.status is not None, 10
                     )
                     initial = (
-                        daemon.application.behavior.status["x"],
-                        daemon.application.behavior.status["y"],
+                        require(daemon.application.behavior.status).x,
+                        require(daemon.application.behavior.status).y,
                     )
                     elapsed[0] += 300
                     await wait_for(
                         lambda: (
                             (
-                                daemon.application.behavior.status["x"],
-                                daemon.application.behavior.status["y"],
+                                require(daemon.application.behavior.status).x,
+                                require(daemon.application.behavior.status).y,
                             )
                             != initial
                         )
                     )
-                    status = daemon.application.behavior.status
-                    screen = status["screen"]
-                    self.assertGreaterEqual(status["x"], screen["x"])
+                    status = require(daemon.application.behavior.status)
+                    screen = status.screen
+                    self.assertGreaterEqual(status.x, screen.x)
                     self.assertLessEqual(
-                        status["x"] + status["width"], screen["x"] + screen["width"]
+                        status.x + status.width, screen.x + screen.width
                     )
                     config.behavior.naps = True
                     config.behavior.nap_interval = (0.2, 0.2)
                     config.behavior.nap_seconds = (2, 2)
                     daemon.application.behavior.next_nap = daemon.clock() + 0.2
                     await wait_for(
-                        lambda: daemon.application.behavior.status["sleeping"]
+                        lambda: bool(
+                            require(daemon.application.behavior.status).sleeping
+                        )
                     )
                     config.behavior.nap_interval = (120, 240)
                     await cli(
                         "intent", "--session", "build", "--text", "Build the parser"
                     )
                     await wait_for(
-                        lambda: not daemon.application.behavior.status["sleeping"]
+                        lambda: not require(daemon.application.behavior.status).sleeping
                     )
                     await cli(
                         "--session",
@@ -237,10 +248,12 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(daemon.application.behavior.state, "working")
                     self.assertFalse(release.is_set())
                     release.set()
-                    await wait_for(lambda: daemon.application.behavior.status["speech"])
+                    await wait_for(
+                        lambda: require(daemon.application.behavior.status).speech
+                    )
                     self.assertGreater(len(speech.encode()), 2048)
                     await wait_for(
-                        lambda: not daemon.application.behavior.status["speech"]
+                        lambda: not require(daemon.application.behavior.status).speech
                     )
                     self.assertTrue(daemon.application.cognition.memory.speech())
                     self.assertTrue(daemon.application.sessions.working)

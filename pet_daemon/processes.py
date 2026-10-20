@@ -1,14 +1,19 @@
 import asyncio
 import os
-from pathlib import Path
 import shlex
 import subprocess
 import time
+from collections.abc import Callable, Iterable
+from pathlib import Path
+from typing import Literal
 
 from .runtime import ProcessIdentity
 
+type ProcessRow = tuple[ProcessIdentity, int, str, str]
+type ProcessStatus = Literal["unknown", "exited", "alive", "replaced"]
 
-def _parse_process(line):
+
+def _parse_process(line: str) -> ProcessRow | None:
     fields = line.strip().split(None, 8)
     if len(fields) != 9:
         return None
@@ -25,7 +30,7 @@ def _parse_process(line):
     return ProcessIdentity(pid, started), parent, fields[7], fields[8]
 
 
-def _processes(pid=None):
+def _processes(pid: int | None = None) -> dict[int, ProcessRow]:
     args = (
         ["ps", "-ww", "-axo", "pid=,ppid=,lstart=,stat=,command="]
         if pid is None
@@ -36,17 +41,21 @@ def _processes(pid=None):
         capture_output=True,
         text=True,
         timeout=2,
+        check=False,
         env={**os.environ, "LC_ALL": "C"},
     )
     if result.returncode not in (0, 1) or (result.returncode and result.stderr.strip()):
         raise OSError("Process query failed")
-    rows = [_parse_process(line) for line in result.stdout.splitlines()]
-    if any(row is None for row in rows):
-        raise OSError("Process query returned unreadable identities")
-    return {row[0].pid: row for row in rows}
+    rows: dict[int, ProcessRow] = {}
+    for line in result.stdout.splitlines():
+        row = _parse_process(line)
+        if row is None:
+            raise OSError("Process query returned unreadable identities")
+        rows[row[0].pid] = row
+    return rows
 
 
-def discover_owner(harness, pid=None):
+def discover_owner(harness: str, pid: int | None = None) -> ProcessIdentity | None:
     try:
         rows = _processes()
     except (OSError, subprocess.SubprocessError):
@@ -84,7 +93,7 @@ def discover_owner(harness, pid=None):
     return None
 
 
-def process_identity(pid):
+def process_identity(pid: int) -> ProcessIdentity | None:
     try:
         row = _processes(pid).get(pid)
     except (OSError, subprocess.SubprocessError):
@@ -92,7 +101,7 @@ def process_identity(pid):
     return row[0] if row and "Z" not in row[2] else None
 
 
-def probe(identity):
+def probe(identity: ProcessIdentity) -> ProcessStatus:
     try:
         row = _processes(identity.pid).get(identity.pid)
     except (OSError, subprocess.SubprocessError):
@@ -103,13 +112,20 @@ def probe(identity):
 
 
 class ProcessTracker:
-    def __init__(self, clock=time.monotonic, interval=10, concurrency=4):
+    def __init__(
+        self,
+        clock: Callable[[], float] = time.monotonic,
+        interval: float = 10,
+        concurrency: int = 4,
+    ) -> None:
         self.clock = clock
         self.interval = interval
         self.semaphore = asyncio.Semaphore(concurrency)
-        self.checked = {}
+        self.checked: dict[ProcessIdentity, float] = {}
 
-    async def refresh(self, identities):
+    async def refresh(
+        self, identities: Iterable[ProcessIdentity]
+    ) -> dict[ProcessIdentity, ProcessStatus]:
         identities = set(identities)
         self.checked = {
             identity: at
@@ -122,7 +138,9 @@ class ProcessTracker:
             if self.clock() - self.checked.get(identity, float("-inf")) >= self.interval
         ]
 
-        async def check(identity):
+        async def check(
+            identity: ProcessIdentity,
+        ) -> tuple[ProcessIdentity, ProcessStatus]:
             async with self.semaphore:
                 status = await asyncio.to_thread(probe, identity)
             self.checked[identity] = self.clock()

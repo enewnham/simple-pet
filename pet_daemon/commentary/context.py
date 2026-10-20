@@ -1,14 +1,25 @@
-from datetime import datetime
 import json
-from pathlib import Path
-
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import TypedDict
+
+from anthropic.types import CacheControlEphemeralParam, TextBlockParam
 
 from ..attention import AttentionSelection
-from ..work.presentation import work_record, opportunity_record
+from ..config import Config
 from ..prompts import bounded, select_prompt
-
+from ..runtime import SessionSnapshot, WorkSnapshot
+from ..types import JSONObject
+from ..work.presentation import (
+    OpportunityRecord,
+    WorkRecord,
+    opportunity_record,
+    work_record,
+)
+from .contracts import ModelRequest, RequestFactory
 
 INSTRUCTIONS = """
 <role>
@@ -94,14 +105,58 @@ that continuation. Keep the remark grounded in the supplied observations. Do not
 news or obligations to make it different. Silence is appropriate for optional commentary
 when there is no fresh angle.
 """.strip()
-CACHE_CONTROL = {"type": "ephemeral", "ttl": "1h"}
+CACHE_CONTROL: CacheControlEphemeralParam = {"type": "ephemeral", "ttl": "1h"}
 
 
-def encoded_size(value):
+class SentimentData(TypedDict):
+    compound: float
+    seconds_ago: float
+
+
+class SessionRecord(TypedDict, total=False):
+    turn_active: bool
+    waiting_for_input: bool
+    outcome: str | None
+    activity_uncertain: bool
+    presence: str
+    project: str
+    session_context: str
+    recent_requests: list[str]
+    progress: str
+    active_for: str | None
+    quiet_for: str | None
+    user_sentiment: SentimentData
+    waiting_for: str | None
+    failure: dict[str, str | int | None] | None
+    active_tools: list[dict[str, str | None]]
+    other_active_tools: int
+    connected_work: WorkRecord
+
+
+class OmittedSessions(TypedDict):
+    active: int
+    total: int
+
+
+class CommentaryPayload(TypedDict, total=False):
+    activity: str
+    sleeping: bool
+    time: str
+    context: str | None
+    focus_session: SessionRecord | None
+    other_sessions: list[SessionRecord]
+    omitted_sessions: OmittedSessions
+    focus_opportunity: OpportunityRecord | None
+    focus_work: WorkRecord
+    convergence: bool
+    memory: dict[str, list[JSONObject]]
+
+
+def encoded_size(value: object) -> int:
     return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
 
 
-def duration(seconds):
+def duration(seconds: float | None) -> str | None:
     if seconds is None:
         return None
     seconds = max(0, round(seconds))
@@ -117,7 +172,7 @@ def duration(seconds):
     return f"{days} day{'s' if days != 1 else ''}"
 
 
-def semantic(value):
+def semantic(value: object) -> object:
     if isinstance(value, dict):
         return {
             key: semantic(item)
@@ -141,59 +196,59 @@ def semantic(value):
     return value
 
 
-def session_record(session):
-    record = {
-        key: session.get(key)
-        for key in (
-            "turn_active",
-            "waiting_for_input",
-            "outcome",
-            "activity_uncertain",
-            "presence",
-        )
-        if key in session
+def session_record(session: SessionSnapshot) -> SessionRecord:
+    record: SessionRecord = {
+        "turn_active": session.turn_active,
+        "waiting_for_input": session.waiting_for_input,
+        "outcome": session.outcome,
+        "activity_uncertain": session.activity_uncertain,
+        "presence": session.presence,
     }
     record.update(
-        project=bounded(Path(session.get("repo") or "").name, 120),
-        session_context=bounded(session.get("session_context"), 400),
+        project=bounded(Path(session.repo or "").name, 120),
+        session_context=bounded(session.session_context, 400),
         recent_requests=[
-            select_prompt(request)
-            for request in session.get("recent_requests", ())[-4:]
+            select_prompt(request) for request in session.recent_requests[-4:]
         ],
-        progress=bounded(session.get("progress"), 240),
-        active_for=duration(session.get("duration_seconds")),
-        quiet_for=duration(session.get("quiet_seconds")),
+        progress=bounded(session.progress, 240),
+        active_for=duration(session.duration_seconds),
+        quiet_for=duration(session.quiet_seconds),
     )
-    if session.get("user_sentiment"):
-        record["user_sentiment"] = session["user_sentiment"]
-    if session.get("waiting_for_input"):
-        record["waiting_for"] = duration(session.get("waiting_seconds"))
-    failure = session.get("failure")
-    record["failure"] = None
-    if failure and failure.get("current_turn") and not failure.get("resolved"):
-        record["failure"] = {
-            "activity": bounded(failure.get("activity"), 120),
-            "count": failure.get("count"),
-            "age": duration(failure.get("seconds_ago")),
+    if session.user_sentiment:
+        record["user_sentiment"] = {
+            "compound": session.user_sentiment.compound,
+            "seconds_ago": session.user_sentiment.seconds_ago,
         }
-    tools = session.get("active_tools", ())
+    if session.waiting_for_input:
+        record["waiting_for"] = duration(session.waiting_seconds)
+    failure = session.failure
+    record["failure"] = None
+    if failure and failure.current_turn and not failure.resolved:
+        record["failure"] = {
+            "activity": bounded(failure.activity, 120),
+            "count": failure.count,
+            "age": duration(failure.seconds_ago),
+        }
+    tools = session.active_tools
     record["active_tools"] = [
         {
-            "tool": bounded(tool.get("tool"), 160),
-            "running_for": duration(tool.get("duration_seconds")),
+            "tool": bounded(tool.tool, 160),
+            "running_for": duration(tool.duration_seconds),
         }
         for tool in tools[:3]
     ]
     record["other_active_tools"] = max(0, len(tools) - 3)
-    if session.get("connected_work"):
-        record["connected_work"] = work_record(session["connected_work"])
+    if session.connected_work:
+        record["connected_work"] = work_record(session.connected_work)
     return record
 
 
-def project_payload(snapshot, selection, timestamp):
-    payload = {
-        "activity": snapshot.get("activity", "idle"),
-        "sleeping": snapshot.get("sleeping", False),
+def project_payload(
+    snapshot: WorkSnapshot, selection: AttentionSelection, timestamp: float
+) -> CommentaryPayload:
+    payload: CommentaryPayload = {
+        "activity": snapshot.activity,
+        "sleeping": snapshot.sleeping,
         "time": datetime.fromtimestamp(timestamp).astimezone().strftime("%A %H:%M"),
     }
     if selection.situation.startswith("care_") or selection.situation == "click_idle":
@@ -219,50 +274,53 @@ def project_payload(snapshot, selection, timestamp):
     if selection.reason == "prompt":
         if focus:
             payload["focus_session"] = {
-                "project": bounded(Path(focus.get("repo") or "").name, 120),
-                "session_context": bounded(focus.get("session_context"), 400),
+                "project": bounded(Path(focus.repo or "").name, 120),
+                "session_context": bounded(focus.session_context, 400),
                 "recent_requests": [
-                    select_prompt(value)
-                    for value in focus.get("recent_requests", ())[-1:]
+                    select_prompt(value) for value in focus.recent_requests[-1:]
                 ],
             }
-            if focus.get("user_sentiment"):
-                payload["focus_session"]["user_sentiment"] = focus["user_sentiment"]
-            if focus.get("connected_work"):
+            if focus.user_sentiment:
+                payload["focus_session"]["user_sentiment"] = {
+                    "compound": focus.user_sentiment.compound,
+                    "seconds_ago": focus.user_sentiment.seconds_ago,
+                }
+            if focus.connected_work:
                 payload["focus_session"]["connected_work"] = work_record(
-                    focus["connected_work"]
+                    focus.connected_work
                 )
         return payload
     others = selection.context_sessions
+    focus_record = session_record(focus) if focus else None
+    if selection.reason == "failure" and focus_record:
+        focus_record.pop("progress", None)
     payload.update(
-        focus_session=session_record(focus) if focus else None,
+        focus_session=focus_record,
         other_sessions=[session_record(session) for session in others[:2]],
         omitted_sessions={
-            "active": sum(bool(session.get("turn_active")) for session in others[2:]),
+            "active": sum(bool(session.turn_active) for session in others[2:]),
             "total": max(0, len(others) - 2),
         },
     )
-    if selection.reason == "failure" and payload["focus_session"]:
-        payload["focus_session"].pop("progress", None)
     return payload
 
 
 @dataclass(frozen=True)
 class EvidenceManifest:
     selection: AttentionSelection
-    payload: dict
+    payload: CommentaryPayload
 
     @property
-    def session_ids(self):
+    def session_ids(self) -> tuple[str, ...]:
         count = len(self.payload.get("other_sessions", ()))
         focus = self.selection.focus_session
         return (
-            (focus["id"],)
+            (focus.id,)
             if self.payload.get("focus_session") is not None and focus
             else ()
-        ) + tuple(session["id"] for session in self.selection.context_sessions[:count])
+        ) + tuple(session.id for session in self.selection.context_sessions[:count])
 
-    def valid(self, snapshot):
+    def valid(self, snapshot: WorkSnapshot) -> bool:
         if not self.selection.supported(snapshot):
             return False
         refreshed = self.selection.refresh(snapshot)
@@ -275,16 +333,19 @@ class EvidenceManifest:
             and refreshed.focus_session is None
         ):
             return False
-        current_ids = {session["id"] for session in snapshot.get("sessions", ())}
+        current_ids = {session.id for session in snapshot.sessions}
         if not set(self.session_ids) <= current_ids:
             return False
         current = project_payload(snapshot, refreshed, 0)
-        expected = semantic(self.payload)
-        actual = semantic(current)
-        if expected.get("focus_session") is not None:
-            requests = expected["focus_session"].get("recent_requests", ())
-            actual["focus_session"]["recent_requests"] = (
-                actual["focus_session"].get("recent_requests", [])[-len(requests) :]
+        expected = deepcopy(self.payload)
+        actual = current
+        expected_focus = expected.get("focus_session")
+        if expected_focus is not None:
+            actual_focus = actual["focus_session"]
+            assert actual_focus is not None
+            requests = expected_focus.get("recent_requests", ())
+            actual_focus["recent_requests"] = (
+                actual_focus.get("recent_requests", [])[-len(requests) :]
                 if requests
                 else []
             )
@@ -294,25 +355,27 @@ class EvidenceManifest:
         for field in ("omitted_sessions", "convergence"):
             expected.pop(field, None)
             actual.pop(field, None)
-        return actual == expected
+        return semantic(actual) == semantic(expected)
 
 
 @dataclass(frozen=True)
 class PreparedCommentary:
     selection: AttentionSelection
-    request: dict
+    request: ModelRequest
     manifest: EvidenceManifest
 
 
 class Context:
-    def __init__(self, config, clock):
+    def __init__(self, config: Config, clock: Callable[[], float]) -> None:
         self.config = config
         self.clock = clock
 
-    def situation(self, selection):
+    def situation(self, selection: AttentionSelection) -> str:
         direction = SITUATIONS[selection.situation]
         if selection.situation == "completion":
-            outcome = (selection.focus_session or {}).get("outcome")
+            outcome = (
+                selection.focus_session.outcome if selection.focus_session else None
+            )
             if outcome == "cancelled":
                 direction += " Acknowledge the cancellation without claiming success."
             elif outcome == "error":
@@ -321,7 +384,9 @@ class Context:
                 )
         return direction
 
-    def system(self, selection, retry=False):
+    def system(
+        self, selection: AttentionSelection, retry: bool = False
+    ) -> list[TextBlockParam]:
         direction = self.situation(selection)
         direction = "<request>\n" + direction + "\n</request>"
         if retry:
@@ -340,12 +405,19 @@ class Context:
             {"type": "text", "text": direction},
         ]
 
-    def prompt(self, snapshot, selection):
+    def prompt(
+        self, snapshot: WorkSnapshot, selection: AttentionSelection
+    ) -> CommentaryPayload:
         return project_payload(snapshot, selection, self.clock())
 
     def prepare(
-        self, snapshot, selection, make_request, speech_required=False, retry=False
-    ):
+        self,
+        snapshot: WorkSnapshot,
+        selection: AttentionSelection,
+        make_request: RequestFactory,
+        speech_required: bool = False,
+        retry: bool = False,
+    ) -> PreparedCommentary:
         payload = self.prompt(snapshot, selection)
         system = self.system(selection, retry)
         selected = deepcopy(payload)
@@ -360,7 +432,7 @@ class Context:
             omitted["total"] += len(others)
             omitted["active"] += sum(bool(item.get("turn_active")) for item in others)
 
-        def has_room():
+        def has_room() -> bool:
             return (
                 encoded_size(
                     make_request(selected, system, speech_required=speech_required)
@@ -371,6 +443,7 @@ class Context:
         for previous in reversed(requests[:-1]):
             if not has_room():
                 break
+            assert focus is not None
             focus["recent_requests"].insert(0, previous)
         for other in others:
             if not has_room():

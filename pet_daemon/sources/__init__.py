@@ -1,3 +1,4 @@
-from .repositories import RepositoryTarget, RepositoryTracker
+from ..work.observations import RepositoryTarget
+from .repositories import RepositoryTracker
 
 __all__ = ["RepositoryTarget", "RepositoryTracker"]

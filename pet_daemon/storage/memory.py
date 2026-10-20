@@ -1,27 +1,92 @@
 import json
 import sqlite3
 import time
+from collections.abc import Callable, Iterable, Sequence
+from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..prompts import select_prompt
 from ..telemetry import verbose
 from ..work import WorkService
 from ..work.history import RecallQuery, SessionFact
-from .work import SQLiteWorkRepository
-from .transactions import transaction
+from ..work.observations import (
+    RepositoryObservation,
+    repository_observation_from_mapping,
+)
 from .migrations import migrate
+from .transactions import transaction
+from .work import SQLiteWorkRepository
+
+
+@dataclass(frozen=True)
+class HistoryRecord:
+    last_selected: float
+    considered_revision: str | None
+
+
+@dataclass(frozen=True)
+class EventRecord:
+    id: int
+    session: str
+    repo: str
+    event_type: str
+    summary: str
+    goal: str
+    timestamp: float
+
+
+@dataclass(frozen=True)
+class ProjectRecord:
+    repo: str
+    goal: str
+    last_result: str
+    timestamp: float
+
+
+@dataclass(frozen=True)
+class ContextRecord:
+    first_prompt: str
+    session_context: str
+    recent_requests: list[str]
+    request_count: int
+    first_summary_attempted: bool
+
+
+@dataclass(frozen=True)
+class MessageOutcome:
+    message_id: str
+    outcome: str
+    text: str
+    reason: str
+    opportunity_id: str | None
+    version: int | None
+    timestamp: float
+
+
+@dataclass(frozen=True)
+class SpeechRecord:
+    text: str
+    reason: str
+    timestamp: float
+
+
+@dataclass(frozen=True)
+class RepositoryAssociation:
+    session: str
+    worktree: str
 
 
 class Memory:
     def __init__(
         self,
-        path,
-        pet,
-        clock=time.time,
-        retention_days=30,
-        max_events=10000,
-        speech_history_seconds=1800,
-    ):
+        path: str | Path,
+        pet: str,
+        clock: Callable[[], float] = time.time,
+        retention_days: int = 30,
+        max_events: int = 10000,
+        speech_history_seconds: float = 1800,
+    ) -> None:
         self.pet = pet
         self.clock = clock
         self.retention_days = retention_days
@@ -44,23 +109,25 @@ class Memory:
         )
         self.prune()
 
-    def transaction(self):
+    def transaction(self) -> AbstractContextManager[None]:
         return transaction(self.db)
 
-    def load_attention_history(self):
+    def load_attention_history(self) -> dict[str, HistoryRecord]:
         rows = self.db.execute(
             "SELECT subject,last_selected,considered_revision FROM attention_history WHERE pet=?",
             (self.pet,),
         ).fetchall()
         return {
-            row["subject"]: {
-                "last_selected": row["last_selected"],
-                "considered_revision": json.loads(row["considered_revision"]),
-            }
+            row["subject"]: HistoryRecord(
+                last_selected=row["last_selected"],
+                considered_revision=json.loads(row["considered_revision"]),
+            )
             for row in rows
         }
 
-    def save_attention_history(self, subject_id, last_selected, considered_revision):
+    def save_attention_history(
+        self, subject_id: str, last_selected: float, considered_revision: str | None
+    ) -> None:
         with self.transaction():
             self.db.execute(
                 """INSERT INTO attention_history VALUES (?,?,?,?,?) ON CONFLICT(pet,subject) DO UPDATE SET
@@ -75,8 +142,13 @@ class Memory:
             )
 
     def record_acceptance(
-        self, message_id, text, reason, opportunity_id=None, version=None
-    ):
+        self,
+        message_id: str,
+        text: str,
+        reason: str,
+        opportunity_id: str | None = None,
+        version: int | None = None,
+    ) -> bool:
         with self.transaction():
             previous = self.db.execute(
                 "SELECT outcome FROM message_outcomes WHERE pet=? AND message_id=?",
@@ -117,8 +189,13 @@ class Memory:
         return True
 
     def record_delivery_failure(
-        self, message_id, reason, text="", opportunity_id=None, version=None
-    ):
+        self,
+        message_id: str,
+        reason: str,
+        text: str = "",
+        opportunity_id: str | None = None,
+        version: int | None = None,
+    ) -> bool:
         with self.transaction():
             result = self.db.execute(
                 "INSERT OR IGNORE INTO message_outcomes VALUES (?,?,?,?,?,?,?,?)",
@@ -135,14 +212,26 @@ class Memory:
             )
         return bool(result.rowcount)
 
-    def message_outcome(self, message_id):
+    def message_outcome(self, message_id: str) -> MessageOutcome | None:
         row = self.db.execute(
             "SELECT message_id,outcome,text,reason,opportunity_id,version,timestamp FROM message_outcomes WHERE pet=? AND message_id=?",
             (self.pet, message_id),
         ).fetchone()
-        return dict(row) if row else None
+        return (
+            MessageOutcome(
+                message_id=row["message_id"],
+                outcome=row["outcome"],
+                text=row["text"],
+                reason=row["reason"],
+                opportunity_id=row["opportunity_id"],
+                version=row["version"],
+                timestamp=row["timestamp"],
+            )
+            if row
+            else None
+        )
 
-    def prune(self):
+    def prune(self) -> None:
         now = self.clock()
         cutoff = now - self.retention_days * 86400
         speech_cutoff = now - self.speech_history_seconds
@@ -177,7 +266,7 @@ class Memory:
         self.db.execute("PRAGMA incremental_vacuum(64)")
         self.work.prune()
 
-    def record_event(self, record: SessionFact | None):
+    def record_event(self, record: SessionFact | None) -> int | None:
         if record is None:
             return None
         if record.coalesce:
@@ -221,7 +310,14 @@ class Memory:
         verbose("memory.event", id=cursor.lastrowid, event_type=record.event_type)
         return cursor.lastrowid
 
-    def recent(self, limit=5, *, session=None, repo=None, event_types=None):
+    def recent(
+        self,
+        limit: int = 5,
+        *,
+        session: str | None = None,
+        repo: str | None = None,
+        event_types: Iterable[str] | None = None,
+    ) -> list[EventRecord]:
         filters = ["pet=?"]
         values = [self.pet]
         if session is not None:
@@ -245,13 +341,24 @@ class Memory:
           FROM ranked ORDER BY rank=1 DESC, id DESC LIMIT ?""",
             (*values, limit),
         ).fetchall()
-        return [dict(row) for row in sorted(rows, key=lambda row: row["id"])]
+        return [
+            EventRecord(
+                id=row["id"],
+                session=row["session"],
+                repo=row["repo"],
+                event_type=row["event_type"],
+                summary=row["summary"],
+                goal=row["goal"],
+                timestamp=row["timestamp"],
+            )
+            for row in sorted(rows, key=lambda row: row["id"])
+        ]
 
-    def recall(self, request: RecallQuery | None, limit=2):
+    def recall(self, request: RecallQuery | None, limit: int = 2) -> list[EventRecord]:
         if request is None:
             return []
         query = " AND ".join('"' + term + '"' for term in request.terms)
-        excluded = [row["id"] for row in self.recent()]
+        excluded = [row.id for row in self.recent()]
         placeholders = ",".join("?" for _ in excluded) or "NULL"
         rows = self.db.execute(
             f"""SELECT e.* FROM events_fts JOIN events e ON e.id=events_fts.rowid
@@ -259,9 +366,20 @@ class Memory:
             ORDER BY e.session=? DESC, bm25(events_fts), e.id DESC LIMIT ?""",
             (query, self.pet, request.repository, *excluded, request.session, limit),
         ).fetchall()
-        return [dict(row) for row in rows]
+        return [
+            EventRecord(
+                id=row["id"],
+                session=row["session"],
+                repo=row["repo"],
+                event_type=row["event_type"],
+                summary=row["summary"],
+                goal=row["goal"],
+                timestamp=row["timestamp"],
+            )
+            for row in rows
+        ]
 
-    def projects(self, repos):
+    def projects(self, repos: Iterable[str]) -> list[ProjectRecord]:
         result = []
         for repo in list(dict.fromkeys(repos))[:3]:
             row = self.db.execute(
@@ -269,33 +387,40 @@ class Memory:
                 (self.pet, repo),
             ).fetchone()
             if row:
-                result.append(dict(row))
+                result.append(
+                    ProjectRecord(
+                        repo=row["repo"],
+                        goal=row["goal"],
+                        last_result=row["last_result"],
+                        timestamp=row["timestamp"],
+                    )
+                )
         return result
 
-    def context(self, session):
+    def context(self, session: str) -> ContextRecord | None:
         row = self.db.execute(
             "SELECT first_prompt,session_context,recent_requests,request_count,first_summary_attempted FROM contexts WHERE pet=? AND session=?",
             (self.pet, session),
         ).fetchone()
         if row is None:
             return None
-        return {
-            "first_prompt": row["first_prompt"],
-            "session_context": row["session_context"],
-            "recent_requests": json.loads(row["recent_requests"]),
-            "request_count": row["request_count"],
-            "first_summary_attempted": bool(row["first_summary_attempted"]),
-        }
+        return ContextRecord(
+            first_prompt=row["first_prompt"],
+            session_context=row["session_context"],
+            recent_requests=json.loads(row["recent_requests"]),
+            request_count=row["request_count"],
+            first_summary_attempted=bool(row["first_summary_attempted"]),
+        )
 
     def save_context(
         self,
-        session,
-        first_prompt,
-        summary,
-        recent_requests,
-        request_count=None,
-        first_summary_attempted=False,
-    ):
+        session: str,
+        first_prompt: str,
+        summary: str | None,
+        recent_requests: Sequence[str],
+        request_count: int | None = None,
+        first_summary_attempted: bool = False,
+    ) -> None:
         requests = [select_prompt(request) for request in recent_requests[-4:]]
         count = len(requests) if request_count is None else request_count
         with self.transaction():
@@ -317,7 +442,7 @@ class Memory:
             )
         self.prune()
 
-    def record_speech(self, text, reason):
+    def record_speech(self, text: str, reason: str) -> None:
         with self.transaction():
             self.db.execute(
                 "INSERT INTO speech(pet,text,reason,timestamp) VALUES (?,?,?,?)",
@@ -325,21 +450,24 @@ class Memory:
             )
         self.prune()
 
-    def associate_repository(self, session, worktree):
+    def associate_repository(self, session: str, worktree: str) -> None:
         with self.transaction():
             self.db.execute(
                 "INSERT OR IGNORE INTO repository_associations VALUES (?,?,?)",
                 (self.pet, session, worktree),
             )
 
-    def repository_associations(self):
+    def repository_associations(self) -> list[RepositoryAssociation]:
         rows = self.db.execute(
             "SELECT session,worktree FROM repository_associations WHERE pet=?",
             (self.pet,),
         ).fetchall()
-        return [dict(row) for row in rows]
+        return [
+            RepositoryAssociation(session=row["session"], worktree=row["worktree"])
+            for row in rows
+        ]
 
-    def forget_repository(self, worktree):
+    def forget_repository(self, worktree: str) -> None:
         with self.transaction():
             self.db.execute(
                 "DELETE FROM repository_associations WHERE pet=? AND worktree=?",
@@ -358,31 +486,39 @@ class Memory:
                 ((self.pet, subject) for subject in subjects),
             )
 
-    def save_repository(self, worktree, observation):
+    def save_repository(self, observation: RepositoryObservation) -> None:
         with self.transaction():
             self.db.execute(
                 "INSERT INTO repositories VALUES (?,?,?) ON CONFLICT(pet,worktree) DO UPDATE SET observation=excluded.observation",
-                (self.pet, worktree, json.dumps(observation)),
+                (self.pet, observation.subject, json.dumps(observation.packet())),
             )
 
-    def load_repositories(self):
+    def load_repositories(self) -> tuple[RepositoryObservation, ...]:
         rows = self.db.execute(
             "SELECT observation FROM repositories WHERE pet=?", (self.pet,)
         ).fetchall()
-        return [json.loads(row["observation"]) for row in rows]
+        return tuple(
+            repository_observation_from_mapping(json.loads(row["observation"]))
+            for row in rows
+        )
 
-    def speech(self, limit=3):
+    def speech(self, limit: int = 3) -> list[SpeechRecord]:
         rows = self.db.execute(
             "SELECT text,reason,timestamp FROM speech WHERE pet=? AND timestamp > ? ORDER BY id DESC LIMIT ?",
             (self.pet, self.clock() - self.speech_history_seconds, limit),
         ).fetchall()
-        return [dict(row) for row in reversed(rows)]
+        return [
+            SpeechRecord(
+                text=row["text"], reason=row["reason"], timestamp=row["timestamp"]
+            )
+            for row in reversed(rows)
+        ]
 
-    def clear_speech(self):
+    def clear_speech(self) -> None:
         with self.transaction():
             self.db.execute("DELETE FROM speech WHERE pet=?", (self.pet,))
 
-    def clear(self):
+    def clear(self) -> None:
         with self.transaction():
             self.work.clear()
             for table in (
@@ -397,5 +533,5 @@ class Memory:
             ):
                 self.db.execute(f"DELETE FROM {table} WHERE pet=?", (self.pet,))
 
-    def close(self):
+    def close(self) -> None:
         self.db.close()

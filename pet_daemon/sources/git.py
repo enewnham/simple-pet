@@ -1,12 +1,27 @@
 import asyncio
-from pathlib import Path
 import re
+from collections.abc import Coroutine
+from pathlib import Path
+from typing import Protocol, TypedDict
 from urllib.parse import urlsplit
 
 from ..work.observations import GitObservation
 
+type CommandPath = str | Path | None
 
-async def _finish(task):
+
+class CommandOptions(TypedDict, total=False):
+    cwd: CommandPath
+    timeout: float
+
+
+class RunCommand(Protocol):
+    def __call__(
+        self, *args: str, cwd: CommandPath = None, timeout: float = 10
+    ) -> Coroutine[object, object, str]: ...
+
+
+async def _finish[T](task: asyncio.Task[T]) -> T:
     while True:
         try:
             return await asyncio.shield(task)
@@ -15,7 +30,7 @@ async def _finish(task):
                 raise
 
 
-async def command(*args, cwd=None, timeout=10):
+async def command(*args: str, cwd: CommandPath = None, timeout: float = 10) -> str:
     startup = asyncio.create_task(
         asyncio.create_subprocess_exec(
             *args,
@@ -29,7 +44,7 @@ async def command(*args, cwd=None, timeout=10):
     except asyncio.CancelledError:
         try:
             process = await _finish(startup)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - Preserve cancellation when subprocess startup fails during cleanup.
             pass
         else:
             if process.returncode is None:
@@ -48,7 +63,7 @@ async def command(*args, cwd=None, timeout=10):
     return stdout.decode(errors="replace")
 
 
-def canonical_repository(value):
+def canonical_repository(value: str) -> str:
     value = value.strip().rstrip("/")
     if not value or value.startswith("local:"):
         return value
@@ -69,10 +84,10 @@ def canonical_repository(value):
     return f"{host}/{path}".lower() if path else ""
 
 
-async def repository_identity(path, run=command):
+async def repository_identity(path: CommandPath, run: RunCommand = command) -> str:
     remotes = (await run("git", "remote", cwd=path)).splitlines()
     if remotes:
-        remote = "origin" if "origin" in remotes else sorted(remotes)[0]
+        remote = "origin" if "origin" in remotes else min(remotes)
         url = (await run("git", "remote", "get-url", remote, cwd=path)).strip()
         repository = canonical_repository(url)
         if repository:
@@ -85,11 +100,11 @@ async def repository_identity(path, run=command):
     return "local:" + str(Path(common).resolve())
 
 
-async def discover(path, run=command):
+async def discover(path: CommandPath, run: RunCommand = command) -> str:
     return (await run("git", "rev-parse", "--show-toplevel", cwd=path)).strip()
 
 
-async def observe(path, run=command):
+async def observe(path: str | Path, run: RunCommand = command) -> GitObservation:
     output = await run(
         "git",
         "status",
@@ -140,7 +155,7 @@ async def observe(path, run=command):
         raise RuntimeError("Repository changed during observation")
     repository = await repository_identity(path, run)
     return GitObservation(
-        path,
+        str(path),
         branch,
         head,
         staged,

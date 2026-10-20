@@ -1,33 +1,62 @@
 import contextlib
 import contextvars
-from datetime import datetime, timezone
 import json
 import logging
-from logging.handlers import RotatingFileHandler
 import os
-from pathlib import Path
 import sys
-import uuid
 import time
+import uuid
+from collections.abc import Generator
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from types import TracebackType
+
+type ExcInfo = (
+    bool
+    | BaseException
+    | tuple[type[BaseException], BaseException, TracebackType | None]
+    | tuple[None, None, None]
+    | None
+)
+
+from typing import ClassVar
+
+
+@dataclass(frozen=True)
+class UsageTokens:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+
+    def __add__(self, other: "UsageTokens") -> "UsageTokens":
+        return UsageTokens(
+            input_tokens=self.input_tokens + other.input_tokens,
+            output_tokens=self.output_tokens + other.output_tokens,
+            cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
+            cache_write_tokens=self.cache_write_tokens + other.cache_write_tokens,
+        )
 
 
 log = logging.getLogger("pet-daemon")
 VERBOSE = 5
 logging.addLevelName(VERBOSE, "VERBOSE")
-observation_id = contextvars.ContextVar("observation_id", default=None)
-request_usage = contextvars.ContextVar("request_usage", default=None)
+observation_id = contextvars.ContextVar[str | None]("observation_id", default=None)
+request_usage = contextvars.ContextVar[dict[str, UsageTokens] | None](
+    "request_usage", default=None
+)
 
 
 class JSONFormatter(logging.Formatter):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.run_id = uuid.uuid4().hex
 
-    def format(self, record):
+    def format(self, record: logging.LogRecord) -> str:
         entry = {
-            "timestamp": datetime.fromtimestamp(
-                record.created, timezone.utc
-            ).isoformat(),
+            "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat(),
             "level": record.levelname,
             "run_id": self.run_id,
             "event": getattr(record, "event", "log"),
@@ -43,7 +72,7 @@ class JSONFormatter(logging.Formatter):
 
 
 class ConsoleFormatter(logging.Formatter):
-    COLORS = {
+    COLORS: ClassVar[dict[int, str]] = {
         VERBOSE: "90",
         logging.DEBUG: "90",
         logging.INFO: "36",
@@ -51,7 +80,7 @@ class ConsoleFormatter(logging.Formatter):
         logging.ERROR: "31",
         logging.CRITICAL: "31",
     }
-    PAYLOADS = {
+    PAYLOADS: ClassVar[set[str]] = {
         "request",
         "response",
         "snapshot",
@@ -64,12 +93,12 @@ class ConsoleFormatter(logging.Formatter):
         "monotonic_seconds",
     }
 
-    def __init__(self, color=False, verbose=False):
+    def __init__(self, color: bool = False, verbose: bool = False) -> None:
         super().__init__()
         self.color = color
         self.verbose = verbose
 
-    def format(self, record):
+    def format(self, record: logging.LogRecord) -> str:
         timestamp = self.formatTime(record, "%H:%M:%S")
         level = f"{record.levelname:<7}"
         if self.color:
@@ -98,7 +127,7 @@ class ConsoleFormatter(logging.Formatter):
         return line
 
 
-def configure(path, verbose=False, debug=False):
+def configure(path: str | Path, verbose: bool = False, debug: bool = False) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     file = RotatingFileHandler(
@@ -123,7 +152,9 @@ def configure(path, verbose=False, debug=False):
     )
 
 
-def event(name, level=logging.INFO, *, exc_info=None, **fields):
+def event(
+    name: str, level: int = logging.INFO, *, exc_info: ExcInfo = None, **fields: object
+) -> None:
     log.log(
         level,
         name,
@@ -135,16 +166,16 @@ def event(name, level=logging.INFO, *, exc_info=None, **fields):
     )
 
 
-def trace(name, **fields):
-    event(name, logging.DEBUG, **fields)
+def trace(name: str, *, exc_info: ExcInfo = None, **fields: object) -> None:
+    event(name, logging.DEBUG, exc_info=exc_info, **fields)
 
 
-def verbose(name, **fields):
-    event(name, VERBOSE, **fields)
+def verbose(name: str, *, exc_info: ExcInfo = None, **fields: object) -> None:
+    event(name, VERBOSE, exc_info=exc_info, **fields)
 
 
 @contextlib.contextmanager
-def observation():
+def observation() -> Generator[dict[str, UsageTokens], None, None]:
     token = observation_id.set(uuid.uuid4().hex)
     usage = {}
     usage_token = request_usage.set(usage)

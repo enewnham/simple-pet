@@ -2,7 +2,7 @@ import json
 import math
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-
+from typing import TypeGuard, get_origin
 
 DEFAULT_PERSONA = """
 You are deadpan and slightly snarky.
@@ -24,17 +24,19 @@ OBSERVATION_REASONS = frozenset(
 )
 
 
-def positive(value):
-    return type(value) in (int, float) and math.isfinite(value) and value > 0
-
-
-def interval(value):
+def positive(value: object) -> TypeGuard[float]:
     return (
-        isinstance(value, (list, tuple))
-        and len(value) == 2
-        and all(positive(v) for v in value)
-        and value[0] <= value[1]
+        (type(value) is int or type(value) is float)
+        and math.isfinite(value)
+        and value > 0
     )
+
+
+def interval(value: object) -> TypeGuard[tuple[float, float] | list[float]]:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return False
+    lower, upper = value
+    return positive(lower) and positive(upper) and lower <= upper
 
 
 @dataclass
@@ -45,23 +47,23 @@ class BehaviorConfig:
     naps: bool = True
     care: bool = True
     sentiment_reactions: bool = True
-    care_interval: tuple = (300, 600)
-    care_speech_interval: tuple = (2700, 5400)
-    nap_interval: tuple = (120, 240)
-    nap_seconds: tuple = (20, 45)
+    care_interval: tuple[float, float] = (300, 600)
+    care_speech_interval: tuple[float, float] = (2700, 5400)
+    nap_interval: tuple[float, float] = (120, 240)
+    nap_seconds: tuple[float, float] = (20, 45)
     baseline_dwell: float = 2
     error_seconds: float = 2
-    walk_seconds: tuple = (2, 6)
+    walk_seconds: tuple[float, float] = (2, 6)
     walk_speed: float = 40
-    idle_pause: tuple = (20, 60)
-    working_pause: tuple = (2, 5)
-    work_burst_seconds: tuple = (12, 25)
+    idle_pause: tuple[float, float] = (20, 60)
+    working_pause: tuple[float, float] = (2, 5)
+    work_burst_seconds: tuple[float, float] = (12, 25)
     pointer_radius: float = 100
     resume_seconds: float = 3
     gaze_reset_seconds: float = 1.2
     gaze_deadzone: float = 24
 
-    def validate(self):
+    def validate(self) -> None:
         for item in fields(self):
             value = getattr(self, item.name)
             if item.type is bool:
@@ -70,7 +72,7 @@ class BehaviorConfig:
                 valid = (
                     type(value) in (int, float) and math.isfinite(value) and value >= 0
                 )
-            elif item.type is tuple:
+            elif get_origin(item.type) is tuple:
                 valid = interval(value)
             else:
                 valid = positive(value)
@@ -90,7 +92,7 @@ class Config:
     model: str = "claude-haiku-5-5"
     summarize_on: list[str] = field(default_factory=lambda: ["prompt"])
     summarize_first_request_only: bool = False
-    observation_seconds: tuple = (20, 40)
+    observation_seconds: tuple[float, float] = (20, 40)
     idle_message_seconds: float = 300
     prompt_target_bytes: int = 16000
     memory_retention_days: int = 30
@@ -108,20 +110,26 @@ class Config:
     behavior: BehaviorConfig = field(default_factory=BehaviorConfig)
 
     @classmethod
-    def load(cls, path):
+    def load(cls, path: str | Path) -> "Config":
         path = Path(path).resolve()
         data = json.loads(path.read_text())
         if not isinstance(data, dict):
-            raise ValueError("Configuration must be a JSON object")
+            raise ValueError("Configuration must be a JSON object")  # noqa: TRY004 - Report malformed JSON values through the validation contract.
         behavior = BehaviorConfig(**data.pop("behavior", {}))
         config = cls(**data, behavior=behavior)
         for name in ("pet_dir", "overlay_binary", "log_file", "memory_file"):
             value = Path(getattr(config, name)).expanduser()
             setattr(config, name, (path.parent / value).resolve())
         config.validate()
+        for item in fields(behavior):
+            if get_origin(item.type) is tuple:
+                lower, upper = getattr(behavior, item.name)
+                setattr(behavior, item.name, (lower, upper))
+        lower, upper = config.observation_seconds
+        config.observation_seconds = (lower, upper)
         return config
 
-    def validate(self):
+    def validate(self) -> None:
         self.behavior.validate()
         if not isinstance(self.summarize_on, list) or any(
             not isinstance(reason, str) or reason not in OBSERVATION_REASONS

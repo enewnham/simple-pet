@@ -2,8 +2,7 @@ import sqlite3
 
 from .transactions import transaction
 
-
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 MEMORY_SCHEMA = """
@@ -93,7 +92,7 @@ DELIVERY_SCHEMA = """
 """
 
 
-def execute_schema(db, script):
+def execute_schema(db: sqlite3.Connection, script: str) -> None:
     statement = ""
     for line in script.splitlines():
         statement += line + "\n"
@@ -102,28 +101,38 @@ def execute_schema(db, script):
             statement = ""
 
 
-def migrate(db):
+DROP_SCHEMA = """
+    DROP TABLE IF EXISTS events;
+    DROP TABLE IF EXISTS events_fts;
+    DROP TABLE IF EXISTS projects;
+    DROP TABLE IF EXISTS speech;
+    DROP TABLE IF EXISTS contexts;
+    DROP TABLE IF EXISTS repository_associations;
+    DROP TABLE IF EXISTS repositories;
+    DROP TABLE IF EXISTS work_items;
+    DROP TABLE IF EXISTS work_sessions;
+    DROP TABLE IF EXISTS work_memberships;
+    DROP TABLE IF EXISTS work_aliases;
+    DROP TABLE IF EXISTS work_artifacts;
+    DROP TABLE IF EXISTS work_links;
+    DROP TABLE IF EXISTS work_evidence;
+    DROP TABLE IF EXISTS work_opportunities;
+    DROP TABLE IF EXISTS work_surfacings;
+    DROP TABLE IF EXISTS attention_history;
+    DROP TABLE IF EXISTS message_outcomes;
+    DROP TABLE IF EXISTS work_updates;
+    DROP TABLE IF EXISTS work_decisions;
+"""
+
+
+def migrate(db: sqlite3.Connection) -> None:
     version = db.execute("PRAGMA user_version").fetchone()[0]
-    if version not in (0, 4, 5, 6, SCHEMA_VERSION):
-        raise ValueError(f"Unsupported memory schema version: {version}")
+    if version == SCHEMA_VERSION:
+        return
+    # Rebuild disposable local memory on version changes rather than upgrading saved rows.
     with transaction(db):
+        execute_schema(db, DROP_SCHEMA)
         execute_schema(db, MEMORY_SCHEMA)
         execute_schema(db, WORK_SCHEMA)
         execute_schema(db, DELIVERY_SCHEMA)
-        context_columns = {row[1] for row in db.execute("PRAGMA table_info(contexts)")}
-        for name in ("request_count", "first_summary_attempted"):
-            if name not in context_columns:
-                db.execute(
-                    f"ALTER TABLE contexts ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0"
-                )
-        history_columns = {
-            row[1] for row in db.execute("PRAGMA table_info(attention_history)")
-        }
-        if "updated_at" not in history_columns:
-            db.execute(
-                "ALTER TABLE attention_history ADD COLUMN updated_at REAL NOT NULL DEFAULT 0"
-            )
-        db.execute(
-            "INSERT OR IGNORE INTO work_memberships SELECT pet,work_id,session FROM work_sessions"
-        )
         db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

@@ -1,23 +1,39 @@
 import asyncio
 import json
-from pathlib import Path
 import random
 import socket
 import tempfile
 import unittest
 import uuid
+from collections.abc import Callable
+from pathlib import Path
+from typing import Unpack
 
 import httpx
 from anthropic import AsyncAnthropic
 
+from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.config import Config
 from pet_daemon.daemon import Daemon
-from pet_daemon.sources.git import command
+from pet_daemon.runtime import OverlayPacket
+from pet_daemon.sources import RepositoryTracker
+from pet_daemon.sources.git import CommandOptions, command
+from pet_daemon.types import JSONObject
+from pet_daemon.work import Opportunity
+from pet_daemon.work.models import ExecutionEvidence
+from pet_daemon.work.presentation import OpportunityRecord
+from Tests.fixtures import require
 from Tests.test_runtime import PNG, reply
 
 
 class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
+    @property
+    def repositories(self) -> RepositoryTracker:
+        provider = self.daemon.application.providers[0]
+        assert isinstance(provider, RepositoryTracker)
+        return provider
+
+    async def asyncSetUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(dir="/tmp", prefix="pet-work-runtime-")
         root = Path(self.temp.name)
         (root / "pixel.png").write_bytes(PNG)
@@ -42,7 +58,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             memory_file=root / "memory.sqlite3",
         )
         self.config.behavior.automatic_speech_cooldown_seconds = 3600
-        self.requests = []
+        self.requests: list[ModelRequest] = []
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
         self.slow = False
@@ -85,7 +101,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             "statusCheckRollup": self.checks("FAILURE"),
         }
 
-        async def handler(request):
+        async def handler(request: httpx.Request) -> httpx.Response:
             self.requests.append(json.loads(request.content))
             speech = self.speech
             self.entered.set()
@@ -104,14 +120,14 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.hook = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         await self.start_daemon()
 
-    async def asyncTearDown(self):
+    async def asyncTearDown(self) -> None:
         await self.daemon.close()
         await self.client.close()
         self.overlay.close()
         self.hook.close()
         self.temp.cleanup()
 
-    async def commit(self, content):
+    async def commit(self, content: str) -> str:
         (self.repository_path / "session.txt").write_text(content + "\n")
         await command("git", "add", "session.txt", cwd=self.repository_path)
         await command(
@@ -121,7 +137,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await command("git", "rev-parse", "HEAD", cwd=self.repository_path)
         ).strip()
 
-    def checks(self, result):
+    def checks(self, result: str) -> list[JSONObject]:
         return [
             {
                 "name": "Session persistence tests",
@@ -131,9 +147,9 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             }
         ]
 
-    async def start_daemon(self):
+    async def start_daemon(self) -> None:
         self.daemon = Daemon(self.config, self.client, rng=random.Random(7))
-        self.daemon.application.providers[0].run = self.repository_command
+        self.repositories.run = self.repository_command
         self.daemon.application.attention.last_attempt = self.daemon.clock()
         await self.daemon.start()
         self.send(
@@ -149,11 +165,15 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "dragging": False,
                 "menu": False,
                 "speech": False,
+                "sleeping": self.daemon.application.behavior.sleeping,
+                "system_sleeping": self.daemon.application.suspended,
             }
         )
         await self.packet(lambda packet: packet.get("state") == "idle")
 
-    async def repository_command(self, *args, **kwargs):
+    async def repository_command(
+        self, *args: str, **kwargs: Unpack[CommandOptions]
+    ) -> str:
         if args[0] != "gh":
             return await command(*args, **kwargs)
         self.github_commands.append(args)
@@ -169,10 +189,10 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             return json.dumps(self.stack_entries)
         self.fail(f"Unexpected GitHub command: {args}")
 
-    def send(self, packet):
+    def send(self, packet: JSONObject) -> None:
         self.hook.sendto(json.dumps(packet).encode(), self.config.daemon_socket)
 
-    async def native_work(self):
+    async def native_work(self) -> Opportunity:
         self.send(
             {
                 "kind": "event",
@@ -212,7 +232,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 for item in self.daemon.application.memory.work.opportunities()
             )
         )
-        await self.wait_for(lambda: not self.daemon.application.providers[0].tasks)
+        await self.wait_for(lambda: not self.repositories.tasks)
         self.assertEqual(self.requests, [])
         self.config.behavior.automatic_speech_cooldown_seconds = 0
         await self.drain()
@@ -222,7 +242,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             if item.kind == "resolve_checks"
         )
 
-    async def native_stack_work(self):
+    async def native_stack_work(self) -> tuple[Opportunity, str]:
         sibling_url = "https://example.test/owner/repository/pull/8"
         self.related_prs[sibling_url] = {
             **self.pr,
@@ -245,10 +265,10 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: any(
                 item.pr and item.pr.url == sibling_url
-                for item in self.daemon.application.providers[0].snapshot()
+                for item in self.repositories.snapshot()
             )
         )
-        await self.wait_for(lambda: not self.daemon.application.providers[0].tasks)
+        await self.wait_for(lambda: not self.repositories.tasks)
         opportunity = next(
             item
             for item in self.daemon.application.memory.work.opportunities()
@@ -256,19 +276,19 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         return opportunity, sibling_url
 
-    async def merge_sibling(self, sibling_url):
+    async def merge_sibling(self, sibling_url: str) -> None:
         self.related_prs[sibling_url].update(
             state="MERGED", mergedAt="2026-10-19T12:00:00Z"
         )
         await self.refresh_sources(
             lambda: any(
                 item.pr and item.pr.url == sibling_url and item.pr.state == "MERGED"
-                for item in self.daemon.application.providers[0].snapshot()
+                for item in self.repositories.snapshot()
             )
         )
 
-    async def packet(self, predicate):
-        async def receive():
+    async def packet(self, predicate: Callable[[OverlayPacket], bool]) -> OverlayPacket:
+        async def receive() -> OverlayPacket:
             while True:
                 data = await asyncio.get_running_loop().sock_recv(self.overlay, 65536)
                 packet = json.loads(data)
@@ -277,14 +297,14 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         return await asyncio.wait_for(receive(), 5)
 
-    async def wait_for(self, condition):
-        async def wait():
+    async def wait_for(self, condition: Callable[[], bool]) -> None:
+        async def wait() -> None:
             while not condition():
                 await asyncio.sleep(0.005)
 
         await asyncio.wait_for(wait(), 5)
 
-    async def drain(self):
+    async def drain(self) -> list[OverlayPacket]:
         packets = []
         while True:
             try:
@@ -292,28 +312,28 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             except BlockingIOError:
                 return packets
 
-    async def refresh_sources(self, predicate):
+    async def refresh_sources(self, predicate: Callable[[], bool]) -> None:
         previous = len(self.github_commands)
-        self.daemon.application.providers[0].local_interval = 0
-        self.daemon.application.providers[0].github_interval = 0
+        self.repositories.local_interval = 0
+        self.repositories.github_interval = 0
         try:
             await self.wait_for(
                 lambda: len(self.github_commands) > previous and predicate()
             )
         finally:
-            self.daemon.application.providers[0].local_interval = 3600
-            self.daemon.application.providers[0].github_interval = 3600
-        await self.wait_for(lambda: not self.daemon.application.providers[0].tasks)
+            self.repositories.local_interval = 3600
+            self.repositories.github_interval = 3600
+        await self.wait_for(lambda: not self.repositories.tasks)
 
-    def schedule_routine(self):
+    def schedule_routine(self) -> None:
         self.daemon.application.attention.next_observation = self.daemon.clock()
         self.daemon.application.tick()
 
-    def focus(self):
+    def focus(self) -> OpportunityRecord:
         payload = json.loads(self.requests[-1]["messages"][-1]["content"])
         return payload["focus_opportunity"]
 
-    async def accept(self, speech):
+    async def accept(self, speech: OverlayPacket) -> None:
         self.send(
             {
                 "kind": "renderer",
@@ -329,11 +349,11 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
                 is not None
-                and outcome["outcome"] == "accepted"
+                and outcome.outcome == "accepted"
             )
         )
 
-    def assert_human_context(self, value):
+    def assert_human_context(self, value: object) -> None:
         if isinstance(value, dict):
             forbidden = {
                 "id",
@@ -366,7 +386,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_native_activity_and_observed_checks_ground_an_acknowledged_remark(
         self,
-    ):
+    ) -> None:
         opportunity = await self.native_work()
         self.schedule_routine()
         speech = await self.packet(lambda packet: "delivery_id" in packet)
@@ -396,16 +416,18 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             "Implemented session persistence; validation passed",
         )
         self.assertNotIn("execution", progress)
-        context = self.daemon.application.memory.work.session_context(
-            "codex:persistence"
+        context = require(
+            self.daemon.application.memory.work.session_context("codex:persistence")
         )
         execution = next(
-            item["data"] for item in context["activity"] if item["kind"] == "execution"
+            item.payload for item in context.activity if item.kind == "execution"
         )
-        self.assertEqual(execution["outcome"], "success")
+        assert isinstance(execution, ExecutionEvidence)
+        self.assertEqual(execution.outcome, "success")
         self.assertTrue(focus["uncertainty"])
         self.assertEqual(
-            {item["kind"] for item in context["artifacts"]}, {"branch", "pull_request"}
+            {item.artifact.kind for item in context.artifacts},
+            {"branch", "pull_request"},
         )
         payload = json.loads(self.requests[-1]["messages"][-1]["content"])
         self.assertNotIn("activity", payload)
@@ -430,13 +452,9 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 opportunity.id, opportunity.version
             )
         )
-        self.assertEqual(
-            self.daemon.application.memory.speech()[0]["reason"], "routine"
-        )
+        self.assertEqual(self.daemon.application.memory.speech()[0].reason, "routine")
         await self.refresh_sources(
-            lambda: any(
-                item.pr for item in self.daemon.application.providers[0].snapshot()
-            )
+            lambda: any(item.pr for item in self.repositories.snapshot())
         )
         self.assertFalse(
             self.daemon.application.memory.work.is_current(
@@ -454,12 +472,12 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(
-            self.daemon.application.memory.speech()[0]["text"], speech["text"]
+            self.daemon.application.memory.speech()[0].text, speech["text"]
         )
 
     async def test_new_head_reassesses_checks_and_green_checks_require_an_explicit_review_request(
         self,
-    ):
+    ) -> None:
         original = await self.native_work()
         self.schedule_routine()
         await self.accept(await self.packet(lambda packet: "delivery_id" in packet))
@@ -469,7 +487,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             lambda: any(
                 item.kind == "resolve_checks"
                 and item.version > original.version
-                and item.artifact.get("revision") == self.head
+                and item.artifact.revision == self.head
                 for item in self.daemon.application.memory.work.opportunities()
             )
         )
@@ -479,7 +497,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             if item.kind == "resolve_checks"
         )
         self.assertEqual(current.id, original.id)
-        self.assertEqual(current.artifact["revision"], self.head)
+        self.assertEqual(current.artifact.revision, self.head)
         self.speech = "The revised session storage still has a failing check."
         self.schedule_routine()
         await self.accept(await self.packet(lambda packet: "delivery_id" in packet))
@@ -488,7 +506,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.refresh_sources(
             lambda: any(
                 item.pr and item.pr.checks and item.pr.checks[0][1] == "SUCCESS"
-                for item in self.daemon.application.providers[0].snapshot()
+                for item in self.repositories.snapshot()
             )
         )
         self.assertFalse(
@@ -524,7 +542,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_merge_rejects_pending_generation_without_concluding_the_intended_work(
         self,
-    ):
+    ) -> None:
         await self.native_work()
         self.slow = True
         self.schedule_routine()
@@ -533,7 +551,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.refresh_sources(
             lambda: any(
                 item.pr and item.pr.state == "MERGED"
-                for item in self.daemon.application.providers[0].snapshot()
+                for item in self.repositories.snapshot()
             )
         )
         self.release.set()
@@ -557,7 +575,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unselected_pull_request_metadata_preserves_supported_generation(
         self,
-    ):
+    ) -> None:
         original = await self.native_work()
         self.slow = True
         self.schedule_routine()
@@ -566,18 +584,20 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.refresh_sources(
             lambda: any(
                 item.pr and item.pr.body == self.pr["body"]
-                for item in self.daemon.application.providers[0].snapshot()
+                for item in self.repositories.snapshot()
             )
         )
-        current = self.daemon.application.memory.work.opportunity(original.id)
+        current = require(self.daemon.application.memory.work.opportunity(original.id))
         self.assertGreater(current.version, original.version)
-        self.assertEqual(current.artifact["revision"], original.artifact["revision"])
+        self.assertEqual(current.artifact.revision, original.artifact.revision)
         self.release.set()
         speech = await self.packet(lambda packet: "delivery_id" in packet)
         await self.accept(speech)
-        outcome = self.daemon.application.memory.message_outcome(speech["delivery_id"])
+        outcome = require(
+            self.daemon.application.memory.message_outcome(speech["delivery_id"])
+        )
         self.assertEqual(
-            (outcome["opportunity_id"], outcome["version"]),
+            (outcome.opportunity_id, outcome.version),
             (original.id, original.version),
         )
         self.assertNotIn(self.pr["body"], json.dumps(self.focus()))
@@ -585,35 +605,41 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.daemon.application.memory.work.is_current(current.id, current.version)
         )
 
-    async def test_sibling_merge_preserves_generation_supported_by_primary_checks(self):
+    async def test_sibling_merge_preserves_generation_supported_by_primary_checks(
+        self,
+    ) -> None:
         original, sibling_url = await self.native_stack_work()
         self.slow = True
         self.schedule_routine()
         await asyncio.wait_for(self.entered.wait(), 5)
         await self.merge_sibling(sibling_url)
-        current = self.daemon.application.memory.work.opportunity(original.id)
+        current = require(self.daemon.application.memory.work.opportunity(original.id))
         self.assertEqual(current.id, original.id)
         self.assertGreater(current.version, original.version)
-        self.assertEqual(current.artifact["revision"], original.artifact["revision"])
+        self.assertEqual(current.artifact.revision, original.artifact.revision)
         self.release.set()
         speech = await self.packet(lambda packet: "delivery_id" in packet)
         await self.accept(speech)
-        outcome = self.daemon.application.memory.message_outcome(speech["delivery_id"])
+        outcome = require(
+            self.daemon.application.memory.message_outcome(speech["delivery_id"])
+        )
         self.assertEqual(
-            (outcome["opportunity_id"], outcome["version"]),
+            (outcome.opportunity_id, outcome.version),
             (original.id, original.version),
         )
         self.assertTrue(
             self.daemon.application.memory.work.is_current(current.id, current.version)
         )
 
-    async def test_sibling_merge_preserves_delivery_retry_and_captured_acceptance(self):
+    async def test_sibling_merge_preserves_delivery_retry_and_captured_acceptance(
+        self,
+    ) -> None:
         original, sibling_url = await self.native_stack_work()
         self.schedule_routine()
         first = await self.packet(lambda packet: "delivery_id" in packet)
         await self.wait_for(lambda: self.daemon.application.task is None)
         await self.merge_sibling(sibling_url)
-        current = self.daemon.application.memory.work.opportunity(original.id)
+        current = require(self.daemon.application.memory.work.opportunity(original.id))
         self.assertGreater(current.version, original.version)
         now = self.daemon.clock() + 5
         self.daemon.application.delivery.clock = lambda: now
@@ -621,9 +647,11 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         retry = await self.packet(lambda packet: "delivery_id" in packet)
         self.assertEqual(retry, first)
         await self.accept(retry)
-        outcome = self.daemon.application.memory.message_outcome(first["delivery_id"])
+        outcome = require(
+            self.daemon.application.memory.message_outcome(first["delivery_id"])
+        )
         self.assertEqual(
-            (outcome["opportunity_id"], outcome["version"]),
+            (outcome.opportunity_id, outcome.version),
             (original.id, original.version),
         )
         self.assertEqual(len(self.daemon.application.memory.speech()), 1)
@@ -633,7 +661,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sleep_cancels_retries_and_late_acceptance_records_the_visible_message(
         self,
-    ):
+    ) -> None:
         opportunity = await self.native_work()
         self.schedule_routine()
         first = await self.packet(lambda packet: "delivery_id" in packet)
@@ -647,14 +675,16 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.daemon.application.memory.speech(), [])
         self.send({"kind": "renderer", "event": "system_wake"})
         await self.wait_for(lambda: not self.daemon.application.suspended)
-        await self.wait_for(lambda: not self.daemon.application.providers[0].tasks)
+        await self.wait_for(lambda: not self.repositories.tasks)
         self.daemon.application.tick()
         self.assertFalse(any("delivery_id" in packet for packet in await self.drain()))
         self.assertEqual(len(self.requests), 1)
         await self.accept(first)
-        outcome = self.daemon.application.memory.message_outcome(first["delivery_id"])
+        outcome = require(
+            self.daemon.application.memory.message_outcome(first["delivery_id"])
+        )
         self.assertEqual(
-            (outcome["opportunity_id"], outcome["version"]),
+            (outcome.opportunity_id, outcome.version),
             (opportunity.id, opportunity.version),
         )
 

@@ -5,7 +5,7 @@ from pet_daemon.user_text import sentiment_excerpt
 
 
 class SentimentTests(unittest.TestCase):
-    def test_scores_criticism_without_diluting_it_with_the_explanation(self):
+    def test_scores_criticism_without_diluting_it_with_the_explanation(self) -> None:
         text = (
             "See, this is why I think you've done a poor job here. "
             "Look at how property value schemas are set. "
@@ -22,7 +22,7 @@ class SentimentTests(unittest.TestCase):
             sentiment_score("Thank you, this looks great."), NEGATIVE_THRESHOLD
         )
 
-    def test_excludes_code_quotes_and_embedded_agent_messages(self):
+    def test_excludes_code_quotes_and_embedded_agent_messages(self) -> None:
         text = (
             "Check the parser.\n> This is terrible and awful.\n"
             '```python\nerror = "This is terrible and awful."\n```\n'
@@ -36,7 +36,7 @@ class SentimentTests(unittest.TestCase):
         self.assertEqual(excerpt, "Check the parser.\nUse  as the name.")
         self.assertEqual(sentiment_score(excerpt), 0)
 
-    def test_bounds_unicode_excerpts_before_transport(self):
+    def test_bounds_unicode_excerpts_before_transport(self) -> None:
         text = "This is terrible.\n" + "🐈" * 2000 + "\nPlease fix the parser."
         excerpt = sentiment_excerpt(text)
         self.assertLessEqual(len(excerpt.encode("utf-8")), 600)

@@ -2,14 +2,13 @@ import re
 
 from .prompts import select_prompt
 
-
 EMBEDDED = re.compile(
     r"<(?P<tag>agent-message|task-notification|pasted_content|skill|environment_context|instructions)\b[^>]*>.*?</(?P=tag)\b[^>]*>",
-    re.I | re.S,
+    re.IGNORECASE | re.DOTALL,
 )
 
 
-def user_prose(text):
+def user_prose(text: str) -> str:
     text = EMBEDDED.sub("", text)
     lines = []
     fence = None
@@ -27,5 +26,5 @@ def user_prose(text):
     return "\n".join(lines).strip()
 
 
-def sentiment_excerpt(text):
+def sentiment_excerpt(text: str) -> str:
     return select_prompt(user_prose(text), limit=600, max_bytes=602)

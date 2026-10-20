@@ -4,15 +4,14 @@
 import argparse
 import json
 import os
-from pathlib import Path
 import runpy
 import sys
-
+from collections.abc import Mapping
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pet_daemon.processes import discover_owner
 from pet_daemon.user_text import sentiment_excerpt
-
 
 CLIENT = runpy.run_path(str(Path(__file__).resolve().parents[1] / "bin" / "pet-notify"))
 COMMON_EVENTS = {
@@ -58,15 +57,15 @@ EVENTS = {
 INPUT_TOOLS = ("AskUserQuestion", "request_user_input", "RequestUserInput")
 
 
-def string(*values):
+def string(*values: object) -> str:
     return next((value for value in values if isinstance(value, str) and value), "")
 
 
-def excerpt(*values, limit=240):
+def excerpt(*values: object, limit: int = 240) -> str:
     return " ".join(string(*values).split())[:limit]
 
 
-def object_value(value):
+def object_value(value: object) -> dict[str, object]:
     if isinstance(value, str):
         try:
             value = json.loads(value)
@@ -75,7 +74,7 @@ def object_value(value):
     return value if isinstance(value, dict) else {}
 
 
-def failed(value):
+def failed(value: object) -> bool:
     if not isinstance(value, dict):
         return False
     code = value.get("exit_code", value.get("exitCode"))
@@ -86,7 +85,9 @@ def failed(value):
     )
 
 
-def update(harness, event, payload):
+def update(
+    harness: str, event: str, payload: Mapping[str, object]
+) -> dict[str, object] | None:
     if harness == "claude" and payload.get("cursor_version"):
         return None
     if event == "Notification" and payload.get("notification_type") not in (
@@ -123,7 +124,7 @@ def update(harness, event, payload):
             parent, session = session, agent
     if not session:
         return None
-    result = {
+    result: dict[str, object] = {
         "kind": "event",
         "harness": harness,
         "session": session,
@@ -164,7 +165,7 @@ def update(harness, event, payload):
     if normalized == "intent":
         result["goal"] = string(payload.get("prompt"))
         if not parent:
-            result["sentiment_text"] = sentiment_excerpt(result["goal"])
+            result["sentiment_text"] = sentiment_excerpt(string(result["goal"]))
     elif normalized == "subagent_start" and payload.get("task"):
         result["goal"] = string(payload.get("task"))
     if normalized == "tool_start" and tool_name in INPUT_TOOLS:
@@ -191,7 +192,7 @@ def update(harness, event, payload):
         result["outcome"] = "cancelled"
     elif normalized == "subagent_done" and harness == "cursor":
         result["outcome"] = {"error": "error", "aborted": "cancelled"}.get(
-            status, "success"
+            string(status), "success"
         )
     elif not interrupted and normalized in ("tool_done", "turn_done", "subagent_done"):
         result["outcome"] = "success"
@@ -215,7 +216,7 @@ def update(harness, event, payload):
     return result
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("harness", choices=EVENTS)
     parser.add_argument("event")

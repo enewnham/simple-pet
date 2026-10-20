@@ -5,27 +5,26 @@ import argparse
 import json
 import math
 import os
-from pathlib import Path
 import socket
 import sys
-
+from collections.abc import Mapping
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from pet_daemon.prompts import select_prompt
 from pet_daemon.processes import discover_owner
-
+from pet_daemon.prompts import select_prompt
 
 MAX_DATAGRAM_BYTES = 1999
 EXCERPT_FIELDS = ("progress", "goal", "tool", "context", "sentiment_text")
 
 
-def encode(payload):
-    payload = payload.copy()
+def encode(payload: Mapping[str, object]) -> bytes | None:
+    payload = dict(payload)
     original_goal = payload.get("goal")
     if isinstance(original_goal, str):
         payload["goal"] = select_prompt(original_goal)
 
-    def serialized():
+    def serialized() -> bytes:
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
             "utf-8"
         )
@@ -56,7 +55,7 @@ def encode(payload):
     return data if len(data) <= MAX_DATAGRAM_BYTES else None
 
 
-def send(payload):
+def send(payload: Mapping[str, object]) -> bool:
     data = encode(payload)
     if data is None:
         return False
@@ -71,7 +70,7 @@ def send(payload):
         return False
 
 
-def bubble_seconds(value):
+def bubble_seconds(value: str) -> float:
     try:
         seconds = float(value)
     except ValueError:
@@ -81,7 +80,7 @@ def bubble_seconds(value):
     return seconds
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session")
     parser.add_argument("--status", choices=("start", "done", "error"))
@@ -104,6 +103,7 @@ def main():
     speech.add_argument("--context", required=True)
     speech.add_argument("--ttl", type=bubble_seconds)
     args = parser.parse_args()
+    payload: dict[str, object]
     if args.command == "clear-memory":
         payload = {"kind": "clear_memory"}
     elif args.command == "clear-speech":

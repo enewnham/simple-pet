@@ -1,14 +1,41 @@
-from dataclasses import asdict
+from __future__ import annotations
+
 import hashlib
 import uuid
+from collections.abc import Sequence
+from dataclasses import replace
+from typing import TYPE_CHECKING
 
-from .models import Artifact, Evidence, WorkItem, WorkState
+if TYPE_CHECKING:
+    from ..runtime import HookEvent
+
+from .models import (
+    Artifact,
+    ArtifactAccount,
+    ArtifactDescriptor,
+    AvailabilityEvidence,
+    CheckoutAssociation,
+    Evidence,
+    EvidencePayload,
+    ExecutionEvidence,
+    GitHubEvidence,
+    IntentEvidence,
+    ProgressEvidence,
+    PullRequestAssociation,
+    StackAssociation,
+    WorkAccount,
+    WorkItem,
+    WorkState,
+)
 from .observations import RepositoryObservation, RepositoryTarget
 from .opportunities import evidence_grounds
+from .serialization import artifact_record
 from .validation import canonical, descriptor, repository_identity, text
 
 
-def bind_sessions(state: WorkState, work_id, session, aliases):
+def bind_sessions(
+    state: WorkState, work_id: str, session: str, aliases: Sequence[str]
+) -> None:
     root = state.aliases.get(session, session)
     for alias in aliases:
         old_root = state.aliases.get(alias, alias)
@@ -28,25 +55,33 @@ def bind_sessions(state: WorkState, work_id, session, aliases):
             state.memberships.add((work_id, identifier))
 
 
-def record_evidence(state: WorkState, work_id, artifact_id, source, kind, data, now):
+def record_evidence(
+    state: WorkState,
+    work_id: str,
+    artifact_id: str,
+    source: str,
+    kind: str,
+    payload: EvidencePayload,
+    now: float,
+) -> None:
     previous = state.latest(work_id, artifact_id).get((source, kind))
     if kind == "observation" and previous and now < previous.timestamp:
         return
-    if previous and canonical(previous.data) == canonical(data):
+    if previous and previous.payload == payload:
         if kind == "observation":
             previous.timestamp = now
         return
     identifier = state.next_evidence_id
     state.next_evidence_id += 1
     state.evidence.append(
-        Evidence(identifier, work_id, artifact_id, source, kind, data, now)
+        Evidence(identifier, work_id, artifact_id, source, kind, payload, now)
     )
 
 
-def record_intent(state: WorkState, session, intent, aliases, now):
+def record_intent(
+    state: WorkState, session: str, intent: str, aliases: tuple[str, ...], now: float
+) -> str:
     session, intent = text(session, "session"), text(intent, "intent")
-    if not isinstance(aliases, (list, tuple)):
-        raise ValueError("aliases must be a list")
     aliases = tuple(text(alias, "alias") for alias in aliases)
     candidates = {
         item.id for name in (session, *aliases) if (item := state.current(name))
@@ -61,24 +96,20 @@ def record_intent(state: WorkState, session, intent, aliases, now):
         work.intent, work.changed_at = intent, now
     bind_sessions(state, work.id, session, aliases)
     record_evidence(
-        state, work.id, "", "user", "intent", {"session": session, "text": intent}, now
+        state, work.id, "", "user", "intent", IntentEvidence(session, intent), now
     )
     return work.id
 
 
-def record_session_event(state: WorkState, session, event, now):
-    if not isinstance(event, dict):
-        raise ValueError("session event must be an object")
-    aliases = event.get("aliases", ())
-    if not isinstance(aliases, (list, tuple)):
-        raise ValueError("aliases must be a list")
-    aliases = tuple(text(alias, "alias") for alias in aliases)
-    harness = event.get("harness")
-    if harness:
-        aliases = tuple(
-            alias if alias.startswith(harness + ":") else f"{harness}:{alias}"
-            for alias in aliases
-        )
+def record_session_event(
+    state: WorkState, session: str, event: HookEvent, now: float
+) -> None:
+    aliases = tuple(text(alias, "alias") for alias in event.aliases)
+    harness = event.harness
+    aliases = tuple(
+        alias if alias.startswith(harness + ":") else f"{harness}:{alias}"
+        for alias in aliases
+    )
     candidates = {
         item.id for name in (session, *aliases) if (item := state.current(name))
     }
@@ -86,41 +117,39 @@ def record_session_event(state: WorkState, session, event, now):
         return
     work_id = next(iter(candidates))
     bind_sessions(state, work_id, session, aliases)
-    observation = {
-        key: event[key]
-        for key in ("event", "outcome", "tool_name", "progress")
-        if key in event
-    }
     record_evidence(
         state,
         work_id,
         "",
         "harness",
         "execution",
-        {"session": session, **observation},
+        ExecutionEvidence(
+            session, event.event, event.outcome, event.tool_name, event.progress
+        ),
         now,
     )
-    if event.get("progress"):
+    if event.progress:
         record_evidence(
             state,
             work_id,
             "",
             "harness",
             "progress",
-            {"session": session, "text": event["progress"]},
+            ProgressEvidence(session, event.progress),
             now,
         )
 
 
-def artifact(state: WorkState, value, source, observed_at):
+def artifact(
+    state: WorkState, value: ArtifactDescriptor, source: str, observed_at: float
+) -> str:
     value = descriptor(value)
     previous = next(
         (
             record
             for record in state.artifacts.values()
-            if all(
-                record.data[key] == value[key] for key in ("kind", "ref", "repository")
-            )
+            if (record.kind, record.ref, record.repository)
+            == (value.kind, value.ref, value.repository)
         ),
         None,
     )
@@ -137,27 +166,51 @@ def artifact(state: WorkState, value, source, observed_at):
         )
         if latest is not None and observed_at < latest:
             return previous.id
-        data = {**previous.data, **value}
-        previous.version += int(canonical(data) != canonical(previous.data))
-        previous.data = data
+        updated = replace(
+            previous,
+            revision=value.revision
+            if value.revision is not None
+            else previous.revision,
+            checkout=value.checkout
+            if value.checkout is not None
+            else previous.checkout,
+            title=value.title if value.title is not None else previous.title,
+        )
+        state.artifacts[previous.id] = replace(
+            updated, version=previous.version + int(updated != previous)
+        )
         return previous.id
     identifier = uuid.uuid4().hex
-    state.artifacts[identifier] = Artifact(identifier, value)
+    state.artifacts[identifier] = Artifact(
+        kind=value.kind,
+        ref=value.ref,
+        repository=value.repository,
+        revision=value.revision,
+        checkout=value.checkout,
+        title=value.title,
+        id=identifier,
+    )
     return identifier
 
 
-def link(state: WorkState, work_id, artifact_id, source, data, now):
+def link(
+    state: WorkState,
+    work_id: str,
+    artifact_id: str,
+    source: str,
+    payload: EvidencePayload,
+    now: float,
+) -> None:
     state.links.add((work_id, artifact_id))
-    record_evidence(state, work_id, artifact_id, source, "relationship", data, now)
+    record_evidence(state, work_id, artifact_id, source, "relationship", payload, now)
 
 
 def observe_repository(
     state: WorkState, observation: RepositoryObservation, now: float
-):
-    local = asdict(observation.local) if observation.local else None
-    pr = asdict(observation.pr) if observation.pr else None
+) -> None:
+    local, pr = observation.local, observation.pr
     repository = repository_identity(
-        observation.repository or (local or {}).get("repository", "")
+        observation.repository or (local.repository if local else "")
     )
     branch_name, checkout = observation.branch, observation.worktree
     work_ids = set()
@@ -169,31 +222,26 @@ def observe_repository(
         }
     branch = None
     if repository and branch_name:
-        value = {"kind": "branch", "ref": branch_name, "repository": repository}
-        if checkout and observation.current:
-            value["checkout"] = checkout
-        if local and local.get("head"):
-            value["revision"] = local["head"]
+        value = ArtifactDescriptor(
+            "branch",
+            branch_name,
+            repository,
+            revision=local.head if local and local.head else None,
+            checkout=checkout if checkout and observation.current else None,
+        )
         branch = artifact(state, value, "git", observation.local_checked_at)
-        if (
-            checkout
-            and not observation.current
-            and state.artifacts[branch].data.get("checkout") == checkout
-        ):
-            state.artifacts[branch].data.pop("checkout")
-            state.artifacts[branch].version += 1
+        current = state.artifacts[branch]
+        if checkout and not observation.current and current.checkout == checkout:
+            state.artifacts[branch] = replace(
+                current, checkout=None, version=current.version + 1
+            )
         for work_id in work_ids:
             link(
                 state,
                 work_id,
                 branch,
                 "harness",
-                {
-                    "relationship": "session_checkout",
-                    "checkout": checkout,
-                    "branch": branch_name,
-                    "association_only": True,
-                },
+                CheckoutAssociation(checkout, branch_name),
                 now,
             )
         work_ids.update(state.linked_work(branch))
@@ -212,15 +260,13 @@ def observe_repository(
     matches_branch = bool(
         branch
         and pr
-        and pr.get("head_branch") == branch_name
-        and repository_identity(pr.get("head_repository", "")) == repository
+        and pr.head_branch == branch_name
+        and repository_identity(pr.head_repository) == repository
     )
-    if pr and pr.get("url"):
-        value = {"kind": "pull_request", "ref": pr["url"]}
-        if pr.get("head"):
-            value["revision"] = pr["head"]
-        if pr.get("title"):
-            value["title"] = pr["title"]
+    if pr and pr.url:
+        value = ArtifactDescriptor(
+            "pull_request", pr.url, revision=pr.head or None, title=pr.title or None
+        )
         pull_request = artifact(state, value, "github", observation.github_checked_at)
         for work_id in work_ids if branch is None or matches_branch else ():
             link(
@@ -228,27 +274,23 @@ def observe_repository(
                 work_id,
                 pull_request,
                 "github",
-                {
-                    "relationship": "checkout_pull_request",
-                    "checkout": checkout or "",
-                    "branch": branch_name or "",
-                    "association_only": True,
-                },
+                PullRequestAssociation(checkout, branch_name),
                 observation.github_checked_at,
             )
         work_ids.update(state.linked_work(pull_request))
-        for related in pr.get("related_links", ()):
+        for related in pr.related_links:
             if (
-                related.get("kind") != "pull_request"
-                or related.get("relationship") != "stack_entry"
-                or related.get("source") != "github_stack"
+                related.kind != "pull_request"
+                or related.relationship != "stack_entry"
+                or related.source != "github_stack"
             ):
                 continue
-            sibling = {"kind": "pull_request", "ref": related["ref"]}
-            if related.get("head"):
-                sibling["revision"] = related["head"]
-            if related.get("title"):
-                sibling["title"] = related["title"]
+            sibling = ArtifactDescriptor(
+                "pull_request",
+                related.ref,
+                revision=related.head or None,
+                title=related.title or None,
+            )
             sibling_id = artifact(
                 state, sibling, "github", observation.github_checked_at
             )
@@ -258,7 +300,7 @@ def observe_repository(
                     work_id,
                     sibling_id,
                     "github_stack",
-                    {**related, "from": pr["url"], "association_only": True},
+                    StackAssociation(related, pr.url),
                     observation.github_checked_at,
                 )
     if observation.github_checked_at and not observation.github_error:
@@ -266,11 +308,12 @@ def observe_repository(
             if artifact_id:
                 if artifact_id == branch and pr and not matches_branch:
                     continue
-                observed_repository = (
-                    descriptor({"kind": "pull_request", "ref": pr["url"]})["repository"]
-                    if artifact_id == pull_request
-                    else repository
-                )
+                observed_repository = repository
+                if artifact_id == pull_request:
+                    assert pr is not None
+                    observed_repository = descriptor(
+                        ArtifactDescriptor("pull_request", pr.url)
+                    ).repository
                 for work_id in state.linked_work(artifact_id):
                     record_evidence(
                         state,
@@ -278,7 +321,7 @@ def observe_repository(
                         artifact_id,
                         "github",
                         "observation",
-                        {"pr": pr, "repository": observed_repository},
+                        GitHubEvidence(pr, observed_repository),
                         observation.github_checked_at,
                     )
     for artifact_id in (branch, pull_request):
@@ -296,75 +339,67 @@ def observe_repository(
                     artifact_id,
                     "observer",
                     "availability",
-                    {
-                        "local_error": observation.local_error,
-                        "github_error": github_error,
-                    },
+                    AvailabilityEvidence(observation.local_error, github_error),
                     now,
                 )
 
 
-def work_context(state: WorkState, work_id):
+def work_context(state: WorkState, work_id: str) -> WorkAccount | None:
     work = state.items.get(work_id)
-    if not work:
-        return {}
-    requests = [
-        record
+    if work is None:
+        return None
+    requests = tuple(
+        record.record()
         for record in state.evidence
         if record.work_id == work_id
         and record.source == "user"
         and record.kind == "intent"
-    ][-4:]
-    activity = [
-        record
+    )[-4:]
+    activity = tuple(
+        record.record()
         for (source, kind), record in sorted(state.latest(work_id, "").items())
         if source == "harness" and kind in {"execution", "progress"}
-    ]
-    artifacts = []
+    )
     linked = [
         state.artifacts[artifact_id]
         for linked_work, artifact_id in state.links
         if linked_work == work_id
     ]
-    for record in sorted(
-        linked, key=lambda record: (record.data["kind"], record.data["ref"])
-    ):
-        evidence = tuple(
-            item.record()
-            for _, item in sorted(state.latest(work_id, record.id).items())
+    artifacts = tuple(
+        ArtifactAccount(
+            record.descriptor(),
+            tuple(
+                item.record()
+                for _, item in sorted(state.latest(work_id, record.id).items())
+            ),
         )
-        artifacts.append({**record.data, "evidence": evidence})
-    context = {
-        "intent": work.intent,
-        "requests": tuple(record.record() for record in requests),
-        "activity": tuple(record.record() for record in activity),
-        "artifacts": tuple(artifacts),
-    }
+        for record in sorted(linked, key=lambda record: (record.kind, record.ref))
+    )
     grounds = {
-        "intent": context["intent"],
-        "requests": evidence_grounds(context["requests"]),
-        "activity": evidence_grounds(context["activity"]),
+        "intent": work.intent,
+        "requests": evidence_grounds(requests),
+        "activity": evidence_grounds(activity),
         "artifacts": [
             {
-                **{key: value for key, value in item.items() if key != "evidence"},
-                "evidence": evidence_grounds(item["evidence"]),
+                **artifact_record(item.artifact),
+                "evidence": evidence_grounds(item.evidence),
             }
             for item in artifacts
         ],
     }
-    context["revision"] = hashlib.sha256(canonical(grounds).encode()).hexdigest()
-    return context
+    revision = hashlib.sha256(canonical(grounds).encode()).hexdigest()
+    return WorkAccount(work.intent, revision, requests, activity, artifacts)
 
 
 def collection_targets(state: WorkState) -> tuple[RepositoryTarget, ...]:
     targets = []
     for record in sorted(
-        state.artifacts.values(), key=lambda item: (item.data["kind"], item.data["ref"])
+        state.artifacts.values(), key=lambda item: (item.kind, item.ref)
     ):
-        if not state.linked_work(record.id):
-            continue
-        value = record.data
-        if value["kind"] not in {"branch", "pull_request"}:
+        if not state.linked_work(record.id) or record.kind not in {
+            "branch",
+            "pull_request",
+        }:
             continue
         relationships = [
             item
@@ -374,10 +409,10 @@ def collection_targets(state: WorkState) -> tuple[RepositoryTarget, ...]:
         direct = any(item.source != "github_stack" for item in relationships)
         targets.append(
             RepositoryTarget(
-                value["kind"],
-                value["ref"],
-                value.get("repository", ""),
-                value.get("checkout", ""),
+                record.kind,
+                record.ref,
+                record.repository,
+                record.checkout or "",
                 direct,
             )
         )

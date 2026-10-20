@@ -3,33 +3,32 @@
 import json
 import re
 
-
 ACTION = re.compile(
     r"^(?:[-*+]\s+|\d+[.)]\s+)?(?:fix|add|update|refactor|implement|create|build|remove|debug|test|explain|check|why|how)\b",
-    re.I,
+    re.IGNORECASE,
 )
 ACTION_ANYWHERE = re.compile(
     r"\b(?:fix|add|update|refactor|implement|create|build|remove|debug|test|explain|check|why|how)\b",
-    re.I,
+    re.IGNORECASE,
 )
 SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 PROMPT_MAX_CHARS = 1000
 
 
-def bounded(value, limit=240):
+def bounded(value: object, limit: int = 240) -> str:
     return " ".join(str(value or "").split())[:limit]
 
 
-def _byte_cost(text):
+def _byte_cost(text: str) -> int:
     return len(json.dumps(text, ensure_ascii=False).encode("utf-8"))
 
 
-def _units(text):
+def _units(text: str) -> list[tuple[str, bool]]:
     units = []
     fenced = False
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped.startswith("```") or stripped.startswith("~~~"):
+        if stripped.startswith(("```", "~~~")):
             fenced = not fenced
             continue
         if not stripped:
@@ -47,7 +46,7 @@ def _units(text):
     return units
 
 
-def _rank(unit):
+def _rank(unit: tuple[str, bool]) -> int:
     text, prose = unit
     if not prose:
         return 0
@@ -58,11 +57,17 @@ def _rank(unit):
     return 1 if ACTION_ANYWHERE.search(text) else 0
 
 
-def _fits(text, limit, max_bytes):
+def _fits(text: str, limit: int, max_bytes: int | None) -> bool:
     return len(text) <= limit and (max_bytes is None or _byte_cost(text) <= max_bytes)
 
 
-def _shorten(text, limit, max_bytes, preceding=False, following=False):
+def _shorten(
+    text: str,
+    limit: int,
+    max_bytes: int | None,
+    preceding: bool = False,
+    following: bool = False,
+) -> str:
     prefix = "[omitted] " if preceding else ""
     complete = prefix + text + (" [omitted]" if following else "")
     if _fits(complete, limit, max_bytes):
@@ -82,7 +87,9 @@ def _shorten(text, limit, max_bytes, preceding=False, following=False):
     return "[omitted]" if _fits("[omitted]", limit, max_bytes) else ""
 
 
-def select_prompt(text, limit=PROMPT_MAX_CHARS, max_bytes=None):
+def select_prompt(
+    text: object, limit: int = PROMPT_MAX_CHARS, max_bytes: int | None = None
+) -> str:
     """Select prose within character and JSON string byte budgets."""
     if (
         not isinstance(text, str)
@@ -111,7 +118,7 @@ def select_prompt(text, limit=PROMPT_MAX_CHARS, max_bytes=None):
     )
     selected = set()
 
-    def render(indices):
+    def render(indices: set[int]) -> str:
         parts = []
         previous = -1
         for index in sorted(indices):

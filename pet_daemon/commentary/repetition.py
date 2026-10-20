@@ -1,14 +1,14 @@
 import asyncio
-from dataclasses import dataclass
-from functools import lru_cache
 import json
 import math
-from pathlib import Path
 import re
 import unicodedata
+from collections.abc import Sequence
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 
 from ..telemetry import event
-
 
 SIMILARITY_BINARY = (
     Path(__file__).resolve().parents[2] / ".build" / "pet-speech-similarity"
@@ -47,14 +47,82 @@ OUTCOMES = (
     {"pushed"},
     {"unpushed"},
 )
-GRAMMAR = set(
-    """
-a an the i me my we us our you your he him his she her they them their it its
-this that these those am is are was were be been being have has had do does did
-will would shall should can could may might must to of in on at for with by
-from and or but as than im ive were weve youre youve theyre theyve again still already just yet
-""".split()
-)
+GRAMMAR = {
+    "a",
+    "an",
+    "the",
+    "i",
+    "me",
+    "my",
+    "we",
+    "us",
+    "our",
+    "you",
+    "your",
+    "he",
+    "him",
+    "his",
+    "she",
+    "her",
+    "they",
+    "them",
+    "their",
+    "it",
+    "its",
+    "this",
+    "that",
+    "these",
+    "those",
+    "am",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "have",
+    "has",
+    "had",
+    "do",
+    "does",
+    "did",
+    "will",
+    "would",
+    "shall",
+    "should",
+    "can",
+    "could",
+    "may",
+    "might",
+    "must",
+    "to",
+    "of",
+    "in",
+    "on",
+    "at",
+    "for",
+    "with",
+    "by",
+    "from",
+    "and",
+    "or",
+    "but",
+    "as",
+    "than",
+    "im",
+    "ive",
+    "weve",
+    "youre",
+    "youve",
+    "theyre",
+    "theyve",
+    "again",
+    "still",
+    "already",
+    "just",
+    "yet",
+}
 
 
 @dataclass(frozen=True)
@@ -64,13 +132,13 @@ class RepeatMatch:
     method: str
 
 
-def normalized(text):
+def normalized(text: str) -> str:
     text = unicodedata.normalize("NFKC", text).casefold().replace("’", "'")
     text = re.sub(r"(?<=\w)'(?=\w)", "", text)
     return " ".join(re.findall(r"[+-]?\d+(?:\.\d+)?|\w+", text))
 
 
-def anchors(text):
+def anchors(text: str) -> tuple[tuple[str, ...], bool, tuple[bool, ...]]:
     words = set(normalized(text).split())
     numbers = tuple(re.findall(r"[+-]?\d+(?:\.\d+)?", text))
     return (
@@ -80,7 +148,7 @@ def anchors(text):
     )
 
 
-def content_tokens(text):
+def content_tokens(text: str) -> set[str]:
     words = set(normalized(text).split())
     outcomes = set().union(*OUTCOMES)
     return {
@@ -91,18 +159,18 @@ def content_tokens(text):
 
 
 @lru_cache(maxsize=16)
-def unavailable(reason):
+def unavailable(reason: str) -> None:
     event("speech.similarity_unavailable", reason=reason)
 
 
 async def repeat_match(
-    text,
-    history,
+    text: str,
+    history: Sequence[str],
     *,
-    executable=SIMILARITY_BINARY,
-    threshold=SEMANTIC_THRESHOLD,
-    timeout=2,
-):
+    executable: Path = SIMILARITY_BINARY,
+    threshold: float = SEMANTIC_THRESHOLD,
+    timeout: float = 2,
+) -> RepeatMatch | None:
     value = normalized(text)
     candidates = [
         (index, previous)
@@ -154,7 +222,7 @@ async def repeat_match(
         if scored:
             score, index = max(scored)
             return RepeatMatch(index, score, "semantic")
-    except (OSError, ValueError, KeyError, TypeError, asyncio.TimeoutError):
+    except (TimeoutError, OSError, ValueError, KeyError, TypeError):
         unavailable("query_failed")
     finally:
         if process is not None and process.returncode is None:

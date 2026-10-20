@@ -1,4 +1,6 @@
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import ClassVar
 
 
 @dataclass
@@ -12,7 +14,7 @@ class Action:
 
 
 class Execution:
-    transitions = {
+    transitions: ClassVar[dict[tuple[str, str], str]] = {
         ("idle", "start"): "executing",
         ("executing", "finish"): "settling",
         ("settling", "ready"): "idle",
@@ -22,31 +24,37 @@ class Execution:
         ("suspended", "resume"): "idle",
     }
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.phase = "idle"
-        self.action = None
-        self.last_completed = None
+        self.action: Action | None = None
+        self.last_completed: str | None = None
         self.settle_until = 0
 
-    def transition(self, event):
+    def transition(self, event: str) -> None:
         self.phase = self.transitions[(self.phase, event)]
 
-    def start(self, action):
+    def start(self, action: Action) -> None:
         self.transition("start")
         self.action = action
 
-    def finish(self, now, pause, interrupted=False):
+    def finish(self, now: float, pause: float, interrupted: bool = False) -> None:
+        action = self.action
+        assert action is not None
         if not interrupted:
-            self.last_completed = self.action.name
+            self.last_completed = action.name
         self.action = None
         self.transition("finish")
         self.settle_until = now + pause
 
-    def completion(self, packet, now, pause):
+    def completion(
+        self, packet: Mapping[str, object], now: float, pause: float
+    ) -> bool:
         action = self.action
+        if self.phase != "executing":
+            return False
+        assert action is not None
         if (
-            self.phase != "executing"
-            or action.event is None
+            action.event is None
             or packet.get("command_id") != action.command_id
             or packet.get("event") != action.event
             or packet.get("result") not in ("finished", "interrupted")
@@ -55,23 +63,26 @@ class Execution:
         self.finish(now, pause, packet["result"] == "interrupted")
         return True
 
-    def advance(self, now, pause):
-        if self.phase == "executing" and now >= self.action.until:
-            self.finish(now, pause)
-            return True
+    def advance(self, now: float, pause: float) -> bool:
+        if self.phase == "executing":
+            action = self.action
+            assert action is not None
+            if now >= action.until:
+                self.finish(now, pause)
+                return True
         if self.phase == "settling" and now >= self.settle_until:
             self.transition("ready")
         return False
 
-    def interrupt(self):
+    def interrupt(self) -> None:
         self.action = None
         self.phase = "idle"
 
-    def suspend(self):
+    def suspend(self) -> None:
         if self.phase != "suspended":
             self.action = None
             self.transition("suspend")
 
-    def resume(self):
+    def resume(self) -> None:
         if self.phase == "suspended":
             self.transition("resume")

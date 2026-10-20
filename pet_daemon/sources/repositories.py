@@ -1,36 +1,38 @@
 import asyncio
-from dataclasses import replace
 import time
+from collections.abc import Callable, Coroutine, Iterable
+from dataclasses import replace
 from pathlib import Path
 
 from .. import telemetry
-from . import git, github
 from ..work.observations import RepositoryObservation, RepositoryTarget
+from . import git, github
+from .git import RunCommand
 
 
 class RepositoryTracker:
     def __init__(
         self,
-        emit,
-        clock=time.time,
-        local_interval=30,
-        github_interval=180,
-        run=git.command,
-        concurrency=2,
+        emit: Callable[[RepositoryObservation], None],
+        clock: Callable[[], float] = time.time,
+        local_interval: float = 30,
+        github_interval: float = 180,
+        run: RunCommand = git.command,
+        concurrency: int = 2,
         *,
-        checkpoints=(),
-        associations=(),
-        targets=(),
-    ):
+        checkpoints: Iterable[RepositoryObservation] = (),
+        associations: Iterable[tuple[str, str]] = (),
+        targets: Iterable[RepositoryTarget] = (),
+    ) -> None:
         self.emit = emit
         self.clock = clock
         self.local_interval = local_interval
         self.github_interval = github_interval
         self.run = run
         self.observations = {item.subject: item for item in checkpoints}
-        self.associations = {}
-        self.paths = {}
-        self.tasks = {}
+        self.associations: dict[str, set[str]] = {}
+        self.paths: dict[str, float] = {}
+        self.tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         self.limit = asyncio.Semaphore(concurrency)
         self.closed = False
         self.paused = False
@@ -38,7 +40,7 @@ class RepositoryTracker:
         self.applied = {}
         self.epoch = 0
         self.roots = {}
-        self.targets = {}
+        self.targets: dict[str, RepositoryTarget] = {}
         self.target_paths = set()
         self.subscriptions = set()
         for session, path in associations:
@@ -46,7 +48,9 @@ class RepositoryTracker:
         for target in targets:
             self.track_artifact(target)
 
-    def associate(self, session, path, *, refresh=False):
+    def associate(
+        self, session: str, path: str | Path, *, refresh: bool = False
+    ) -> None:
         if not path:
             return
         path = str(Path(path).resolve())
@@ -55,7 +59,7 @@ class RepositoryTracker:
             self.paths[path] = 0
         sessions.add(session)
 
-    def track_artifact(self, target):
+    def track_artifact(self, target: RepositoryTarget) -> None:
         repository = git.canonical_repository(target.repository)
         if target.kind == "pull_request":
             repository, number = github.pull_request_identity(target.ref)
@@ -79,7 +83,7 @@ class RepositoryTracker:
                 subject, "", branch, current=False, repository=repository
             )
 
-    def reconcile_targets(self, targets):
+    def reconcile_targets(self, targets: Iterable[RepositoryTarget]) -> None:
         previous_paths = self.target_paths
         self.targets.clear()
         self.target_paths = set()
@@ -105,10 +109,10 @@ class RepositoryTracker:
                 if item.worktree == root and item.current:
                     self._save(replace(item, current=False, revision=item.revision + 1))
 
-    def snapshot(self):
+    def snapshot(self) -> tuple[RepositoryObservation, ...]:
         return tuple(self.observations[key] for key in sorted(self.observations))
 
-    def signature(self):
+    def signature(self) -> tuple[tuple[str, int, bool, str | None, str | None], ...]:
         return tuple(
             (
                 item.subject,
@@ -120,20 +124,22 @@ class RepositoryTracker:
             for item in self.snapshot()
         )
 
-    def _save(self, item):
+    def _save(self, item: RepositoryObservation) -> None:
         self.observations[item.subject] = item
         self.emit(item)
 
-    def _launch(self, key, coroutine):
+    def _launch(
+        self, key: tuple[str, str], coroutine: Coroutine[object, object, None]
+    ) -> None:
         self.tasks[key] = asyncio.create_task(coroutine)
 
-        def completed(task):
+        def completed(task: asyncio.Task[None]) -> None:
             if self.tasks.get(key) is task:
                 self.tasks.pop(key, None)
 
         self.tasks[key].add_done_callback(completed)
 
-    def _retire_missing(self, path):
+    def _retire_missing(self, path: str) -> bool:
         try:
             Path(path).stat()
         except (FileNotFoundError, NotADirectoryError):
@@ -158,7 +164,7 @@ class RepositoryTracker:
             pass
         return False
 
-    def tick(self):
+    def tick(self) -> None:
         if self.closed or self.paused:
             return
         now = self.clock()
@@ -185,7 +191,7 @@ class RepositoryTracker:
             ):
                 self._launch(key, self._github(item, self.epoch))
 
-    async def _local(self, path, sequence, epoch):
+    async def _local(self, path: str, sequence: int, epoch: int) -> None:
         try:
             async with self.limit:
                 checked_at = self.clock()
@@ -246,7 +252,7 @@ class RepositoryTracker:
                     revision=item.revision,
                     pending=item.pending,
                 )
-        except (OSError, RuntimeError, ValueError, asyncio.TimeoutError) as error:
+        except (TimeoutError, OSError, RuntimeError, ValueError) as error:
             if epoch != self.epoch:
                 return
             telemetry.event(
@@ -256,7 +262,7 @@ class RepositoryTracker:
                 if item.worktree == self.roots.get(path, path) and item.current:
                     self._save(replace(item, local_error=str(error)[:240]))
 
-    async def _github(self, captured, epoch):
+    async def _github(self, captured: RepositoryObservation, epoch: int) -> None:
         try:
             async with self.limit:
                 checked_at = self.clock()
@@ -348,12 +354,12 @@ class RepositoryTracker:
                     state=pr.state if pr else None,
                 )
         except (
+            TimeoutError,
             OSError,
             RuntimeError,
             ValueError,
             KeyError,
             TypeError,
-            asyncio.TimeoutError,
         ) as error:
             if epoch != self.epoch:
                 return
@@ -377,13 +383,13 @@ class RepositoryTracker:
                 error=str(error),
             )
 
-    def pause(self):
+    def pause(self) -> None:
         self.paused = True
         self.epoch += 1
         for task in self.tasks.values():
             task.cancel()
 
-    def resume(self):
+    def resume(self) -> None:
         if self.closed:
             return
         self.paused = False
@@ -393,12 +399,12 @@ class RepositoryTracker:
             for key, item in self.observations.items()
         }
 
-    async def close(self):
+    async def close(self) -> None:
         self.closed = True
         self.pause()
         await asyncio.gather(*list(self.tasks.values()), return_exceptions=True)
 
-    def clear(self):
+    def clear(self) -> None:
         self.epoch += 1
         for task in self.tasks.values():
             task.cancel()

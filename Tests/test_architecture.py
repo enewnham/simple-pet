@@ -1,12 +1,16 @@
 import ast
-from pathlib import Path
 import unittest
+from collections.abc import Iterator, Mapping
+from dataclasses import is_dataclass
+from pathlib import Path
 
+from pet_daemon.runtime import WorkSnapshot
+from pet_daemon.sessions import Sessions
 
 ROOT = Path(__file__).resolve().parents[1] / "pet_daemon"
 
 
-def imports(path):
+def imports(path: Path) -> Iterator[tuple[str, str | None]]:
     package = ("pet_daemon", *path.relative_to(ROOT).parts[:-1])
     for node in ast.walk(ast.parse(path.read_text())):
         if isinstance(node, ast.Import):
@@ -20,7 +24,25 @@ def imports(path):
 
 
 class ArchitectureTests(unittest.TestCase):
-    def assert_import_boundary(self, directory, forbidden):
+    def test_runtime_snapshots_expose_records_without_mapping_interfaces(self) -> None:
+        sessions = Sessions(lambda: 1000)
+        sessions.handle(
+            {
+                "harness": "codex",
+                "session": "parser",
+                "event": "intent",
+                "goal": "Check parsing",
+            }
+        )
+        snapshot = sessions.snapshot()
+        work = WorkSnapshot(snapshot.activity, snapshot.sessions, False)
+        for record in (snapshot, snapshot.sessions[0], work):
+            with self.subTest(record=type(record).__name__):
+                self.assertTrue(is_dataclass(record))
+                self.assertNotIsInstance(record, Mapping)
+                self.assertFalse(hasattr(record, "get"))
+
+    def assert_import_boundary(self, directory: str, forbidden: set[str]) -> None:
         for path in (ROOT / directory).rglob("*.py"):
             for module, name in imports(path):
                 with self.subTest(
@@ -34,7 +56,7 @@ class ArchitectureTests(unittest.TestCase):
                         f"{path.relative_to(ROOT)} imports {module}",
                     )
 
-    def test_work_rules_depend_on_domain_values_and_repository_ports(self):
+    def test_work_rules_depend_on_domain_values_and_repository_ports(self) -> None:
         self.assert_import_boundary(
             "work",
             {
@@ -57,7 +79,7 @@ class ArchitectureTests(unittest.TestCase):
 
     def test_source_adapters_emit_observations_without_storage_or_commentary_imports(
         self,
-    ):
+    ) -> None:
         self.assert_import_boundary(
             "sources",
             {
@@ -70,7 +92,7 @@ class ArchitectureTests(unittest.TestCase):
             },
         )
 
-    def test_commentary_consumes_selections_without_selecting_attention(self):
+    def test_commentary_consumes_selections_without_selecting_attention(self) -> None:
         forbidden = {
             "select",
             "choose_session",

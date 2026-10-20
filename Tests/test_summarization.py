@@ -1,19 +1,34 @@
-from copy import deepcopy
 import json
-from pathlib import Path
 import tempfile
-from types import SimpleNamespace
 import unittest
+from copy import deepcopy
+from dataclasses import replace
+from pathlib import Path
+from typing import TypedDict, Unpack
 
 from pet_daemon.commentary.cognition import Cognition
+from pet_daemon.commentary.contracts import ModelRequest
+from pet_daemon.commentary.summarization import SummaryPayload
 from pet_daemon.config import Config
-from pet_daemon.work.history import project_event
-from pet_daemon.storage import Memory
 from pet_daemon.prompts import bounded, select_prompt
+from pet_daemon.sources.hooks import HookEvent
+from pet_daemon.storage import Memory
+from pet_daemon.work.history import project_event
+from Tests.fixtures import session_snapshot
+
+
+class EventOptions(TypedDict, total=False):
+    outcome: str
+    progress: str
+
+
+class NoRequestsModel:
+    async def complete(self, request: ModelRequest, reason: str) -> dict[str, object]:
+        raise AssertionError("Summary preparation must not request model output")
 
 
 class SummarizationTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.config = Config(
@@ -24,42 +39,43 @@ class SummarizationTests(unittest.TestCase):
         )
         self.addCleanup(self.memory.close)
         self.context = Cognition(
-            None, self.config, clock=lambda: 1000, memory=self.memory
+            NoRequestsModel(), self.config, clock=lambda: 1000, memory=self.memory
         )
-        self.focus = {
-            "id": "codex:main",
-            "first_prompt": "Plan: [ ] Implement parser. [ ] Verify parser.",
-            "recent_requests": ["Implement parser"],
-            "session_context": "Parser work remains pending.",
-            "progress": "Parser implemented and tests passed",
-            "outcome": "success",
-            "turn_active": False,
-        }
+        self.focus = session_snapshot(
+            id="codex:main",
+            first_prompt="Plan: [ ] Implement parser. [ ] Verify parser.",
+            recent_requests=("Implement parser",),
+            session_context="Parser work remains pending.",
+            progress="Parser implemented and tests passed",
+            outcome="success",
+            turn_active=False,
+        )
 
-    def event(self, kind, session="main", **values):
+    def summary_request(self) -> ModelRequest:
+        return self.context.summary_request(self.focus)
+
+    def event(
+        self, kind: str, session: str = "main", **values: Unpack[EventOptions]
+    ) -> None:
         self.memory.record_event(
             project_event(
-                {
-                    "harness": "codex",
-                    "session": session,
-                    "event": kind,
-                    "repo": "/repo",
-                    **values,
-                }
+                HookEvent(
+                    harness="codex", session=session, event=kind, repo="/repo", **values
+                )
             )
         )
 
-    def payload(self, request=None):
-        request = request or self.context.summary_request(self.focus)
+    def payload(self, request: ModelRequest | None = None) -> SummaryPayload:
+        request = request or self.summary_request()
         return json.loads(request["messages"][0]["content"])
 
-    def test_initial_checklist_and_later_completion_keep_their_provenance(self):
+    def test_initial_checklist_and_later_completion_keep_their_provenance(self) -> None:
         self.event(
             "turn_done",
             outcome="success",
             progress="Parser implemented and tests passed",
         )
-        request = self.context.summary_request(self.focus)
+        request = self.summary_request()
         payload = self.payload(request)
         self.assertIn("[ ] Implement parser", payload["initial_intent"])
         self.assertEqual(
@@ -84,7 +100,9 @@ class SummarizationTests(unittest.TestCase):
             ["session_context"],
         )
 
-    def test_next_request_retains_its_session_completion_after_later_tools(self):
+    def test_next_request_retains_its_session_completion_after_later_tools(
+        self,
+    ) -> None:
         self.event("turn_done", outcome="success", progress="Parser delivered")
         for index in range(10):
             self.event("progress", progress=f"Follow-up inspection {index}")
@@ -94,8 +112,11 @@ class SummarizationTests(unittest.TestCase):
             outcome="success",
             progress="Unrelated migration delivered",
         )
-        self.focus.update(
-            progress="Inspecting a follow-up", outcome=None, turn_active=True
+        self.focus = replace(
+            self.focus,
+            progress="Inspecting a follow-up",
+            outcome=None,
+            turn_active=True,
         )
         payload = self.payload()
         self.assertEqual(len(payload["reported_results"]), 1)
@@ -106,14 +127,14 @@ class SummarizationTests(unittest.TestCase):
             {"progress": "Inspecting a follow-up", "outcome": None},
         )
 
-    def test_first_request_only_excludes_followups_history_and_results(self):
+    def test_first_request_only_excludes_followups_history_and_results(self) -> None:
         self.config.summarize_first_request_only = True
         self.event("turn_done", outcome="success", progress="Parser delivered")
         payload = self.payload()
-        self.assertEqual(payload, {"initial_intent": self.focus["first_prompt"]})
+        self.assertEqual(payload, {"initial_intent": self.focus.first_prompt})
 
-    def test_missing_results_preserve_an_unknown_outcome(self):
-        self.focus.update(progress="", outcome=None, turn_active=True)
+    def test_missing_results_preserve_an_unknown_outcome(self) -> None:
+        self.focus = replace(self.focus, progress="", outcome=None, turn_active=True)
         payload = self.payload()
         self.assertEqual(payload["reported_results"], [])
         self.assertIsNone(payload["current_report"]["outcome"])
@@ -121,11 +142,12 @@ class SummarizationTests(unittest.TestCase):
 
     def test_tiny_target_preserves_initial_intent_latest_request_and_current_report(
         self,
-    ):
+    ) -> None:
         self.config.prompt_target_bytes = 1
-        self.focus.update(
+        self.focus = replace(
+            self.focus,
             first_prompt="Implement 猫 parser. " * 500,
-            recent_requests=["Earlier request", "Review 猫. " * 500],
+            recent_requests=("Earlier request", "Review 猫. " * 500),
             progress="Current 猫 progress. " * 100,
         )
         self.event(
@@ -133,37 +155,39 @@ class SummarizationTests(unittest.TestCase):
             outcome="success",
             progress="Parser delivered after verification",
         )
-        request = self.context.summary_request(self.focus)
+        request = self.summary_request()
         payload = self.payload(request)
         self.assertGreater(
             len(json.dumps(request, ensure_ascii=False).encode()),
             self.config.prompt_target_bytes,
         )
         self.assertEqual(
-            payload["initial_intent"], select_prompt(self.focus["first_prompt"])
+            payload["initial_intent"], select_prompt(self.focus.first_prompt)
         )
         self.assertEqual(
             payload["recent_requests"],
-            [select_prompt(self.focus["recent_requests"][-1])],
+            [select_prompt(self.focus.recent_requests[-1])],
         )
         self.assertEqual(
             payload["current_report"],
-            {"progress": bounded(self.focus["progress"], 800), "outcome": "success"},
+            {"progress": bounded(self.focus.progress, 800), "outcome": "success"},
         )
         self.assertEqual(payload["historical_session_context"], "")
         self.assertEqual(payload["reported_results"], [])
 
-    def test_whole_latest_report_can_cross_target_before_other_context_is_added(self):
+    def test_whole_latest_report_can_cross_target_before_other_context_is_added(
+        self,
+    ) -> None:
         self.event("turn_done", outcome="success", progress="Earlier parser result")
         self.event(
             "turn_done", outcome="success", progress="Latest parser verification " * 20
         )
         self.config.prompt_target_bytes = 1
-        essential = self.context.summary_request(self.focus)
+        essential = self.summary_request()
         self.config.prompt_target_bytes = (
             len(json.dumps(essential, ensure_ascii=False).encode()) + 1
         )
-        request = self.context.summary_request(self.focus)
+        request = self.summary_request()
         payload = self.payload(request)
         self.assertGreater(
             len(json.dumps(request, ensure_ascii=False).encode()),
@@ -171,24 +195,29 @@ class SummarizationTests(unittest.TestCase):
         )
         self.assertEqual(len(payload["reported_results"]), 1)
         row = self.memory.recent(
-            limit=1, session=self.focus["id"], event_types=("turn_done",)
+            limit=1, session=self.focus.id, event_types=("turn_done",)
         )[0]
         self.assertEqual(
             payload["reported_results"][0]["report"],
-            bounded(row["summary"].removeprefix("turn_done").removeprefix(" | "), 320),
+            bounded(row.summary.removeprefix("turn_done").removeprefix(" | "), 320),
         )
         self.assertEqual(payload["historical_session_context"], "")
 
-    def test_optional_requests_retain_chronology_without_mutating_session_input(self):
-        self.focus["recent_requests"] = [
-            "Implement parser",
-            "Keep aliases",
-            "Verify compatibility",
-        ]
+    def test_optional_requests_retain_chronology_without_mutating_session_input(
+        self,
+    ) -> None:
+        self.focus = replace(
+            self.focus,
+            recent_requests=(
+                "Implement parser",
+                "Keep aliases",
+                "Verify compatibility",
+            ),
+        )
         before = deepcopy(self.focus)
         payload = self.payload()
-        self.assertEqual(payload["recent_requests"], self.focus["recent_requests"])
+        self.assertEqual(payload["recent_requests"], list(self.focus.recent_requests))
         self.assertEqual(
-            payload["historical_session_context"], self.focus["session_context"]
+            payload["historical_session_context"], self.focus.session_context
         )
         self.assertEqual(self.focus, before)

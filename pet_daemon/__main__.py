@@ -11,7 +11,7 @@ from .daemon import Daemon
 from .telemetry import VERBOSE, ConsoleFormatter, configure
 
 
-async def run(config):
+async def run(config: Config) -> None:
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         raise ValueError("Set ANTHROPIC_API_KEY before starting pet-daemon")
@@ -21,7 +21,7 @@ async def run(config):
         await Daemon(config, client).run()
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         prog="pet-daemon",
         description="Track coding-agent work and run a native Haiku desktop pet",

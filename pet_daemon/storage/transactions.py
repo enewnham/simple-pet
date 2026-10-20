@@ -1,9 +1,11 @@
-from contextlib import contextmanager
+import sqlite3
 import uuid
+from collections.abc import Generator
+from contextlib import contextmanager
 
 
 @contextmanager
-def transaction(db):
+def transaction(db: sqlite3.Connection) -> Generator[None, None, None]:
     name = "pet_" + uuid.uuid4().hex
     db.execute(f"SAVEPOINT {name}")
     try:

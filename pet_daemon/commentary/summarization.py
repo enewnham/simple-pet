@@ -1,7 +1,12 @@
 import json
+from collections.abc import Callable
+from typing import Literal, NotRequired, TypedDict
 
+from ..config import Config
 from ..prompts import bounded, select_prompt
-
+from ..runtime import SessionSnapshot
+from ..storage import Memory
+from .contracts import ModelRequest, RequestFactory
 
 SUMMARY_INSTRUCTIONS = """
 Concisely summarize this session's durable intent, decisions, and reported results.
@@ -20,7 +25,7 @@ excerpts. Do not invent omitted facts or carry stale pending status into the sum
 """.strip()
 
 
-def report_age(seconds):
+def report_age(seconds: float) -> str | None:
     if seconds < 60:
         return "less than a minute ago"
     for unit, duration, following in (
@@ -33,25 +38,46 @@ def report_age(seconds):
             return f"about {count} {unit}{'s' if count != 1 else ''} ago"
 
 
-def summary_request(config, memory, clock, make_request, focus):
-    payload = {"initial_intent": select_prompt(focus.get("first_prompt", ""))}
-    optional = []
+class Report(TypedDict):
+    age: str | None
+    report: str
+
+
+class SummaryPayload(TypedDict):
+    initial_intent: str
+    recent_requests: NotRequired[list[str]]
+    historical_session_context: NotRequired[str]
+    current_report: NotRequired[dict[str, str | None]]
+    reported_results: NotRequired[list[Report]]
+
+
+def summary_request(
+    config: Config,
+    memory: Memory,
+    clock: Callable[[], float],
+    make_request: RequestFactory,
+    focus: SessionSnapshot,
+) -> ModelRequest:
+    payload: SummaryPayload = {"initial_intent": select_prompt(focus.first_prompt)}
+    optional: list[
+        tuple[Literal["reported_results"], Report]
+        | tuple[Literal["historical_session_context"], str]
+        | tuple[Literal["recent_requests"], str]
+    ] = []
     if not config.summarize_first_request_only:
-        recent = [
-            select_prompt(value) for value in focus.get("recent_requests", [])[-4:]
-        ]
+        recent = [select_prompt(value) for value in focus.recent_requests[-4:]]
         payload.update(
             recent_requests=list(recent[-1:]),
             historical_session_context="",
             current_report={
-                "progress": bounded(focus.get("progress"), 800),
-                "outcome": focus.get("outcome"),
+                "progress": bounded(focus.progress, 800),
+                "outcome": focus.outcome,
             },
             reported_results=[],
         )
         rows = memory.recent(
             limit=3,
-            session=focus["id"],
+            session=focus.id,
             event_types=(
                 "turn_done",
                 "turn_error",
@@ -64,11 +90,9 @@ def summary_request(config, memory, clock, make_request, focus):
             (
                 "reported_results",
                 {
-                    "age": report_age(clock() - row["timestamp"]),
+                    "age": report_age(clock() - row.timestamp),
                     "report": bounded(
-                        row["summary"]
-                        .removeprefix(row["event_type"])
-                        .removeprefix(" | "),
+                        row.summary.removeprefix(row.event_type).removeprefix(" | "),
                         320,
                     ),
                 },
@@ -76,7 +100,7 @@ def summary_request(config, memory, clock, make_request, focus):
             for row in reversed(rows)
         )
         optional.append(
-            ("historical_session_context", bounded(focus.get("session_context"), 400))
+            ("historical_session_context", bounded(focus.session_context, 400))
         )
         optional.extend(("recent_requests", value) for value in reversed(recent[:-1]))
     request = make_request(payload, [{"type": "text", "text": SUMMARY_INSTRUCTIONS}])
@@ -91,15 +115,17 @@ def summary_request(config, memory, clock, make_request, focus):
         "required": ["session_context"],
         "additionalProperties": False,
     }
-    for field, value in optional:
+    for addition in optional:
         if (
             len(json.dumps(request, ensure_ascii=False).encode("utf-8"))
             >= config.prompt_target_bytes
         ):
             break
-        if field == "historical_session_context":
-            payload[field] = value
+        if addition[0] == "historical_session_context":
+            payload["historical_session_context"] = addition[1]
+        elif addition[0] == "recent_requests":
+            payload["recent_requests"].insert(0, addition[1])
         else:
-            payload[field].insert(0, value)
+            payload["reported_results"].insert(0, addition[1])
         request["messages"][0]["content"] = json.dumps(payload, ensure_ascii=False)
     return request

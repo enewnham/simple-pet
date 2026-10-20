@@ -1,8 +1,7 @@
-from dataclasses import dataclass, fields
 from collections.abc import Mapping
+from typing import cast
 
-from ..runtime import ProcessIdentity
-
+from ..runtime import HookEvent, HookTextFields, ProcessIdentity
 
 EVENTS = frozenset(
     {
@@ -36,57 +35,7 @@ TEXT_FIELDS = (
 )
 
 
-@dataclass(frozen=True)
-class HookEvent:
-    harness: str
-    session: str
-    event: str
-    aliases: tuple[str, ...] = ()
-    parent: str | None = None
-    parent_call: str | None = None
-    call: str | None = None
-    turn: str | None = None
-    tool: str | None = None
-    goal: str | None = None
-    progress: str | None = None
-    repo: str | None = None
-    tool_name: str | None = None
-    sentiment_text: str | None = None
-    outcome: str | None = None
-    manual: bool | None = None
-    owner: ProcessIdentity | None = None
-    exit_code: int | None = None
-
-    @property
-    def source(self):
-        return f"hook:{self.harness}"
-
-    @property
-    def subject(self):
-        return f"{self.harness}:{self.session}"
-
-    def packet(self):
-        packet = {
-            "kind": "event",
-            "harness": self.harness,
-            "session": self.session,
-            "event": self.event,
-        }
-        for item in fields(self):
-            value = getattr(self, item.name)
-            if item.name in packet or value is None:
-                continue
-            if item.name == "aliases":
-                if value:
-                    packet[item.name] = list(value)
-            elif item.name == "owner":
-                packet[item.name] = value.packet()
-            else:
-                packet[item.name] = value
-        return packet
-
-
-def normalize_hook(packet):
+def normalize_hook(packet: object) -> HookEvent | None:
     if not isinstance(packet, Mapping):
         return None
     harness, event, session = (
@@ -120,14 +69,25 @@ def normalize_hook(packet):
         return None
     if "\0" in packet.get("repo", ""):
         return None
-    values = {name: packet[name] for name in TEXT_FIELDS if name in packet}
-    values.update(
-        aliases=tuple(aliases), owner=ProcessIdentity.parse(packet.get("owner"))
+    validated = cast(HookTextFields, packet)
+    code = packet.get("exit_code")
+    return HookEvent(
+        harness,
+        session,
+        event,
+        aliases=tuple(aliases),
+        parent=validated.get("parent"),
+        parent_call=validated.get("parent_call"),
+        call=validated.get("call"),
+        turn=validated.get("turn"),
+        tool=validated.get("tool"),
+        goal=validated.get("goal"),
+        progress=validated.get("progress"),
+        repo=validated.get("repo"),
+        tool_name=validated.get("tool_name"),
+        sentiment_text=validated.get("sentiment_text"),
+        outcome=validated.get("outcome"),
+        manual=bool(packet["manual"]) if "manual" in packet else None,
+        owner=ProcessIdentity.parse(packet.get("owner")),
+        exit_code=code if type(code) is int else None,
     )
-    if "manual" in packet:
-        values["manual"] = bool(packet["manual"])
-    if "outcome" in packet:
-        values["outcome"] = packet["outcome"]
-    if type(packet.get("exit_code")) is int:
-        values["exit_code"] = packet["exit_code"]
-    return HookEvent(harness, session, event, **values)

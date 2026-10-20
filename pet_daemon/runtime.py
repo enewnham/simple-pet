@@ -1,9 +1,109 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import TYPE_CHECKING
-
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, NotRequired, Protocol, TypedDict
+
+
+class ProcessPacket(TypedDict):
+    pid: int
+    started: str
+
+
+class HookTextFields(TypedDict, total=False):
+    parent: str
+    parent_call: str
+    call: str
+    turn: str
+    tool: str
+    goal: str
+    progress: str
+    repo: str
+    tool_name: str
+    sentiment_text: str
+    outcome: str
+
+
+class HookPacket(HookTextFields):
+    harness: str
+    session: str
+    event: str
+    kind: NotRequired[str]
+    aliases: NotRequired[list[str]]
+    manual: NotRequired[bool]
+    owner: NotRequired[ProcessPacket]
+    exit_code: NotRequired[int]
+
+
+class AnimationPacket(TypedDict):
+    id: str
+    repeats: int | None
+    command_id: int
+
+
+class MotionPacket(TypedDict):
+    x: float
+    y: float
+    seconds: float
+    command_id: int
+
+
+class OverlayPacket(TypedDict, total=False):
+    text: str
+    ttl: float
+    delivery_id: str
+    animation: AnimationPacket
+    motion: MotionPacket
+    stop_motion: bool
+    sleeping: bool
+    state: str
+
+
+@dataclass(frozen=True)
+class Point:
+    x: float
+    y: float
+
+
+@dataclass(frozen=True)
+class SessionTrigger:
+    session_id: str
+
+
+@dataclass(frozen=True)
+class SubjectTrigger:
+    subject_id: str
+
+
+@dataclass(frozen=True)
+class EpisodeTrigger:
+    episode: Episode
+
+
+@dataclass(frozen=True)
+class CareTrigger:
+    care: str
+
+
+type Trigger = SessionTrigger | SubjectTrigger | EpisodeTrigger | CareTrigger
+
+
+class RandomSource(Protocol):
+    def random(self) -> float: ...
+    def uniform(self, a: float, b: float) -> float: ...
+    def choice[T](self, seq: Sequence[T]) -> T: ...
+
+
+@dataclass(frozen=True)
+class SentimentSnapshot:
+    compound: float
+    seconds_ago: float
+
+
+@dataclass(frozen=True)
+class ConvergenceItem:
+    id: str
+    outcome: str | None
 
 
 @dataclass(frozen=True)
@@ -12,7 +112,7 @@ class ProcessIdentity:
     started: str
 
     @classmethod
-    def parse(cls, value):
+    def parse(cls, value: object) -> ProcessIdentity | None:
         if (
             isinstance(value, dict)
             and type(value.get("pid")) is int
@@ -23,29 +123,86 @@ class ProcessIdentity:
             return cls(value["pid"], value["started"])
         return None
 
-    def packet(self):
+    def packet(self) -> ProcessPacket:
         return {"pid": self.pid, "started": self.started}
 
 
+@dataclass(frozen=True)
+class HookEvent:
+    harness: str
+    session: str
+    event: str
+    aliases: tuple[str, ...] = ()
+    parent: str | None = None
+    parent_call: str | None = None
+    call: str | None = None
+    turn: str | None = None
+    tool: str | None = None
+    goal: str | None = None
+    progress: str | None = None
+    repo: str | None = None
+    tool_name: str | None = None
+    sentiment_text: str | None = None
+    outcome: str | None = None
+    manual: bool | None = None
+    owner: ProcessIdentity | None = None
+    exit_code: int | None = None
+
+    @property
+    def source(self) -> str:
+        return f"hook:{self.harness}"
+
+    @property
+    def subject(self) -> str:
+        return f"{self.harness}:{self.session}"
+
+    def packet(self) -> HookPacket:
+        packet: HookPacket = {
+            "kind": "event",
+            "harness": self.harness,
+            "session": self.session,
+            "event": self.event,
+        }
+        if self.parent is not None:
+            packet["parent"] = self.parent
+        if self.parent_call is not None:
+            packet["parent_call"] = self.parent_call
+        if self.call is not None:
+            packet["call"] = self.call
+        if self.turn is not None:
+            packet["turn"] = self.turn
+        if self.tool is not None:
+            packet["tool"] = self.tool
+        if self.goal is not None:
+            packet["goal"] = self.goal
+        if self.progress is not None:
+            packet["progress"] = self.progress
+        if self.repo is not None:
+            packet["repo"] = self.repo
+        if self.tool_name is not None:
+            packet["tool_name"] = self.tool_name
+        if self.sentiment_text is not None:
+            packet["sentiment_text"] = self.sentiment_text
+        if self.outcome is not None:
+            packet["outcome"] = self.outcome
+        if self.manual is not None:
+            packet["manual"] = self.manual
+        if self.exit_code is not None:
+            packet["exit_code"] = self.exit_code
+        if self.aliases:
+            packet["aliases"] = list(self.aliases)
+        if self.owner is not None:
+            packet["owner"] = self.owner.packet()
+        return packet
+
+
 if TYPE_CHECKING:
+    from .episodes import Episode
     from .work.views import WorkSubject, WorkView
 
 
-class Record(Mapping):
-    def __getitem__(self, name):
-        if name not in self.__dataclass_fields__:
-            raise KeyError(name)
-        return getattr(self, name)
-
-    def __iter__(self):
-        return iter(self.__dataclass_fields__)
-
-    def __len__(self):
-        return len(self.__dataclass_fields__)
-
-
 @dataclass(frozen=True)
-class ToolSnapshot(Record):
+class ToolSnapshot:
     call: str
     tool: str
     activity: str
@@ -53,7 +210,7 @@ class ToolSnapshot(Record):
 
 
 @dataclass(frozen=True)
-class FailureSnapshot(Record):
+class FailureSnapshot:
     activity: str
     count: int
     goal: str
@@ -63,7 +220,7 @@ class FailureSnapshot(Record):
 
 
 @dataclass(frozen=True)
-class SessionSnapshot(Record):
+class SessionSnapshot:
     id: str
     changed_at: float
     parent: str | None
@@ -90,32 +247,27 @@ class SessionSnapshot(Record):
     progress: str
     failure: FailureSnapshot | None
     outcome: str | None
-    user_sentiment: dict | None = None
+    user_sentiment: SentimentSnapshot | None = None
     connected_work: WorkView | None = None
 
-    @classmethod
-    def capture(cls, values, connected_work):
-        return cls(
-            **{
-                **values,
-                "recent_requests": tuple(values["recent_requests"]),
-                "active_tools": tuple(
-                    ToolSnapshot(**tool) for tool in values["active_tools"]
-                ),
-                "failure": FailureSnapshot(**values["failure"])
-                if values["failure"]
-                else None,
-                "owner": ProcessIdentity.parse(values["owner"]),
-                "connected_work": connected_work,
-            }
-        )
+    @property
+    def input_wait_seconds(self) -> float:
+        assert self.waiting_seconds is not None
+        return self.waiting_seconds
 
 
 @dataclass(frozen=True)
-class WorkSnapshot(Record):
+class SessionsSnapshot:
+    activity: str
+    sessions: tuple[SessionSnapshot, ...]
+    convergence: tuple[ConvergenceItem, ...] | None = None
+
+
+@dataclass(frozen=True)
+class WorkSnapshot:
     activity: str
     sessions: tuple[SessionSnapshot, ...]
     sleeping: bool
-    trigger: dict | None = None
+    trigger: Trigger | None = None
     work: tuple[WorkSubject, ...] = ()
-    convergence: object = None
+    convergence: tuple[ConvergenceItem, ...] | None = None

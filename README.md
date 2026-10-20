@@ -69,6 +69,9 @@ Customize `persona` to change the pet's voice. Use `memory_retention_days` and
 `memory_max_events` to limit remembered work. Install and authenticate `gh` for
 GitHub PR and stack observations.
 
+Remembered work and speech are local cache data. A storage schema version change
+clears this cache.
+
 Use `prompt_target_bytes` to control how much optional context is included in model
 requests. Requests can exceed the target to preserve complete context.
 
@@ -92,6 +95,18 @@ Run the automated checks and compile the renderer:
 make check
 make build
 ```
+
+`make setup` installs runtime and development dependencies from `uv.lock`.
+`make check` includes Ruff linting, Ruff format verification, and ty type checking
+for all Python modules, tests, and Python scripts. Ruff extends its default rules
+with required function annotations. ty requires type arguments for generic types.
+Both tools infer the Python version from `pyproject.toml`.
+Run `make lint` for just these checks or `make format` to apply formatting.
+
+Use dataclasses and field access for internal records. Reuse SDK types at API
+boundaries. Keep `TypedDict` for JSON payloads and typed keyword arguments, and
+validate external data when decoding it into internal records. Use standard
+dataclass helpers and explicit JSON codecs for serialization.
 
 Run `make desktop-check` in a logged-in macOS session to test the renderer. Checks use a fake API and make no paid model requests.
 

@@ -1,5 +1,8 @@
 from dataclasses import dataclass, field
 
+from .runtime import HookEvent
+from .sessions import Lane, SessionResult, Sessions
+
 
 @dataclass(frozen=True)
 class Episode:
@@ -12,26 +15,28 @@ class Episode:
 
 @dataclass
 class EpisodeState:
-    lane: object
+    lane: Lane
     generation: int
     started: bool = False
     waiting: bool = False
     waiting_serial: int = 0
-    waiting_identity: tuple | None = None
-    trouble: set = field(default_factory=set)
-    unresolved: set = field(default_factory=set)
-    category_serials: dict = field(default_factory=dict)
+    waiting_identity: tuple[str | None, float | None] | None = None
+    trouble: set[str] = field(default_factory=set)
+    unresolved: set[str] = field(default_factory=set)
+    category_serials: dict[str, int] = field(default_factory=dict)
     terminal: bool = False
     investigating: bool = False
 
 
 class Episodes:
-    def __init__(self):
-        self.states = {}
+    def __init__(self) -> None:
+        self.states: dict[tuple[str, int], EpisodeState] = {}
         self.serial = 0
 
-    def handle(self, packet, result, sessions):
-        reconciled = {}
+    def handle(
+        self, packet: HookEvent, result: SessionResult, sessions: Sessions
+    ) -> list[Episode]:
+        reconciled: dict[tuple[str, int], EpisodeState] = {}
         for (key, generation), state in self.states.items():
             if state.lane.generation != state.generation:
                 continue
@@ -66,23 +71,22 @@ class Episodes:
             else:
                 reconciled[identity] = state
         self.states = reconciled
-        key = result["session"]
+        key = result.session
         lane = sessions.lanes[key]
         state = self.states.setdefault(
             (key, lane.generation), EpisodeState(lane, lane.generation)
         )
         emitted = []
 
-        def add(kind, activity=result["activity"]):
+        def add(kind: str, activity: str = result.activity) -> None:
             self.serial += 1
             emitted.append(Episode(kind, key, lane.generation, activity, self.serial))
             if kind in ("trouble", "recovery"):
                 state.category_serials[activity] = self.serial
 
-        event = packet["event"]
+        event = packet.event
         if lane.active and (
-            not state.started
-            or (event == "intent" and packet.get("manual") and packet.get("goal"))
+            not state.started or (event == "intent" and packet.manual and packet.goal)
         ):
             state.started = True
             add("start")
@@ -99,7 +103,7 @@ class Episodes:
         unresolved = {
             category
             for category, failure in lane.failures.items()
-            if failure["generation"] == lane.generation and not failure["resolved"]
+            if failure.generation == lane.generation and not failure.resolved
         }
         recovered = state.unresolved - unresolved
         if lane.active:
@@ -125,41 +129,39 @@ class Episodes:
                 if lane.outcome == "cancelled"
                 else "success"
             )
-        elif result["failure"]:
-            failure = lane.failures[result["activity"]]
-            if failure["count"] >= 3 and result["activity"] not in state.trouble:
-                state.trouble.add(result["activity"])
+        elif result.failure:
+            failure = lane.failures[result.activity]
+            if failure.count >= 3 and result.activity not in state.trouble:
+                state.trouble.add(result.activity)
                 add("trouble")
-            elif result["activity"] not in state.trouble:
+            elif result.activity not in state.trouble:
                 add("investigation")
         elif lane.phase == "investigating" and not state.investigating:
             add("investigation")
         state.investigating = lane.phase == "investigating"
         return emitted
 
-    def relevant(self, trigger, sessions):
-        key = sessions.aliases.get(trigger["target_session"], trigger["target_session"])
+    def relevant(self, episode: Episode, sessions: Sessions) -> bool:
+        key = sessions.aliases.get(episode.session, episode.session)
         lane = sessions.lanes.get(key)
-        if lane is None or lane.generation != trigger["generation"]:
+        if lane is None or lane.generation != episode.generation:
             return False
-        kind = trigger["episode"]
+        kind = episode.kind
         state = self.states.get((key, lane.generation))
         if kind == "waiting":
             return bool(
-                lane.waiting and state and state.waiting_serial == trigger["serial"]
+                lane.waiting and state and state.waiting_serial == episode.serial
             )
-        if kind in ("trouble", "recovery"):
-            if (
-                not state
-                or state.category_serials.get(trigger["activity"]) != trigger["serial"]
-            ):
-                return False
+        if kind in ("trouble", "recovery") and (
+            not state or state.category_serials.get(episode.activity) != episode.serial
+        ):
+            return False
         if kind == "trouble":
-            failure = lane.failures.get(trigger["activity"])
+            failure = lane.failures.get(episode.activity)
             return bool(
                 failure
-                and not failure["resolved"]
-                and failure["generation"] == lane.generation
+                and not failure.resolved
+                and failure.generation == lane.generation
             )
         if kind == "failure":
             return lane.finished and lane.outcome == "error"
@@ -168,6 +170,6 @@ class Episodes:
                 "success" if kind == "success" else "cancelled"
             )
         if kind == "recovery":
-            failure = lane.failures.get(trigger["activity"])
-            return bool(lane.active and failure and failure["resolved"])
+            failure = lane.failures.get(episode.activity)
+            return bool(lane.active and failure and failure.resolved)
         return lane.active

@@ -3,11 +3,11 @@ from .context import Context, EvidenceManifest, PreparedCommentary
 from .model import AnthropicModelClient, ModelClient
 
 __all__ = [
+    "AnthropicModelClient",
     "Cognition",
-    "ObservationResult",
     "Context",
     "EvidenceManifest",
-    "PreparedCommentary",
-    "AnthropicModelClient",
     "ModelClient",
+    "ObservationResult",
+    "PreparedCommentary",
 ]

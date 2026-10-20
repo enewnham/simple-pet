@@ -1,4 +1,4 @@
-.PHONY: setup build run test check desktop-check assets clean
+.PHONY: setup build run test check lint format desktop-check assets clean
 
 SWIFT_FLAGS ?= --disable-sandbox
 UV_CACHE_DIR ?= $(CURDIR)/.cache/uv
@@ -24,13 +24,21 @@ test: setup
 	swiftc -parse-as-library -module-cache-path .build/core-tests/cache Sources/PetCore/*.swift Tests/PetCoreChecks.swift -o .build/core-tests/pet-core-checks
 	.build/core-tests/pet-core-checks
 	swiftc -O -module-cache-path .build/core-tests/cache Sources/PetSpeechSimilarity/main.swift -o .build/pet-speech-similarity
-	uv run python -m unittest discover -s Tests -v
+	uv run --locked python -m unittest discover -s Tests -v
 	mkdir -p .build/asset-tests
 	swiftc -O -module-cache-path .build/asset-tests/cache scripts/import-assets.swift -o .build/asset-tests/import-assets
 	swiftc -module-cache-path .build/asset-tests/cache Tests/AssetImportTests.swift -o .build/asset-tests/asset-import-tests
 	.build/asset-tests/asset-import-tests .build/asset-tests/import-assets
 
-check: test
+lint: setup
+	uv run --locked ruff check .
+	uv run --locked ruff format --check .
+	uv run --locked ty check
+
+format: setup
+	uv run --locked ruff format .
+
+check: lint test
 	bash -n scripts/fetch-assets.sh
 	bash -n examples/pet-run
 	bash -n bin/pet-daemon
@@ -40,7 +48,7 @@ desktop-check: setup build
 	swiftc -parse-as-library -whole-module-optimization -emit-module -emit-object -module-name PetCore -module-cache-path .build/overlay-tests/cache Sources/PetCore/*.swift -emit-module-path .build/overlay-tests/PetCore.swiftmodule -o .build/overlay-tests/PetCore.o
 	swiftc -parse-as-library -module-cache-path .build/overlay-tests/cache -I .build/overlay-tests Sources/PetOverlay/PetView.swift Tests/PetOverlayChecks.swift .build/overlay-tests/PetCore.o -o .build/overlay-tests/pet-overlay-checks
 	.build/overlay-tests/pet-overlay-checks
-	PET_DESKTOP_CHECK=1 uv run python -m unittest discover -s Tests -p test_desktop.py -v
+	PET_DESKTOP_CHECK=1 uv run --locked python -m unittest discover -s Tests -p test_desktop.py -v
 
 assets:
 	scripts/fetch-assets.sh $(ARGS)

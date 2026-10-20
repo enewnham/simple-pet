@@ -1,8 +1,14 @@
-from dataclasses import dataclass
+from __future__ import annotations
+
 import re
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from ..activity import activity, result_summary
 from ..prompts import bounded
+
+if TYPE_CHECKING:
+    from ..runtime import HookEvent
 
 
 @dataclass(frozen=True)
@@ -23,20 +29,31 @@ class RecallQuery:
     terms: tuple[str, ...]
 
 
-def project_event(event, session=None) -> SessionFact | None:
-    kind = event["event"]
-    state = session or {}
-    repo = bounded(event.get("repo") or state.get("repo"), 1024)
+@dataclass(frozen=True)
+class EventContext:
+    id: str
+    repo: str
+    goal: str
+    last_tool: str
+    outcome: str | None
+    activity: str
+
+
+def project_event(
+    event: HookEvent, context: EventContext | None = None
+) -> SessionFact | None:
+    kind = event.event
+    repo = bounded(event.repo or (context.repo if context else None), 1024)
     identifier = bounded(
-        state.get("id") or f"{event['harness']}:{event['session']}", 256
+        context.id if context else f"{event.harness}:{event.session}", 256
     )
-    progress = bounded(event.get("progress"))
-    requested_goal = bounded(event.get("goal"))
-    goal = requested_goal or bounded(state.get("goal"))
-    tool = bounded(event.get("tool") or state.get("last_tool"), 160)
+    progress = bounded(event.progress)
+    requested_goal = bounded(event.goal)
+    goal = requested_goal or bounded(context.goal if context else None)
+    tool = bounded(event.tool or (context.last_tool if context else None), 160)
     if kind == "tool_start":
         return None
-    name = event.get("tool_name", "").lower().rsplit("__", 1)[-1].rsplit(".", 1)[-1]
+    name = (event.tool_name or "").lower().rsplit("__", 1)[-1].rsplit(".", 1)[-1]
     read_only = name in (
         "read",
         "read_file",
@@ -58,13 +75,15 @@ def project_event(event, session=None) -> SessionFact | None:
         "session_end",
     )
     outcome = (
-        state.get("outcome")
-        if terminal and state.get("outcome")
-        else event.get("outcome")
+        context.outcome if terminal and context and context.outcome else event.outcome
     )
     if kind in ("tool_error", "turn_error"):
         outcome = "error"
-    category = state.get("activity") or activity(tool, event.get("tool_name", ""))
+    category = (
+        context.activity
+        if context and context.activity
+        else activity(tool, event.tool_name or "")
+    )
     if terminal:
         category = "harness"
     if outcome == "error":
@@ -91,16 +110,11 @@ def project_event(event, session=None) -> SessionFact | None:
     )
 
 
-def recall_query(event) -> RecallQuery | None:
-    if (
-        not event
-        or event.get("event") != "intent"
-        or not event.get("repo")
-        or not event.get("goal")
-    ):
+def recall_query(event: HookEvent | None) -> RecallQuery | None:
+    if not event or event.event != "intent" or not event.repo or not event.goal:
         return None
-    repo = bounded(event["repo"], 1024)
-    tokens = re.findall(r"[\w]+", event["goal"])
+    repo = bounded(event.repo, 1024)
+    tokens = re.findall(r"[\w]+", event.goal)
     distinctive = list(
         dict.fromkeys(
             token
@@ -121,9 +135,5 @@ def recall_query(event) -> RecallQuery | None:
     if not distinctive:
         return None
 
-    session = bounded(
-        event.get("target_session")
-        or f"{event.get('harness', '')}:{event.get('session', '')}",
-        256,
-    )
+    session = bounded(f"{event.harness}:{event.session}", 256)
     return RecallQuery(repo, session, tuple(distinctive))

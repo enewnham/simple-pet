@@ -1,14 +1,20 @@
 import unittest
 import uuid
+from typing import Never
 
-from pet_daemon.delivery import SpeechDelivery, SpeechMessage
+from pet_daemon.delivery import (
+    DeliveryOutcome,
+    SpeechDelivery,
+    SpeechMessage,
+    SpeechPacket,
+)
 
 
 class DeliveryTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.now = 10
-        self.sent = []
-        self.outcomes = []
+        self.sent: list[SpeechPacket] = []
+        self.outcomes: list[DeliveryOutcome] = []
         self.current = True
         self.delivery = SpeechDelivery(
             self.sent.append,
@@ -22,11 +28,11 @@ class DeliveryTests(unittest.TestCase):
             "routine",
             "selection",
             "work",
-            1,
+            "one",
             ("opportunity", 1),
         )
 
-    def acknowledge(self, identifier=None):
+    def acknowledge(self, identifier: str | None = None) -> bool:
         return self.delivery.acknowledge(
             {
                 "event": "speech_accepted",
@@ -34,7 +40,7 @@ class DeliveryTests(unittest.TestCase):
             }
         )
 
-    def test_acceptance_matches_a_sent_message_once(self):
+    def test_acceptance_matches_a_sent_message_once(self) -> None:
         identifier = self.delivery.submit(self.message)
         uuid.UUID(identifier)
         self.assertEqual(
@@ -52,7 +58,7 @@ class DeliveryTests(unittest.TestCase):
             [(("opportunity", 1), "accepted")],
         )
 
-    def test_missing_acknowledgment_retries_the_same_message_once(self):
+    def test_missing_acknowledgment_retries_the_same_message_once(self) -> None:
         self.delivery.submit(self.message)
         self.now += 2
         self.delivery.tick()
@@ -64,8 +70,8 @@ class DeliveryTests(unittest.TestCase):
         self.delivery.submit(self.message)
         self.assertEqual(len(self.sent), 2)
 
-    def test_send_errors_share_the_bounded_retry_budget(self):
-        def unavailable(packet):
+    def test_send_errors_share_the_bounded_retry_budget(self) -> None:
+        def unavailable(packet: SpeechPacket) -> Never:
             self.sent.append(packet)
             raise OSError("offline")
 
@@ -77,7 +83,7 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(len(self.sent), 2)
         self.assertEqual([item.status for item in self.outcomes], ["failed"])
 
-    def test_changed_facts_stop_retries_but_acceptance_records_display(self):
+    def test_changed_facts_stop_retries_but_acceptance_records_display(self) -> None:
         self.delivery.submit(self.message)
         self.current = False
         self.now += 2
@@ -86,7 +92,7 @@ class DeliveryTests(unittest.TestCase):
         self.assertTrue(self.acknowledge())
         self.assertEqual(self.outcomes[0].message.opportunity, ("opportunity", 1))
 
-    def test_preemption_stops_retries_and_retains_late_acceptance(self):
+    def test_preemption_stops_retries_and_retains_late_acceptance(self) -> None:
         self.delivery.submit(self.message)
         self.delivery.cancel_pending()
         self.now += 2
@@ -94,7 +100,7 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(len(self.sent), 1)
         self.assertTrue(self.acknowledge())
 
-    def test_late_acceptance_supersedes_transport_timeout(self):
+    def test_late_acceptance_supersedes_transport_timeout(self) -> None:
         self.delivery.submit(self.message)
         for _ in range(2):
             self.now += 2
@@ -104,13 +110,13 @@ class DeliveryTests(unittest.TestCase):
             [item.status for item in self.outcomes], ["failed", "accepted"]
         )
 
-    def test_unsent_invalid_message_cannot_be_acknowledged(self):
+    def test_unsent_invalid_message_cannot_be_acknowledged(self) -> None:
         self.current = False
         self.delivery.submit(self.message)
         self.assertEqual(self.sent, [])
         self.assertFalse(self.acknowledge())
 
-    def test_clear_rejects_old_acceptance(self):
+    def test_clear_rejects_old_acceptance(self) -> None:
         self.delivery.submit(self.message)
         self.delivery.clear()
         self.assertFalse(self.acknowledge())
@@ -118,7 +124,9 @@ class DeliveryTests(unittest.TestCase):
         self.delivery.tick()
         self.assertEqual(len(self.sent), 1)
 
-    def test_sent_metadata_expires_after_display_and_acknowledgment_window(self):
+    def test_sent_metadata_expires_after_display_and_acknowledgment_window(
+        self,
+    ) -> None:
         self.delivery.submit(self.message)
         self.delivery.cancel_pending()
         self.now += 15
@@ -126,10 +134,10 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(self.delivery.deliveries, {})
         self.assertFalse(self.acknowledge())
 
-    def test_persistence_failure_leaves_acceptance_retryable(self):
+    def test_persistence_failure_leaves_acceptance_retryable(self) -> None:
         self.delivery.submit(self.message)
 
-        def unavailable(outcome):
+        def unavailable(outcome: DeliveryOutcome) -> Never:
             raise RuntimeError("storage unavailable")
 
         self.delivery.on_outcome = unavailable

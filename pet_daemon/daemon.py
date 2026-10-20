@@ -1,5 +1,4 @@
 import asyncio
-from dataclasses import asdict
 import errno
 import json
 import logging
@@ -9,31 +8,36 @@ import signal
 import socket
 import stat
 import time
+from collections.abc import Callable, Mapping
+from dataclasses import asdict
+from typing import Never
 
+from anthropic import AsyncAnthropic
+
+from .application import Application
 from .attention import Attention
 from .behavior import Behavior
-from .commentary import Cognition, AnthropicModelClient
-from .application import Application
+from .commentary import AnthropicModelClient, Cognition
+from .config import Config
 from .episodes import Episodes
-from .storage import Memory
-from .sessions import Sessions
 from .processes import ProcessTracker
+from .runtime import RandomSource
+from .sessions import Sessions
 from .sources import RepositoryTracker
 from .sources.hooks import normalize_hook
-from .work.observations import repository_observation_from_mapping
 from .sprites import Pack
+from .storage import Memory
 from .telemetry import event, trace, verbose
-
 
 log = logging.getLogger("pet-daemon")
 MAX_INPUT_BYTES = 2000
 
 
-def reject_constant(value):
+def reject_constant(value: str) -> Never:
     raise ValueError(f"Invalid JSON constant: {value}")
 
 
-def bind_socket(path):
+def bind_socket(path: str) -> tuple[socket.socket, tuple[int, int]]:
     try:
         existing = os.lstat(path)
     except FileNotFoundError:
@@ -64,7 +68,7 @@ def bind_socket(path):
         raise
 
 
-def unlink_owned(path, identity):
+def unlink_owned(path: str, identity: tuple[int, int]) -> None:
     try:
         current = os.lstat(path)
         if (current.st_dev, current.st_ino) == identity:
@@ -74,18 +78,26 @@ def unlink_owned(path, identity):
 
 
 class Receiver(asyncio.DatagramProtocol):
-    def __init__(self, daemon):
+    def __init__(self, daemon: "Daemon") -> None:
         self.daemon = daemon
 
-    def datagram_received(self, data, address):
+    def datagram_received(
+        self, data: bytes, addr: tuple[str, int] | str | None
+    ) -> None:
         self.daemon.receive(data)
 
-    def error_received(self, error):
-        log.warning("Hook socket: %s", error)
+    def error_received(self, exc: Exception) -> None:
+        log.warning("Hook socket: %s", exc)
 
 
 class Daemon:
-    def __init__(self, config, client, clock=time.monotonic, rng=None):
+    def __init__(
+        self,
+        config: Config,
+        client: AsyncAnthropic,
+        clock: Callable[[], float] = time.monotonic,
+        rng: RandomSource | None = None,
+    ) -> None:
         self.config = config
         self.clock = clock
         self.rng = rng or random.Random()
@@ -113,12 +125,9 @@ class Daemon:
             lambda observation: self.application.ingest(observation),
             local_interval=config.repository_refresh_seconds,
             github_interval=config.github_refresh_seconds,
-            checkpoints=tuple(
-                repository_observation_from_mapping(item)
-                for item in memory.load_repositories()
-            ),
+            checkpoints=memory.load_repositories(),
             associations=tuple(
-                (item["session"], item["worktree"])
+                (item.session, item.worktree)
                 for item in memory.repository_associations()
             ),
         )
@@ -137,14 +146,14 @@ class Daemon:
             rng=self.rng,
         )
         self.application.reconcile_targets()
-        self.transport = None
-        self.identity = None
-        self.sender = None
-        self.child = None
-        self.loop_task = None
+        self.transport: asyncio.DatagramTransport | None = None
+        self.identity: tuple[int, int] | None = None
+        self.sender: socket.socket | None = None
+        self.child: asyncio.subprocess.Process | None = None
+        self.loop_task: asyncio.Task[None] | None = None
         self.stopping = asyncio.Event()
 
-    async def start(self):
+    async def start(self) -> None:
         receiver, identity = bind_socket(self.config.daemon_socket)
         self.identity = identity
         try:
@@ -179,7 +188,7 @@ class Daemon:
             retention_seconds=self.config.completed_retention_seconds,
         )
 
-    def emit(self, packet):
+    def emit(self, packet: Mapping[str, object]) -> bool:
         if self.sender is None:
             return False
         try:
@@ -194,7 +203,7 @@ class Daemon:
             log.warning("Renderer delivery failed: %s", error)
             return False
 
-    def receive(self, data):
+    def receive(self, data: bytes) -> None:
         if not data or len(data) > MAX_INPUT_BYTES:
             return
         try:
@@ -211,15 +220,15 @@ class Daemon:
         else:
             self.application.receive(packet)
 
-    async def loop(self):
+    async def loop(self) -> None:
         while True:
             self.application.tick()
             await asyncio.sleep(0.05)
 
-    async def close(self):
+    async def close(self) -> None:
         event(
             "daemon.stopping",
-            snapshot=self.application.sessions.snapshot(),
+            snapshot=asdict(self.application.sessions.snapshot()),
             sessions=len(self.application.sessions.lanes),
         )
         if self.loop_task:
@@ -231,7 +240,7 @@ class Daemon:
             self.child.terminate()
             try:
                 await asyncio.wait_for(self.child.wait(), timeout=2)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self.child.kill()
                 await self.child.wait()
         if self.transport:
@@ -245,7 +254,7 @@ class Daemon:
             self.identity = None
         self.application.memory.close()
 
-    async def run(self):
+    async def run(self) -> None:
         if not self.config.overlay_binary.is_file() or not os.access(
             self.config.overlay_binary, os.X_OK
         ):
@@ -271,12 +280,14 @@ class Daemon:
             )
             child_wait = asyncio.create_task(self.child.wait())
             stop_wait = asyncio.create_task(self.stopping.wait())
+            loop_task = self.loop_task
+            assert loop_task is not None
             finished, _ = await asyncio.wait(
-                (child_wait, stop_wait, self.loop_task),
+                (child_wait, stop_wait, loop_task),
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            if self.loop_task in finished:
-                self.loop_task.result()
+            if loop_task in finished:
+                loop_task.result()
             if child_wait in finished and child_wait.result() != 0:
                 raise RuntimeError(f"Renderer exited with status {child_wait.result()}")
         finally:

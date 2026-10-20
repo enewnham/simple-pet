@@ -3,16 +3,15 @@
 
 import argparse
 import json
-from pathlib import Path, PurePosixPath
 import shutil
 import stat
 import zipfile
-
+from pathlib import Path, PurePosixPath
 
 MAX_UNPACKED_BYTES = 128 * 1024 * 1024
 
 
-def is_pack(directory):
+def is_pack(directory: Path) -> bool:
     files = (
         "pet.json",
         "manifest.json",
@@ -26,7 +25,7 @@ def is_pack(directory):
     )
 
 
-def unpack(archive, destination):
+def unpack(archive: str | Path, destination: str | Path) -> dict[str, str]:
     archive = Path(archive).expanduser().resolve()
     destination = Path(destination).resolve()
     with zipfile.ZipFile(archive) as bundle:
@@ -97,7 +96,7 @@ def unpack(archive, destination):
     return {"directory": str(source), "pet": identifier, "origin": str(archive)}
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("archive", type=Path)
     parser.add_argument("destination", type=Path)

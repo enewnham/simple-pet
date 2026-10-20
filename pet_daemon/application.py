@@ -1,22 +1,33 @@
 import asyncio
 import logging
 import math
-from dataclasses import asdict, dataclass
-import uuid
 import sqlite3
-import time
+import uuid
+from collections.abc import Callable, Mapping
+from dataclasses import asdict, dataclass, replace
 from typing import Protocol
 
-from .delivery import SpeechDelivery, SpeechMessage
+from .attention import Attention, AttentionSelection
+from .behavior import Behavior
+from .commentary import Cognition, EvidenceManifest, ObservationResult
+from .config import Config
+from .delivery import DeliveryOutcome, SpeechDelivery, SpeechMessage
 from .episodes import Episodes
 from .events import AgentEvents
+from .processes import ProcessTracker
+from .runtime import (
+    EpisodeTrigger,
+    HookEvent,
+    OverlayPacket,
+    RandomSource,
+    Trigger,
+    WorkSnapshot,
+)
 from .sessions import Sessions
-from .runtime import SessionSnapshot, WorkSnapshot
-from .work.observations import RepositoryObservation, RepositoryTarget
-from .commentary import EvidenceManifest
+from .storage import Memory
 from .telemetry import event, observation, trace
 from .work import build_work
-
+from .work.observations import RepositoryObservation, RepositoryTarget
 
 log = logging.getLogger("pet-daemon")
 
@@ -34,27 +45,27 @@ class ObservationProvider(Protocol):
 @dataclass(frozen=True)
 class MessageSupport:
     manifest: EvidenceManifest
-    trigger: dict | None
+    trigger: Trigger | None
     request_epoch: int
 
 
 class Application:
     def __init__(
         self,
-        config,
+        config: Config,
         *,
-        sessions,
-        episodes,
-        attention,
-        behavior,
-        cognition,
+        sessions: Sessions,
+        episodes: Episodes,
+        attention: Attention,
+        behavior: Behavior,
+        cognition: Cognition,
         providers: tuple[ObservationProvider, ...],
-        processes,
-        memory,
-        emit,
-        clock,
-        rng,
-    ):
+        processes: ProcessTracker,
+        memory: Memory,
+        emit: Callable[[OverlayPacket], object],
+        clock: Callable[[], float],
+        rng: RandomSource,
+    ) -> None:
         self.config = config
         self.sessions = sessions
         self.episodes = episodes
@@ -67,16 +78,16 @@ class Application:
         self.emit = emit
         self.clock = clock
         self.rng = rng
-        self.task = None
-        self.reason = None
+        self.task: asyncio.Task[None] | None = None
+        self.reason: str | None = None
         self.revision = 0
         self.history_epoch = 0
         self.suspended = False
-        self.manual = None
+        self.manual: tuple[str, float | None] | None = None
         self.clicked = False
-        self.last_speech = None
+        self.last_speech: tuple[str, float] | None = None
         self.attention.restore(memory.load_attention_history())
-        self.process_task = None
+        self.process_task: asyncio.Task[None] | None = None
         self.next_prune = 0
         self.reconciling = False
         self.events = AgentEvents(
@@ -90,13 +101,19 @@ class Application:
             rng=rng,
         )
         self.delivery = SpeechDelivery(
-            emit,
+            lambda packet: emit(
+                {
+                    "text": packet["text"],
+                    "ttl": packet["ttl"],
+                    "delivery_id": packet["delivery_id"],
+                }
+            ),
             clock=clock,
             on_outcome=self.delivery_outcome,
             valid=self.delivery_valid,
         )
 
-    def clear_memory(self):
+    def clear_memory(self) -> None:
         try:
             self.memory.clear()
         except sqlite3.Error as error:
@@ -124,7 +141,7 @@ class Application:
         self.emit({"text": "", "ttl": 0})
         event("memory.cleared", pet=self.memory.pet)
 
-    def system_sleep_changed(self, sleeping):
+    def system_sleep_changed(self, sleeping: bool) -> None:
         if sleeping == self.suspended:
             return
         self.suspended = sleeping
@@ -148,77 +165,69 @@ class Application:
                 *self.config.observation_seconds
             )
 
-    def speak(self, context, ttl=None):
+    def speak(self, context: str, ttl: float | None = None) -> None:
         self.behavior.wake("speech_request")
         self.behavior.stop_movement()
         self.preempt()
         self.manual = (context, ttl)
         trace("speech.requested", context=context, ttl=ttl)
 
-    def queue(self, reason, trigger=None):
+    def queue(self, reason: str, trigger: Trigger | None = None) -> None:
         self.attention.queue(reason, trigger, self.sessions.failed)
 
-    def snapshot(self, trigger=None):
+    def snapshot(self, trigger: Trigger | None = None) -> WorkSnapshot:
         runtime = self.sessions.snapshot()
         state = self.memory.work.snapshot()
-        subjects = build_work(runtime, state, now=time.time())
+        subjects = build_work(runtime, state)
         views = {subject.id: subject.view for subject in subjects}
         members = []
-        for session in runtime["sessions"]:
-            work = state.current(session["id"])
+        for session in runtime.sessions:
+            work = state.current(session.id)
             view = views.get(work.id) if work else None
-            members.append(SessionSnapshot.capture(session, view))
+            members.append(replace(session, connected_work=view))
         return WorkSnapshot(
-            runtime["activity"],
+            runtime.activity,
             tuple(members),
             self.behavior.sleeping,
             trigger=trigger,
             work=subjects,
-            convergence=runtime["convergence"],
+            convergence=runtime.convergence,
         )
 
-    def ingest(self, observation: RepositoryObservation):
+    def ingest(self, observation: RepositoryObservation) -> None:
         try:
             with self.memory.transaction():
-                self.memory.save_repository(observation.subject, asdict(observation))
+                self.memory.save_repository(observation)
                 self.memory.work.observe_repository(observation)
             self.reconcile_targets()
         except (sqlite3.Error, ValueError) as error:
             log.warning("Could not ingest work observation: %s", error)
 
-    def ingest_hook(self, hook):
-        packet = hook.packet()
-        result = self.events.handle(packet, self.suspended)
+    def ingest_hook(self, hook: HookEvent) -> None:
+        result = self.events.handle(hook, self.suspended)
         if not result:
             return
-        key = result["session"]
+        key = result.session
         lane = self.sessions.lanes[key]
         try:
             with self.memory.transaction():
-                if packet["event"] in ("intent", "subagent_start") and packet.get(
-                    "goal"
-                ):
-                    aliases = tuple(
-                        f"{packet['harness']}:{alias}"
-                        for alias in packet.get("aliases", ())
-                    )
-                    self.memory.work.session_intent(
-                        key, packet["goal"], aliases=aliases
-                    )
-                self.memory.work.session_event(key, packet)
+                if hook.event in ("intent", "subagent_start") and hook.goal:
+                    aliases = tuple(f"{hook.harness}:{alias}" for alias in hook.aliases)
+                    self.memory.work.session_intent(key, hook.goal, aliases=aliases)
+                self.memory.work.session_event(key, hook)
                 if lane.repo:
                     self.memory.associate_repository(key, lane.repo)
             for provider in self.providers:
                 provider.associate(
                     key,
                     lane.repo,
-                    refresh=packet["event"] in ("intent", "subagent_start"),
+                    refresh=hook.event in ("intent", "subagent_start"),
                 )
             self.reconcile_targets()
         except (sqlite3.Error, ValueError) as error:
             log.warning("Could not record work evidence: %s", error)
 
-    def reconcile_targets(self):
+    def reconcile_targets(self) -> None:
         if self.reconciling:
             return
         self.reconciling = True
@@ -229,7 +238,7 @@ class Application:
         finally:
             self.reconciling = False
 
-    def receive(self, packet):
+    def receive(self, packet: Mapping[str, object]) -> None:
         kind = packet.get("kind")
         if kind == "clear_speech":
             self.clear_speech()
@@ -237,14 +246,17 @@ class Application:
             self.clear_memory()
         elif kind == "renderer":
             self.receive_renderer(packet)
-        elif kind == "speak" and isinstance(packet.get("context"), str):
-            ttl = packet.get("ttl")
-            if ttl is None or (
-                type(ttl) in (int, float) and math.isfinite(ttl) and ttl >= 0
+        elif kind == "speak":
+            context, ttl = packet.get("context"), packet.get("ttl")
+            if isinstance(context, str) and (
+                ttl is None
+                or (type(ttl) is int or type(ttl) is float)
+                and math.isfinite(ttl)
+                and ttl >= 0
             ):
-                self.speak(packet["context"], ttl)
+                self.speak(context, ttl)
 
-    def receive_renderer(self, packet):
+    def receive_renderer(self, packet: Mapping[str, object]) -> None:
         feedback = packet.get("event")
         if feedback == "speech_accepted":
             try:
@@ -253,9 +265,9 @@ class Application:
                 log.warning("Could not record renderer acceptance: %s", error)
         elif feedback == "status":
             if self.behavior.renderer_status(packet):
-                sleeping = packet.get("system_sleeping")
-                if type(sleeping) is bool:
-                    self.system_sleep_changed(sleeping)
+                status = self.behavior.status
+                assert status is not None
+                self.system_sleep_changed(status.system_sleeping)
                 if not self.suspended:
                     self.behavior.tick(self.events.activity(), self.sessions)
         elif feedback in ("system_sleep", "system_wake"):
@@ -265,7 +277,7 @@ class Application:
         else:
             self.behavior.completion(packet)
 
-    def clear_speech(self):
+    def clear_speech(self) -> None:
         try:
             self.memory.clear_speech()
         except sqlite3.Error as error:
@@ -277,17 +289,17 @@ class Application:
         self.emit({"text": "", "ttl": 0})
         event("speech.cleared", pet=self.memory.pet)
 
-    def speech_duration(self, speech):
+    def speech_duration(self, speech: str) -> float:
         return max(self.config.speech_ttl, 3 + len(speech.split()) / 2)
 
-    def preempt(self):
+    def preempt(self) -> None:
         self.delivery.cancel_pending()
         self.revision += 1
         if self.task:
             self.task.cancel()
         self.attention.pending = None
 
-    def click(self):
+    def click(self) -> None:
         self.behavior.satisfy()
         self.behavior.wake("click")
         self.behavior.react("click", self.sessions)
@@ -299,14 +311,14 @@ class Application:
 
     async def observe(
         self,
-        reason,
-        context=None,
-        ttl=None,
-        trigger=None,
+        reason: str,
+        context: str | None = None,
+        ttl: float | None = None,
+        trigger: Trigger | None = None,
         *,
-        snapshot=None,
-        selection=None,
-    ):
+        snapshot: WorkSnapshot | None = None,
+        selection: AttentionSelection | None = None,
+    ) -> None:
         if self.suspended:
             return
         snapshot = self.snapshot(trigger) if snapshot is None else snapshot
@@ -322,13 +334,14 @@ class Application:
             history_epoch = self.history_epoch
             sessions = self.sessions
             focus_snapshot = selection.focus_session
-            focus_session = focus_snapshot["id"] if focus_snapshot else None
+            focus_session = focus_snapshot.id if focus_snapshot else None
             trace("observation.started", reason=reason, subject=selection.id)
             try:
                 if (
                     self.config.summarize_first_request_only
                     and self.cognition.should_summarize(focus_snapshot, reason)
                 ):
+                    assert focus_session is not None
                     focus = self.sessions.lanes[focus_session]
                     focus.first_summary_attempted = True
                     self.memory.save_context(
@@ -394,7 +407,7 @@ class Application:
             except asyncio.CancelledError:
                 outcome = "cancelled"
                 raise
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - Keep model failures inside the observation task.
                 event(
                     "observation.failed",
                     level=logging.WARNING,
@@ -404,6 +417,7 @@ class Application:
                     exc_info=True,
                 )
             finally:
+                tokens = usage.get(reason)
                 event(
                     "observation.finished",
                     reason=reason,
@@ -411,45 +425,47 @@ class Application:
                     session=focus_session,
                     outcome=outcome,
                     duration_seconds=round(self.clock() - started, 3),
-                    **usage.get(reason, {}),
+                    **(asdict(tokens) if tokens is not None else {}),
                 )
 
-    def selection_valid(self, manifest, trigger):
-        if (
-            trigger
-            and "episode" in trigger
-            and not self.episodes.relevant(trigger, self.sessions)
+    def selection_valid(
+        self, manifest: EvidenceManifest, trigger: Trigger | None
+    ) -> bool:
+        if isinstance(trigger, EpisodeTrigger) and not self.episodes.relevant(
+            trigger.episode, self.sessions
         ):
             return False
         return manifest.valid(self.snapshot(trigger))
 
-    def mark_considered(self, selection):
+    def mark_considered(self, selection: AttentionSelection) -> None:
         if selection.subject is not None:
             self.attention.mark_considered(selection.subject)
             self.persist_attention(selection.subject.id)
 
-    def persist_attention(self, subject_id):
+    def persist_attention(self, subject_id: str | None) -> None:
         if subject_id is not None:
             last_selected, considered = self.attention.history(subject_id)
             self.memory.save_attention_history(subject_id, last_selected, considered)
 
-    def delivery_valid(self, message):
+    def delivery_valid(self, message: SpeechMessage) -> bool:
         support = message.support
+        assert support is not None
         return (
             message.history_epoch == self.history_epoch
             and support.request_epoch == self.revision
             and self.selection_valid(support.manifest, support.trigger)
         )
 
-    def save_summary(self, result):
+    def save_summary(self, result: ObservationResult) -> None:
         if result.session_context is None:
             return
         summary = " ".join(result.session_context.split())
         key = result.context_session
+        assert key is not None
         focus = self.sessions.lanes.get(key)
         if not summary or focus is None:
             return
-        current = self.sessions.snapshot(keys=[key])["sessions"][0]
+        current = self.sessions.snapshot(keys=[key]).sessions[0]
         if self.cognition.summary_version(current) != result.context_version:
             trace("memory.context_discarded", reason="session_changed", session=key)
             return
@@ -467,7 +483,7 @@ class Application:
             log.warning("Could not save pet session context: %s", error)
         trace("memory.context_updated", session=key)
 
-    def delivery_outcome(self, outcome):
+    def delivery_outcome(self, outcome: DeliveryOutcome) -> None:
         message = outcome.message
         if message.history_epoch != self.history_epoch:
             return
@@ -501,13 +517,13 @@ class Application:
             outcome=outcome.status,
         )
 
-    async def probe_processes(self):
+    async def probe_processes(self) -> None:
         sessions = self.sessions
         result = await self.processes.refresh(sessions.process_owners())
         if sessions is self.sessions and not self.suspended:
             sessions.apply_process_status(result)
 
-    def tick(self):
+    def tick(self) -> None:
         now = self.clock()
         if not self.suspended:
             for provider in self.providers:
@@ -560,7 +576,7 @@ class Application:
             snapshot, request.reason, request.context, request.eligible
         )
         if request.reason == "check_in" and selection.focus_session:
-            self.sessions.lanes[selection.focus_session["id"]].last_check_in = now
+            self.sessions.lanes[selection.focus_session.id].last_check_in = now
         self.attention.scheduled(selection.id)
         self.persist_attention(selection.id)
         self.behavior.stop_movement()
@@ -576,7 +592,7 @@ class Application:
             )
         )
 
-    async def close(self):
+    async def close(self) -> None:
         self.delivery.close()
         tasks = [task for task in (self.task, self.process_task) if task]
         for task in tasks:

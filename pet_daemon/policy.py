@@ -1,5 +1,7 @@
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
+
+from .runtime import RandomSource
 
 
 @dataclass(frozen=True)
@@ -92,7 +94,7 @@ CATALOGUE = (
 
 
 class Policy:
-    def candidates(self, observation):
+    def candidates(self, observation: Observation) -> list[Candidate]:
         return [
             Candidate(
                 spec.name,
@@ -105,7 +107,13 @@ class Policy:
             if spec.eligible(observation)
         ]
 
-    def select(self, observation, last_completed, rng, available):
+    def select(
+        self,
+        observation: Observation,
+        last_completed: str | None,
+        rng: RandomSource,
+        available: Callable[[Candidate], bool],
+    ) -> Candidate:
         choices = [
             Candidate(
                 c.name, c.score * (0.9 if c.name == last_completed else 1), c.role

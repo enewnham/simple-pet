@@ -1,6 +1,19 @@
-from dataclasses import dataclass, field
+from __future__ import annotations
+
 import time
 import uuid
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, TypedDict
+
+if TYPE_CHECKING:
+    from .application import MessageSupport
+
+
+class SpeechPacket(TypedDict):
+    text: str
+    ttl: float
+    delivery_id: str
 
 
 @dataclass(frozen=True)
@@ -10,11 +23,11 @@ class SpeechMessage:
     reason: str
     selection_id: str
     subject_id: str | None = None
-    revision: object = None
+    revision: str | None = None
     opportunity: tuple[str, int] | None = None
     history_epoch: int = 0
     message_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    support: object = None
+    support: MessageSupport | None = None
 
 
 @dataclass(frozen=True)
@@ -33,7 +46,15 @@ class Attempt:
 
 
 class SpeechDelivery:
-    def __init__(self, emit, *, clock=time.monotonic, on_outcome, valid, ack_timeout=2):
+    def __init__(
+        self,
+        emit: Callable[[SpeechPacket], object],
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        on_outcome: Callable[[DeliveryOutcome], None],
+        valid: Callable[[SpeechMessage], bool],
+        ack_timeout: float = 2,
+    ) -> None:
         self.emit = emit
         self.clock = clock
         self.on_outcome = on_outcome
@@ -41,7 +62,7 @@ class SpeechDelivery:
         self.ack_timeout = ack_timeout
         self.deliveries: dict[str, Attempt] = {}
 
-    def submit(self, message: SpeechMessage):
+    def submit(self, message: SpeechMessage) -> str:
         delivery = self.deliveries.get(message.message_id)
         if delivery is None:
             delivery = Attempt(message)
@@ -49,7 +70,7 @@ class SpeechDelivery:
             self._send(delivery)
         return message.message_id
 
-    def _send(self, delivery):
+    def _send(self, delivery: Attempt) -> None:
         message = delivery.message
         if not self.valid(message):
             delivery.status = "cancelled"
@@ -68,7 +89,7 @@ class SpeechDelivery:
         except OSError:
             pass
 
-    def acknowledge(self, packet):
+    def acknowledge(self, packet: Mapping[str, object]) -> bool:
         if packet.get("event") != "speech_accepted":
             return False
         identifier = packet.get("delivery_id")
@@ -86,7 +107,7 @@ class SpeechDelivery:
         delivery.status = "accepted"
         return True
 
-    def tick(self):
+    def tick(self) -> None:
         now = self.clock()
         for identifier, delivery in tuple(self.deliveries.items()):
             if delivery.status == "pending":
@@ -101,13 +122,13 @@ class SpeechDelivery:
             if delivery.status != "pending" and now > delivery.expires:
                 del self.deliveries[identifier]
 
-    def clear(self):
+    def clear(self) -> None:
         self.deliveries.clear()
 
-    def cancel_pending(self):
+    def cancel_pending(self) -> None:
         for delivery in self.deliveries.values():
             if delivery.status == "pending":
                 delivery.status = "cancelled"
 
-    def close(self):
+    def close(self) -> None:
         self.clear()

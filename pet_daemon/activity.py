@@ -1,4 +1,4 @@
-def activity(tool, name=""):
+def activity(tool: str, name: str = "") -> str:
     tool_name = name.lower().rsplit("__", 1)[-1].rsplit(".", 1)[-1]
     if tool_name in ("read", "read_file", "readfile", "grep", "find", "search", "glob"):
         return "investigating"
@@ -27,7 +27,7 @@ def activity(tool, name=""):
     return "command"
 
 
-def result_summary(category, outcome):
+def result_summary(category: str, outcome: str) -> str:
     subject = {
         "testing": "Tests",
         "building": "Build",

@@ -1,12 +1,52 @@
-from dataclasses import replace
 import json
+from collections.abc import Sequence
+from dataclasses import replace
+from typing import Required, TypedDict
 from urllib.parse import urlsplit
 
-from .git import canonical_repository, command
+from ..work.models import RelatedLink
 from ..work.observations import PullRequest
+from .git import CommandPath, RunCommand, canonical_repository, command
+
+CheckRollup = TypedDict(
+    "CheckRollup",
+    {
+        "name": str,
+        "context": str,
+        "conclusion": str | None,
+        "state": str,
+        "status": str,
+        "source": str,
+        "app": dict[str, str] | None,
+        "__typename": str,
+        "headSha": str,
+        "sha": str,
+        "checkSuite": dict[str, str] | None,
+    },
+    total=False,
+)
 
 
-def pull_request_identity(url):
+class GitHubPullRequest(TypedDict, total=False):
+    number: Required[int]
+    url: Required[str]
+    state: Required[str]
+    mergedAt: str | None
+    reviewDecision: str | None
+    headRepositoryOwner: dict[str, str] | None
+    headRepository: dict[str, str] | None
+    statusCheckRollup: list[CheckRollup] | None
+    reviewRequests: list[dict[str, str]] | None
+    headRefOid: str
+    isDraft: bool
+    headRefName: str
+    title: str
+    body: str
+    baseRefName: str
+    baseRefOid: str
+
+
+def pull_request_identity(url: str) -> tuple[str, int | None]:
     parsed = urlsplit(url)
     parts = parsed.path.strip("/").split("/")
     if (
@@ -21,7 +61,7 @@ def pull_request_identity(url):
     return "", None
 
 
-def _pull_request(data, viewer=""):
+def _pull_request(data: GitHubPullRequest, viewer: str = "") -> PullRequest:
     repository, _ = pull_request_identity(data["url"])
     owner = data.get("headRepositoryOwner") or {}
     head_repository = data.get("headRepository") or {}
@@ -92,7 +132,9 @@ def _pull_request(data, viewer=""):
     )
 
 
-async def _viewer(records, path, run):
+async def _viewer(
+    records: Sequence[GitHubPullRequest], path: CommandPath, run: RunCommand
+) -> str:
     if not any(
         item.get("login")
         for data in records
@@ -105,7 +147,9 @@ async def _viewer(records, path, run):
         return ""
 
 
-async def _stack_links(pr, path, run):
+async def _stack_links(
+    pr: PullRequest, path: CommandPath, run: RunCommand
+) -> PullRequest:
     host, slug = pr.repository.split("/", 1)
     try:
         output = await run(
@@ -133,18 +177,18 @@ async def _stack_links(pr, path, run):
                 continue
             state = "MERGED" if item.get("merged_at") else item["state"].upper()
             links.append(
-                {
-                    "kind": "pull_request",
-                    "ref": f"https://{pr.repository}/pull/{item['number']}",
-                    "relationship": "stack_entry",
-                    "source": "github_stack",
-                    "stack": stack["number"],
-                    "position": position,
-                    "state": state,
-                    "is_draft": item.get("draft"),
-                    "head": (item.get("head") or {}).get("sha", ""),
-                    "head_branch": (item.get("head") or {}).get("ref", ""),
-                }
+                RelatedLink(
+                    kind="pull_request",
+                    ref=f"https://{pr.repository}/pull/{item['number']}",
+                    relationship="stack_entry",
+                    source="github_stack",
+                    stack=stack["number"],
+                    position=position,
+                    state=state,
+                    is_draft=item.get("draft"),
+                    head=(item.get("head") or {}).get("sha", ""),
+                    head_branch=(item.get("head") or {}).get("ref", ""),
+                )
             )
         return replace(pr, related_links=tuple(links))
     except (
@@ -159,8 +203,14 @@ async def _stack_links(pr, path, run):
 
 
 async def observe(
-    path, branch, number=None, run=command, repository="", url="", include_links=True
-):
+    path: CommandPath,
+    branch: str,
+    number: int | None = None,
+    run: RunCommand = command,
+    repository: str = "",
+    url: str = "",
+    include_links: bool = True,
+) -> PullRequest | None:
     fields = (
         "number,url,state,mergedAt,reviewDecision,statusCheckRollup,isDraft,headRefOid,"
         "headRepository,headRepositoryOwner,headRefName,reviewRequests,title,body,baseRefName,baseRefOid"

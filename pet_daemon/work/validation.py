@@ -1,7 +1,9 @@
 import json
 import re
+from dataclasses import replace
 from urllib.parse import urlsplit
 
+from .models import ArtifactDescriptor
 
 KINDS = {"branch", "pull_request", "document", "ticket", "patch"}
 FAILURES = {
@@ -14,7 +16,7 @@ FAILURES = {
 }
 
 
-def canonical(value):
+def canonical(value: object) -> str:
     return json.dumps(
         value,
         ensure_ascii=False,
@@ -24,7 +26,7 @@ def canonical(value):
     )
 
 
-def repository_identity(value):
+def repository_identity(value: str) -> str:
     if not value or value.startswith("local:"):
         return value
     if "://" in value:
@@ -35,7 +37,7 @@ def repository_identity(value):
     return value.removesuffix("/").removesuffix(".git").lower()
 
 
-def text(value, name, *, optional=False):
+def text(value: object, name: str, *, optional: bool = False) -> str:
     if value is None and optional:
         return ""
     if not isinstance(value, str) or not value.strip():
@@ -43,31 +45,42 @@ def text(value, name, *, optional=False):
     return value.strip()
 
 
-def descriptor(value):
-    if not isinstance(value, dict):
-        raise ValueError("artifact must be an object")
-    kind = value.get("kind")
-    if not isinstance(kind, str) or kind not in KINDS:
+def descriptor(value: ArtifactDescriptor) -> ArtifactDescriptor:
+    if value.kind not in KINDS:
         raise ValueError("unsupported artifact kind")
-    result = {"kind": kind, "ref": text(value.get("ref"), "artifact.ref")}
-    for key in ("repository", "revision", "checkout", "title"):
-        if value.get(key) not in (None, ""):
-            result[key] = text(value[key], f"artifact.{key}")
-    if "\0" in result.get("checkout", ""):
+    result = replace(
+        value,
+        ref=text(value.ref, "artifact.ref"),
+        repository=text(value.repository, "artifact.repository")
+        if value.repository
+        else "",
+        revision=text(value.revision, "artifact.revision")
+        if value.revision is not None
+        else None,
+        checkout=text(value.checkout, "artifact.checkout")
+        if value.checkout is not None
+        else None,
+        title=text(value.title, "artifact.title") if value.title is not None else None,
+    )
+    if result.checkout is not None and "\0" in result.checkout:
         raise ValueError(
             "artifact.checkout must be a filesystem path without NUL characters"
         )
-    result["repository"] = repository_identity(result.get("repository", ""))
-    if kind == "branch" and not result["repository"]:
+    result = replace(result, repository=repository_identity(result.repository))
+    if result.kind == "branch" and not result.repository:
         raise ValueError("branch artifacts require repository")
-    if kind == "pull_request" and not re.match(
-        r"https?://[^/]+/[^/]+/[^/]+/pull/\d+/?$", result["ref"]
+    if result.kind == "pull_request" and not re.match(
+        r"https?://[^/]+/[^/]+/[^/]+/pull/\d+/?$", result.ref
     ):
         raise ValueError("pull_request.ref must be a pull request URL")
-    if kind == "pull_request":
-        result["ref"] = result["ref"].rstrip("/")
-        parsed = urlsplit(result["ref"])
-        result["repository"] = repository_identity(
-            parsed.netloc + parsed.path.rsplit("/pull/", 1)[0]
+    if result.kind == "pull_request":
+        ref = result.ref.rstrip("/")
+        parsed = urlsplit(ref)
+        result = replace(
+            result,
+            ref=ref,
+            repository=repository_identity(
+                parsed.netloc + parsed.path.rsplit("/pull/", 1)[0]
+            ),
         )
     return result

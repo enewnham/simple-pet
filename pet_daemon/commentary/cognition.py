@@ -2,17 +2,40 @@ import asyncio
 import json
 import logging
 import time
-
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from .context import Context, PreparedCommentary
-from .summarization import summary_request
-from .repetition import repeat_match
-from .model import ModelClient
-from ..telemetry import event, trace
+from anthropic.types import TextBlockParam
 
+from ..attention import AttentionSelection
+from ..config import Config
+from ..runtime import SessionSnapshot, WorkSnapshot
+from ..storage import Memory
+from ..telemetry import event, trace
+from .context import Context, PreparedCommentary
+from .contracts import JSONSchema, ModelRequest, TextSchema
+from .model import ModelClient
+from .repetition import RepeatMatch, repeat_match
+from .summarization import summary_request
 
 log = logging.getLogger("pet-daemon")
+
+
+@dataclass(frozen=True)
+class SummaryEvidence:
+    recent_requests: tuple[str, ...]
+    session_context: str
+    progress: str
+    outcome: str | None
+    turn_active: bool
+    report_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class SummaryVersion:
+    generation: int
+    first_prompt: str
+    evidence: SummaryEvidence | None
 
 
 @dataclass(frozen=True)
@@ -20,25 +43,32 @@ class ObservationResult:
     speak: str | None
     session_context: str | None
     context_session: str | None
-    context_version: object
+    context_version: SummaryVersion | None
     prepared: PreparedCommentary
 
 
 class Cognition:
-    def __init__(self, client: ModelClient, config, *, memory, clock=time.time):
+    def __init__(
+        self,
+        client: ModelClient,
+        config: Config,
+        *,
+        memory: Memory,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
         self.client = client
         self.config = config
         self.clock = clock
         self.memory = memory
         self.context = Context(config, lambda: self.clock())
 
-    def summary_request(self, focus):
+    def summary_request(self, focus: SessionSnapshot) -> ModelRequest:
         return summary_request(
             self.config, self.memory, self.clock, self.request, focus
         )
 
-    def schema(self, speech_required=False):
-        speech = (
+    def schema(self, speech_required: bool = False) -> JSONSchema:
+        speech: TextSchema = (
             {"type": "string"}
             if speech_required
             else {"anyOf": [{"type": "string"}, {"type": "null"}]}
@@ -55,44 +85,49 @@ class Cognition:
             "additionalProperties": False,
         }
 
-    def request(self, payload, system, speech_required=False):
-        return dict(
-            model=self.config.model,
-            max_tokens=self.config.max_tokens,
-            timeout=self.config.request_timeout,
-            thinking={"type": "disabled"},
-            system=system,
-            messages=[
+    def request(
+        self,
+        payload: object,
+        system: Sequence[TextBlockParam],
+        speech_required: bool = False,
+    ) -> ModelRequest:
+        return {
+            "model": self.config.model,
+            "max_tokens": self.config.max_tokens,
+            "timeout": self.config.request_timeout,
+            "thinking": {"type": "disabled"},
+            "system": system,
+            "messages": [
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}
             ],
-            output_config={
+            "output_config": {
                 "effort": "low",
                 "format": {
                     "type": "json_schema",
                     "schema": self.schema(speech_required),
                 },
             },
-        )
+        }
 
-    def should_summarize(self, focus, reason):
+    def should_summarize(self, focus: SessionSnapshot | None, reason: str) -> bool:
         if not focus:
             return False
         if self.config.summarize_first_request_only:
             return (
                 reason == "prompt"
-                and focus.get("request_count", 0) > 0
-                and not focus.get("first_summary_attempted", False)
+                and focus.request_count > 0
+                and not focus.first_summary_attempted
             )
         return reason in self.config.summarize_on
 
-    def summary_version(self, focus):
+    def summary_version(self, focus: SessionSnapshot | None) -> SummaryVersion | None:
         if not focus:
             return None
         if self.config.summarize_first_request_only:
-            return focus.get("generation"), focus.get("first_prompt", "")
+            return SummaryVersion(focus.generation, focus.first_prompt, None)
         reports = self.memory.recent(
             limit=3,
-            session=focus["id"],
+            session=focus.id,
             event_types=(
                 "turn_done",
                 "turn_error",
@@ -101,31 +136,38 @@ class Cognition:
                 "interrupt",
             ),
         )
-        return (
-            focus.get("generation"),
-            focus.get("first_prompt", ""),
-            tuple(focus.get("recent_requests", ())),
-            focus.get("session_context", ""),
-            focus.get("progress", ""),
-            focus.get("outcome"),
-            focus.get("turn_active", False),
-            tuple(report["id"] for report in reports),
+        return SummaryVersion(
+            focus.generation,
+            focus.first_prompt,
+            SummaryEvidence(
+                tuple(focus.recent_requests),
+                focus.session_context,
+                focus.progress,
+                focus.outcome,
+                focus.turn_active,
+                tuple(report.id for report in reports),
+            ),
         )
 
-    async def summarize(self, focus):
+    async def summarize(self, focus: SessionSnapshot) -> str | None:
         request = self.summary_request(focus)
         result = await self.complete(request, "summary")
-        if set(result) != {"session_context"} or (
-            result["session_context"] is not None
-            and not isinstance(result["session_context"], str)
-        ):
+        if set(result) != {"session_context"}:
             raise ValueError("Invalid session context")
-        return result["session_context"]
+        context = result["session_context"]
+        if context is not None and not isinstance(context, str):
+            raise ValueError("Invalid session context")
+        return context
 
-    async def complete(self, request, reason):
+    async def complete(self, request: ModelRequest, reason: str) -> dict[str, object]:
         return await self.client.complete(request, reason)
 
-    async def observe(self, snapshot, selection, refresh=None):
+    async def observe(
+        self,
+        snapshot: WorkSnapshot,
+        selection: AttentionSelection,
+        refresh: Callable[[], WorkSnapshot] | None = None,
+    ) -> ObservationResult:
         reason = selection.reason
         explicit = selection.context is not None or reason in (
             "check_in",
@@ -137,21 +179,25 @@ class Cognition:
         context_version = self.summary_version(focus)
         prepared = self.context.prepare(snapshot, selection, self.request, explicit)
         summary = None
-        if self.should_summarize(focus, reason):
-            result, summary = await asyncio.gather(
+        if focus is not None and self.should_summarize(focus, reason):
+            raw_result, summary = await asyncio.gather(
                 self.complete(prepared.request, reason),
                 self.summarize(focus),
                 return_exceptions=True,
             )
-            if isinstance(result, Exception):
-                raise result
+            if isinstance(raw_result, BaseException):
+                raise raw_result
+            if isinstance(summary, BaseException) and not isinstance(
+                summary, Exception
+            ):
+                raise summary
             if isinstance(summary, Exception):
                 log.warning("Could not summarize session: %s", summary)
                 summary = None
         else:
-            result = await self.complete(prepared.request, reason)
-        self.validate_speech(result, explicit)
-        match = await self.repetition(result["speak"])
+            raw_result = await self.complete(prepared.request, reason)
+        speech = self.validate_speech(raw_result, explicit)
+        match = await self.repetition(speech)
         if match:
             event(
                 "speech.repetition",
@@ -160,14 +206,14 @@ class Cognition:
                 similarity=round(match.similarity, 3),
             )
             manual = selection.context is not None or reason in ("click", "explicit")
-            initial = result
+            initial = speech
             current = refresh() if refresh else snapshot
             refreshed = selection.refresh(current)
             if not selection.supported(current):
                 return ObservationResult(
                     None,
                     summary,
-                    focus["id"] if focus else None,
+                    focus.id if focus else None,
                     context_version,
                     prepared,
                 )
@@ -175,14 +221,14 @@ class Cognition:
                 current, refreshed, self.request, explicit, retry=True
             )
             try:
-                result = await self.complete(retry.request, reason)
-                self.validate_speech(result, explicit)
-            except Exception as error:
+                raw_result = await self.complete(retry.request, reason)
+                speech = self.validate_speech(raw_result, explicit)
+            except Exception as error:  # noqa: BLE001 - Keep failed model retries from discarding accepted speech.
                 event("speech.retry_failed", level=logging.WARNING, error=str(error))
-                result = initial if manual else {"speak": None}
+                speech = initial if manual else None
             else:
                 prepared = retry
-                match = await self.repetition(result["speak"])
+                match = await self.repetition(speech)
                 if match:
                     event(
                         "speech.repetition",
@@ -192,33 +238,34 @@ class Cognition:
                         action="acknowledgment" if manual else "silence",
                     )
                     if not manual:
-                        result = {"speak": None}
+                        speech = None
         trace(
             "observation.decision",
             reason=reason,
-            speaks=result["speak"] is not None,
+            speaks=speech is not None,
             summary_updated=summary is not None,
-            decision={**result, "session_context": summary},
+            decision={"speak": speech, "session_context": summary},
         )
         return ObservationResult(
-            result["speak"],
+            speech,
             summary,
-            focus["id"] if focus else None,
+            focus.id if focus else None,
             context_version,
             prepared,
         )
 
-    async def repetition(self, text):
+    async def repetition(self, text: str | None) -> RepeatMatch | None:
         if not text or not text.strip():
             return None
-        return await repeat_match(text, [row["text"] for row in self.memory.speech()])
+        return await repeat_match(text, [row.text for row in self.memory.speech()])
 
-    def validate_speech(self, result, required):
+    def validate_speech(self, result: dict[str, object], required: bool) -> str | None:
         if set(result) != {"speak"}:
             raise ValueError("Observation requires speak")
-        if result["speak"] is not None and not isinstance(result["speak"], str):
+        speech = result["speak"]
+        if speech is not None and not isinstance(speech, str):
             raise ValueError("Invalid observation text")
-        if required and (
-            not isinstance(result["speak"], str) or not result["speak"].strip()
-        ):
+        if required and (not isinstance(speech, str) or not speech.strip()):
             raise ValueError("Requested commentary requires speech")
+
+        return speech
