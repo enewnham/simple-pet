@@ -4,7 +4,6 @@ from typing import Callable
 
 @dataclass(frozen=True)
 class Observation:
-    now: float
     active: bool
     working: bool
     investigating: bool
@@ -15,10 +14,6 @@ class Observation:
     can_nap: bool
     restlessness: float
     rest_pressure: float
-    position: tuple = ()
-    pointer: tuple = ()
-    screen: tuple = ()
-    sessions: tuple = ()
 
 
 @dataclass(frozen=True)

@@ -21,10 +21,7 @@ class Behavior:
         self.state = None
         self.clip = None
         self.command = 0
-        self.idle_since = None
         self.inactive_since = None
-        self.greeted_idle = False
-        self.gesture_after = 0
         self.clear_since = None
         self.pointer_moved = -math.inf
         self.last_pointer = None
@@ -65,7 +62,7 @@ class Behavior:
             self.care_choices.remove(selected)
             kind, role, preferred = selected
         clip = self._resolve_clip(role, preferred, "idle")
-        self._play(clip, "care", "reaction")
+        self._play(clip, "care", "reaction", REACTION_SECONDS)
         if not sessions.engaged and self.clock() >= self.next_care_speech:
             self.care_remark = kind
             self.next_care_speech = self.clock() + self.rng.uniform(*self.config.care_speech_interval)
@@ -190,19 +187,10 @@ class Behavior:
     def _blocked(self):
         return not self.status or any(self.status[name] for name in ("speech", "dragging", "menu")) or self._near_pointer()
 
-    def _play(self, clip, name, kind="gesture", seconds=None, session=None):
-        if kind in ("error", "success", "reaction"):
-            seconds = REACTION_SECONDS
-        if seconds is not None:
-            repeats = max(1, math.ceil(seconds / clip.seconds))
-            if clip.max_repeats is not None:
-                repeats = min(repeats, clip.max_repeats)
-        else:
-            minimum, maximum = self.config.repeat_range
-            maximum = min(maximum, clip.max_repeats or math.inf,
-                          max(1, math.floor(self.config.repeat_budget / clip.seconds)))
-            minimum = min(minimum, maximum)
-            repeats = self.rng.randint(minimum, maximum)
+    def _play(self, clip, name, kind, seconds, session=None):
+        repeats = max(1, math.ceil(seconds / clip.seconds))
+        if clip.max_repeats is not None:
+            repeats = min(repeats, clip.max_repeats)
         command = self._next_id()
         duration = clip.seconds * repeats
         self.execution.start(Action(name, command, "animation", self.clock() + duration + 1, clip.role, kind))
@@ -214,7 +202,6 @@ class Behavior:
         else:
             trace("behavior.animation", activity=name, clip=clip.id, role=clip.role, repeats=repeats,
                   duration_seconds=round(duration, 3), command_id=command)
-        self.gesture_after = self.clock() + duration + self.config.gesture_cooldown
 
     def _resolve_clip(self, role, preferred, fallback):
         for candidate_role, candidate_id in ((role, preferred), (ANIMATION_ROLES[fallback], fallback)):
@@ -247,38 +234,8 @@ class Behavior:
             event("behavior.reaction", reaction=kind, clip=clip.id, role="rest", repeats=None,
                   duration_seconds=self.config.baseline_dwell, command_id=self.command, session=key)
         else:
-            self._play(clip, kind, REACTIONS[kind].kind, session=key)
+            self._play(clip, kind, REACTIONS[kind].kind, REACTION_SECONDS, session=key)
         return True
-
-    def success(self):
-        return self.react("success")
-
-    def attention(self, sessions, key):
-        lane = sessions.lanes[key]
-        return self.react("waiting" if lane.waiting else "investigation", sessions, key) if lane.waiting or lane.phase == "investigating" else False
-
-    def gesture(self, clip_id, sessions):
-        clip = self.pack.clips.get(clip_id)
-        if (not clip or clip_id not in self.pack.gesture_ids or not self.status or self.suspension
-                or self.status["dragging"] or self.status["menu"] or self.clock() < self.gesture_after):
-            return False
-        if ((clip.role == "celebrate" and not sessions.clean_convergence)
-                or (clip.role == "error" and not sessions.failed)
-                or (clip.role == "work" and not sessions.working)
-                or (clip.role == "attention" and not sessions.engaged)):
-            return False
-        self.wake("gesture")
-        self._interrupt("gesture")
-        self._play(clip, "gesture")
-        return True
-
-    def greet(self, sessions):
-        if (not self.status or sessions.engaged or self.idle_since is None
-                or self.clock() - self.idle_since < self.config.idle_greeting_seconds):
-            return False
-        accepted = self.react("click", sessions)
-        self.greeted_idle = accepted
-        return accepted
 
     def _walk(self):
         status = self.status
@@ -360,11 +317,8 @@ class Behavior:
         if sessions.engaged:
             self.inactive_since = None
             self.next_nap = None
-            self.idle_since = None
-            self.greeted_idle = False
         elif self.inactive_since is None:
             self.inactive_since = now
-            self.idle_since = now
             self.next_nap = now + self.rng.uniform(*self.config.nap_interval)
         blocked = self._blocked()
         if blocked:
@@ -378,7 +332,6 @@ class Behavior:
             self.clear_since = now
         inactive_seconds = 0 if self.inactive_since is None else now - self.inactive_since
         self.observation = Observation(
-            now=now,
             active=sessions.engaged,
             working=sessions.working,
             investigating=any(lane.working and lane.phase == "investigating" for lane in sessions.lanes.values()),
@@ -391,12 +344,6 @@ class Behavior:
                      and self.next_nap is not None and now >= self.next_nap),
             restlessness=min(1, (now - self.last_movement) / 300),
             rest_pressure=min(1, inactive_seconds / 240),
-            position=(status["x"], status["y"], status["width"], status["height"]),
-            pointer=(status["pointer"]["x"], status["pointer"]["y"]),
-            screen=tuple(status["screen"][name] for name in ("x", "y", "width", "height")),
-            sessions=tuple((key, lane.generation, lane.working, lane.waiting, lane.phase,
-                            tuple((call, item.activity) for call, item in lane.calls.items()))
-                           for key, lane in sorted(sessions.lanes.items())),
         )
         if self.sleeping:
             if sessions.engaged or blocked or now >= self.nap_until:

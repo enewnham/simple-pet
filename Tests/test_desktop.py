@@ -25,13 +25,11 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                             daemon_socket=directory + "/daemon.sock", overlay_socket=directory + "/overlay.sock",
                             observation_seconds=(3600, 3600), speech_ttl=1, memory_file=Path(directory) / "memory.sqlite3")
             config.behavior.naps = False
-            config.behavior.repeat_range = (1, 1)
-            config.behavior.gesture_cooldown = 0.05
             config.behavior.idle_pause = config.behavior.working_pause = (0.05, 0.05)
             config.behavior.resume_seconds = 0.05
             config.behavior.pointer_radius = 0.01
             config.behavior.walk_seconds = (0.2, 0.2)
-            config.behavior.baseline_dwell = config.behavior.idle_debounce = 0.05
+            config.behavior.baseline_dwell = 0.05
             config.behavior.error_seconds = 0.2
             entered, release = asyncio.Event(), asyncio.Event()
             requests = []

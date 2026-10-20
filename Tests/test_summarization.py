@@ -1,3 +1,4 @@
+from copy import deepcopy
 import json
 from pathlib import Path
 import tempfile
@@ -6,8 +7,8 @@ import unittest
 
 from pet_daemon.cognition import Cognition
 from pet_daemon.config import Config
-from pet_daemon.memory import Memory
-from pet_daemon.summarization import summary_request, summary_text
+from pet_daemon.memory import Memory, bounded
+from pet_daemon.prompts import select_prompt
 
 
 class SummarizationTests(unittest.TestCase):
@@ -27,12 +28,12 @@ class SummarizationTests(unittest.TestCase):
                                   "repo": "/repo", **values})
 
     def payload(self, request=None):
-        request = request or summary_request(self.context, self.focus)
+        request = request or self.context.summary_request(self.focus)
         return json.loads(request["messages"][0]["content"])
 
     def test_initial_checklist_and_later_completion_keep_their_provenance(self):
         self.event("turn_done", outcome="success", progress="Parser implemented and tests passed")
-        request = summary_request(self.context, self.focus)
+        request = self.context.summary_request(self.focus)
         payload = self.payload(request)
         self.assertIn("[ ] Implement parser", payload["initial_intent"])
         self.assertEqual(payload["historical_session_context"], "Parser work remains pending.")
@@ -70,43 +71,40 @@ class SummarizationTests(unittest.TestCase):
         self.assertIsNone(payload["current_report"]["outcome"])
         self.assertEqual(payload["current_report"]["progress"], "")
 
-    def test_budget_reduces_initial_history_before_recent_report(self):
-        self.config.prompt_max_bytes = 4000
+    def test_tiny_target_preserves_initial_intent_latest_request_and_current_report(self):
+        self.config.prompt_target_bytes = 1
         self.focus.update(first_prompt="Implement 猫 parser. " * 500,
-                          recent_requests=["Review 猫. " * 500] * 4,
-                          session_context="Historical 猫 plan. " * 100,
+                          recent_requests=["Earlier request", "Review 猫. " * 500],
                           progress="Current 猫 progress. " * 100)
         self.event("turn_done", outcome="success", progress="Parser delivered after verification")
-        request = summary_request(self.context, self.focus)
+        request = self.context.summary_request(self.focus)
         payload = self.payload(request)
-        self.assertLessEqual(len(json.dumps(request, ensure_ascii=False).encode()), self.config.prompt_max_bytes)
+        self.assertGreater(len(json.dumps(request, ensure_ascii=False).encode()), self.config.prompt_target_bytes)
+        self.assertEqual(payload["initial_intent"], select_prompt(self.focus["first_prompt"]))
+        self.assertEqual(payload["recent_requests"], [select_prompt(self.focus["recent_requests"][-1])])
+        self.assertEqual(payload["current_report"], {"progress": bounded(self.focus["progress"], 800), "outcome": "success"})
         self.assertEqual(payload["historical_session_context"], "")
-        self.assertLess(len(payload["initial_intent"]), 120)
-        self.assertIn("Parser delivered after verification", payload["reported_results"][0]["report"])
+        self.assertEqual(payload["reported_results"], [])
 
+    def test_whole_latest_report_can_cross_target_before_other_context_is_added(self):
+        self.event("turn_done", outcome="success", progress="Earlier parser result")
+        self.event("turn_done", outcome="success", progress="Latest parser verification " * 20)
+        self.config.prompt_target_bytes = 1
+        essential = self.context.summary_request(self.focus)
+        self.config.prompt_target_bytes = len(json.dumps(essential, ensure_ascii=False).encode()) + 1
+        request = self.context.summary_request(self.focus)
+        payload = self.payload(request)
+        self.assertGreater(len(json.dumps(request, ensure_ascii=False).encode()), self.config.prompt_target_bytes)
+        self.assertEqual(len(payload["reported_results"]), 1)
+        row = self.memory.recent(limit=1, session=self.focus["id"], event_types=("turn_done",))[0]
+        self.assertEqual(payload["reported_results"][0]["report"],
+                         bounded(row["summary"].removeprefix("turn_done").removeprefix(" | "), 320))
+        self.assertEqual(payload["historical_session_context"], "")
 
-class SummaryTextTests(unittest.TestCase):
-    def test_keeps_complete_sentences_within_the_storage_limit(self):
-        first = "Keep the parser API stable."
-        second = "The agent reported that parser tests passed."
-        text = first + "\n" + second + " " + "Additional details " * 30 + "."
-        self.assertEqual(summary_text(text), first + " " + second)
-
-    def test_preserves_short_summaries_without_truncation(self):
-        self.assertEqual(summary_text("  Keep the parser API stable.\nTests passed. "),
-                         "Keep the parser API stable. Tests passed.")
-
-    def test_rejects_an_overlong_first_sentence(self):
-        self.assertEqual(summary_text("The agent reported " + "parser details " * 40 + "."), "")
-
-    def test_abbreviations_and_decimals_do_not_end_an_overlong_sentence(self):
-        for beginning in ("Dr. Example selected version 1.2 of the parser ",
-                          "Keep aliases, e.g. the parser names ",
-                          "Keep aliases (e.g. the parser names) ",
-                          "The U.S. parser configuration "):
-            with self.subTest(beginning=beginning):
-                self.assertEqual(summary_text(beginning + "details " * 60 + "."), "")
-
-    def test_preserves_sentence_quotes_without_cutting_the_next_sentence(self):
-        complete = 'The agent reported "Checks passed."'
-        self.assertEqual(summary_text(complete + " " + "Details " * 60 + "."), complete)
+    def test_optional_requests_retain_chronology_without_mutating_session_input(self):
+        self.focus["recent_requests"] = ["Implement parser", "Keep aliases", "Verify compatibility"]
+        before = deepcopy(self.focus)
+        payload = self.payload()
+        self.assertEqual(payload["recent_requests"], self.focus["recent_requests"])
+        self.assertEqual(payload["historical_session_context"], self.focus["session_context"])
+        self.assertEqual(self.focus, before)

@@ -10,6 +10,8 @@ import tempfile
 import time
 import unittest
 
+from pet_daemon.sessions import Sessions
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT = ROOT / "bin" / "pet-notify"
@@ -202,6 +204,26 @@ class NotifyTests(unittest.TestCase):
         self.run_hook("claude", "StopFailure", {"session_id": "worker", "error": "API error"})
         packet = self.receive()
         self.assertEqual((packet["event"], packet["outcome"]), ("turn_error", "error"))
+
+    def test_question_tool_outcomes_determine_turn_completion(self):
+        for completion, extra, outcome in (
+                ("PostToolUse", {}, "success"),
+                ("PostToolUseFailure", {}, "error"),
+                ("PostToolUseFailure", {"is_interrupt": True}, "cancelled")):
+            with self.subTest(outcome=outcome):
+                sessions = Sessions(time.monotonic)
+                for event, payload in (
+                        ("UserPromptSubmit", {"prompt": "Choose a strategy"}),
+                        ("PreToolUse", {"tool_use_id": "question", "tool_name": "AskUserQuestion"}),
+                        (completion, {"tool_use_id": "question", "tool_name": "AskUserQuestion", **extra}),
+                        ("Stop", {})):
+                    result = self.run_hook("claude", event, {"session_id": "worker", **payload})
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    accepted = sessions.handle(self.receive())
+                    if event == completion:
+                        self.assertEqual(accepted["failure"], outcome == "error")
+                self.assertEqual(sessions.snapshot()["sessions"][0]["outcome"], outcome)
+                self.assertEqual(sessions.clean_convergence, outcome == "success")
 
     def test_codex_subagents_use_child_identity_and_parent_relationship(self):
         for event, expected in (("SubagentStart", "subagent_start"), ("SubagentStop", "subagent_done")):

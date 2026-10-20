@@ -60,27 +60,27 @@ class AttentionTests(unittest.TestCase):
         self.now = self.config.behavior.automatic_speech_cooldown_seconds
         self.assertTrue(self.attention.allowed("routine"))
 
-    def test_pending_repository_precedes_historical_goal(self):
+    def test_pending_opportunity_precedes_historical_goal(self):
         history = WorkSubject("codex:quiet", "session", 4, 100, 1, ())
-        repository = WorkSubject("repo:branch", "repository", 2, 10, 1, ())
-        self.assertEqual(selected_subject({"work": (history, repository)}), repository)
+        opportunity = WorkSubject("repo:branch", "opportunity", 2, 10, 1, ())
+        self.assertEqual(selected_subject({"work": (history, opportunity)}), opportunity)
 
-    def test_new_pending_evidence_precedes_older_repository(self):
-        older = WorkSubject("repo:older", "repository", 2, 10, 1, ())
-        newer = WorkSubject("repo:newer", "repository", 2, 20, 1, ())
+    def test_new_pending_evidence_precedes_older_opportunity(self):
+        older = WorkSubject("repo:older", "opportunity", 2, 10, 1, ())
+        newer = WorkSubject("repo:newer", "opportunity", 2, 20, 1, ())
         snapshot = {"work": (older, newer)}
         self.attention.scheduled(newer.id)
         self.assertEqual(self.attention.choose_work(snapshot), newer)
 
-    def test_explicit_repository_target_keeps_its_subject(self):
-        repository = WorkSubject("repo:branch", "repository", 2, 10, 1, ())
+    def test_explicit_opportunity_target_keeps_its_subject(self):
+        opportunity = WorkSubject("repo:branch", "opportunity", 2, 10, 1, ())
         waiting = WorkSubject("codex:waiting", "session", 0, 20, 1, ())
-        snapshot = {"work": (waiting, repository), "trigger": {"target_repository": repository.id}}
-        self.assertEqual(selected_subject(snapshot), repository)
+        snapshot = {"work": (waiting, opportunity), "trigger": {"target_opportunity": opportunity.id}}
+        self.assertEqual(selected_subject(snapshot), opportunity)
 
     def test_equally_recent_subjects_receive_fair_attention(self):
-        first = WorkSubject("repo:a", "repository", 2, 10, 1, ())
-        second = WorkSubject("repo:b", "repository", 2, 10, 1, ())
+        first = WorkSubject("repo:a", "opportunity", 2, 10, 1, ())
+        second = WorkSubject("repo:b", "opportunity", 2, 10, 1, ())
         snapshot = {"work": (first, second)}
         self.assertEqual(self.attention.choose_work(snapshot), first)
         self.attention.scheduled(first.id)

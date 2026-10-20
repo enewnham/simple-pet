@@ -30,18 +30,12 @@ class RandomChoices:
     def __init__(self):
         self.angle = 0
         self.walk = False
-        self.repeat_minimum = False
-        self.repeat_calls = []
 
     def random(self):
         return 0 if self.walk else 1
 
     def uniform(self, low, high):
         return self.angle if (low, high) == (0, 2 * math.pi) else low
-
-    def randint(self, low, high):
-        self.repeat_calls.append((low, high))
-        return low if self.repeat_minimum else high
 
     def choice(self, choices):
         return choices[0]
@@ -106,14 +100,13 @@ class BehaviorTests(unittest.TestCase):
             self.clock.advance(1)
         self.fail('The inactive pet did not wander')
 
-    def test_gesture_repeats_whole_cycles_with_authored_limit(self):
+    def test_success_repeats_whole_cycles_with_authored_limit(self):
         behavior = self.make_behavior({'hop': {'role': 'celebrate', 'frames': 5, 'fps': 5, 'max_repeats': 2}})
         self.clean_completion()
-        self.assertTrue(behavior.gesture('hop', self.sessions))
+        self.assertTrue(behavior.react('success'))
         self.assertEqual(self.animations()[-1]['repeats'], 2)
-        self.assertEqual(self.rng.repeat_calls, [(1, 2)])
         self.assertEqual(behavior.pending['until'], self.clock() + 3)
-        self.assertFalse(behavior.gesture('hop', self.sessions))
+        self.assertFalse(behavior.react('success'))
 
     def test_quiet_care_reuses_clips_and_click_satisfies_speech_need(self):
         behavior = self.make_behavior({'jumping': {'role': 'celebrate'}}, roaming=False,
@@ -183,23 +176,23 @@ class BehaviorTests(unittest.TestCase):
         self.advance(behavior, 5)
         self.assertTrue(any(a['id'] == 'jumping' for a in self.animations()))
 
-    def test_repeat_budget_keeps_long_clips_complete(self):
-        behavior = self.make_behavior({'hop': {'role': 'celebrate', 'frames': 10, 'fps': 2}},
-                                      repeat_range=(2, 9), repeat_budget=4)
+    def test_success_keeps_long_animation_cycles_complete(self):
+        behavior = self.make_behavior({'hop': {'role': 'celebrate', 'frames': 10, 'fps': 2}})
         self.clean_completion()
-        self.assertTrue(behavior.gesture('hop', self.sessions))
+        self.assertTrue(behavior.react('success'))
         self.assertEqual(self.animations()[-1]['repeats'], 1)
         self.clock.advance(4)
         behavior.tick('idle', self.sessions)
         self.assertEqual(self.animations()[-1]['id'], 'hop')
 
-    def test_rest_only_pack_stays_still_and_rejects_unavailable_gestures(self):
+    def test_rest_only_pack_stays_still_and_uses_rest_for_reactions(self):
         behavior = self.make_behavior()
         behavior.tick('idle', self.sessions)
         self.advance(behavior, 600)
         self.assertFalse(any('motion' in packet for packet in self.output))
         self.assertEqual({command['id'] for command in self.animations()}, {'quiet-pose'})
-        self.assertFalse(behavior.gesture('jumping', self.sessions))
+        self.assertTrue(behavior.react('success'))
+        self.assertEqual(self.animations()[-1]['id'], 'quiet-pose')
 
     def test_work_bursts_commit_then_rest_and_resume_during_an_active_turn(self):
         behavior = self.make_behavior({'busy': {'role': 'work', 'frames': 2, 'fps': 2}})
@@ -237,7 +230,6 @@ class BehaviorTests(unittest.TestCase):
     def test_work_burst_lasts_for_the_sampled_duration_in_whole_cycles(self):
         behavior = self.make_behavior({'busy': {'role': 'work', 'frames': 41, 'fps': 50}},
                                       work_burst_seconds=(12, 25))
-        self.rng.repeat_minimum = True
         self.start()
         behavior.tick('working', self.sessions)
         start = self.animations()[-1]
@@ -282,7 +274,7 @@ class BehaviorTests(unittest.TestCase):
     def test_reactions_preempt_and_remain_visible_during_other_work(self):
         behavior = self.make_behavior({'hello': {'role': 'greeting'}, 'uh-oh': {'role': 'error'},
                                        'hop': {'role': 'celebrate'}, 'busy': {'role': 'work'}})
-        behavior.gesture('hello', self.sessions)
+        behavior.react('start', self.sessions)
         self.start()
         behavior.react('trouble')
         self.assertEqual(self.animations()[-1]['id'], 'uh-oh')
@@ -350,12 +342,11 @@ class BehaviorTests(unittest.TestCase):
                                        'busy': {'role': 'work'}})
         self.sessions.handle({'harness': 'cli', 'event': 'tool_start', 'session': 'one',
                               'call': 'inspect', 'tool': 'Read file'})
-        self.assertTrue(behavior.attention(self.sessions, 'cli:one'))
+        self.assertTrue(behavior.react('investigation', self.sessions, 'cli:one'))
         self.assertEqual(self.animations()[-1]['id'], 'review')
         self.sessions.handle({'harness': 'cli', 'event': 'waiting', 'session': 'one', 'call': 'question'})
-        self.assertTrue(behavior.attention(self.sessions, 'cli:one'))
+        self.assertTrue(behavior.react('waiting', self.sessions, 'cli:one'))
         self.assertEqual(self.animations()[-1]['id'], 'waiting')
-        self.assertFalse(behavior.gesture('busy', self.sessions))
 
     def test_walk_waits_for_matching_motion_feedback(self):
         behavior = self.make_behavior({'west': {'role': 'walk-left'}, 'east': {'role': 'walk-right'}})
@@ -476,8 +467,6 @@ class BehaviorTests(unittest.TestCase):
         self.advance(behavior, 121)
         self.assertTrue(any(packet.get('sleeping') is True for packet in self.output))
         self.assertNotIn('snooze', [command['id'] for command in self.animations()])
-        self.assertNotIn('snooze', behavior.pack.gesture_ids)
-        self.assertFalse(behavior.gesture('snooze', self.sessions))
 
     def wait_for_nap(self, behavior):
         for _ in range(300):

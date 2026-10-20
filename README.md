@@ -5,7 +5,7 @@ A native macOS desktop pet that speaks about your coding agents’ work. A local
 ![Simple Pet demo](docs/media/simple-pet.webp)
 
 - Tracks concurrent work across Claude Code, Codex, Cursor CLI, and command wrappers.
-- Speaks in a configurable persona and remembers work and recent remarks across restarts.
+- Speaks in a configurable persona and remembers session context and recent remarks across restarts.
 - Roams, reacts to work, and takes short naps when idle.
 - Supports custom sprite packs, dragging, and clicking interactions.
 
@@ -66,8 +66,11 @@ examples/pet-run pytest
 Edit `pet.config.json` and restart the daemon to apply changes. Paths are relative to the configuration file. See [pet.config.example.json](pet.config.example.json) for all settings and defaults. Set `pet_dir` to your imported sprite pack.
 
 Customize `persona` to change the pet's voice. Use `memory_retention_days` and
-`memory_max_events` to limit remembered work. Install and authenticate `gh` to include
-PR status in commentary.
+`memory_max_events` to limit remembered work. Install and authenticate `gh` for
+GitHub PR and stack observations.
+
+Use `prompt_target_bytes` to control how much optional context is included in model
+requests. Requests can exceed the target to preserve complete context.
 
 The pet occasionally reacts to negative user prompts with its sad animation.
 Set `behavior.sentiment_reactions` to `false` to disable these reactions.

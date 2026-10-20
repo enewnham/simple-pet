@@ -53,7 +53,3 @@ class Pack:
 
     def role(self, *roles):
         return [clip for clip in self.clips.values() if clip.role in roles]
-
-    @property
-    def gesture_ids(self):
-        return sorted(clip.id for clip in self.clips.values() if clip.role not in ("rest", "sleep", "walk-left", "walk-right", "gaze"))

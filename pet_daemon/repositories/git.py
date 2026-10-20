@@ -1,5 +1,8 @@
 import asyncio
 from dataclasses import dataclass
+from pathlib import Path
+import re
+from urllib.parse import urlsplit
 
 
 async def command(*args, cwd=None, timeout=10):
@@ -29,10 +32,44 @@ class GitObservation:
     upstream: str
     ahead: int
     behind: int
+    repository: str = ""
 
     @property
     def pending(self):
         return bool(self.staged or self.unstaged or self.untracked or self.conflicts or self.ahead)
+
+
+def canonical_repository(value):
+    value = value.strip().rstrip("/")
+    if not value or value.startswith("local:"):
+        return value
+    if "://" in value:
+        parsed = urlsplit(value)
+        if not parsed.hostname:
+            return ""
+        host, path = parsed.hostname, parsed.path
+    else:
+        match = re.fullmatch(r"(?:[^@/]+@)?([^/:]+):(.+)", value)
+        if match:
+            host, path = match.groups()
+        elif "/" in value and not value.startswith(("/", ".")):
+            host, path = value.split("/", 1)
+        else:
+            return ""
+    path = path.strip("/").removesuffix(".git")
+    return f"{host}/{path}".lower() if path else ""
+
+
+async def repository_identity(path, run=command):
+    remotes = (await run("git", "remote", cwd=path)).splitlines()
+    if remotes:
+        remote = "origin" if "origin" in remotes else sorted(remotes)[0]
+        url = (await run("git", "remote", "get-url", remote, cwd=path)).strip()
+        repository = canonical_repository(url)
+        if repository:
+            return repository
+    common = (await run("git", "rev-parse", "--path-format=absolute", "--git-common-dir", cwd=path)).strip()
+    return "local:" + str(Path(common).resolve())
 
 
 async def discover(path, run=command):
@@ -72,4 +109,5 @@ async def observe(path, run=command):
             current_branch = "(detached)"
     if (head != "(initial)" and identity.strip() != head) or current_branch != branch:
         raise RuntimeError("Repository changed during observation")
-    return GitObservation(path, branch, head, staged, unstaged, untracked, conflicts, upstream, ahead, behind)
+    repository = await repository_identity(path, run)
+    return GitObservation(path, branch, head, staged, unstaged, untracked, conflicts, upstream, ahead, behind, repository)

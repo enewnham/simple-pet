@@ -7,9 +7,10 @@ from pathlib import Path
 from .activity import activity, result_summary
 from .prompts import select_prompt
 from .telemetry import verbose
+from .work import WorkStore
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def bounded(value, limit=240):
@@ -29,7 +30,7 @@ class Memory:
         path.chmod(0o600)
         self.db.row_factory = sqlite3.Row
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (4, SCHEMA_VERSION):
+        if version not in (4, 5, SCHEMA_VERSION):
             self.db.executescript("""
                 DROP TRIGGER IF EXISTS events_insert;
                 DROP TRIGGER IF EXISTS events_delete;
@@ -79,6 +80,7 @@ class Memory:
                 PRIMARY KEY(pet, worktree)
             );
         """)
+        self.work = WorkStore(self.db, pet, clock, retention_days=self.retention_days)
         self.db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self.prune()
 
@@ -94,6 +96,7 @@ class Memory:
             self.db.execute("DELETE FROM projects WHERE timestamp < ? OR rowid NOT IN (SELECT rowid FROM projects ORDER BY timestamp DESC LIMIT 128)", (cutoff,))
             self.db.execute("DELETE FROM contexts WHERE timestamp < ? OR rowid NOT IN (SELECT rowid FROM contexts ORDER BY timestamp DESC LIMIT 128)", (cutoff,))
         self.db.execute("PRAGMA incremental_vacuum(64)")
+        self.work.prune()
 
     def record_event(self, event, session=None):
         kind = event["event"]
@@ -211,7 +214,7 @@ class Memory:
                 first_prompt=excluded.first_prompt, session_context=excluded.session_context,
                 recent_requests=excluded.recent_requests, timestamp=excluded.timestamp,
                 request_count=excluded.request_count, first_summary_attempted=excluded.first_summary_attempted""",
-                (self.pet, session, select_prompt(first_prompt), bounded(summary, 400), json.dumps(requests), self.clock(),
+                (self.pet, session, select_prompt(first_prompt), summary or '', json.dumps(requests), self.clock(),
                  count, first_summary_attempted))
         self.prune()
 
@@ -227,6 +230,13 @@ class Memory:
     def repository_associations(self):
         rows = self.db.execute("SELECT session,worktree FROM repository_associations WHERE pet=?", (self.pet,)).fetchall()
         return [dict(row) for row in rows]
+
+    def forget_repository(self, worktree):
+        with self.db:
+            self.db.execute("DELETE FROM repository_associations WHERE pet=? AND worktree=?", (self.pet, worktree))
+            rows = self.db.execute("SELECT worktree,observation FROM repositories WHERE pet=?", (self.pet,)).fetchall()
+            subjects = [row["worktree"] for row in rows if json.loads(row["observation"])["worktree"] == worktree]
+            self.db.executemany("DELETE FROM repositories WHERE pet=? AND worktree=?", ((self.pet, subject) for subject in subjects))
 
     def save_repository(self, worktree, observation):
         with self.db:
@@ -247,6 +257,7 @@ class Memory:
             self.db.execute("DELETE FROM speech WHERE pet=?", (self.pet,))
 
     def clear(self):
+        self.work.clear()
         with self.db:
             for table in ("events", "projects", "speech", "contexts", "repository_associations", "repositories"):
                 self.db.execute(f"DELETE FROM {table} WHERE pet=?", (self.pet,))

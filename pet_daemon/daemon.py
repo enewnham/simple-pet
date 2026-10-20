@@ -15,20 +15,23 @@ import time
 from .attention import Attention
 from .behavior import Behavior
 from .cognition import Cognition
+from .commentary import Commentary
 from .episodes import Episodes
-from .memory import Memory, bounded
+from .events import AgentEvents
+from .memory import Memory
 from .sessions import Sessions
 from .processes import ProcessTracker
 from .repositories import RepositoryTracker
-from .work import build_work
 from .sprites import Pack
-from .summarization import summary_text
-from .sentiment import analyzer, sentiment_score, NEGATIVE_THRESHOLD, REACTION_CHANCE, COOLDOWN_SECONDS, DUPLICATE_SECONDS
-from .telemetry import event, observation, trace, verbose
+from .telemetry import event, trace, verbose
 
 
 log = logging.getLogger("pet-daemon")
 MAX_INPUT_BYTES = 2000
+
+
+def reject_constant(value):
+    raise ValueError(f"Invalid JSON constant: {value}")
 
 
 def bind_socket(path):
@@ -87,36 +90,29 @@ class Daemon:
         self.rng = rng or random.Random()
         self.pack = Pack(config.pet_dir)
         self.sessions = Sessions(clock, config.stale_seconds, config.completed_retention_seconds, config.activity_fresh_seconds)
+        self.episodes = Episodes()
         self.attention = Attention(config, clock, self.rng)
         self.processes = ProcessTracker(clock=clock, interval=config.process_probe_seconds)
-        self.episodes = Episodes()
-        self.last_attention_attempt = float("-inf")
-        self.request_reason = None
-        self.request_revision = 0
-        self.speech_revision = 0
         self.behavior = Behavior(self.pack, config.behavior, clock, self.rng, self.emit)
         self.memory = Memory(config.memory_file, self.pack.pet, time.time, config.memory_retention_days, config.memory_max_events, speech_history_seconds=config.speech_history_seconds)
         self.cognition = Cognition(client, config, self.pack, memory=self.memory)
         self.repositories = RepositoryTracker(self.memory, local_interval=config.repository_refresh_seconds, github_interval=config.github_refresh_seconds)
+        self.commentary = Commentary(
+            config, sessions=self.sessions, episodes=self.episodes, attention=self.attention,
+            behavior=self.behavior, cognition=self.cognition, repositories=self.repositories,
+            memory=self.memory, emit=self.emit, clock=clock, rng=self.rng,
+        )
+        self.events = AgentEvents(
+            config, sessions=self.sessions, episodes=self.episodes, repositories=self.repositories,
+            memory=self.memory, behavior=self.behavior, queue=self.commentary.queue, clock=clock, rng=self.rng,
+        )
         self.process_task = None
         self.transport = None
         self.identity = None
         self.sender = None
         self.child = None
         self.loop_task = None
-        self.request_task = None
-        self.system_sleeping = False
-        self.last_reaction_state = None
-        self.repository_attention = {}
-        self.pending = None
-        self.manual = None
-        self.clicked = False
-        self.last_speech = None
-        self.error_until = 0
-        self.sentiment_after = float("-inf")
-        analyzer()
         self.next_prune = 0
-        self.next_observation = clock() + self.rng.uniform(*config.observation_seconds)
         self.stopping = asyncio.Event()
 
     async def start(self):
@@ -134,7 +130,7 @@ class Daemon:
         self.sender.setblocking(False)
         self.loop_task = asyncio.create_task(self.loop())
         verbose("daemon.started", config=asdict(self.config), pet=self.pack.pet,
-              clips={key: asdict(clip) for key, clip in self.pack.clips.items()}, next_observation=self.next_observation)
+              clips={key: asdict(clip) for key, clip in self.pack.clips.items()}, next_observation=self.attention.next_observation)
         event("daemon.listening", socket=self.config.daemon_socket, pet=self.pack.pet, model=self.config.model,
               stale_seconds=self.config.stale_seconds, retention_seconds=self.config.completed_retention_seconds)
 
@@ -151,185 +147,53 @@ class Daemon:
             log.warning("Renderer delivery failed: %s", error)
             return False
 
-    @property
-    def pending(self):
-        return self.attention.pending
-
-    @pending.setter
-    def pending(self, value):
-        self.attention.pending = value
-
-    @property
-    def next_observation(self):
-        return self.attention.next_observation
-
-    @next_observation.setter
-    def next_observation(self, value):
-        self.attention.next_observation = value
-
-    @property
-    def last_attention_attempt(self):
-        return self.attention.last_attempt
-
-    @last_attention_attempt.setter
-    def last_attention_attempt(self, value):
-        self.attention.last_attempt = value
-
-    def queue(self, reason, trigger=None):
-        self.attention.queue(reason, trigger, self.sessions.failed)
-
-    def snapshot(self, trigger=None):
-        snapshot = {**self.sessions.snapshot(), "trigger": trigger, "sleeping": self.behavior.sleeping}
-        repositories = self.repositories.snapshot()
-        snapshot["repositories"] = [{**asdict(item), "pending": item.pending} for item in repositories]
-        snapshot["work"] = build_work(snapshot, repositories, now=time.time())
-        return snapshot
-
     async def probe_processes(self):
         result = await self.processes.refresh(self.sessions.process_owners())
         self.sessions.apply_process_status(result)
-
-    def activity(self):
-        return "error" if self.clock() < self.error_until else "working" if self.sessions.working else "idle"
 
     def receive(self, data):
         if not data or len(data) > MAX_INPUT_BYTES:
             return
         try:
-            packet = json.loads(data.decode("utf-8"), parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
-            if not isinstance(packet, dict):
-                return
-            kind = packet.get("kind")
-            if kind == "clear_speech":
-                self.clear_speech()
-            elif kind == "clear_memory":
-                self.clear_memory()
-            elif kind == "event":
-                result = self.sessions.handle(packet)
-                if result:
-                    key = result["session"]
-                    lane = self.sessions.lanes.get(key)
-                    self.repositories.associate(key, lane.repo)
-                    if not lane.context_loaded:
-                        lane.context_loaded = True
-                        try:
-                            stored = self.memory.context(key)
-                            if stored is None:
-                                for alias in packet.get("aliases", []):
-                                    stored = self.memory.context(f"{packet['harness']}:{alias}")
-                                    if stored is not None:
-                                        break
-                            if stored:
-                                if stored["request_count"] or not lane.request_count:
-                                    lane.first_prompt = stored["first_prompt"] or lane.first_prompt
-                                lane.session_context = stored["session_context"]
-                                lane.recent_requests = [*stored["recent_requests"], *lane.recent_requests][-4:]
-                                lane.request_count += stored["request_count"]
-                                lane.first_summary_attempted = stored["first_summary_attempted"]
-                                lane.goal = lane.session_context or lane.first_prompt
-                        except sqlite3.Error as error:
-                            log.warning("Could not restore pet session context: %s", error)
-                    if packet["event"] in ("intent", "subagent_start") and lane.first_prompt:
-                        try:
-                            self.memory.save_context(key, lane.first_prompt, lane.session_context, lane.recent_requests,
-                                                               lane.request_count, lane.first_summary_attempted)
-                        except sqlite3.Error as error:
-                            log.warning("Could not save pet session context: %s", error)
-                    state = {"id": key, "repo": lane.repo, "goal": lane.goal, "last_tool": lane.last_tool, "outcome": lane.outcome, "activity": result["activity"]}
-                    trigger = {**packet, "target_session": key, "repo": lane.repo, "activity": result["activity"]}
-                    if packet["event"] in ("turn_done", "turn_error", "subagent_done", "interrupt", "session_end"):
-                        trigger["outcome"] = lane.outcome
-                    try:
-                        self.memory.record_event(packet, state)
-                    except sqlite3.Error as error:
-                        log.warning("Could not record pet event: %s", error)
-                    episodes = self.episodes.handle(packet, result, self.sessions)
-                    for episode in episodes:
-                        if not self.system_sleeping:
-                            self.behavior.react(episode.kind, self.sessions, key)
-                        episode_trigger = {**trigger, "episode": episode.kind, "generation": episode.generation,
-                                           "serial": episode.serial, "activity": episode.activity}
-                        if episode.kind in ("trouble", "failure"):
-                            self.error_until = self.clock() + self.config.behavior.error_seconds
-                            self.queue("failure", episode_trigger)
-                        elif episode.kind == "start" and packet["event"] in ("intent", "subagent_start"):
-                            self.queue("prompt", episode_trigger)
-                        elif episode.kind == "waiting":
-                            episode_trigger["sessions"] = [key]
-                            self.queue("check_in", episode_trigger)
-                        elif episode.kind in ("success", "cancelled", "recovery"):
-                            self.queue("completion", episode_trigger)
-                    if packet["event"] == "intent" and not lane.parent:
-                        self.react_to_sentiment(packet, key, lane)
-                    if not self.system_sleeping:
-                        self.behavior.tick(self.activity(), self.sessions)
-                verbose("hook.received", packet=packet, result=result, snapshot=self.sessions.snapshot())
-            elif kind == "renderer":
-                if packet.get("event") == "status":
-                    if self.behavior.renderer_status(packet):
-                        sleeping = packet.get("system_sleeping")
-                        if type(sleeping) is bool:
-                            self.system_sleep_changed(sleeping)
-                        if not self.system_sleeping:
-                            self.behavior.tick(self.activity(), self.sessions)
-                elif packet.get("event") in ("system_sleep", "system_wake"):
-                    self.system_sleep_changed(packet["event"] == "system_sleep")
-                elif packet.get("event") == "click":
-                    self.click()
-                else:
-                    trace("renderer.feedback", command_id=packet.get("command_id"), feedback=packet.get("event"),
-                          result=packet.get("result"), packet=packet)
-                    self.behavior.completion(packet)
-            elif kind == "speak" and isinstance(packet.get("context"), str):
-                ttl = packet.get("ttl")
-                if ttl is None or (type(ttl) in (int, float) and math.isfinite(ttl) and ttl >= 0):
-                    self.behavior.wake("speech_request")
-                    self.behavior.stop_movement()
-                    self.preempt()
-                    self.manual = (packet["context"], ttl)
-                    trace("speech.requested", context=packet["context"], ttl=ttl)
-        except (ValueError, KeyError, TypeError, UnicodeError) as error:
+            packet = json.loads(data.decode("utf-8"), parse_constant=reject_constant)
+        except (ValueError, UnicodeError) as error:
             trace("input.rejected", error=str(error))
-            log.debug("Ignoring malformed datagram")
+            return
+        if not isinstance(packet, dict):
+            return
+        kind = packet.get("kind")
+        if kind == "clear_speech":
+            self.commentary.clear_speech()
+        elif kind == "clear_memory":
+            self.clear_memory()
+        elif kind == "event":
+            self.events.handle(packet, self.commentary.suspended)
+        elif kind == "renderer":
+            self.receive_renderer(packet)
+        elif kind == "speak" and isinstance(packet.get("context"), str):
+            ttl = packet.get("ttl")
+            if ttl is None or (type(ttl) in (int, float) and math.isfinite(ttl) and ttl >= 0):
+                self.commentary.speak(packet["context"], ttl)
 
-    def react_to_sentiment(self, packet, key, lane):
-        if not self.config.behavior.sentiment_reactions:
-            return
-        now = self.clock()
-        text = packet.get("sentiment_text", packet.get("goal", ""))
-        identity = (packet.get("turn"), text)
-        if lane.sentiment_identity == identity and (packet.get("turn") or now - lane.sentiment_seen < DUPLICATE_SECONDS):
-            trace("sentiment.evaluated", session=key, decision="duplicate")
-            return
-        lane.sentiment_identity = identity
-        lane.sentiment_seen = now
-        score = sentiment_score(text)
-        lane.user_sentiment = score if score <= NEGATIVE_THRESHOLD else None
-        if score > NEGATIVE_THRESHOLD:
-            decision = "neutral"
-        elif now < self.sentiment_after:
-            decision = "cooldown"
-        elif self.system_sleeping:
-            decision = "sleeping"
-        elif self.rng.random() >= REACTION_CHANCE:
-            decision = "chance"
-        elif self.behavior.react("frustration", self.sessions, key):
-            self.sentiment_after = now + COOLDOWN_SECONDS
-            decision = "played"
+    def receive_renderer(self, packet):
+        feedback = packet.get("event")
+        if feedback == "speech_accepted":
+            self.commentary.delivery.acknowledge(packet)
+        elif feedback == "status":
+            if self.behavior.renderer_status(packet):
+                sleeping = packet.get("system_sleeping")
+                if type(sleeping) is bool:
+                    self.system_sleep_changed(sleeping)
+                if not self.commentary.suspended:
+                    self.behavior.tick(self.events.activity(), self.sessions)
+        elif feedback in ("system_sleep", "system_wake"):
+            self.system_sleep_changed(feedback == "system_sleep")
+        elif feedback == "click":
+            self.commentary.click()
         else:
-            decision = "blocked"
-        trace("sentiment.evaluated", session=key, compound=score, decision=decision)
-
-    def clear_speech(self):
-        try:
-            self.memory.clear_speech()
-        except sqlite3.Error as error:
-            log.warning("Could not clear pet speech: %s", error)
-            return
-        self.speech_revision += 1
-        self.last_speech = None
-        self.emit({"text": "", "ttl": 0})
-        event("speech.cleared", pet=self.pack.pet)
+            trace("renderer.feedback", command_id=packet.get("command_id"), feedback=feedback,
+                  result=packet.get("result"), packet=packet)
+            self.behavior.completion(packet)
 
     def clear_memory(self):
         try:
@@ -337,178 +201,24 @@ class Daemon:
         except sqlite3.Error as error:
             log.warning("Could not clear pet memory: %s", error)
             return
-        if self.request_task:
-            self.request_task.cancel()
         self.repositories.clear()
         self.sessions = Sessions(self.clock, self.config.stale_seconds, self.config.completed_retention_seconds, self.config.activity_fresh_seconds)
         self.episodes = Episodes()
-        self.last_attention_attempt = float("-inf")
-        self.request_revision += 1
-        self.pending = None
-        self.manual = None
-        self.clicked = False
-        self.last_speech = None
-        self.last_reaction_state = None
-        self.repository_attention = {}
-        self.error_until = 0
-        self.sentiment_after = float("-inf")
-        self.next_observation = self.clock() + self.rng.uniform(*self.config.observation_seconds)
+        self.events.reset(self.sessions, self.episodes)
+        self.commentary.reset(self.sessions, self.episodes)
         self.emit({"text": "", "ttl": 0})
-        trace("memory.cleared", pet=self.pack.pet)
-        log.info("cleared knowledge for pet=%s", self.pack.pet)
-
-    def speech_duration(self, speech):
-        return max(self.config.speech_ttl, 3 + len(speech.split()) / 2)
+        event("memory.cleared", pet=self.pack.pet)
 
     def system_sleep_changed(self, sleeping):
-        if sleeping == self.system_sleeping:
+        if sleeping == self.commentary.suspended:
             return
-        self.system_sleeping = sleeping
         event("system.sleep" if sleeping else "system.wake")
         if sleeping:
             self.behavior.suspend("system_sleep")
-            self.request_revision += 1
-            if self.request_task:
-                self.request_task.cancel()
-            self.last_speech = None
-            self.pending = None
         else:
             self.behavior.resume()
-            self.pending = None
             self.sessions.prune()
-            for lane in self.sessions.lanes.values():
-                if lane.active:
-                    lane.last_check_in = self.clock()
-            self.last_reaction_state = self.sessions.reaction_state()
-            self.next_observation = self.clock() + self.rng.uniform(*self.config.observation_seconds)
-
-    def preempt(self):
-        self.request_revision += 1
-        if self.request_task:
-            self.request_task.cancel()
-        self.pending = None
-
-    def click(self):
-        self.behavior.satisfy()
-        self.behavior.wake("click")
-        self.behavior.react("click", self.sessions)
-        if self.request_task and self.request_reason == "click" and not self.request_task.done():
-            return
-        self.preempt()
-        self.clicked = True
-        trace("speech.requested", reason="click")
-
-    async def observe(self, reason, context=None, ttl=None, trigger=None):
-        if self.system_sleeping:
-            return
-        with observation() as usage:
-            started = self.clock()
-            outcome = "failed"
-            focus_session = None
-            revision = self.request_revision
-            speech_revision = self.speech_revision
-            sessions = self.sessions
-            include_activity = reason == "check_in"
-            keys = trigger.get("sessions") if include_activity and trigger else None
-            episode_key = trigger.get("target_session") if trigger and "episode" in trigger else None
-            if episode_key:
-                keys = [self.sessions.aliases.get(episode_key, episode_key)]
-            observation_context = self.sessions.observation_context(include_activity, keys)
-            trace("observation.started", reason=reason)
-            self.last_reaction_state = self.sessions.reaction_state()
-            timeout = self.config.request_timeout
-            try:
-                snapshot = self.snapshot(trigger)
-                repository_revision = self.repositories.signature()
-                selected = self.cognition.selected_sessions(snapshot, reason)
-                focus_snapshot = selected[0] if selected else None
-                focus_session = focus_snapshot["id"] if focus_snapshot else None
-                if (self.config.summarize_first_request_only
-                        and self.cognition.should_summarize(focus_snapshot, reason)):
-                    focus = self.sessions.lanes[focus_snapshot["id"]]
-                    focus.first_summary_attempted = True
-                    try:
-                        self.memory.save_context(focus_snapshot["id"], focus.first_prompt, focus.session_context,
-                                                           focus.recent_requests, focus.request_count, True)
-                    except sqlite3.Error as error:
-                        log.warning("Could not save pet session context: %s", error)
-                        focus_snapshot["first_summary_attempted"] = True
-                result = await asyncio.wait_for(
-                    self.cognition.observe(snapshot, reason, context, refresh=lambda: self.snapshot(trigger)),
-                    timeout=timeout,
-                )
-                if sessions is not self.sessions:
-                    outcome = "discarded"
-                    event("observation.discarded", reason="memory_cleared", trigger=reason, session=focus_session)
-                    return
-                relevant = observation_context == self.sessions.observation_context(include_activity, keys)
-                repository_relevant = repository_revision == self.repositories.signature()
-                if episode_key:
-                    canonical = self.sessions.aliases.get(episode_key, episode_key)
-                    before = next(iter(observation_context.values()), None)
-                    current = self.sessions.observation_context(include_activity, [canonical]).get(canonical)
-                    if trigger["episode"] == "waiting" and before is not None and current is not None:
-                        before, current = before[:5], current[:5]
-                    relevant = self.episodes.relevant(trigger, self.sessions) and before == current
-                if revision != self.request_revision or (context is None and (not relevant or not repository_relevant)):
-                    outcome = "discarded"
-                    event("observation.discarded", reason="preempted" if revision != self.request_revision else "subject_changed",
-                          trigger=reason, session=focus_session, decision=result)
-                    return
-                summary = summary_text(result["session_context"]) if result["session_context"] is not None else None
-                focus = self.sessions.lanes.get(result["context_session"])
-                if summary is not None and summary.strip() and focus:
-                    current = self.sessions.snapshot(keys=[result["context_session"]])["sessions"]
-                    version = self.cognition.summary_version(current[0]) if current else None
-                    if version == result["context_version"]:
-                        focus.session_context = summary
-                        focus.goal = focus.session_context or focus.first_prompt
-                        try:
-                            self.memory.save_context(result["context_session"], focus.first_prompt, focus.session_context,
-                                                               focus.recent_requests, focus.request_count, focus.first_summary_attempted)
-                        except sqlite3.Error as error:
-                            log.warning("Could not save pet session context: %s", error)
-                        trace("memory.context_updated", session=result["context_session"])
-                    else:
-                        trace("memory.context_discarded", reason="session_changed", session=result["context_session"])
-                if speech_revision != self.speech_revision:
-                    outcome = "discarded"
-                    event("observation.discarded", reason="speech_cleared", trigger=reason, session=focus_session)
-                    return
-                subject = self.attention.choose_work(snapshot)
-                if (subject and subject.kind == "repository" and context is None and reason not in ("explicit", "care")
-                        and not self.cognition.quiet_greeting(snapshot, reason)):
-                    self.repository_attention[subject.id] = subject.revision
-                outcome = "silent"
-                if result["speak"] is not None:
-                    speech = result["speak"]
-                    if speech.strip() and ttl != 0:
-                        self.behavior.wake("speech")
-                        self.behavior.stop_movement()
-                    reading_seconds = self.speech_duration(speech)
-                    delivered = self.emit({"text": speech, "ttl": reading_seconds if ttl is None else ttl})
-                    if not delivered:
-                        outcome = "delivery_failed"
-                    else:
-                        outcome = "spoken" if speech.strip() and ttl != 0 else "suppressed"
-                    event("speech.delivered" if delivered else "speech.delivery_failed",
-                          level=logging.INFO if delivered else logging.WARNING,
-                          session=focus_session, text=speech, ttl=reading_seconds if ttl is None else ttl)
-                    if delivered and speech.strip() and ttl != 0:
-                        self.last_speech = (speech, self.clock())
-                        self.last_attention_attempt = self.clock()
-                        self.clicked = False
-                        self.memory.record_speech(speech, reason)
-            except asyncio.CancelledError:
-                outcome = "cancelled"
-                trace("observation.cancelled")
-                raise
-            except Exception as error:
-                event("observation.failed", level=logging.WARNING, reason=reason, session=focus_session,
-                      error=str(error), exc_info=True)
-            finally:
-                event("observation.finished", reason=reason, session=focus_session, outcome=outcome,
-                      duration_seconds=round(self.clock() - started, 3), **usage.get(reason, {}))
+        self.commentary.sleep_changed(sleeping)
 
     async def loop(self):
         while True:
@@ -525,81 +235,18 @@ class Daemon:
                 if changed or removed:
                     trace("sessions.pruned", removed=removed, snapshot=self.sessions.snapshot())
                 self.next_prune = now + 1
-            if not self.system_sleeping:
-                self.behavior.tick(self.activity(), self.sessions)
-            if self.request_task and self.request_task.done():
-                if not self.request_task.cancelled():
-                    self.request_task.result()
-                self.request_task = None
-                self.request_reason = None
-            if not self.system_sleeping and self.request_task is None:
-                request = None
-                check_in = [key for key in self.sessions.check_in_due(self.config.idle_message_seconds)
-                            if not self.sessions.lanes[key].waiting] if self.behavior.status else []
-                if self.behavior.status and self.manual is not None:
-                    context, ttl = self.manual
-                    self.manual = None
-                    request = ("explicit", context, ttl)
-                elif self.behavior.status and self.clicked:
-                    self.clicked = False
-                    request = ("click", None, None)
-                elif self.behavior.status and self.pending and now >= self.pending[1]:
-                    reason, _, trigger = self.pending
-                    self.pending = None
-                    valid = self.episodes.relevant(trigger, self.sessions) if trigger and "episode" in trigger else True
-                    if valid:
-                        request = (reason, None, None, trigger)
-                    else:
-                        trace("observation.skipped", reason=reason, snapshot=self.sessions.snapshot())
-                elif check_in:
-                    selected = self.attention.choose(self.sessions.snapshot(), "check_in", set(check_in))
-                    key = selected["id"]
-                    request = ("check_in", None, None, {"sessions": [key], "target_session": key})
-                elif self.behavior.status and now >= self.next_observation:
-                    self.next_observation = now + self.rng.uniform(*self.config.observation_seconds)
-                    selected = self.attention.choose(self.sessions.snapshot(), "routine")
-                    snapshot = self.snapshot()
-                    snapshot["work"] = tuple(subject for subject in snapshot["work"] if subject.kind != "repository"
-                                             or self.repository_attention.get(subject.id) != subject.revision)
-                    work = self.attention.choose_work(snapshot)
-                    if work and work.kind == "repository":
-                        request = ("routine", None, None, {"target_repository": work.id})
-                    elif selected and self.sessions.reaction_state() != self.last_reaction_state:
-                        request = ("routine", None, None, {"target_session": selected["id"]})
-                    else:
-                        trace("observation.skipped", reason="unchanged_activity")
-                elif self.behavior.status and self.behavior.care_remark is not None:
-                    care = self.behavior.care_remark
-                    self.behavior.care_remark = None
-                    if not self.sessions.engaged:
-                        request = ("care", None, None, {"care": care})
-                if request:
-                    trigger = request[3] if len(request) > 3 else None
-                    if not self.attention.allowed(request[0], trigger):
-                        trace("observation.skipped", reason="attention_cooldown")
-                        request = None
-                if request:
-                    trigger = request[3] if len(request) > 3 else None
-                    snapshot = self.snapshot(trigger)
-                    selected = self.attention.choose(snapshot, request[0])
-                    work = self.attention.choose_work(snapshot)
-                    key = work.id if work and work.kind == "repository" else selected["id"] if selected else None
-                    if request[0] == "check_in" and key in self.sessions.lanes:
-                        self.sessions.lanes[key].last_check_in = now
-                    self.attention.scheduled(key)
-                    self.behavior.stop_movement()
-                    self.request_reason = request[0]
-                    self.next_observation = now + self.rng.uniform(*self.config.observation_seconds)
-                    trace("observation.scheduled", reason=request[0], next_observation=self.next_observation)
-                    self.request_task = asyncio.create_task(self.observe(*request))
+            if not self.commentary.suspended:
+                self.behavior.tick(self.events.activity(), self.sessions)
+            self.commentary.tick()
             await asyncio.sleep(0.05)
 
     async def close(self):
         event("daemon.stopping", snapshot=self.sessions.snapshot(), sessions=len(self.sessions.lanes))
-        for task in (self.loop_task, self.request_task, self.process_task):
+        for task in (self.loop_task, self.process_task):
             if task:
                 task.cancel()
-        await asyncio.gather(*(task for task in (self.loop_task, self.request_task, self.process_task) if task), return_exceptions=True)
+        await self.commentary.close()
+        await asyncio.gather(*(task for task in (self.loop_task, self.process_task) if task), return_exceptions=True)
         if self.child and self.child.returncode is None:
             self.child.terminate()
             try:

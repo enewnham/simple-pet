@@ -351,6 +351,15 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(self.memory.recent(), [])
         self.assertIsNone(self.memory.context("codex:other"))
 
+    def test_full_session_summary_survives_restart(self):
+        summary = ("The agent reported parser compatibility details " * 12
+                   + "and confirmed that legacy aliases remain supported.\n"
+                   + "Keep the public API stable during follow-up work.")
+        self.memory.save_context("codex:one", "Refactor parser", summary, ["Verify compatibility"])
+        self.memory.close()
+        self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
+        self.assertEqual(self.memory.context("codex:one")["session_context"], summary)
+
     def test_pet_identity_keeps_session_context_separate(self):
         self.memory.save_context("codex:one", "Refactor parser", "Parser validation pending", ["Refactor parser"])
         other = Memory(self.path, "other-pet", clock=lambda: self.now)
@@ -358,3 +367,95 @@ class MemoryTests(unittest.TestCase):
             self.assertIsNone(other.context("codex:one"))
         finally:
             other.close()
+
+    def test_version_four_and_five_migrations_preserve_saved_memory_and_repositories(self):
+        for version in (4, 5):
+            with self.subTest(version=version):
+                self.event("Parser inspection completed", goal="Improve parser")
+                self.memory.save_context("codex:one", "Improve parser", "Parser summary", ["Improve parser"])
+                self.memory.record_speech("Parser work", "prompt")
+                self.memory.associate_repository("codex:one", "/repo/parser")
+                self.memory.save_repository("branch", {"worktree": "/repo/parser"})
+                self.memory.close()
+                with sqlite3.connect(self.path) as database:
+                    database.execute(f"PRAGMA user_version = {version}")
+                self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
+                self.assertTrue(self.memory.recent())
+                self.assertEqual(self.memory.speech()[0]["text"], "Parser work")
+                self.assertEqual(self.memory.context("codex:one")["session_context"], "Parser summary")
+                self.assertEqual(self.memory.projects(["/repo/parser"])[0]["goal"], "Improve parser")
+                self.assertEqual(self.memory.repository_associations(), [{"session": "codex:one", "worktree": "/repo/parser"}])
+                self.assertEqual(self.memory.load_repositories(), [{"worktree": "/repo/parser"}])
+                self.assertEqual(self.memory.db.execute("PRAGMA user_version").fetchone()[0], 6)
+
+    def test_connected_work_is_pet_scoped_and_clears_with_memory(self):
+        other = Memory(self.path, "other-pet", clock=lambda: self.now)
+        try:
+            for memory in (self.memory, other):
+                memory.work.session_intent("codex:one", "Improve parser")
+                memory.work.observe_repository({"sessions": ["codex:one"], "repository": "github.com/team/project",
+                                                "worktree": "/repo/parser", "branch": "feature", "local": None, "pr": None})
+            self.assertEqual(len(self.memory.work.session_context("codex:one")["artifacts"]), 1)
+            self.memory.clear()
+            self.memory.close()
+            self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
+            self.assertEqual(self.memory.work.tracked_artifacts(), ())
+            self.assertEqual(self.memory.work.session_context("codex:one"), {})
+            self.assertEqual(len(other.work.session_context("codex:one")["artifacts"]), 1)
+        finally:
+            other.close()
+
+    def test_work_evidence_retention_uses_configured_memory_retention(self):
+        self.memory.close()
+        self.memory = Memory(self.path, "fixture", clock=lambda: self.now, retention_days=1)
+        self.memory.work.session_intent("codex:one", "Improve parser")
+        self.memory.work.session_intent("codex:one", "Check parser edge cases")
+        self.now += 2 * 86400
+        self.memory.prune()
+        rows = self.memory.db.execute("SELECT data FROM work_evidence WHERE pet=? AND kind='intent'", ("fixture",)).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertIn("Check parser edge cases", rows[0]["data"])
+        self.assertEqual(self.memory.work._current("codex:one")["intent"], "Check parser edge cases")
+
+    def test_work_graph_creates_only_tables_with_automatic_producers(self):
+        for name in ("work_updates", "work_decisions"):
+            self.assertIsNone(self.memory.db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone())
+        self.memory.work.session_intent("codex:one", "Improve parser")
+        self.memory.work.observe_repository({"sessions": ["codex:one"], "repository": "github.com/team/project",
+                                            "worktree": "/repo/parser", "branch": "feature", "local": None, "pr": None})
+        self.memory.close()
+        self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
+        self.assertEqual(self.memory.work.tracked_artifacts()[0]["ref"], "feature")
+
+    def test_legacy_command_history_survives_startup_and_clear_forgets_only_the_current_pet(self):
+        self.memory.db.execute("""CREATE TABLE work_updates (
+            pet TEXT NOT NULL, id TEXT NOT NULL, content TEXT NOT NULL, acceptance TEXT NOT NULL,
+            timestamp REAL NOT NULL, PRIMARY KEY(pet,id))""")
+        with self.memory.db:
+            self.memory.db.executemany("INSERT INTO work_updates VALUES (?,?,?,?,?)",
+                                      [(pet, "legacy-report", '{"fact":"preserved"}', '{"status":"accepted"}', self.now)
+                                       for pet in ("fixture", "other-pet")])
+        self.memory.close()
+        self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
+        rows = self.memory.db.execute("SELECT pet,content FROM work_updates ORDER BY pet").fetchall()
+        self.assertEqual([dict(row) for row in rows], [{"pet": "fixture", "content": '{"fact":"preserved"}'},
+                                                     {"pet": "other-pet", "content": '{"fact":"preserved"}'}])
+        self.memory.clear()
+        rows = self.memory.db.execute("SELECT pet FROM work_updates").fetchall()
+        self.assertEqual([row["pet"] for row in rows], ["other-pet"])
+
+    def test_legacy_decisions_survive_startup_and_clear_forgets_only_the_current_pet(self):
+        self.memory.db.execute("""CREATE TABLE work_decisions (
+            pet TEXT NOT NULL, work_id TEXT NOT NULL, target TEXT NOT NULL, action TEXT NOT NULL,
+            state TEXT NOT NULL, until_at REAL, data TEXT NOT NULL,
+            PRIMARY KEY(pet,work_id,target,action))""")
+        with self.memory.db:
+            self.memory.db.executemany("INSERT INTO work_decisions VALUES (?,?,?,?,?,?,?)",
+                                      [(pet, "legacy-work", "work", "", "deferred", None, '{"source":"user"}')
+                                       for pet in ("fixture", "other-pet")])
+        self.memory.close()
+        self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
+        self.assertEqual(self.memory.db.execute("SELECT COUNT(*) FROM work_decisions").fetchone()[0], 2)
+        self.memory.clear()
+        rows = self.memory.db.execute("SELECT pet FROM work_decisions").fetchall()
+        self.assertEqual([row["pet"] for row in rows], ["other-pet"])

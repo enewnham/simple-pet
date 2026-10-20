@@ -9,7 +9,7 @@ class PolicyTests(unittest.TestCase):
     def setUp(self):
         self.policy = Policy()
         self.observation = Observation(
-            now=100, active=False, working=False, investigating=False,
+            active=False, working=False, investigating=False,
             waiting=False, interacting=False, pointer_recent=False,
             can_roam=False, can_nap=False, restlessness=0, rest_pressure=0,
         )

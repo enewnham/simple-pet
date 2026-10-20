@@ -19,7 +19,7 @@ def selected_sessions(snapshot, reason=None):
 def selected_subject(snapshot):
     subjects = snapshot.get("work", ())
     trigger = snapshot.get("trigger") or {}
-    target = trigger.get("target_repository") or trigger.get("target_session")
+    target = trigger.get("target_opportunity") or trigger.get("target_session")
     if target:
         match = next((subject for subject in subjects if subject.id == target), None)
         if match:
@@ -36,6 +36,13 @@ class Attention:
         self.last_attempt = float("-inf")
         self.next_observation = clock() + rng.uniform(*config.observation_seconds)
         self.selections = {}
+        self.sequence = 0
+
+    def reset(self):
+        self.pending = None
+        self.last_attempt = float("-inf")
+        self.next_observation = self.clock() + self.rng.uniform(*self.config.observation_seconds)
+        self.selections.clear()
         self.sequence = 0
 
     def queue(self, reason, trigger=None, failed=False):
@@ -82,7 +89,7 @@ class Attention:
     def choose_work(self, snapshot):
         selected = selected_subject(snapshot)
         trigger = snapshot.get("trigger") or {}
-        if selected is None or trigger.get("target_repository") or trigger.get("target_session"):
+        if selected is None or trigger.get("target_opportunity") or trigger.get("target_session"):
             return selected
         eligible = [subject for subject in snapshot.get("work", ())
                     if (subject.priority, subject.changed_at) == (selected.priority, selected.changed_at)]

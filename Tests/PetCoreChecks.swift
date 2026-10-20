@@ -9,6 +9,7 @@ struct PetCoreChecks {
         try checks.testRejectsMalformedEventsWithoutApplyingPartialState()
         try await checks.testSpeechExpiresWithoutChangingState()
         try await checks.testNewSpeechSurvivesEarlierExpirationAndStateInputPreservesIt()
+        try await checks.testSpeechAcceptanceRequiresVisibleTextAndRetriesPreserveCurrentSpeech()
         try checks.testNapCommandsPreserveActivityAndWakeIndependently()
         try await checks.testSocketReceivesValidEventsAfterInvalidJSON()
         try await checks.testSocketReceivesLongSpeechWithoutTruncation()
@@ -16,7 +17,7 @@ struct PetCoreChecks {
         try checks.testFinitePlaybackHoldsLastFrameAndCompletesOnce()
         try checks.testMotionStaysWithinMonitorBounds()
         try checks.testRejectsInvalidSpritePacks()
-        print("Pet core checks passed (10 scenarios).")
+        print("Pet core checks passed (11 scenarios).")
     }
     private func event(_ json: String) throws -> PetEvent {
         try PetEvent.decode(Data(json.utf8))
@@ -52,6 +53,25 @@ struct PetCoreChecks {
         try require(model.state == .idle)
         model.apply(try event("{\"text\":\"\"}"))
         try require(model.text == nil)
+    }
+
+    func testSpeechAcceptanceRequiresVisibleTextAndRetriesPreserveCurrentSpeech() async throws {
+        let model = PetModel()
+        let identifier = UUID().uuidString
+        let speech = try event("{\"text\":\"Accepted\",\"ttl\":0.02,\"delivery_id\":\"\(identifier)\"}")
+        try require(model.apply(speech) == identifier)
+        try require(model.text == "Accepted")
+        try await waitUntil { model.text == nil }
+        try require(model.apply(speech) == identifier)
+        try require(model.text == nil)
+        model.apply(try event("{\"text\":\"New speech\",\"ttl\":1}"))
+        try require(model.apply(speech) == identifier)
+        try require(model.text == "New speech")
+        for input in ["{\"text\":\"   \",\"ttl\":1}", "{\"text\":\"Hidden\",\"ttl\":0}", "{\"state\":\"working\"}"] {
+            let data = input.dropLast() + ",\"delivery_id\":\"\(UUID().uuidString)\"}"
+            try require(model.apply(try event(String(data))) == nil)
+        }
+        try requireThrows { try event("{\"text\":\"Rejected\",\"delivery_id\":\"invalid\"}") }
     }
 
     func testSocketReceivesValidEventsAfterInvalidJSON() async throws {

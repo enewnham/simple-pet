@@ -140,7 +140,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func receive(_ event: PetEvent) {
-        model.apply(event)
+        if let deliveryID = model.apply(event) {
+            sender?.send(["kind": "renderer", "event": "speech_accepted", "delivery_id": deliveryID])
+        }
         if event.stopMotion == true { stopMotion() }
         if let animation = event.animation { view?.play(animation) }
         if let command = event.motion, command.commandID > latestMotion {

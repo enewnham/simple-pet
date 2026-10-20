@@ -1,173 +1,111 @@
-# Session liveness and repository awareness
+# Connected work and commentary
 
-Give the pet reliable evidence of agent activity and pending work. Keep process presence,
-activity freshness, local changes, and PR delivery separate. Pending repository work can
-inform commentary while the pet rests. Retain historical memory as supporting context.
+## Purpose
 
-## Implementation sequence
+The pet embodies the agent swarm: what we are attempting, what we have produced, and
+where the developer's involvement could help. Source observations connect work before
+attention selects a subject and the model expresses it in the pet's voice.
 
-- [x] P0 Establish durable progress tracking.
-- [x] P1 Extract attention and context, with application-owned memory.
-- [x] P2 Fair session scheduling and session-scoped waiting suppression.
-- [x] P3 Verified process ownership and asynchronous liveness probes.
-- [x] P4 Separate presence from activity freshness after five quiet minutes.
-- [x] P5 Asynchronous Git and GitHub cached repository tracking.
-- [x] P6 Persist associations through additive migration and derive immutable work views.
-- [x] P7 Prioritize input requests, failures, recent activity, pending work, completion, history.
-- [x] P8 Validate commentary against changing subjects and update diagnostics and guidance.
-- [x] P9 Run scoped checks, make check, and review integration.
+## Source observations and relationships
 
-## Architecture
+Agent hooks record requests, execution, progress, and reported outcomes automatically.
+Explicit requests create provisional work. Follow-ups refine that work and remain attributed
+user evidence. Ending a session or reporting a successful turn does not complete the work.
 
-```text
-pet_daemon/
-├── daemon.py                # Lifecycle, sockets, and coordination
-├── sessions.py              # Sessions, turns, calls, and owner associations
-├── processes.py             # Process identity discovery and liveness
-├── repositories/
-│   ├── __init__.py          # Tracker exports
-│   ├── tracker.py           # Associations, cached observations, refresh scheduling
-│   ├── git.py               # Local Git commands and parsing
-│   └── github.py            # PR discovery and queries
-├── work.py                  # Derived immutable session and repository views
-├── attention.py             # Subject selection, fairness, and cooldowns
-├── context.py               # Knowledge selection and bounded model payloads
-├── cognition.py             # Model requests and response validation
-└── memory.py                # Persistent facts, summaries, and associations
-```
+The accepted session's checkout starts Git discovery. Git establishes the worktree root,
+repository identity, checked-out branch, and revision. Exact repository and branch identities
+resolve a GitHub PR. A fresh session requires a fresh Git observation, so a cached branch
+cannot establish a new session's association after a checkout switch.
 
-Animation, policy, execution, and episode modules retain their responsibilities.
+Several attempts can share artifacts without sharing intent or claiming authorship of every
+change. Branch and PR identities support those relationships even when their revisions differ.
+Known PRs remain independently observable after a worktree is pruned. Missing source links
+remain unresolved. Failed refreshes preserve the age and uncertainty of successful observations.
 
-## Step requirements
+Native GitHub stack metadata supplies exact related PR links. Each member retains its own
+state and revision, and linked PRs refresh independently. A merged member does not complete
+its stack. Issue tracking is deferred until a Linear data source is available.
 
-P0 records the checkout, baseline, validation, findings, and next action. Update progress
-after each coherent result and before handoff. Resume by reading this file and the diff.
+## Work and attention
 
-P1 extracts scheduling, cooldowns, and subject selection into attention. Context owns
-payloads, instructions, history selection, and budgeting. The application owns memory
-independently of cognition. Preserve behavior during extraction.
+SQLite stores work, session associations, artifacts, attributed evidence, opportunity versions,
+and surfacing outcomes. Source adapters feed the work store. One work view combines session
+activity and derived opportunities for attention and commentary. GitHub does not schedule
+separate remarks.
 
-P2 rotates equally eligible sessions fairly, marks only the selected session checked,
-scopes waiting suppression to its session, and uses recent completed work for completion
-context.
+Derived actions include reviewing an explicit review request, inspecting failed checks on
+the current PR revision, and considering branch output for PR preparation. Preparation requires
+observed output, an agent progress report, and a successful lookup finding no associated PR.
+It does not establish implementation completion or readiness. Draft state alone supplies
+context without selecting an implementation or review action.
 
-P3 discovers persistent harness or wrapper owners through verified ancestry, captures PID
-and start time, deduplicates probes, and checks about every ten seconds. Sessions retire
-on confirmed owner exit or identity replacement. Shared hosts and subagents preserve hook
-lifecycle distinctions.
+Known revisions determine whether checks and interpretations remain current. Changed output
+requires reassessment. Terminal PR state resolves that artifact's obsolete opportunities
+without completing the intended work. Repeated identical polls and changed file counts do
+not create fresh interpretations by themselves.
 
-P4 keeps owner liveness independent of working state. Quiet turns without outstanding calls
-become uncertain after five minutes and release idle care and naps. Preserve stale-turn
-cleanup and timeout handling for ownerless sessions.
+## Commentary
 
-P5 discovers worktrees and associates sessions. Observe branch, HEAD, staged, unstaged,
-untracked changes, conflicts, upstream, and local ahead/behind counts. Observe associated
-PR state, merge information, reviews, and checks. Refresh Git every 30 seconds and GitHub
-every three minutes while relevant.
+The model receives a compact account of intent, attributed agent progress, PR subject,
+observed state, relevant checks, and supported next steps. Exact IDs, Git revisions, branch
+names, and raw file or commit counts stay in relationship resolution and freshness checks.
+Actionable PR links remain available when they help identify the work.
 
-P6 preserves many-to-many session/worktree and PR associations across exits, branch
-switches, and restart. Derive immutable work views from snapshots. Migrate storage without
-destroying existing history, speech, summaries, or contexts.
+Work in progress, possible attention, explicit input requests, and a person waiting for an
+answer remain distinct. Unchecked lists, draft status, and failed checks establish no social
+dependency or urgency. Only an explicit question, permission request, review request, or other
+direct evidence supports a claim that input is required. Model instructions preserve these
+boundaries and distinguish observed facts from agent reports.
 
-P7 ranks explicit input requests and fresh failures first, then recent activity, recent
-pending repository work, newly observed completion, and relevant history. Unchanged polling
-does not increase recency. A merged PR resolves its pending state while local changes
-remain separate.
+Session summaries describe intent and reported results. Recent requests and current progress
+take precedence. Request size is a soft target for adding optional context, with required
+context preserved even when the request exceeds the target.
 
-P8 rejects commentary when its subject changes during generation, including a PR merge.
-Log retirement, observation changes, refresh failures, and attention selection. Update
-configuration examples, README usage guidance, and the codebase guide.
+## Delivery
 
-P9 runs scoped checks and make check, and reviews ownership, asynchronous result validity,
-persistence, and idle behavior against every acceptance case.
+Speech for an opportunity carries a delivery ID. The renderer acknowledges accepting it
+for display before the domain records it as surfaced. A socket send or animation completion
+does not establish display, and display does not establish that the developer read it.
 
-## Contracts
+The delivery layer retries an unacknowledged packet within its runtime budget using the same
+ID and content. Socket attempt state stays in memory. Durable surfacing outcomes suppress
+repeated unchanged suggestions across restart. Manual report commands, decision workflows,
+and a persistent socket delivery ledger are outside this implementation.
 
-Hooks accept optional owner PID and start time. Probes report alive, exited, replaced,
-or unknown. Sessions decide retirement. Shared hosts and subagents retain hook lifecycle
-semantics. Quiet turns without calls cease blocking rest after five minutes. Ownerless
-sessions retain stale cleanup.
+## Automatic integration example
 
-Repository observations include identity, timestamps, revision, and refresh status.
-Local Git refreshes every 30 seconds, GitHub every three minutes. External commands have
-timeouts and bounded concurrency. Animation reads caches. Stale branch or generation
-results cannot overwrite current observations. Failed probes retain the last successful
-observation and its age. Unchanged polling does not advance evidence recency.
+`Tests/test_work_runtime.py` runs a fresh daemon against real temporary Git data and native
+hook datagrams. GitHub CLI and model HTTP responses are simulated at their external boundaries.
+The test does not seed work records or manually attach artifacts.
 
-Work views derive from authoritative snapshots. Attention chooses subjects and reasons.
-Context owns bounded payloads and history selection. Cognition owns model requests and
-validation. Application owns memory. Preserve the 16,000-byte default request budget.
-Model responses never establish process or PR state. Merged PRs resolve their own pending
-state while remaining local changes stay separate. Reject commentary if its subject
-changes during generation.
+1. An intent requests session persistence and identifies its checkout. A later native turn
+   report says implementation and validation succeeded.
+2. Git discovers the repository and branch. GitHub supplies a draft PR titled
+   “Persist coding session context” with a failing check on its current head.
+3. The shared work view selects inspecting the failed check. Model input preserves both
+   the agent's validation report and the independent failing check, along with draft status.
+   It omits raw revision and count fields.
+4. The renderer accepts the speech. An unchanged source refresh does not repeat the remark,
+   and its surfaced version survives daemon restart.
+5. A new head requires reassessment. Passing checks remove the check opportunity without
+   establishing readiness. An explicit review request supplies a separate review opportunity.
+6. A merge arriving during generation rejects the obsolete response and resolves the check
+   opportunity without marking the work item complete.
 
-## Verification
+The fixture establishes collection, association, selection, context, invalidation, and delivery.
+It does not establish the quality of unsimulated model prose or desktop visual behavior.
 
-Use temporary Git repositories, short-lived processes, and a simulated GitHub command
-boundary. Cover missing exit hooks, PID reuse, intermediary shells, shared hosts, unknown
-ownership, quiet live agents, outstanding tools, pending work after exit, manual commits
-and merges, merged PRs with edits, branch switches and concurrent refreshes, fair attention,
-unchanged polling, query failures, restart persistence, migration preservation, and work
-resolved during generation.
+## Code layout and verification
 
-## Progress and compaction handoff
+- `events.py` records accepted native activity and starts repository discovery.
+- `repositories/` collects Git, PR, and stack observations.
+- `work/` connects facts and derives opportunities and shared work views.
+- `attention.py` selects subjects. `context.py` projects their meaningful facts.
+- `cognition.py` requests commentary. `commentary.py` schedules and revalidates it.
+- `delivery.py` owns renderer acknowledgment and runtime retries.
+- `sessions.py` owns execution. `episodes.py` retains separate reaction bookkeeping.
 
-Current step: complete.
-Completed steps: P0–P9.
-Checkout and branch: /Users/elliot/sc/simple-pet, main, baseline 77054ff.
-Baseline changes: clean. User committed logging changes and cleared uncommitted files.
-Files changed: attention/context/process/repository/work modules, daemon, sessions, behavior, memory, config, hook clients, tests, and this plan.
-Decisions added or revised: preserve explicit input waits and outstanding tools as engaged. Quiet turns without calls become uncertain. Use additive v4→v5 migration. Keep cognition helper compatibility while the application owns its Memory instance. Poll local Git using one porcelain snapshot plus identity verification. Keep last successful observation timestamps separate from retry timestamps.
-Validation run and results: make check passes. Ran 295 Python tests with one desktop-only check skipped, Swift core checks, Swift asset-import checks, and shell syntax checks. Scoped process, repository, migration, context-budget, and runtime tests pass. git diff --check passes. Initial check-in and prompt assertion failures were corrected to match uncertain activity and the parallel agent's speech-only prompt changes. Process tests use unsandboxed ps access on macOS.
-Outstanding findings: independent reviews reconciled. Fixed terminal PR rediscovery, fresh CI failure priority, stable recency, explicit/care direction preservation, retry after failed generation, and uncertainty invalidation. Recent pending repository horizon is 24 hours, fresh failure/completion horizon is five minutes. No remaining review findings.
-Next concrete action: none. Implementation, verification, and review are complete.
-
-## Commentary evidence follow-up
-
-Current step: complete.
-Checkout and branch: /Users/elliot/sc/simple-pet, main. Baseline b45e71b, clean.
-Scope: keep application validation in response schemas, project model-facing observations
-without tracking identifiers or precise timestamps, scope history to selected work, and
-include agent-reported results when updating summaries. Initial plans and inferred summaries
-do not establish pending work. Quiet greetings exclude work history.
-Files changed: context, cognition, summarization, memory, daemon, focused tests, and codebase guide.
-Review findings resolved: reject summaries after same-turn progress or terminal reports change.
-Keep repository reactions focused on the selected repository within the request budget.
-Validation: make check passes, including 324 Python tests with one desktop-only skip,
-Swift core checks, asset-import checks, and shell syntax checks. git diff --check passes.
-Outstanding findings: none.
-Next concrete action: none. Changes are verified and uncommitted.
-
-## Situation inputs and durable summaries
-
-Current step: complete.
-Checkout and branch: /Users/elliot/sc/simple-pet, main, with the preceding commentary changes uncommitted.
-Scope: acknowledge the latest request without repository or historical-report context.
-Keep repository reactions focused on Git and PR observations. Preserve explicit commentary
-subjects across request reasons. Summarize durable intent, decisions, and reported results.
-Store complete sentences within the existing limit and retain prior context if none fit.
-Repetition detection remains under discussion. Preserve the configured persona.
-Validation: make check passes, including 333 Python tests with one desktop-only skip,
-Swift core checks, asset-import checks, and shell syntax checks. git diff --check passes.
-Review finding resolved: retain explicit context through quiet greeting paths.
-Outstanding findings: no implementation findings. Repetition handling is covered by the local-check follow-up.
-Next concrete action: none for the approved situation-input and summary changes. Changes are uncommitted.
-
-## Local repetition checks and bounded retry
-
-Current step: complete.
-Checkout and branch: /Users/elliot/sc/simple-pet, main, preserving preceding uncommitted changes.
-Scope: keep previous speech local. Compare generated remarks with recent delivered speech
-using normalized equality and conservative local sentence embeddings. Preserve changed
-counts, outcomes, negation, Git states, and subject words. Retry once with refreshed
-observations and the configured persona. Silence a repeated automatic remark; preserve
-a deliberate acknowledgment. Keep summaries and aggregate API usage across the retry.
-Files changed: cognition, context, daemon, repetition, native similarity executable, build
-commands, codebase guide, and focused tests. No new downloaded models or Python dependencies.
-Validation: native similarity checks and scoped cognition/context/runtime checks pass.
-make build and make check pass. The full check ran 352 Python tests with one desktop-only skip,
-Swift core checks, asset-import checks, and shell syntax checks. A final tighter subject-content
-filter and its added regression pass all 11 native-boundary repetition tests.
-Review finding resolved: protect changed subjects even when embedding similarity is high.
-Outstanding findings: conservative matching intentionally permits uncertain paraphrases.
-Next concrete action: restart the daemon to load the changes. Changes are uncommitted.
+Schema version 6 adds work storage to version 4/5 history. Existing events, summaries,
+repository observations, and speech remain available. Clear-memory includes work records.
+`make check` covers Python, Swift core, assets, and shell syntax. `make build` compiles the
+renderer and speech similarity helper. Desktop visual checks require a logged-in session.
