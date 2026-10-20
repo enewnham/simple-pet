@@ -23,13 +23,12 @@ class DeliveryTests(unittest.TestCase):
             valid=lambda message: self.current,
         )
         self.message = SpeechMessage(
-            "The PR requests your review.",
+            "The parser preserves quoted fields.",
             10,
             "routine",
             "selection",
             "work",
             "one",
-            ("opportunity", 1),
         )
 
     def acknowledge(self, identifier: str | None = None) -> bool:
@@ -54,8 +53,11 @@ class DeliveryTests(unittest.TestCase):
         self.assertTrue(self.acknowledge())
         self.assertFalse(self.acknowledge())
         self.assertEqual(
-            [(item.message.opportunity, item.status) for item in self.outcomes],
-            [(("opportunity", 1), "accepted")],
+            [
+                (item.message.subject_id, item.message.revision, item.status)
+                for item in self.outcomes
+            ],
+            [("work", "one", "accepted")],
         )
 
     def test_missing_acknowledgment_retries_the_same_message_once(self) -> None:
@@ -90,7 +92,7 @@ class DeliveryTests(unittest.TestCase):
         self.delivery.tick()
         self.assertEqual(len(self.sent), 1)
         self.assertTrue(self.acknowledge())
-        self.assertEqual(self.outcomes[0].message.opportunity, ("opportunity", 1))
+        self.assertEqual(self.outcomes[0].message.revision, "one")
 
     def test_preemption_stops_retries_and_retains_late_acceptance(self) -> None:
         self.delivery.submit(self.message)

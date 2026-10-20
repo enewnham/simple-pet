@@ -45,8 +45,6 @@ def request_reason(body: ModelRequest) -> str:
     instruction = body["system"][-1]["text"]
     for situation, direction in SITUATIONS.items():
         if direction in instruction:
-            if situation == "opportunity":
-                return "routine"
             return (
                 "check_in"
                 if situation.startswith("check_in")
@@ -681,12 +679,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             "url": "https://example.test/owner/repository/pull/1",
             "state": "OPEN",
             "mergedAt": None,
-            "reviewDecision": "REVIEW_REQUIRED",
-            "statusCheckRollup": [],
             "isDraft": True,
             "title": "Persist parser sessions",
             "body": "Preserve session context",
-            "reviewRequests": [{"login": "elliot"}],
             "headRefOid": head,
             "headRefName": "feature",
             "headRepositoryOwner": {"login": "owner"},
@@ -715,6 +710,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         return next(item for item in self.repositories.snapshot() if item.current)
 
     async def connect_repository_work(self) -> None:
+        self.repositories.github_interval = 0
         self.config.behavior.automatic_speech_cooldown_seconds = 90
         self.daemon.application.attention.last_attempt = self.daemon.clock()
         self.event(
@@ -728,14 +724,16 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
                 is not None
-                and context.artifacts
+                and any(
+                    item.artifact.kind == "pull_request" for item in context.artifacts
+                )
             ),
             timeout=3,
         )
         self.daemon.application.attention.pending = None
         self.config.behavior.automatic_speech_cooldown_seconds = 0
 
-    async def test_exited_owner_leaves_connected_output_available_for_review(
+    async def test_exited_owner_leaves_the_reported_work_and_pr_context_available(
         self,
     ) -> None:
         from pet_daemon.processes import process_identity
@@ -772,11 +770,17 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.daemon.application.sessions.lanes["cli:one"].presence, "exited"
         )
         self.assertFalse(self.daemon.application.sessions.lanes["cli:one"].active)
-        self.assertIsNone(payload["focus_session"])
+        self.assertFalse(payload["focus_session"]["turn_active"])
+        self.assertEqual(payload["focus_session"]["presence"], "exited")
+        self.assertNotIn("connected_work", payload["focus_session"])
         self.assertEqual(payload["other_sessions"], [])
-        self.assertEqual(payload["focus_opportunity"]["kind"], "review_output")
+        work = payload["focus_work"]
+        self.assertEqual(work["intent"], "Improve parser persistence")
         self.assertEqual(
-            payload["focus_opportunity"]["artifact"]["title"], "Persist parser sessions"
+            next(item for item in work["artifacts"] if item["kind"] == "pull_request")[
+                "title"
+            ],
+            "Persist parser sessions",
         )
 
     async def test_pull_request_merge_discards_commentary_generated_for_pending_work(
@@ -879,7 +883,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(task.cancel)
         await asyncio.wait_for(self.entered.wait(), 1)
         payload = json.loads(self.requests[-1]["messages"][0]["content"])
-        self.assertIsNone(payload["focus_opportunity"])
+        self.assertNotIn("Persist parser sessions", json.dumps(payload))
         self.repository_pr.update(state="MERGED", mergedAt="2026-10-17T00:00:00Z")
         self.repositories.github_interval = 0
         await self.wait_for(
@@ -915,11 +919,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.observe("routine")
         payload = json.loads(self.requests[-1]["messages"][-1]["content"])
         self.assertIsNone(payload["focus_session"])
-        self.assertEqual(
-            payload["focus_opportunity"]["intent"], "Improve parser persistence"
-        )
+        self.assertEqual(payload["focus_work"]["intent"], "Improve parser persistence")
 
-    async def test_repository_changes_without_reported_output_do_not_create_opportunities(
+    async def test_repository_changes_without_agent_intent_do_not_create_commentary(
         self,
     ) -> None:
         await self.repository_fixture()
@@ -934,7 +936,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             ),
             timeout=3,
         )
-        self.assertEqual(self.daemon.application.memory.work.opportunities(), ())
+        self.assertEqual(self.daemon.application.memory.work.work_items(), ())
         self.daemon.application.attention.next_observation = self.daemon.clock()
         await self.wait_for(
             lambda: (
@@ -970,7 +972,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.daemon.application.sessions.lanes[unchecked].last_check_in
         )
 
-    async def test_failed_opportunity_commentary_can_retry_without_new_evidence(
+    async def test_failed_story_commentary_can_retry_without_new_evidence(
         self,
     ) -> None:
         await self.repository_fixture()
@@ -983,12 +985,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             await self.wait_for(
                 lambda: len(self.requests) == 1 and self.daemon.application.task is None
             )
-        self.assertTrue(self.daemon.application.memory.work.opportunities())
+        self.assertTrue(self.daemon.application.memory.work.work_items())
         self.http_status = 200
         self.daemon.application.attention.next_observation = self.daemon.clock()
         packet = await self.packet(lambda packet: packet.get("text") == self.speech)
         self.assertEqual(len(self.requests), 2)
-        self.assertFalse(self.daemon.application.memory.work.opportunities())
+        self.assertTrue(self.daemon.application.memory.work.work_items())
         accepted = require(
             self.daemon.application.memory.message_outcome(packet["delivery_id"])
         )
@@ -2013,7 +2015,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.packet(lambda packet: "text" in packet)
         self.assertEqual(len(self.requests), 2)
 
-    async def test_repeated_failures_persist_and_request_speech_at_the_third_failure_once(
+    async def test_repeated_failures_request_speech_at_the_third_failure_without_command_history(
         self,
     ) -> None:
         self.use_clock()
@@ -2050,12 +2052,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.requests), 1)
         events = self.daemon.application.cognition.memory.recent(limit=10)
         failures = [event for event in events if event.event_type == "tool_error"]
-        self.assertEqual(len(failures), 5)
-        self.assertTrue(
-            all("error_signature" not in asdict(event) for event in failures)
-        )
-        self.assertNotIn(
-            "Parser assertion failed", json.dumps([asdict(event) for event in failures])
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            require(self.daemon.application.sessions.lanes["cli:one"].failure).count, 5
         )
 
     async def test_recovered_session_skips_queued_failure_when_another_session_is_still_failing(
@@ -2123,7 +2122,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             any(request_reason(body) == "failure" for body in self.requests)
         )
 
-    async def test_parent_routed_child_failure_is_persisted_under_the_child_session(
+    async def test_parent_routed_child_failure_retains_the_child_turn_report(
         self,
     ) -> None:
         self.use_clock()
@@ -2176,7 +2175,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         failures = [
             row
             for row in self.daemon.application.cognition.memory.recent(limit=10)
-            if row.event_type == "tool_error"
+            if row.event_type == "turn_error"
         ]
         self.assertEqual(len(failures), 1)
         self.assertEqual(failures[0].session, "claude:child")

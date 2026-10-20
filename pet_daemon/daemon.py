@@ -144,6 +144,12 @@ class Daemon:
             emit=self.emit,
             clock=clock,
             rng=self.rng,
+            session_target=lambda session, path, refresh: repositories.associate(
+                session, path, refresh=refresh
+            ),
+            reconcile_work=lambda: repositories.reconcile_targets(
+                memory.work.collection_targets()
+            ),
         )
         self.application.reconcile_targets()
         self.transport: asyncio.DatagramTransport | None = None
@@ -216,7 +222,7 @@ class Daemon:
         if packet.get("kind") == "event":
             hook = normalize_hook(packet)
             if hook is not None:
-                self.application.ingest_hook(hook)
+                self.application.ingest(hook)
         else:
             self.application.receive(packet)
 

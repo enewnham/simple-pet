@@ -51,19 +51,7 @@ def project_event(
     requested_goal = bounded(event.goal)
     goal = requested_goal or bounded(context.goal if context else None)
     tool = bounded(event.tool or (context.last_tool if context else None), 160)
-    if kind == "tool_start":
-        return None
-    name = (event.tool_name or "").lower().rsplit("__", 1)[-1].rsplit(".", 1)[-1]
-    read_only = name in (
-        "read",
-        "read_file",
-        "readfile",
-        "grep",
-        "find",
-        "search",
-        "glob",
-    )
-    if kind == "tool_done" and read_only:
+    if kind in {"tool_start", "tool_done", "tool_error"}:
         return None
     if kind == "progress" and not progress:
         return None
@@ -77,7 +65,7 @@ def project_event(
     outcome = (
         context.outcome if terminal and context and context.outcome else event.outcome
     )
-    if kind in ("tool_error", "turn_error"):
+    if kind == "turn_error":
         outcome = "error"
     category = (
         context.activity
@@ -95,7 +83,6 @@ def project_event(
         kind,
         goal if kind in ("intent", "subagent_start") else "",
         result,
-        tool if kind.startswith("tool_") and outcome != "error" else "",
         progress,
     ]
     summary = bounded(" | ".join(part for part in facts if part), 320)

@@ -51,9 +51,9 @@ Merge the hooks from the matching example into your harness configuration, prese
 
 If the harness cannot find `pet-hook` through PATH, replace it in the hook commands with the absolute path to `scripts/pet-hook`. In Codex, review and trust the definitions through `/hooks`.
 
-Hooks send task and command metadata to Haiku for commentary. Failures describe broad
-activity and outcome, such as tests failing or a build succeeding. Tool output, stack traces,
-and diagnostic details are discarded.
+Hooks provide agent intent, reported progress, and execution signals. The pet uses
+execution signals for activity and animation. Tool output, stack traces, and diagnostic
+details are discarded.
 
 For commands outside a harness, use the wrapper:
 
@@ -67,10 +67,10 @@ Edit `pet.config.json` and restart the daemon to apply changes. Paths are relati
 
 Customize `persona` to change the pet's voice. Use `memory_retention_days` and
 `memory_max_events` to limit remembered work. Install and authenticate `gh` for
-GitHub PR and stack observations.
+PR links, stack membership, and basic PR state. Repository observations provide context
+for the agents' reports.
 
-Remembered work and speech are local cache data. A storage schema version change
-clears this cache.
+Remembered work and speech are stored locally. Use the commands below to clear them.
 
 Use `prompt_target_bytes` to control how much optional context is included in model
 requests. Requests can exceed the target to preserve complete context.

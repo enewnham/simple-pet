@@ -53,16 +53,11 @@ class PullRequest:
     url: str
     state: str
     merged_at: str | None
-    review: str
-    checks: tuple[tuple[str, ...], ...]
     is_draft: bool | None = None
     head: str = ""
     head_repository: str = ""
     head_branch: str = ""
-    review_requests: tuple[str, ...] = ()
     repository: str = ""
-    check_revision: str = ""
-    review_requested: bool | None = None
     title: str = ""
     body: str = ""
     base_branch: str = ""
@@ -76,16 +71,11 @@ class PullRequest:
             "url": self.url,
             "state": self.state,
             "merged_at": self.merged_at,
-            "review": self.review,
-            "checks": self.checks,
             "is_draft": self.is_draft,
             "head": self.head,
             "head_repository": self.head_repository,
             "head_branch": self.head_branch,
-            "review_requests": self.review_requests,
             "repository": self.repository,
-            "check_revision": self.check_revision,
-            "review_requested": self.review_requested,
             "title": self.title,
             "body": self.body,
             "base_branch": self.base_branch,
@@ -119,6 +109,9 @@ class RepositoryObservation:
     github_error: str | None = None
     repository: str = ""
     source: str = "repository"
+    pr_sessions: tuple[str, ...] = ()
+    # Retain fresh local head claims until GitHub confirms their pull request.
+    session_heads: tuple[tuple[str, str], ...] = ()
 
     def packet(self) -> RepositoryObservationData:
         return {
@@ -138,6 +131,8 @@ class RepositoryObservation:
             "github_error": self.github_error,
             "repository": self.repository,
             "source": self.source,
+            "pr_sessions": self.pr_sessions,
+            "session_heads": self.session_heads,
         }
 
     @property
@@ -192,6 +187,8 @@ class RepositoryObservationData(TypedDict):
     github_error: str | None
     repository: str
     source: str
+    pr_sessions: tuple[str, ...]
+    session_heads: tuple[tuple[str, str], ...]
 
 
 def repository_observation_from_mapping(
@@ -216,6 +213,8 @@ def repository_observation_from_mapping(
         github_error=data["github_error"],
         repository=data["repository"],
         source=data["source"],
+        pr_sessions=tuple(data.get("pr_sessions", ())),
+        session_heads=tuple(tuple(item) for item in data.get("session_heads", ())),
     )
 
 
@@ -257,16 +256,11 @@ def pull_request_from_data(pr: PullRequestData) -> PullRequest:
         url=pr["url"],
         state=pr["state"],
         merged_at=pr["merged_at"],
-        review=pr["review"],
-        checks=tuple(tuple(check) for check in pr["checks"]),
         is_draft=pr["is_draft"],
         head=pr["head"],
         head_repository=pr["head_repository"],
         head_branch=pr["head_branch"],
-        review_requests=tuple(pr["review_requests"]),
         repository=pr["repository"],
-        check_revision=pr["check_revision"],
-        review_requested=pr["review_requested"],
         title=pr["title"],
         body=pr["body"],
         base_branch=pr["base_branch"],

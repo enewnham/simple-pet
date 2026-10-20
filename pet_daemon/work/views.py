@@ -1,5 +1,4 @@
 import hashlib
-from collections.abc import Sequence
 from dataclasses import dataclass
 
 from ..runtime import SessionSnapshot, SessionsSnapshot
@@ -11,15 +10,14 @@ from .models import (
     ExecutionEvidence,
     GitHubEvidence,
     IntentEvidence,
-    Opportunity,
     ProgressEvidence,
     PullRequestAssociation,
+    ReferenceAssociation,
     StackAssociation,
     WorkAccount,
     WorkState,
 )
 from .observations import GitObservation
-from .opportunities import eligible, project
 from .validation import canonical
 
 
@@ -29,8 +27,6 @@ class PresentedPullRequest:
     title: str
     state: str
     is_draft: bool | None
-    review: str
-    review_requested: bool | None
 
 
 @dataclass(frozen=True)
@@ -45,8 +41,6 @@ class GitEvidenceView:
 @dataclass(frozen=True)
 class PullRequestEvidenceView:
     output: PresentedPullRequest
-    checks: tuple[tuple[str, str], ...]
-    checks_current: bool
 
 
 @dataclass(frozen=True)
@@ -120,8 +114,6 @@ class WorkView:
     requests: tuple[EvidenceView, ...] = ()
     activity: tuple[EvidenceView, ...] = ()
     artifacts: tuple[ArtifactView, ...] = ()
-    opportunities: tuple[Opportunity, ...] = ()
-    current_obstacle: bool = False
 
 
 @dataclass(frozen=True)
@@ -156,29 +148,16 @@ def project_evidence(record: EvidenceRecord) -> EvidenceView | None:
         case GitHubEvidence() if source == "github" and kind == "observation":
             pr = payload.pr
             if pr:
-                current = bool(pr.head and pr.head == pr.check_revision)
-                checks = tuple(
-                    (check[0], check[1])
-                    for check in pr.checks
-                    if len(check) >= 2
-                    and current
-                    and (len(check) < 4 or not check[3] or check[3] == pr.head)
-                )
                 details = PullRequestEvidenceView(
-                    PresentedPullRequest(
-                        pr.url,
-                        pr.title,
-                        pr.state,
-                        pr.is_draft,
-                        pr.review,
-                        pr.review_requested,
-                    ),
-                    checks,
-                    current,
+                    PresentedPullRequest(pr.url, pr.title, pr.state, pr.is_draft)
                 )
             else:
                 details = MissingPullRequestView()
-        case ExecutionEvidence() if source == "harness" and kind == "execution":
+        case ExecutionEvidence() if (
+            source == "harness"
+            and kind == "execution"
+            and not payload.event.startswith("tool_")
+        ):
             ended = payload.event in {
                 "turn_done",
                 "turn_error",
@@ -220,6 +199,10 @@ def project_evidence(record: EvidenceRecord) -> EvidenceView | None:
             details = AssociationView("The agent session used this checkout.")
         case PullRequestAssociation() if kind == "relationship" and source == "github":
             details = AssociationView("The pull request matches the observed branch.")
+        case ReferenceAssociation() if kind == "relationship":
+            details = AssociationView(
+                "The reported text explicitly references this URL."
+            )
         case StackAssociation() if kind == "relationship" and source == "github_stack":
             details = AssociationView("The pull requests share an observed stack.")
         case _:
@@ -227,9 +210,7 @@ def project_evidence(record: EvidenceRecord) -> EvidenceView | None:
     return EvidenceView(source, kind, details, record.observed_at)
 
 
-def project_work(
-    identifier: str, account: WorkAccount, opportunities: Sequence[Opportunity] = ()
-) -> WorkView:
+def project_work(identifier: str, account: WorkAccount) -> WorkView:
     def evidence(records: tuple[EvidenceRecord, ...]) -> tuple[EvidenceView, ...]:
         return tuple(
             value
@@ -248,11 +229,6 @@ def project_work(
         )
         for item in account.artifacts
     )
-    obstacle = any(action.kind == "resolve_checks" for action in opportunities) or any(
-        isinstance(record.details, GitEvidenceView) and record.details.conflicts
-        for item in artifacts
-        for record in item.evidence
-    )
     return WorkView(
         identifier,
         account.intent,
@@ -260,28 +236,19 @@ def project_work(
         evidence(account.requests),
         evidence(account.activity),
         artifacts,
-        tuple(opportunities),
-        obstacle,
     )
 
 
 def runtime_revision(
     session: SessionSnapshot,
-) -> tuple[
-    tuple[int, bool, str | None, bool, str, bool, str, str], tuple[tuple[str, str], ...]
-]:
-    state = (
+) -> tuple[int, bool, str | None, bool, bool]:
+    return (
         session.generation,
         session.turn_active,
         session.outcome,
         session.waiting_for_input,
-        session.progress,
         session.activity_uncertain,
-        session.phase,
-        session.last_tool,
     )
-    tools = tuple(sorted({(tool.tool, tool.activity) for tool in session.active_tools}))
-    return state, tools
 
 
 def revision_key(value: object) -> str:
@@ -291,9 +258,6 @@ def revision_key(value: object) -> str:
 def build_work(sessions: SessionsSnapshot, state: WorkState) -> tuple[WorkSubject, ...]:
     runtime = {session.id: session for session in sessions.sessions}
     subjects, bound = [], set()
-    opportunities = tuple(
-        project(record) for record in state.opportunities.values() if eligible(record)
-    )
     for work in state.items.values():
         names = tuple(
             sorted(
@@ -304,21 +268,15 @@ def build_work(sessions: SessionsSnapshot, state: WorkState) -> tuple[WorkSubjec
         bound.update(names)
         account = work_context(state, work.id)
         assert account is not None
-        actions = tuple(action for action in opportunities if action.work_id == work.id)
-        view = project_work(work.id, account, actions)
+        view = project_work(work.id, account)
         changed_at = max(
             (member.changed_at for member in members), default=work.changed_at
         )
-        revision = revision_key(
-            (
-                account.revision,
-                tuple((member.id, runtime_revision(member)) for member in members),
-            )
-        )
+        revision = account.revision
         subjects.append(WorkSubject(work.id, "work", changed_at, revision, view, names))
     for identifier, session in runtime.items():
         if identifier not in bound:
-            revision = revision_key(runtime_revision(session))
+            revision = revision_key((runtime_revision(session), session.progress))
             subjects.append(
                 WorkSubject(
                     identifier,

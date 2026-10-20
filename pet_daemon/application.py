@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import math
 import sqlite3
@@ -27,14 +28,12 @@ from .sessions import Sessions
 from .storage import Memory
 from .telemetry import event, observation, trace
 from .work import build_work
-from .work.observations import RepositoryObservation, RepositoryTarget
+from .work.observations import RepositoryObservation
 
 log = logging.getLogger("pet-daemon")
 
 
 class ObservationProvider(Protocol):
-    def associate(self, session: str, path: str, *, refresh: bool = False) -> None: ...
-    def reconcile_targets(self, targets: tuple[RepositoryTarget, ...]) -> None: ...
     def tick(self) -> None: ...
     def pause(self) -> None: ...
     def resume(self) -> None: ...
@@ -65,6 +64,8 @@ class Application:
         emit: Callable[[OverlayPacket], object],
         clock: Callable[[], float],
         rng: RandomSource,
+        session_target: Callable[[str, str, bool], None] | None = None,
+        reconcile_work: Callable[[], None] | None = None,
     ) -> None:
         self.config = config
         self.sessions = sessions
@@ -78,6 +79,8 @@ class Application:
         self.emit = emit
         self.clock = clock
         self.rng = rng
+        self.session_target = session_target
+        self.reconcile_work = reconcile_work
         self.task: asyncio.Task[None] | None = None
         self.reason: str | None = None
         self.revision = 0
@@ -194,7 +197,10 @@ class Application:
             convergence=runtime.convergence,
         )
 
-    def ingest(self, observation: RepositoryObservation) -> None:
+    def ingest(self, observation: HookEvent | RepositoryObservation) -> None:
+        if isinstance(observation, HookEvent):
+            self._ingest_hook(observation)
+            return
         try:
             with self.memory.transaction():
                 self.memory.save_repository(observation)
@@ -203,7 +209,7 @@ class Application:
         except (sqlite3.Error, ValueError) as error:
             log.warning("Could not ingest work observation: %s", error)
 
-    def ingest_hook(self, hook: HookEvent) -> None:
+    def _ingest_hook(self, hook: HookEvent) -> None:
         result = self.events.handle(hook, self.suspended)
         if not result:
             return
@@ -214,14 +220,16 @@ class Application:
                 if hook.event in ("intent", "subagent_start") and hook.goal:
                     aliases = tuple(f"{hook.harness}:{alias}" for alias in hook.aliases)
                     self.memory.work.session_intent(key, hook.goal, aliases=aliases)
-                self.memory.work.session_event(key, hook)
+                self.memory.work.session_event(
+                    key, hook, waiting_for_input=lane.waiting
+                )
                 if lane.repo:
                     self.memory.associate_repository(key, lane.repo)
-            for provider in self.providers:
-                provider.associate(
+            if self.session_target is not None:
+                self.session_target(
                     key,
                     lane.repo,
-                    refresh=hook.event in ("intent", "subagent_start"),
+                    hook.event in ("intent", "subagent_start"),
                 )
             self.reconcile_targets()
         except (sqlite3.Error, ValueError) as error:
@@ -232,9 +240,8 @@ class Application:
             return
         self.reconciling = True
         try:
-            targets = self.memory.work.collection_targets()
-            for provider in self.providers:
-                provider.reconcile_targets(targets)
+            if self.reconcile_work is not None:
+                self.reconcile_work()
         finally:
             self.reconciling = False
 
@@ -386,8 +393,6 @@ class Application:
                     else:
                         self.behavior.wake("speech")
                         self.behavior.stop_movement()
-                        action = selection.action
-                        opportunity = (action.id, action.version) if action else None
                         message = SpeechMessage(
                             result.speak,
                             seconds,
@@ -395,14 +400,12 @@ class Application:
                             str(uuid.uuid4()),
                             selection.id,
                             selection.subject.revision if selection.subject else None,
-                            opportunity,
-                            history_epoch,
+                            history_epoch=history_epoch,
                             support=MessageSupport(
                                 result.prepared.manifest, trigger, epoch
                             ),
                         )
                         self.delivery.submit(message)
-                        self.mark_considered(selection)
                         outcome = "submitted"
             except asyncio.CancelledError:
                 outcome = "cancelled"
@@ -439,8 +442,14 @@ class Application:
 
     def mark_considered(self, selection: AttentionSelection) -> None:
         if selection.subject is not None:
+            last_selected, _ = self.attention.history(selection.subject.id)
+            considered = json.dumps(
+                selection.subject.revision, sort_keys=True, separators=(",", ":")
+            )
+            self.memory.save_attention_history(
+                selection.subject.id, last_selected, considered
+            )
             self.attention.mark_considered(selection.subject)
-            self.persist_attention(selection.subject.id)
 
     def persist_attention(self, subject_id: str | None) -> None:
         if subject_id is not None:
@@ -487,14 +496,30 @@ class Application:
         message = outcome.message
         if message.history_epoch != self.history_epoch:
             return
-        opportunity_id, version = message.opportunity or (None, None)
+        subject = next(
+            (item for item in self.snapshot().work if item.id == message.subject_id),
+            None,
+        )
+        current = subject is not None and subject.revision == message.revision
+        last_selected, _ = (
+            self.attention.history(message.subject_id)
+            if message.subject_id is not None
+            else (0, None)
+        )
+        considered = (
+            json.dumps(message.revision, sort_keys=True, separators=(",", ":"))
+            if current
+            else None
+        )
         if outcome.status == "accepted":
             self.memory.record_acceptance(
                 message.message_id,
                 message.text,
                 message.reason,
-                opportunity_id=opportunity_id,
-                version=version,
+                subject_id=message.subject_id,
+                revision=message.revision,
+                last_selected=last_selected,
+                considered_revision=considered,
             )
             self.last_speech = (message.text, self.clock())
             self.attention.last_attempt = self.clock()
@@ -504,11 +529,17 @@ class Application:
                     message.message_id,
                     message.reason,
                     text=message.text,
-                    opportunity_id=opportunity_id,
-                    version=version,
+                    subject_id=message.subject_id,
+                    revision=message.revision,
+                    last_selected=last_selected,
+                    considered_revision=considered,
                 )
             except sqlite3.Error as error:
                 log.warning("Could not record failed speech delivery: %s", error)
+                return
+        if current:
+            assert subject is not None
+            self.attention.mark_considered(subject)
         event(
             "speech.delivery",
             message=message.message_id,
@@ -560,6 +591,7 @@ class Application:
             episode_relevant=lambda trigger: self.episodes.relevant(
                 trigger, self.sessions
             ),
+            delivery_pending=self.delivery.has_pending(),
         )
         if request is None:
             return

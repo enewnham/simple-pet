@@ -17,7 +17,7 @@ from .runtime import (
 )
 from .storage.memory import HistoryRecord
 from .telemetry import trace
-from .work import Opportunity, WorkSubject
+from .work import WorkSubject
 
 
 @dataclass(frozen=True)
@@ -32,23 +32,16 @@ class AttentionRequest:
 @dataclass(frozen=True)
 class SelectionSupport:
     subject_revision: str | None = None
-    action_version: int | None = None
-    artifact_ref: str | None = None
-    artifact_revision: str | None = None
     session_transition: tuple[int, bool, bool, str | None] | tuple[()] = ()
 
     @classmethod
     def capture(
         cls,
         subject: WorkSubject | None,
-        action: Opportunity | None,
         focus: SessionSnapshot | None,
     ) -> "SelectionSupport":
         return cls(
             subject.revision if subject else None,
-            action.version if action else None,
-            action.artifact.ref if action else None,
-            action.artifact.revision if action else None,
             (
                 focus.generation,
                 focus.turn_active,
@@ -68,7 +61,6 @@ class AttentionSelection:
     reason: str
     situation: str
     context: str | None = None
-    action: Opportunity | None = None
     supporting_facts: SelectionSupport = SelectionSupport()
 
     @property
@@ -85,16 +77,7 @@ class AttentionSelection:
         current = self.refresh(snapshot)
         if self.subject is not None and current.subject is None:
             return False
-        if self.action is not None:
-            if current.action is None or current.action.kind != self.action.kind:
-                return False
-            before, after = self.supporting_facts, current.supporting_facts
-            if (before.artifact_ref, before.artifact_revision) != (
-                after.artifact_ref,
-                after.artifact_revision,
-            ):
-                return False
-        if self.focus_session is not None and self.action is None:
+        if self.focus_session is not None:
             if current.focus_session is None:
                 return False
             if (
@@ -102,29 +85,23 @@ class AttentionSelection:
                 != current.supporting_facts.session_transition
             ):
                 return False
+        if current.subject is not None and current.focus_session is not None:
+            members = set(current.subject.sessions)
+            if current.subject.kind == "session":
+                members.add(current.subject.id)
+            if current.focus_session.id not in members:
+                return False
         return True
 
     def refresh(self, snapshot: WorkSnapshot) -> "AttentionSelection":
         subjects = {subject.id: subject for subject in snapshot.work}
         sessions = {session.id: session for session in snapshot.sessions}
         subject = subjects.get(self.subject.id) if self.subject is not None else None
-        action = self.action
-        if action is not None:
-            action_id = action.id
-            action = next(
-                (
-                    item
-                    for item in (subject.view.opportunities if subject else ())
-                    if item.id == action_id
-                ),
-                None,
-            )
         focus = sessions.get(self.focus_session.id) if self.focus_session else None
         return replace(
             self,
             subject=subject,
-            action=deepcopy(action),
-            supporting_facts=SelectionSupport.capture(subject, action, focus),
+            supporting_facts=SelectionSupport.capture(subject, focus),
             focus_session=deepcopy(focus),
             context_sessions=tuple(
                 deepcopy(sessions[item.id])
@@ -149,10 +126,6 @@ def _session_tier(session: SessionSnapshot) -> int:
     if session.outcome and session.quiet_seconds < 300:
         return 4
     return 5
-
-
-def _action_tier(action: Opportunity) -> int:
-    return 1 if action.kind == "resolve_checks" else 2
 
 
 def _target_session(trigger: Trigger | None) -> str | None:
@@ -219,13 +192,7 @@ class Attention:
         if not self.is_new(subject):
             return False
         view = subject.view
-        if (
-            view.intent
-            or view.requests
-            or view.activity
-            or view.opportunities
-            or view.current_obstacle
-        ):
+        if view.intent or view.requests or view.activity:
             return True
         return any(
             session.turn_active or session.waiting_for_input or session.outcome
@@ -241,7 +208,6 @@ class Attention:
     ) -> AttentionSelection:
         trigger = snapshot.trigger
         subject = None
-        action = None
         focus = None
         others: tuple[SessionSnapshot, ...] = ()
         if context is None and reason not in ("explicit", "care"):
@@ -263,17 +229,12 @@ class Attention:
                     ]
                     if not sessions and item.id not in eligible:
                         continue
-                actions = item.view.opportunities
-                tiers = [_session_tier(session) for session in sessions] + [
-                    _action_tier(value) for value in actions
-                ]
-                tier = min((*tiers, 1 if item.view.current_obstacle else 5))
-                candidates.append((item, sessions, actions, tier))
+                tier = min((_session_tier(session) for session in sessions), default=5)
+                candidates.append((item, sessions, tier))
             targeted = [
                 item
                 for item in candidates
                 if item[0].id == target_subject
-                or any(value.id == target_subject for value in item[2])
                 or target_session
                 and any(session.id == target_session for session in item[1])
             ]
@@ -282,10 +243,10 @@ class Attention:
             elif target_session:
                 candidates = []
             if candidates:
-                subject, sessions, actions, tier = min(
+                subject, sessions, tier = min(
                     candidates,
                     key=lambda item: (
-                        item[3],
+                        item[2],
                         self.selections.get(item[0].id, -1),
                         -max(
                             (
@@ -295,7 +256,7 @@ class Attention:
                             ),
                             default=0,
                         )
-                        if reason == "click" and item[3] == 0
+                        if reason == "click" and item[2] == 0
                         else -item[0].changed_at,
                         item[0].id,
                     ),
@@ -323,26 +284,6 @@ class Attention:
                             session.id,
                         ),
                     )
-                if not target_session and reason in ("routine", "click"):
-                    action = next(
-                        (value for value in actions if value.id == target_subject), None
-                    )
-                    if action is None:
-                        action = min(
-                            actions,
-                            key=lambda value: (
-                                _action_tier(value),
-                                -value.changed_at,
-                                value.id,
-                            ),
-                            default=None,
-                        )
-                    if (
-                        action is not None
-                        and focus is not None
-                        and _session_tier(focus) < _action_tier(action)
-                    ):
-                        action = None
                 others = tuple(
                     sorted(
                         (
@@ -384,14 +325,10 @@ class Attention:
                             key=lambda session: (_session_tier(session), session.id),
                         )
                     )
-            if (
-                reason == "click"
-                and action is None
-                and not any(
-                    session.waiting_for_input
-                    or (session.turn_active and not session.activity_uncertain)
-                    for session in ((focus,) if focus else ())
-                )
+            if reason == "click" and not any(
+                session.waiting_for_input
+                or (session.turn_active and not session.activity_uncertain)
+                for session in ((focus,) if focus else ())
             ):
                 subject, focus, others = None, None, ()
         situation = reason
@@ -416,8 +353,6 @@ class Attention:
                 if focus and focus.active_tools
                 else "check_in_quiet"
             )
-        if action is not None:
-            situation = "opportunity"
         return AttentionSelection(
             subject,
             deepcopy(focus),
@@ -425,8 +360,7 @@ class Attention:
             reason,
             situation,
             context,
-            deepcopy(action),
-            SelectionSupport.capture(subject, action, focus),
+            SelectionSupport.capture(subject, focus),
         )
 
     def request(
@@ -438,13 +372,14 @@ class Attention:
         clicked: bool = False,
         care: str | None = None,
         episode_relevant: Callable[[Episode], bool] = lambda trigger: True,
+        delivery_pending: bool = False,
     ) -> AttentionRequest | None:
         now = self.clock()
         if manual is not None:
             return AttentionRequest("explicit", manual[0], manual[1])
         if clicked:
             return AttentionRequest("click")
-        if snapshot.sleeping:
+        if delivery_pending or snapshot.sleeping:
             return None
         if self.pending and now >= self.pending[1]:
             reason, _, trigger = self.pending

@@ -10,10 +10,9 @@ from .models import (
     ExecutionEvidence,
     GitHubEvidence,
     IntentEvidence,
-    OpportunityContent,
-    OpportunityState,
     ProgressEvidence,
     PullRequestAssociation,
+    ReferenceAssociation,
     RelatedLink,
     StackAssociation,
 )
@@ -69,15 +68,6 @@ class StoredEvidence(TypedDict):
     observed_at: float | None
 
 
-class StoredOpportunity(TypedDict):
-    intent: str
-    artifact: dict[str, str]
-    evidence: list[StoredEvidence]
-    uncertainty: list[str]
-    next_step: str
-    sessions: list[str]
-
-
 def artifact_record(artifact: ArtifactDescriptor) -> dict[str, str]:
     result = {
         "kind": artifact.kind,
@@ -127,6 +117,8 @@ def payload_record(payload: EvidencePayload) -> dict[str, object]:
                 "branch": payload.branch,
                 "association_only": True,
             }
+        case ReferenceAssociation():
+            return {"ref": payload.ref}
         case StackAssociation():
             return {
                 **related_link_data(payload.link),
@@ -191,6 +183,8 @@ def _decode_payload(source: str, kind: str, data: StoredPayload) -> EvidencePayl
     if source == "observer" and kind == "availability":
         return AvailabilityEvidence(data["local_error"], data["github_error"])
     if kind == "relationship":
+        if source in {"user_reference", "agent_reference", "pr_reference"}:
+            return ReferenceAssociation(data["ref"])
         if source == "harness":
             return CheckoutAssociation(data["checkout"], data["branch"])
         if source == "github":
@@ -222,38 +216,3 @@ def evidence_record(record: EvidenceRecord) -> dict[str, object]:
         "data": payload_record(record.payload),
         "observed_at": record.observed_at,
     }
-
-
-def encode_opportunity(opportunity: OpportunityState) -> str:
-    return canonical(
-        {
-            "intent": opportunity.intent,
-            "artifact": artifact_record(opportunity.artifact),
-            "evidence": tuple(
-                evidence_record(record) for record in opportunity.evidence
-            ),
-            "uncertainty": opportunity.uncertainty,
-            "next_step": opportunity.next_step,
-            "sessions": opportunity.sessions,
-        }
-    )
-
-
-def decode_opportunity(encoded: str) -> OpportunityContent:
-    data: StoredOpportunity = json.loads(encoded)
-    return OpportunityContent(
-        intent=data["intent"],
-        artifact=ArtifactDescriptor(**data["artifact"]),
-        evidence=tuple(
-            EvidenceRecord(
-                record["source"],
-                record["kind"],
-                _decode_payload(record["source"], record["kind"], record["data"]),
-                record["observed_at"],
-            )
-            for record in data["evidence"]
-        ),
-        uncertainty=tuple(data["uncertainty"]),
-        next_step=data["next_step"],
-        sessions=tuple(data["sessions"]),
-    )

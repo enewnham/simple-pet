@@ -6,14 +6,6 @@ from urllib.parse import urlsplit
 from .models import ArtifactDescriptor
 
 KINDS = {"branch", "pull_request", "document", "ticket", "patch"}
-FAILURES = {
-    "FAILURE",
-    "ERROR",
-    "CANCELLED",
-    "TIMED_OUT",
-    "ACTION_REQUIRED",
-    "STARTUP_FAILURE",
-}
 
 
 def canonical(value: object) -> str:

@@ -4,7 +4,6 @@ import random
 import socket
 import tempfile
 import unittest
-import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Unpack
@@ -19,9 +18,6 @@ from pet_daemon.runtime import OverlayPacket
 from pet_daemon.sources import RepositoryTracker
 from pet_daemon.sources.git import CommandOptions, command
 from pet_daemon.types import JSONObject
-from pet_daemon.work import Opportunity
-from pet_daemon.work.models import ExecutionEvidence
-from pet_daemon.work.presentation import OpportunityRecord
 from Tests.fixtures import require
 from Tests.test_runtime import PNG, reply
 
@@ -62,7 +58,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
         self.slow = False
-        self.speech = "The persistence checks need another look."
+        self.speech = "The agents report session persistence survives a restart."
         self.github_commands = []
         self.related_prs = {}
         self.stack_entries = []
@@ -91,14 +87,11 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             "mergedAt": None,
             "title": "Persist coding session context",
             "body": "Retain the requested session context when the daemon restarts.",
-            "reviewDecision": "REVIEW_REQUIRED",
             "isDraft": True,
             "headRefOid": self.head,
             "headRefName": "feature",
             "headRepository": {"nameWithOwner": "owner/repository"},
             "headRepositoryOwner": {"login": "owner"},
-            "reviewRequests": [],
-            "statusCheckRollup": self.checks("FAILURE"),
         }
 
         async def handler(request: httpx.Request) -> httpx.Response:
@@ -137,16 +130,6 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await command("git", "rev-parse", "HEAD", cwd=self.repository_path)
         ).strip()
 
-    def checks(self, result: str) -> list[JSONObject]:
-        return [
-            {
-                "name": "Session persistence tests",
-                "conclusion": result,
-                "headSha": self.head,
-                "app": {"slug": "github-actions"},
-            }
-        ]
-
     async def start_daemon(self) -> None:
         self.daemon = Daemon(self.config, self.client, rng=random.Random(7))
         self.repositories.run = self.repository_command
@@ -177,8 +160,6 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         if args[0] != "gh":
             return await command(*args, **kwargs)
         self.github_commands.append(args)
-        if args[:3] == ("gh", "api", "user"):
-            return "elliot"
         if args[:3] == ("gh", "repo", "view"):
             return json.dumps({"isFork": False})
         if args[:3] == ("gh", "pr", "list"):
@@ -191,101 +172,6 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     def send(self, packet: JSONObject) -> None:
         self.hook.sendto(json.dumps(packet).encode(), self.config.daemon_socket)
-
-    async def native_work(self) -> Opportunity:
-        self.send(
-            {
-                "kind": "event",
-                "harness": "codex",
-                "session": "persistence",
-                "event": "intent",
-                "turn": "implementation",
-                "repo": str(self.repository_path),
-                "goal": "Preserve the coding session context across daemon restarts",
-            }
-        )
-        await self.wait_for(
-            lambda: "codex:persistence" in self.daemon.application.sessions.lanes
-        )
-        self.send(
-            {
-                "kind": "event",
-                "harness": "codex",
-                "session": "persistence",
-                "event": "turn_done",
-                "turn": "implementation",
-                "repo": str(self.repository_path),
-                "outcome": "success",
-                "progress": "Implemented session persistence; validation passed",
-            }
-        )
-        await self.wait_for(
-            lambda: (
-                self.daemon.application.sessions.lanes["codex:persistence"].outcome
-                == "success"
-            )
-        )
-        self.daemon.application.attention.pending = None
-        await self.wait_for(
-            lambda: any(
-                item.kind == "resolve_checks"
-                for item in self.daemon.application.memory.work.opportunities()
-            )
-        )
-        await self.wait_for(lambda: not self.repositories.tasks)
-        self.assertEqual(self.requests, [])
-        self.config.behavior.automatic_speech_cooldown_seconds = 0
-        await self.drain()
-        return next(
-            item
-            for item in self.daemon.application.memory.work.opportunities()
-            if item.kind == "resolve_checks"
-        )
-
-    async def native_stack_work(self) -> tuple[Opportunity, str]:
-        sibling_url = "https://example.test/owner/repository/pull/8"
-        self.related_prs[sibling_url] = {
-            **self.pr,
-            "number": 8,
-            "url": sibling_url,
-            "headRefName": "followup",
-            "title": "Verify restored sessions",
-            "statusCheckRollup": self.checks("SUCCESS"),
-        }
-        self.stack_entries = [
-            {
-                "number": 4,
-                "pull_requests": [
-                    {"number": 7, "state": "open", "draft": True},
-                    {"number": 8, "state": "open", "draft": True},
-                ],
-            }
-        ]
-        await self.native_work()
-        await self.wait_for(
-            lambda: any(
-                item.pr and item.pr.url == sibling_url
-                for item in self.repositories.snapshot()
-            )
-        )
-        await self.wait_for(lambda: not self.repositories.tasks)
-        opportunity = next(
-            item
-            for item in self.daemon.application.memory.work.opportunities()
-            if item.kind == "resolve_checks"
-        )
-        return opportunity, sibling_url
-
-    async def merge_sibling(self, sibling_url: str) -> None:
-        self.related_prs[sibling_url].update(
-            state="MERGED", mergedAt="2026-10-19T12:00:00Z"
-        )
-        await self.refresh_sources(
-            lambda: any(
-                item.pr and item.pr.url == sibling_url and item.pr.state == "MERGED"
-                for item in self.repositories.snapshot()
-            )
-        )
 
     async def packet(self, predicate: Callable[[OverlayPacket], bool]) -> OverlayPacket:
         async def receive() -> OverlayPacket:
@@ -329,10 +215,6 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.daemon.application.attention.next_observation = self.daemon.clock()
         self.daemon.application.tick()
 
-    def focus(self) -> OpportunityRecord:
-        payload = json.loads(self.requests[-1]["messages"][-1]["content"])
-        return payload["focus_opportunity"]
-
     async def accept(self, speech: OverlayPacket) -> None:
         self.send(
             {
@@ -370,7 +252,6 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "untracked",
                 "ahead",
                 "behind",
-                "check_revision",
                 "count",
                 "timestamp",
                 "changed_at",
@@ -384,285 +265,188 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             for item in value:
                 self.assert_human_context(item)
 
-    async def test_native_activity_and_observed_checks_ground_an_acknowledged_remark(
-        self,
-    ) -> None:
-        opportunity = await self.native_work()
-        self.schedule_routine()
-        speech = await self.packet(lambda packet: "delivery_id" in packet)
-        focus = self.focus()
-        self.assertEqual(
-            focus["intent"],
-            "Preserve the coding session context across daemon restarts",
-        )
-        self.assertEqual(focus["kind"], "resolve_checks")
-        self.assertEqual(focus["artifact"]["kind"], "pull_request")
-        self.assertEqual(focus["artifact"]["title"], "Persist coding session context")
-        github = next(
-            item
-            for item in focus["evidence"]
-            if item["source"] == "github" and item["kind"] == "observation"
-        )
-        self.assertTrue(github["output"]["is_draft"])
-        self.assertTrue(github["checks_current"])
-        self.assertEqual(github["checks"], [["Session persistence tests", "FAILURE"]])
-        progress = next(
-            item
-            for item in focus["evidence"]
-            if item["source"] == "harness" and item["kind"] == "progress"
-        )
-        self.assertEqual(
-            progress["reported_progress"],
-            "Implemented session persistence; validation passed",
-        )
-        self.assertNotIn("execution", progress)
-        context = require(
-            self.daemon.application.memory.work.session_context("codex:persistence")
-        )
-        execution = next(
-            item.payload for item in context.activity if item.kind == "execution"
-        )
-        assert isinstance(execution, ExecutionEvidence)
-        self.assertEqual(execution.outcome, "success")
-        self.assertTrue(focus["uncertainty"])
-        self.assertEqual(
-            {item.artifact.kind for item in context.artifacts},
-            {"branch", "pull_request"},
-        )
-        payload = json.loads(self.requests[-1]["messages"][-1]["content"])
-        self.assertNotIn("activity", payload)
-        self.assertIsNone(payload["focus_session"])
-        self.assert_human_context(focus)
-        encoded = json.dumps(focus)
-        for identifier in (self.head, "codex:persistence", str(self.repository_path)):
-            self.assertNotIn(identifier, encoded)
-        self.assertEqual(self.daemon.application.memory.speech(), [])
+    async def native_work(self) -> str:
         self.send(
             {
-                "kind": "renderer",
-                "event": "speech_accepted",
-                "delivery_id": str(uuid.uuid4()),
+                "kind": "event",
+                "harness": "codex",
+                "session": "persistence",
+                "event": "intent",
+                "turn": "implementation",
+                "repo": str(self.repository_path),
+                "goal": "Preserve coding session context across daemon restarts",
             }
         )
-        await asyncio.sleep(0)
-        self.assertEqual(self.daemon.application.memory.speech(), [])
-        await self.accept(speech)
-        self.assertFalse(
-            self.daemon.application.memory.work.is_current(
-                opportunity.id, opportunity.version
+        await self.wait_for(
+            lambda: "codex:persistence" in self.daemon.application.sessions.lanes
+        )
+        self.send(
+            {
+                "kind": "event",
+                "harness": "codex",
+                "session": "persistence",
+                "event": "turn_done",
+                "turn": "implementation",
+                "repo": str(self.repository_path),
+                "outcome": "success",
+                "progress": "Implemented session persistence; next I will document restart behavior.",
+            }
+        )
+        await self.wait_for(
+            lambda: (
+                self.daemon.application.sessions.lanes["codex:persistence"].outcome
+                == "success"
             )
         )
-        self.assertEqual(self.daemon.application.memory.speech()[0].reason, "routine")
-        await self.refresh_sources(
+        self.daemon.application.attention.pending = None
+        await self.wait_for(
             lambda: any(item.pr for item in self.repositories.snapshot())
         )
-        self.assertFalse(
-            self.daemon.application.memory.work.is_current(
-                opportunity.id, opportunity.version
-            )
+        await self.wait_for(lambda: not self.repositories.tasks)
+        self.assertEqual(self.requests, [])
+        self.config.behavior.automatic_speech_cooldown_seconds = 0
+        await self.drain()
+        return require(
+            self.daemon.application.memory.work.work_for_session("codex:persistence")
+        ).id
+
+    async def test_native_agent_report_and_connected_pr_reach_accepted_commentary(
+        self,
+    ) -> None:
+        work_id = await self.native_work()
+        self.schedule_routine()
+        speech = await self.packet(lambda packet: "delivery_id" in packet)
+        payload = json.loads(self.requests[-1]["messages"][-1]["content"])
+        self.assertIn("next I will document restart behavior", json.dumps(payload))
+        self.assertIn("Persist coding session context", json.dumps(payload))
+        self.assertIn("draft", json.dumps(payload).lower())
+        self.assertEqual(self.daemon.application.memory.speech(), [])
+        await self.accept(speech)
+        outcome = require(
+            self.daemon.application.memory.message_outcome(speech["delivery_id"])
+        )
+        self.assertEqual((outcome.outcome, outcome.subject_id), ("accepted", work_id))
+        self.assertEqual(
+            [item.text for item in self.daemon.application.memory.speech()],
+            [self.speech],
         )
         self.schedule_routine()
         await asyncio.sleep(0.06)
         self.assertEqual(len(self.requests), 1)
         await self.daemon.close()
         await self.start_daemon()
-        self.assertFalse(
-            self.daemon.application.memory.work.is_current(
-                opportunity.id, opportunity.version
-            )
-        )
-        self.assertEqual(
-            self.daemon.application.memory.speech()[0].text, speech["text"]
-        )
+        self.schedule_routine()
+        await asyncio.sleep(0.06)
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(self.daemon.application.memory.speech()[0].text, self.speech)
 
-    async def test_new_head_reassesses_checks_and_green_checks_require_an_explicit_review_request(
-        self,
-    ) -> None:
-        original = await self.native_work()
-        self.schedule_routine()
-        await self.accept(await self.packet(lambda packet: "delivery_id" in packet))
-        self.head = await self.commit("persist session context during restart")
-        self.pr.update(headRefOid=self.head, statusCheckRollup=self.checks("FAILURE"))
-        await self.refresh_sources(
-            lambda: any(
-                item.kind == "resolve_checks"
-                and item.version > original.version
-                and item.artifact.revision == self.head
-                for item in self.daemon.application.memory.work.opportunities()
-            )
-        )
-        current = next(
-            item
-            for item in self.daemon.application.memory.work.opportunities()
-            if item.kind == "resolve_checks"
-        )
-        self.assertEqual(current.id, original.id)
-        self.assertEqual(current.artifact.revision, self.head)
-        self.speech = "The revised session storage still has a failing check."
-        self.schedule_routine()
-        await self.accept(await self.packet(lambda packet: "delivery_id" in packet))
-        self.assertEqual(self.focus()["kind"], "resolve_checks")
-        self.pr["statusCheckRollup"] = self.checks("SUCCESS")
-        await self.refresh_sources(
-            lambda: any(
-                item.pr and item.pr.checks and item.pr.checks[0][1] == "SUCCESS"
-                for item in self.repositories.snapshot()
-            )
-        )
-        self.assertFalse(
-            any(
-                item.kind == "resolve_checks"
-                for item in self.daemon.application.memory.work.opportunities()
-            )
-        )
-        self.assertFalse(
-            any(
-                item.kind == "review_output"
-                for item in self.daemon.application.memory.work.opportunities()
-            )
-        )
-        self.pr["reviewRequests"] = [{"login": "elliot"}]
-        await self.refresh_sources(
-            lambda: any(
-                item.kind == "review_output"
-                for item in self.daemon.application.memory.work.opportunities()
-            )
-        )
-        self.speech = "There is a requested review on the session persistence change."
-        self.schedule_routine()
-        await self.accept(await self.packet(lambda packet: "delivery_id" in packet))
-        focus = self.focus()
-        self.assertEqual(focus["kind"], "review_output")
-        github = next(
-            item
-            for item in focus["evidence"]
-            if item["source"] == "github" and item["kind"] == "observation"
-        )
-        self.assertTrue(github["output"]["review_requested"])
-
-    async def test_merge_rejects_pending_generation_without_concluding_the_intended_work(
-        self,
-    ) -> None:
+    async def test_basic_pr_state_refresh_does_not_rearm_the_agent_story(self) -> None:
         await self.native_work()
-        self.slow = True
         self.schedule_routine()
-        await asyncio.wait_for(self.entered.wait(), 5)
-        self.pr.update(state="MERGED", mergedAt="2026-10-18T12:00:00Z")
+        await self.accept(await self.packet(lambda packet: "delivery_id" in packet))
+        self.pr.update(state="MERGED", mergedAt="2026-10-20T12:00:00Z")
         await self.refresh_sources(
             lambda: any(
                 item.pr and item.pr.state == "MERGED"
                 for item in self.repositories.snapshot()
             )
         )
+        self.schedule_routine()
+        await asyncio.sleep(0.06)
+        self.assertEqual(len(self.requests), 1)
+        self.config.behavior.automatic_speech_cooldown_seconds = 3600
+        self.send(
+            {
+                "kind": "event",
+                "harness": "codex",
+                "session": "persistence",
+                "event": "intent",
+                "turn": "documentation",
+                "goal": "Preserve coding session context across daemon restarts",
+            }
+        )
+        self.send(
+            {
+                "kind": "event",
+                "harness": "codex",
+                "session": "persistence",
+                "event": "progress",
+                "turn": "documentation",
+                "progress": "Documented restart behavior; next I will update the examples.",
+            }
+        )
+        await self.wait_for(
+            lambda: (
+                "update the examples"
+                in self.daemon.application.sessions.lanes["codex:persistence"].progress
+            )
+        )
+        self.daemon.application.attention.pending = None
+        self.config.behavior.automatic_speech_cooldown_seconds = 0
+        self.speech = "The agents have documented restart behavior."
+        self.schedule_routine()
+        await self.accept(await self.packet(lambda packet: "delivery_id" in packet))
+        self.assertEqual(len(self.requests), 2)
+        self.assertIn("MERGED", json.dumps(self.requests[-1]))
+
+    async def test_superseded_report_discards_pending_commentary(self) -> None:
+        await self.native_work()
+        self.slow = True
+        self.schedule_routine()
+        await asyncio.wait_for(self.entered.wait(), 5)
+        self.config.behavior.automatic_speech_cooldown_seconds = 3600
+        self.send(
+            {
+                "kind": "event",
+                "harness": "codex",
+                "session": "persistence",
+                "event": "intent",
+                "turn": "documentation",
+                "goal": "Preserve coding session context across daemon restarts",
+            }
+        )
+        self.send(
+            {
+                "kind": "event",
+                "harness": "codex",
+                "session": "persistence",
+                "event": "progress",
+                "turn": "documentation",
+                "progress": "The restart example needs a different approach.",
+            }
+        )
+        await self.wait_for(
+            lambda: (
+                "different approach"
+                in self.daemon.application.sessions.lanes["codex:persistence"].progress
+            )
+        )
         self.release.set()
         await self.wait_for(lambda: self.daemon.application.task is None)
         self.assertFalse(any(packet.get("text") for packet in await self.drain()))
         self.assertEqual(self.daemon.application.memory.speech(), [])
-        self.assertFalse(
-            any(
-                item.kind == "resolve_checks"
-                for item in self.daemon.application.memory.work.opportunities()
-            )
-        )
-        work = self.daemon.application.memory.db.execute(
-            "SELECT intent,status FROM work_items WHERE pet=?",
-            (self.daemon.application.memory.pet,),
-        ).fetchall()
-        self.assertEqual(
-            [(item["intent"], item["status"]) for item in work],
-            [("Preserve the coding session context across daemon restarts", "active")],
-        )
 
-    async def test_unselected_pull_request_metadata_preserves_supported_generation(
-        self,
-    ) -> None:
-        original = await self.native_work()
+    async def test_unselected_pr_body_preserves_pending_commentary(self) -> None:
+        await self.native_work()
         self.slow = True
         self.schedule_routine()
         await asyncio.wait_for(self.entered.wait(), 5)
-        self.pr["body"] = "Document the manual restart validation procedure."
+        self.pr["body"] = "Additional context for the human author."
         await self.refresh_sources(
             lambda: any(
                 item.pr and item.pr.body == self.pr["body"]
                 for item in self.repositories.snapshot()
             )
         )
-        current = require(self.daemon.application.memory.work.opportunity(original.id))
-        self.assertGreater(current.version, original.version)
-        self.assertEqual(current.artifact.revision, original.artifact.revision)
         self.release.set()
-        speech = await self.packet(lambda packet: "delivery_id" in packet)
-        await self.accept(speech)
-        outcome = require(
-            self.daemon.application.memory.message_outcome(speech["delivery_id"])
-        )
-        self.assertEqual(
-            (outcome.opportunity_id, outcome.version),
-            (original.id, original.version),
-        )
-        self.assertNotIn(self.pr["body"], json.dumps(self.focus()))
-        self.assertTrue(
-            self.daemon.application.memory.work.is_current(current.id, current.version)
-        )
-
-    async def test_sibling_merge_preserves_generation_supported_by_primary_checks(
-        self,
-    ) -> None:
-        original, sibling_url = await self.native_stack_work()
-        self.slow = True
-        self.schedule_routine()
-        await asyncio.wait_for(self.entered.wait(), 5)
-        await self.merge_sibling(sibling_url)
-        current = require(self.daemon.application.memory.work.opportunity(original.id))
-        self.assertEqual(current.id, original.id)
-        self.assertGreater(current.version, original.version)
-        self.assertEqual(current.artifact.revision, original.artifact.revision)
-        self.release.set()
-        speech = await self.packet(lambda packet: "delivery_id" in packet)
-        await self.accept(speech)
-        outcome = require(
-            self.daemon.application.memory.message_outcome(speech["delivery_id"])
-        )
-        self.assertEqual(
-            (outcome.opportunity_id, outcome.version),
-            (original.id, original.version),
-        )
-        self.assertTrue(
-            self.daemon.application.memory.work.is_current(current.id, current.version)
-        )
-
-    async def test_sibling_merge_preserves_delivery_retry_and_captured_acceptance(
-        self,
-    ) -> None:
-        original, sibling_url = await self.native_stack_work()
-        self.schedule_routine()
-        first = await self.packet(lambda packet: "delivery_id" in packet)
-        await self.wait_for(lambda: self.daemon.application.task is None)
-        await self.merge_sibling(sibling_url)
-        current = require(self.daemon.application.memory.work.opportunity(original.id))
-        self.assertGreater(current.version, original.version)
-        now = self.daemon.clock() + 5
-        self.daemon.application.delivery.clock = lambda: now
-        self.daemon.application.tick()
-        retry = await self.packet(lambda packet: "delivery_id" in packet)
-        self.assertEqual(retry, first)
-        await self.accept(retry)
-        outcome = require(
-            self.daemon.application.memory.message_outcome(first["delivery_id"])
-        )
-        self.assertEqual(
-            (outcome.opportunity_id, outcome.version),
-            (original.id, original.version),
-        )
+        await self.accept(await self.packet(lambda packet: "delivery_id" in packet))
         self.assertEqual(len(self.daemon.application.memory.speech()), 1)
-        self.assertTrue(
-            self.daemon.application.memory.work.is_current(current.id, current.version)
-        )
+        self.assertNotIn(self.pr["body"], json.dumps(self.requests[-1]))
 
-    async def test_sleep_cancels_retries_and_late_acceptance_records_the_visible_message(
+    async def test_sleep_cancels_retries_and_late_acceptance_records_visible_message(
         self,
     ) -> None:
-        opportunity = await self.native_work()
+        work_id = await self.native_work()
         self.schedule_routine()
         first = await self.packet(lambda packet: "delivery_id" in packet)
         await self.wait_for(lambda: self.daemon.application.task is None)
@@ -673,19 +457,12 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.daemon.application.tick()
         self.assertFalse(any("delivery_id" in packet for packet in await self.drain()))
         self.assertEqual(self.daemon.application.memory.speech(), [])
-        self.send({"kind": "renderer", "event": "system_wake"})
-        await self.wait_for(lambda: not self.daemon.application.suspended)
-        await self.wait_for(lambda: not self.repositories.tasks)
-        self.daemon.application.tick()
-        self.assertFalse(any("delivery_id" in packet for packet in await self.drain()))
-        self.assertEqual(len(self.requests), 1)
         await self.accept(first)
-        outcome = require(
-            self.daemon.application.memory.message_outcome(first["delivery_id"])
-        )
         self.assertEqual(
-            (outcome.opportunity_id, outcome.version),
-            (opportunity.id, opportunity.version),
+            require(
+                self.daemon.application.memory.message_outcome(first["delivery_id"])
+            ).subject_id,
+            work_id,
         )
 
 

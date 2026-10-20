@@ -59,8 +59,8 @@ class MessageOutcome:
     outcome: str
     text: str
     reason: str
-    opportunity_id: str | None
-    version: int | None
+    subject_id: str | None
+    revision: str | None
     timestamp: float
 
 
@@ -146,8 +146,10 @@ class Memory:
         message_id: str,
         text: str,
         reason: str,
-        opportunity_id: str | None = None,
-        version: int | None = None,
+        subject_id: str | None = None,
+        revision: str | None = None,
+        last_selected: float = 0,
+        considered_revision: str | None = None,
     ) -> bool:
         with self.transaction():
             previous = self.db.execute(
@@ -158,17 +160,19 @@ class Memory:
                 return False
             timestamp = self.clock()
             self.db.execute(
-                """INSERT INTO message_outcomes VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(pet,message_id) DO UPDATE SET
-                outcome=excluded.outcome,text=excluded.text,reason=excluded.reason,opportunity_id=excluded.opportunity_id,
-                version=excluded.version,timestamp=excluded.timestamp""",
+                """INSERT INTO message_outcomes
+                (pet,message_id,outcome,text,reason,subject_id,revision,timestamp)
+                VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(pet,message_id) DO UPDATE SET
+                outcome=excluded.outcome,text=excluded.text,reason=excluded.reason,
+                subject_id=excluded.subject_id,revision=excluded.revision,timestamp=excluded.timestamp""",
                 (
                     self.pet,
                     message_id,
                     "accepted",
                     text,
                     reason,
-                    opportunity_id,
-                    version,
+                    subject_id,
+                    revision,
                     timestamp,
                 ),
             )
@@ -176,16 +180,11 @@ class Memory:
                 "INSERT INTO speech(pet,text,reason,timestamp) VALUES (?,?,?,?)",
                 (self.pet, text, reason, timestamp),
             )
-            if opportunity_id is not None and version is not None:
-                self.db.execute(
-                    "INSERT INTO work_surfacings(pet,opportunity_id,version,outcome,timestamp) VALUES (?,?,?,?,?)",
-                    (self.pet, opportunity_id, version, "accepted", timestamp),
+            if subject_id is not None and considered_revision is not None:
+                self.save_attention_history(
+                    subject_id, last_selected, considered_revision
                 )
-                self.db.execute(
-                    "UPDATE work_opportunities SET surfaced_version=? WHERE pet=? AND id=? AND version=?",
-                    (version, self.pet, opportunity_id, version),
-                )
-        self.prune()
+            self.prune()
         return True
 
     def record_delivery_failure(
@@ -193,28 +192,40 @@ class Memory:
         message_id: str,
         reason: str,
         text: str = "",
-        opportunity_id: str | None = None,
-        version: int | None = None,
+        subject_id: str | None = None,
+        revision: str | None = None,
+        last_selected: float = 0,
+        considered_revision: str | None = None,
     ) -> bool:
         with self.transaction():
             result = self.db.execute(
-                "INSERT OR IGNORE INTO message_outcomes VALUES (?,?,?,?,?,?,?,?)",
+                """INSERT OR IGNORE INTO message_outcomes
+                (pet,message_id,outcome,text,reason,subject_id,revision,timestamp)
+                VALUES (?,?,?,?,?,?,?,?)""",
                 (
                     self.pet,
                     message_id,
                     "failed",
                     text,
                     reason,
-                    opportunity_id,
-                    version,
+                    subject_id,
+                    revision,
                     self.clock(),
                 ),
             )
+            if (
+                result.rowcount
+                and subject_id is not None
+                and considered_revision is not None
+            ):
+                self.save_attention_history(
+                    subject_id, last_selected, considered_revision
+                )
         return bool(result.rowcount)
 
     def message_outcome(self, message_id: str) -> MessageOutcome | None:
         row = self.db.execute(
-            "SELECT message_id,outcome,text,reason,opportunity_id,version,timestamp FROM message_outcomes WHERE pet=? AND message_id=?",
+            "SELECT message_id,outcome,text,reason,subject_id,revision,timestamp FROM message_outcomes WHERE pet=? AND message_id=?",
             (self.pet, message_id),
         ).fetchone()
         return (
@@ -223,8 +234,8 @@ class Memory:
                 outcome=row["outcome"],
                 text=row["text"],
                 reason=row["reason"],
-                opportunity_id=row["opportunity_id"],
-                version=row["version"],
+                subject_id=row["subject_id"],
+                revision=row["revision"],
                 timestamp=row["timestamp"],
             )
             if row

@@ -27,8 +27,8 @@ checks. [Makefile](Makefile) defines the check and build commands.
   [pet_daemon/sentiment.py](pet_daemon/sentiment.py) scores user prose with VADER using the
   [bundled lexicon](pet_daemon/data/README.md). The event coordinator selects sentiment reactions and cooldowns.
 - **Work and evidence:** [pet_daemon/work/](pet_daemon/work/) defines typed work,
-  artifacts, relationships, evidence, and pure association and opportunity rules.
-  Its views expose intent, meaningful progress, supported outcomes, and possible actions.
+  artifacts, relationships, evidence, and pure association rules.
+  Its views expose intent, agent-reported progress, outcomes, and next steps.
   [pet_daemon/sources/](pet_daemon/sources/) collects hook, Git, and GitHub observations.
   Runtime reactions remain in [pet_daemon/episodes.py](pet_daemon/episodes.py).
 - **Commentary and storage:** [pet_daemon/commentary/context.py](pet_daemon/commentary/context.py)
@@ -37,7 +37,7 @@ checks. [Makefile](Makefile) defines the check and build commands.
   summaries, and repetition checks against that selection.
   [pet_daemon/commentary/model.py](pet_daemon/commentary/model.py) adapts Anthropic responses.
   [pet_daemon/storage/](pet_daemon/storage/) owns SQLite persistence, transactions, and migrations.
-  Accepted speech, message outcomes, and captured-version surfacing commit together.
+  Accepted speech, message outcomes, and captured-subject consideration commit together.
   The local [similarity helper](Sources/PetSpeechSimilarity/main.swift) checks repeated speech.
 - **Renderer:** [Sources/PetCore/](Sources/PetCore/) defines events and socket
   handling. [Sources/PetOverlay/](Sources/PetOverlay/) contains the AppKit app and view.

@@ -1,6 +1,5 @@
 from typing import NotRequired, TypedDict
 
-from .models import Opportunity
 from .views import (
     AssociationView,
     AvailabilityView,
@@ -12,7 +11,6 @@ from .views import (
     ProgressView,
     PullRequestEvidenceView,
     WorkView,
-    project_evidence,
 )
 
 
@@ -21,8 +19,6 @@ class PullRequestRecord(TypedDict):
     title: str
     state: str
     is_draft: bool | None
-    review: str
-    review_requested: bool | None
 
 
 class EvidenceFields(TypedDict, total=False):
@@ -32,8 +28,6 @@ class EvidenceFields(TypedDict, total=False):
     conflicts: bool
     behind: bool
     output: PullRequestRecord
-    checks: tuple[tuple[str, str], ...]
-    checks_current: bool
     pull_request_found: bool
     execution: str
     reported_progress: str
@@ -64,15 +58,6 @@ class WorkRecord(TypedDict):
     artifacts: tuple[PresentedArtifact, ...]
 
 
-class OpportunityRecord(TypedDict):
-    kind: str
-    intent: str
-    artifact: dict[str, str]
-    evidence: tuple[PresentedEvidence, ...]
-    uncertainty: tuple[str, ...]
-    next_step: str
-
-
 def evidence_record(record: EvidenceView) -> PresentedEvidence:
     result: PresentedEvidence = {"source": record.source, "kind": record.kind}
     match record.details:
@@ -92,11 +77,7 @@ def evidence_record(record: EvidenceView) -> PresentedEvidence:
                     "title": output.title,
                     "state": output.state,
                     "is_draft": output.is_draft,
-                    "review": output.review,
-                    "review_requested": output.review_requested,
                 },
-                checks=details.checks,
-                checks_current=details.checks_current,
             )
         case MissingPullRequestView() as details:
             result["pull_request_found"] = details.pull_request_found
@@ -137,24 +118,4 @@ def work_record(work: WorkView) -> WorkRecord:
             }
             for item in work.artifacts
         ),
-    }
-
-
-def opportunity_record(action: Opportunity) -> OpportunityRecord:
-    artifact = action.artifact
-    return {
-        "kind": action.kind,
-        "intent": action.intent[:1000],
-        "artifact": {
-            "kind": artifact.kind,
-            "ref": artifact.ref,
-            **({"title": artifact.title[:240]} if artifact.title is not None else {}),
-        },
-        "evidence": tuple(
-            evidence_record(value)
-            for record in action.evidence
-            if (value := project_evidence(record)) is not None
-        ),
-        "uncertainty": action.uncertainty,
-        "next_step": action.next_step,
     }

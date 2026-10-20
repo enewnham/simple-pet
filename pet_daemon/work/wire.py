@@ -20,16 +20,11 @@ class PullRequestData(TypedDict):
     url: str
     state: str
     merged_at: str | None
-    review: str
-    checks: tuple[tuple[str, ...], ...]
     is_draft: bool | None
     head: str
     head_repository: str
     head_branch: str
-    review_requests: tuple[str, ...]
     repository: str
-    check_revision: str
-    review_requested: bool | None
     title: str
     body: str
     base_branch: str

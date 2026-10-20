@@ -1,5 +1,4 @@
 import json
-from collections.abc import Sequence
 from dataclasses import replace
 from typing import Required, TypedDict
 from urllib.parse import urlsplit
@@ -8,35 +7,14 @@ from ..work.models import RelatedLink
 from ..work.observations import PullRequest
 from .git import CommandPath, RunCommand, canonical_repository, command
 
-CheckRollup = TypedDict(
-    "CheckRollup",
-    {
-        "name": str,
-        "context": str,
-        "conclusion": str | None,
-        "state": str,
-        "status": str,
-        "source": str,
-        "app": dict[str, str] | None,
-        "__typename": str,
-        "headSha": str,
-        "sha": str,
-        "checkSuite": dict[str, str] | None,
-    },
-    total=False,
-)
-
 
 class GitHubPullRequest(TypedDict, total=False):
     number: Required[int]
     url: Required[str]
     state: Required[str]
     mergedAt: str | None
-    reviewDecision: str | None
     headRepositoryOwner: dict[str, str] | None
     headRepository: dict[str, str] | None
-    statusCheckRollup: list[CheckRollup] | None
-    reviewRequests: list[dict[str, str]] | None
     headRefOid: str
     isDraft: bool
     headRefName: str
@@ -61,7 +39,7 @@ def pull_request_identity(url: str) -> tuple[str, int | None]:
     return "", None
 
 
-def _pull_request(data: GitHubPullRequest, viewer: str = "") -> PullRequest:
+def _pull_request(data: GitHubPullRequest) -> PullRequest:
     repository, _ = pull_request_identity(data["url"])
     owner = data.get("headRepositoryOwner") or {}
     head_repository = data.get("headRepository") or {}
@@ -70,81 +48,21 @@ def _pull_request(data: GitHubPullRequest, viewer: str = "") -> PullRequest:
         name = f"{owner['login']}/{head_repository['name']}"
     host = urlsplit(data["url"]).hostname
     head_identity = canonical_repository(f"{host}/{name}") if name and host else ""
-    checks = []
-    for item in data.get("statusCheckRollup") or []:
-        check = (
-            item.get("name") or item.get("context", ""),
-            item.get("conclusion") or item.get("state") or item.get("status", ""),
-        )
-        source = (
-            item.get("source")
-            or (item.get("app") or {}).get("slug")
-            or item.get("__typename")
-            or ""
-        )
-        sha = (
-            item.get("headSha")
-            or item.get("sha")
-            or (item.get("checkSuite") or {}).get("headSha")
-            or ""
-        )
-        if source or sha:
-            check += (source, sha)
-        checks.append(check)
-    requests = tuple(
-        sorted(
-            item.get("login") or item.get("slug") or item.get("name") or ""
-            for item in data.get("reviewRequests") or []
-        )
-    )
-    reviewers = data.get("reviewRequests") or []
-    review_requested = False if "reviewRequests" in data and not reviewers else None
-    if viewer:
-        requested = any(
-            (item.get("login") or "").casefold() == viewer.casefold()
-            for item in reviewers
-        )
-        review_requested = (
-            requested
-            if requested or all(item.get("login") for item in reviewers)
-            else None
-        )
-    head = data.get("headRefOid") or ""
     return PullRequest(
-        data["number"],
-        data["url"],
-        data["state"],
-        data.get("mergedAt"),
-        data.get("reviewDecision") or "",
-        tuple(sorted(checks)),
-        data.get("isDraft"),
-        head,
-        head_identity,
-        data.get("headRefName") or "",
-        requests,
-        repository,
-        head,
-        review_requested,
-        data.get("title") or "",
-        data.get("body") or "",
-        data.get("baseRefName") or "",
-        data.get("baseRefOid") or "",
+        number=data["number"],
+        url=data["url"],
+        state=data["state"],
+        merged_at=data.get("mergedAt"),
+        is_draft=data.get("isDraft"),
+        head=data.get("headRefOid") or "",
+        head_repository=head_identity,
+        head_branch=data.get("headRefName") or "",
+        repository=repository,
+        title=data.get("title") or "",
+        body=data.get("body") or "",
+        base_branch=data.get("baseRefName") or "",
+        base_head=data.get("baseRefOid") or "",
     )
-
-
-async def _viewer(
-    records: Sequence[GitHubPullRequest], path: CommandPath, run: RunCommand
-) -> str:
-    if not any(
-        item.get("login")
-        for data in records
-        for item in data.get("reviewRequests") or []
-    ):
-        return ""
-    try:
-        return (await run("gh", "api", "user", "--jq", ".login", cwd=path)).strip()
-    except (OSError, RuntimeError, TimeoutError):
-        return ""
 
 
 async def _stack_links(
@@ -212,15 +130,15 @@ async def observe(
     include_links: bool = True,
 ) -> PullRequest | None:
     fields = (
-        "number,url,state,mergedAt,reviewDecision,statusCheckRollup,isDraft,headRefOid,"
-        "headRepository,headRepositoryOwner,headRefName,reviewRequests,title,body,baseRefName,baseRefOid"
+        "number,url,state,mergedAt,isDraft,headRefOid,"
+        "headRepository,headRepositoryOwner,headRefName,title,body,baseRefName,baseRefOid"
     )
     if number is not None or url:
         args = ["gh", "pr", "view", url or str(number), "--json", fields]
         if not url and repository and not repository.startswith("local:"):
             args.extend(("--repo", repository))
         data = json.loads(await run(*args, cwd=path))
-        pr = _pull_request(data, await _viewer([data], path, run))
+        pr = _pull_request(data)
         return await _stack_links(pr, path, run) if include_links else pr
     if not repository or repository.startswith("local:"):
         raise RuntimeError("GitHub repository identity is unavailable")
@@ -254,8 +172,7 @@ async def observe(
         cwd=path,
     )
     records = json.loads(output)
-    viewer = await _viewer(records, path, run)
-    candidates = [_pull_request(item, viewer) for item in records]
+    candidates = [_pull_request(item) for item in records]
     if any(not item.head_repository or not item.head_branch for item in candidates):
         raise RuntimeError("Pull request head identity is unavailable")
     matches = [

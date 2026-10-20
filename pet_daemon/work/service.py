@@ -16,9 +16,8 @@ from .association import (
     record_session_event,
     work_context,
 )
-from .models import ArtifactDescriptor, Opportunity, WorkAccount, WorkItem, WorkState
+from .models import ArtifactDescriptor, WorkAccount, WorkItem, WorkState
 from .observations import RepositoryObservation, RepositoryTarget
-from .opportunities import derive_opportunities, eligible, project
 from .views import WorkSubject, WorkView, build_work, project_work
 
 
@@ -44,9 +43,6 @@ class WorkService:
         with self.repository.transaction():
             state = self.repository.load()
             result = apply(state)
-            derive_opportunities(
-                state, self.clock(), lambda work_id: work_context(state, work_id)
-            )
             self.repository.save(state)
         return result
 
@@ -57,9 +53,13 @@ class WorkService:
             lambda state: record_intent(state, session, intent, aliases, self.clock())
         )
 
-    def session_event(self, session: str, event: HookEvent) -> None:
+    def session_event(
+        self, session: str, event: HookEvent, *, waiting_for_input: bool | None = None
+    ) -> None:
         self._change(
-            lambda state: record_session_event(state, session, event, self.clock())
+            lambda state: record_session_event(
+                state, session, event, self.clock(), waiting_for_input=waiting_for_input
+            )
         )
 
     def observe_repository(self, observation: RepositoryObservation) -> None:
@@ -88,14 +88,9 @@ class WorkService:
         return self._view(self.repository.load(), work_id)
 
     def _view(self, state: WorkState, work_id: str) -> WorkView:
-        actions = tuple(
-            project(item)
-            for item in state.opportunities.values()
-            if item.work_id == work_id and eligible(item)
-        )
         account = work_context(state, work_id)
         assert account is not None
-        return project_work(work_id, account, actions)
+        return project_work(work_id, account)
 
     def work_for_session(self, session: str) -> WorkItem | None:
         return self.repository.load().current(session)
@@ -124,22 +119,6 @@ class WorkService:
             )
         )
 
-    def opportunities(self) -> tuple[Opportunity, ...]:
-        records = self.repository.load().opportunities.values()
-        return tuple(
-            project(item)
-            for item in sorted(records, key=lambda item: (-item.changed_at, item.id))
-            if eligible(item)
-        )
-
-    def opportunity(self, identifier: str) -> Opportunity | None:
-        item = self.repository.load().opportunities.get(identifier)
-        return project(item) if item and eligible(item) else None
-
-    def is_current(self, identifier: str, version: int) -> bool:
-        item = self.opportunity(identifier)
-        return bool(item and item.version == version)
-
     def prune(self) -> None:
         cutoff = self.clock() - self.retention_days * 86400
         with self.repository.transaction():
@@ -153,15 +132,6 @@ class WorkService:
                 if item.timestamp >= cutoff
                 or item.id
                 == latest[item.work_id, item.artifact_id, item.source, item.kind]
-            ]
-            latest = {}
-            for item in state.surfacings:
-                latest[item.opportunity_id, item.version, item.outcome] = item.id
-            state.surfacings = [
-                item
-                for item in state.surfacings
-                if item.timestamp >= cutoff
-                or item.id == latest[item.opportunity_id, item.version, item.outcome]
             ]
             self.repository.save(state)
 

@@ -2,7 +2,7 @@ import sqlite3
 
 from .transactions import transaction
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 MEMORY_SCHEMA = """
@@ -71,14 +71,6 @@ WORK_SCHEMA = """
                 artifact_id TEXT NOT NULL, source TEXT NOT NULL, kind TEXT NOT NULL,
                 data TEXT NOT NULL, timestamp REAL NOT NULL);
             CREATE INDEX IF NOT EXISTS work_evidence_scope ON work_evidence(pet,work_id,artifact_id,source,kind,id);
-            CREATE TABLE IF NOT EXISTS work_opportunities (
-                pet TEXT NOT NULL, id TEXT NOT NULL, work_id TEXT NOT NULL, kind TEXT NOT NULL,
-                artifact_id TEXT NOT NULL, version INTEGER NOT NULL, fingerprint TEXT NOT NULL,
-                data TEXT NOT NULL, active INTEGER NOT NULL, surfaced_version INTEGER NOT NULL,
-                changed_at REAL NOT NULL, PRIMARY KEY(pet,id));
-            CREATE TABLE IF NOT EXISTS work_surfacings (
-                id INTEGER PRIMARY KEY, pet TEXT NOT NULL, opportunity_id TEXT NOT NULL,
-                version INTEGER NOT NULL, outcome TEXT NOT NULL, timestamp REAL NOT NULL);
 """
 
 DELIVERY_SCHEMA = """
@@ -87,8 +79,9 @@ DELIVERY_SCHEMA = """
                 considered_revision TEXT NOT NULL, updated_at REAL NOT NULL, PRIMARY KEY(pet,subject));
             CREATE TABLE IF NOT EXISTS message_outcomes (
                 pet TEXT NOT NULL, message_id TEXT NOT NULL, outcome TEXT NOT NULL,
-                text TEXT NOT NULL, reason TEXT NOT NULL, opportunity_id TEXT,
-                version INTEGER, timestamp REAL NOT NULL, PRIMARY KEY(pet,message_id));
+                text TEXT NOT NULL, reason TEXT NOT NULL, timestamp REAL NOT NULL,
+                subject_id TEXT, revision TEXT,
+                PRIMARY KEY(pet,message_id));
 """
 
 
@@ -129,10 +122,13 @@ def migrate(db: sqlite3.Connection) -> None:
     version = db.execute("PRAGMA user_version").fetchone()[0]
     if version == SCHEMA_VERSION:
         return
-    # Rebuild disposable local memory on version changes rather than upgrading saved rows.
     with transaction(db):
-        execute_schema(db, DROP_SCHEMA)
-        execute_schema(db, MEMORY_SCHEMA)
-        execute_schema(db, WORK_SCHEMA)
-        execute_schema(db, DELIVERY_SCHEMA)
+        if version in {7, 8}:
+            db.execute("ALTER TABLE message_outcomes ADD COLUMN subject_id TEXT")
+            db.execute("ALTER TABLE message_outcomes ADD COLUMN revision TEXT")
+        else:
+            execute_schema(db, DROP_SCHEMA)
+            execute_schema(db, MEMORY_SCHEMA)
+            execute_schema(db, WORK_SCHEMA)
+            execute_schema(db, DELIVERY_SCHEMA)
         db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

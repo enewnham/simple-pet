@@ -8,18 +8,14 @@ type SQLValue = str | int | float | bytes | None
 from ..work.models import (
     Artifact,
     Evidence,
-    OpportunityState,
-    Surfacing,
     WorkItem,
     WorkState,
 )
 from ..work.serialization import (
     decode_artifact,
     decode_evidence,
-    decode_opportunity,
     encode_artifact,
     encode_evidence,
-    encode_opportunity,
 )
 from .transactions import transaction
 
@@ -31,8 +27,6 @@ TABLES = (
     "work_artifacts",
     "work_links",
     "work_evidence",
-    "work_opportunities",
-    "work_surfacings",
 )
 
 
@@ -53,9 +47,6 @@ class SQLiteWorkRepository:
         state = WorkState()
         state.next_evidence_id = self.db.execute(
             "SELECT COALESCE(MAX(id),0)+1 FROM work_evidence"
-        ).fetchone()[0]
-        state.next_surfacing_id = self.db.execute(
-            "SELECT COALESCE(MAX(id),0)+1 FROM work_surfacings"
         ).fetchone()[0]
         state.items = {
             row["id"]: WorkItem(
@@ -98,35 +89,6 @@ class SQLiteWorkRepository:
                 row["timestamp"],
             )
             for row in sorted(self.rows("work_evidence"), key=lambda row: row["id"])
-        ]
-        for row in self.rows("work_opportunities"):
-            content = decode_opportunity(row["data"])
-            state.opportunities[row["id"]] = OpportunityState(
-                id=row["id"],
-                work_id=row["work_id"],
-                kind=row["kind"],
-                artifact_id=row["artifact_id"],
-                version=row["version"],
-                fingerprint=row["fingerprint"],
-                intent=content.intent,
-                artifact=content.artifact,
-                evidence=content.evidence,
-                uncertainty=content.uncertainty,
-                next_step=content.next_step,
-                sessions=content.sessions,
-                active=bool(row["active"]),
-                surfaced_version=row["surfaced_version"],
-                changed_at=row["changed_at"],
-            )
-        state.surfacings = [
-            Surfacing(
-                row["id"],
-                row["opportunity_id"],
-                row["version"],
-                row["outcome"],
-                row["timestamp"],
-            )
-            for row in sorted(self.rows("work_surfacings"), key=lambda row: row["id"])
         ]
         return state
 
@@ -209,55 +171,6 @@ class SQLiteWorkRepository:
                 for item in state.evidence
             ),
         )
-        self._sync(
-            "work_opportunities",
-            (
-                "pet",
-                "id",
-                "work_id",
-                "kind",
-                "artifact_id",
-                "version",
-                "fingerprint",
-                "data",
-                "active",
-                "surfaced_version",
-                "changed_at",
-            ),
-            ("id",),
-            (
-                (
-                    pet,
-                    item.id,
-                    item.work_id,
-                    item.kind,
-                    item.artifact_id,
-                    item.version,
-                    item.fingerprint,
-                    encode_opportunity(item),
-                    int(item.active),
-                    item.surfaced_version,
-                    item.changed_at,
-                )
-                for item in state.opportunities.values()
-            ),
-        )
-        self._sync(
-            "work_surfacings",
-            ("id", "pet", "opportunity_id", "version", "outcome", "timestamp"),
-            ("id",),
-            (
-                (
-                    item.id,
-                    pet,
-                    item.opportunity_id,
-                    item.version,
-                    item.outcome,
-                    item.timestamp,
-                )
-                for item in state.surfacings
-            ),
-        )
 
     def _sync(
         self,
@@ -302,3 +215,8 @@ class SQLiteWorkRepository:
     def clear(self) -> None:
         for table in TABLES:
             self.db.execute(f"DELETE FROM {table} WHERE pet=?", (self.pet,))
+        for table in ("work_opportunities", "work_surfacings"):
+            if self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone():
+                self.db.execute(f"DELETE FROM {table} WHERE pet=?", (self.pet,))

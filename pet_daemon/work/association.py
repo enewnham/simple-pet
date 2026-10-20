@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import uuid
 from collections.abc import Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit, urlunsplit
 
 if TYPE_CHECKING:
     from ..runtime import HookEvent
@@ -22,14 +24,14 @@ from .models import (
     IntentEvidence,
     ProgressEvidence,
     PullRequestAssociation,
+    ReferenceAssociation,
     StackAssociation,
     WorkAccount,
     WorkItem,
     WorkState,
 )
 from .observations import RepositoryObservation, RepositoryTarget
-from .opportunities import evidence_grounds
-from .serialization import artifact_record
+from .serialization import payload_record
 from .validation import canonical, descriptor, repository_identity, text
 
 
@@ -98,11 +100,17 @@ def record_intent(
     record_evidence(
         state, work.id, "", "user", "intent", IntentEvidence(session, intent), now
     )
+    link_references(state, work.id, intent, "user_reference", now)
     return work.id
 
 
 def record_session_event(
-    state: WorkState, session: str, event: HookEvent, now: float
+    state: WorkState,
+    session: str,
+    event: HookEvent,
+    now: float,
+    *,
+    waiting_for_input: bool | None = None,
 ) -> None:
     aliases = tuple(text(alias, "alias") for alias in event.aliases)
     harness = event.harness
@@ -117,18 +125,52 @@ def record_session_event(
         return
     work_id = next(iter(candidates))
     bind_sessions(state, work_id, session, aliases)
-    record_evidence(
-        state,
-        work_id,
-        "",
-        "harness",
-        "execution",
-        ExecutionEvidence(
-            session, event.event, event.outcome, event.tool_name, event.progress
-        ),
-        now,
-    )
-    if event.progress:
+    if event.event in {
+        "turn_done",
+        "turn_error",
+        "subagent_done",
+        "interrupt",
+        "session_end",
+        "turn_start",
+    }:
+        record_evidence(
+            state,
+            work_id,
+            "",
+            "harness",
+            "execution",
+            ExecutionEvidence(
+                session, event.event, event.outcome, None, event.progress
+            ),
+            now,
+        )
+    elif event.event == "waiting" and waiting_for_input is not False:
+        record_evidence(
+            state,
+            work_id,
+            "",
+            "harness",
+            "execution",
+            ExecutionEvidence(session, "waiting", None, None, None),
+            now,
+        )
+    elif waiting_for_input is False:
+        previous = state.latest(work_id, "").get(("harness", "execution"))
+        if (
+            previous
+            and isinstance(previous.payload, ExecutionEvidence)
+            and previous.payload.event == "waiting"
+        ):
+            record_evidence(
+                state,
+                work_id,
+                "",
+                "harness",
+                "execution",
+                ExecutionEvidence(session, "resumed", None, None, None),
+                now,
+            )
+    if event.progress and not event.event.startswith("tool_"):
         record_evidence(
             state,
             work_id,
@@ -138,6 +180,7 @@ def record_session_event(
             ProgressEvidence(session, event.progress),
             now,
         )
+        link_references(state, work_id, event.progress, "agent_reference", now)
 
 
 def artifact(
@@ -205,6 +248,29 @@ def link(
     record_evidence(state, work_id, artifact_id, source, "relationship", payload, now)
 
 
+def link_references(
+    state: WorkState, work_id: str, prose: str, source: str, now: float
+) -> None:
+    for matched in re.findall(r"https?://[^\s<>\"'`]+", prose):
+        parsed = urlsplit(matched.rstrip(".,;:!?)]}"))
+        path = parsed.path.rstrip("/")
+        if re.fullmatch(r"/[^/]+/[^/]+/pull/\d+", path):
+            kind = "pull_request"
+        elif (
+            parsed.hostname == "linear.app"
+            and re.search(r"/issue/[^/]+", path)
+            or parsed.hostname == "github.com"
+            and re.fullmatch(r"/[^/]+/[^/]+/issues/\d+", path)
+            or re.fullmatch(r"/browse/[A-Z][A-Z0-9]+-\d+", path)
+        ):
+            kind = "ticket"
+        else:
+            continue
+        ref = urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, "", ""))
+        artifact_id = artifact(state, ArtifactDescriptor(kind, ref), source, now)
+        link(state, work_id, artifact_id, source, ReferenceAssociation(ref), now)
+
+
 def observe_repository(
     state: WorkState, observation: RepositoryObservation, now: float
 ) -> None:
@@ -244,7 +310,6 @@ def observe_repository(
                 CheckoutAssociation(checkout, branch_name),
                 now,
             )
-        work_ids.update(state.linked_work(branch))
         if local and not observation.local_error:
             for work_id in state.linked_work(branch):
                 record_evidence(
@@ -268,7 +333,12 @@ def observe_repository(
             "pull_request", pr.url, revision=pr.head or None, title=pr.title or None
         )
         pull_request = artifact(state, value, "github", observation.github_checked_at)
-        for work_id in work_ids if branch is None or matches_branch else ():
+        pr_work_ids = {
+            work.id
+            for session in observation.pr_sessions
+            if (work := state.current(session))
+        }
+        for work_id in pr_work_ids if branch is None or matches_branch else ():
             link(
                 state,
                 work_id,
@@ -277,7 +347,10 @@ def observe_repository(
                 PullRequestAssociation(checkout, branch_name),
                 observation.github_checked_at,
             )
-        work_ids.update(state.linked_work(pull_request))
+        for work_id in state.linked_work(pull_request):
+            link_references(
+                state, work_id, pr.title + "\n" + pr.body, "pr_reference", now
+            )
         for related in pr.related_links:
             if (
                 related.kind != "pull_request"
@@ -358,7 +431,12 @@ def work_context(state: WorkState, work_id: str) -> WorkAccount | None:
     activity = tuple(
         record.record()
         for (source, kind), record in sorted(state.latest(work_id, "").items())
-        if source == "harness" and kind in {"execution", "progress"}
+        if source == "harness"
+        and kind in {"execution", "progress"}
+        and not (
+            isinstance(record.payload, ExecutionEvidence)
+            and record.payload.event.startswith("tool_")
+        )
     )
     linked = [
         state.artifacts[artifact_id]
@@ -377,15 +455,8 @@ def work_context(state: WorkState, work_id: str) -> WorkAccount | None:
     )
     grounds = {
         "intent": work.intent,
-        "requests": evidence_grounds(requests),
-        "activity": evidence_grounds(activity),
-        "artifacts": [
-            {
-                **artifact_record(item.artifact),
-                "evidence": evidence_grounds(item.evidence),
-            }
-            for item in artifacts
-        ],
+        "requests": [payload_record(record.payload) for record in requests],
+        "activity": [payload_record(record.payload) for record in activity],
     }
     revision = hashlib.sha256(canonical(grounds).encode()).hexdigest()
     return WorkAccount(work.intent, revision, requests, activity, artifacts)

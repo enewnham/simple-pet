@@ -15,8 +15,7 @@ from pet_daemon.runtime import (
     WorkSnapshot,
 )
 from pet_daemon.storage.memory import HistoryRecord
-from pet_daemon.work import Opportunity, WorkSubject, WorkView
-from pet_daemon.work.models import ArtifactDescriptor
+from pet_daemon.work import WorkSubject, WorkView
 from Tests.fixtures import (
     capture_snapshot,
     require,
@@ -25,33 +24,13 @@ from Tests.fixtures import (
 )
 
 
-def opportunity(identifier: str, kind: str, changed_at: float = 0) -> Opportunity:
-    return Opportunity(
-        identifier,
-        1,
-        kind,
-        identifier,
-        "",
-        ArtifactDescriptor(
-            kind="branch", ref="fixture", repository="example.test/team/repo"
-        ),
-        (),
-        (),
-        "",
-        changed_at,
-        (),
-    )
-
-
 class AttentionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.now = 0
         self.config = Config(pet_dir=Path("."), observation_seconds=(30, 30))
         self.attention = Attention(self.config, lambda: self.now, random.Random(0))
 
-    def snapshot(
-        self, *sessions: SessionSnapshot, actions: tuple[Opportunity, ...] = ()
-    ) -> WorkSnapshot:
+    def snapshot(self, *sessions: SessionSnapshot) -> WorkSnapshot:
         members = sessions
         subjects = tuple(
             WorkSubject(
@@ -64,16 +43,6 @@ class AttentionTests(unittest.TestCase):
             )
             for session in members
         )
-        for item in actions:
-            subjects += (
-                WorkSubject(
-                    item.id,
-                    "work",
-                    item.changed_at,
-                    "one",
-                    WorkView(item.id, "", "one", opportunities=(item,)),
-                ),
-            )
         return capture_snapshot(sessions_snapshot(*members), work=subjects)
 
     def test_rotates_within_a_tier_before_preferring_recency(self) -> None:
@@ -88,26 +57,15 @@ class AttentionTests(unittest.TestCase):
             self.attention.scheduled(selected.id)
         self.assertEqual(chosen, ["cli:newer", "cli:older", "cli:newer", "cli:older"])
 
-    def test_explicit_input_precedes_current_checks_and_active_work(self) -> None:
+    def test_explicit_input_precedes_active_work(self) -> None:
         waiting = session_snapshot(
             id="cli:input", turn_active=True, waiting_for_input=True, waiting_seconds=0
         )
         snapshot = self.snapshot(
             waiting,
             session_snapshot(id="cli:active", turn_active=True),
-            actions=(opportunity("checks", "resolve_checks"),),
         )
         self.assertEqual(self.attention.select(snapshot).id, "cli:input")
-
-    def test_checks_precede_review_and_active_work(self) -> None:
-        snapshot = self.snapshot(
-            session_snapshot(id="cli:active", turn_active=True),
-            actions=(
-                opportunity("review", "review_output", changed_at=10),
-                opportunity("checks", "resolve_checks", changed_at=1),
-            ),
-        )
-        self.assertEqual(require(self.attention.select(snapshot).action).id, "checks")
 
     def test_tool_failure_alone_does_not_outrank_an_active_session(self) -> None:
         snapshot = self.snapshot(
@@ -131,12 +89,10 @@ class AttentionTests(unittest.TestCase):
     def test_event_target_keeps_its_focus_and_direction(self) -> None:
         snapshot = self.snapshot(
             session_snapshot(id="cli:finished", outcome="success"),
-            actions=(opportunity("checks", "resolve_checks"),),
         )
         snapshot = replace(snapshot, trigger=SessionTrigger("cli:finished"))
         selected = self.attention.select(snapshot, "completion")
         self.assertEqual(require(selected.focus_session).id, "cli:finished")
-        self.assertIsNone(selected.action)
         self.assertEqual(selected.situation, "completion")
 
     def test_manual_context_and_care_do_not_select_work(self) -> None:
@@ -272,3 +228,50 @@ class AttentionTests(unittest.TestCase):
             snapshot, require(request).reason, eligible=require(request).eligible
         )
         self.assertEqual(require(selected.focus_session).id, "cli:second")
+
+    def test_pending_delivery_preserves_every_automatic_request(self) -> None:
+        snapshot = self.snapshot(session_snapshot(id="cli:parser", turn_active=True))
+        self.now = 60
+        self.attention.queue("prompt", SessionTrigger("cli:parser"))
+        pending = self.attention.pending
+        next_observation = self.attention.next_observation
+        self.assertIsNone(
+            self.attention.request(
+                snapshot,
+                check_in=("cli:parser",),
+                care="exercise",
+                delivery_pending=True,
+            )
+        )
+        self.assertEqual(self.attention.pending, pending)
+        self.assertEqual(self.attention.next_observation, next_observation)
+        self.assertEqual(
+            require(
+                self.attention.request(
+                    snapshot, manual=("Inspect parser", 4), delivery_pending=True
+                )
+            ).reason,
+            "explicit",
+        )
+        self.assertEqual(
+            require(
+                self.attention.request(snapshot, clicked=True, delivery_pending=True)
+            ).reason,
+            "click",
+        )
+        self.assertEqual(require(self.attention.request(snapshot)).reason, "prompt")
+
+    def test_pending_delivery_preserves_due_observation_and_care(self) -> None:
+        snapshot = self.snapshot(session_snapshot(id="cli:parser", turn_active=True))
+        self.now = 60
+        next_observation = self.attention.next_observation
+        self.assertIsNone(self.attention.request(snapshot, delivery_pending=True))
+        self.assertEqual(self.attention.next_observation, next_observation)
+        self.assertEqual(require(self.attention.request(snapshot)).reason, "routine")
+        idle = self.snapshot()
+        self.assertIsNone(
+            self.attention.request(idle, care="exercise", delivery_pending=True)
+        )
+        self.assertEqual(
+            require(self.attention.request(idle, care="exercise")).reason, "care"
+        )

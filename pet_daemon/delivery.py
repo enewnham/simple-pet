@@ -24,7 +24,6 @@ class SpeechMessage:
     selection_id: str
     subject_id: str | None = None
     revision: str | None = None
-    opportunity: tuple[str, int] | None = None
     history_epoch: int = 0
     message_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     support: MessageSupport | None = None
@@ -69,6 +68,11 @@ class SpeechDelivery:
             self.deliveries[message.message_id] = delivery
             self._send(delivery)
         return message.message_id
+
+    def has_pending(self) -> bool:
+        return any(
+            delivery.status == "pending" for delivery in self.deliveries.values()
+        )
 
     def _send(self, delivery: Attempt) -> None:
         message = delivery.message

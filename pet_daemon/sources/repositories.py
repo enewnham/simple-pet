@@ -29,8 +29,11 @@ class RepositoryTracker:
         self.local_interval = local_interval
         self.github_interval = github_interval
         self.run = run
-        self.observations = {item.subject: item for item in checkpoints}
+        self.observations = {
+            item.subject: replace(item, session_heads=()) for item in checkpoints
+        }
         self.associations: dict[str, set[str]] = {}
+        self.claims: dict[str, set[str]] = {}
         self.paths: dict[str, float] = {}
         self.tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         self.limit = asyncio.Semaphore(concurrency)
@@ -44,7 +47,10 @@ class RepositoryTracker:
         self.target_paths = set()
         self.subscriptions = set()
         for session, path in associations:
-            self.associate(session, path)
+            if path:
+                path = str(Path(path).resolve())
+                self.associations.setdefault(path, set()).add(session)
+                self.paths[path] = 0
         for target in targets:
             self.track_artifact(target)
 
@@ -57,6 +63,7 @@ class RepositoryTracker:
         sessions = self.associations.setdefault(path, set())
         if refresh or session not in sessions or path not in self.paths:
             self.paths[path] = 0
+        self.claims.setdefault(path, set()).add(session)
         sessions.add(session)
 
     def track_artifact(self, target: RepositoryTarget) -> None:
@@ -104,6 +111,7 @@ class RepositoryTracker:
             }:
                 self.paths.pop(retired, None)
                 self.associations.pop(retired, None)
+                self.claims.pop(retired, None)
                 self.roots.pop(retired, None)
             for item in self.snapshot():
                 if item.worktree == root and item.current:
@@ -147,6 +155,7 @@ class RepositoryTracker:
             for retired in paths:
                 self.paths.pop(retired, None)
                 self.associations.pop(retired, None)
+                self.claims.pop(retired, None)
                 self.roots.pop(retired, None)
             self.applied.pop(path, None)
             for item in self.snapshot():
@@ -209,13 +218,43 @@ class RepositoryTracker:
             self.applied[root] = sequence
             now = self.clock()
             self.paths.setdefault(root, now)
-            sessions = self.associations.setdefault(root, set())
-            sessions.update(self.associations.get(path, ()))
+            self.associations.setdefault(root, set()).update(
+                self.associations.get(path, ())
+            )
+            claims = self.claims.pop(path, set())
             subject = root + ":" + local.branch
             for old in self.snapshot():
                 if old.worktree == root and old.subject != subject and old.current:
                     self._save(replace(old, current=False, revision=old.revision + 1))
             previous = self.observations.get(subject)
+            if previous and previous.repository != local.repository:
+                self._save(
+                    replace(
+                        previous,
+                        subject=subject + ":repository:" + previous.repository,
+                        current=False,
+                        local=None,
+                        session_heads=(),
+                        revision=previous.revision + 1,
+                    )
+                )
+                previous = None
+            sessions = set(previous.sessions if previous else ()) | claims
+            heads = dict(previous.session_heads if previous else ())
+            fresh_heads = {
+                session: local.head
+                for session in claims
+                if not (
+                    previous
+                    and previous.pr
+                    and session in previous.pr_sessions
+                    and previous.pr.head == local.head
+                )
+            }
+            claims_changed = any(
+                heads.get(session) != head for session, head in fresh_heads.items()
+            )
+            heads.update(fresh_heads)
             changed = (
                 previous is None or previous.local != local or not previous.current
             )
@@ -225,6 +264,10 @@ class RepositoryTracker:
                     local=local,
                     current=True,
                     sessions=tuple(sorted(sessions)),
+                    session_heads=tuple(sorted(heads.items())),
+                    github_attempted_at=0
+                    if claims_changed
+                    else previous.github_attempted_at,
                     local_checked_at=checked_at,
                     local_error=None,
                     revision=previous.revision + int(changed),
@@ -242,6 +285,7 @@ class RepositoryTracker:
                     changed_at=now,
                     local_checked_at=checked_at,
                     repository=local.repository,
+                    session_heads=tuple(sorted(heads.items())),
                 )
             )
             self._save(item)
@@ -308,6 +352,7 @@ class RepositoryTracker:
             if local is not None and local != captured.local:
                 self.paths[captured.worktree] = 0
                 return
+            observed_pr = pr
             if pr is None and current.pr is not None:
                 pr = current.pr
             if pr and current.pr and current.pr.url == pr.url:
@@ -325,20 +370,50 @@ class RepositoryTracker:
                 if current.pr and pr
                 else current.pr != pr
             )
-            if current.pr and pr and current.pr.url != pr.url:
+            replacement = bool(current.pr and pr and current.pr.url != pr.url)
+            claims = dict(current.session_heads)
+            supported = {
+                session
+                for session, head in claims.items()
+                if observed_pr
+                and pr
+                and (not replacement or current.pr and head != current.pr.head)
+                and local
+                and local.repository == pr.head_repository
+                and local.branch == pr.head_branch
+                and head == local.head == pr.head
+            }
+            sessions = set(current.sessions)
+            pr_sessions = set(current.pr_sessions)
+            if replacement:
                 self._save(
                     replace(
                         current,
                         subject=current.subject + f":pr:{current.pr.url}",
                         current=False,
                         local=None,
+                        sessions=current.pr_sessions,
+                        session_heads=(),
                         revision=current.revision + 1,
                     )
                 )
+                sessions = set(claims)
+                claims = {
+                    session: head
+                    for session, head in claims.items()
+                    if current.pr and head != current.pr.head
+                }
+                pr_sessions.clear()
+            pr_sessions.update(supported)
+            for session in supported:
+                claims.pop(session)
             self._save(
                 replace(
                     current,
                     pr=pr,
+                    sessions=tuple(sorted(sessions)),
+                    pr_sessions=tuple(sorted(pr_sessions)),
+                    session_heads=tuple(sorted(claims.items())),
                     github_checked_at=checked_at,
                     github_attempted_at=self.clock(),
                     github_error=None,
@@ -410,6 +485,7 @@ class RepositoryTracker:
             task.cancel()
         self.observations.clear()
         self.associations.clear()
+        self.claims.clear()
         self.paths.clear()
         self.applied.clear()
         self.roots.clear()

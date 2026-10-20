@@ -38,14 +38,11 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
             "url": "https://example.test/team/repo/pull/1",
             "state": "OPEN",
             "mergedAt": None,
-            "reviewDecision": "REVIEW_REQUIRED",
-            "statusCheckRollup": [],
             "isDraft": False,
             "headRefOid": self.git("rev-parse", "HEAD").strip(),
             "headRefName": "feature",
             "headRepositoryOwner": {"login": "team"},
             "headRepository": {"name": "repo"},
-            "reviewRequests": [],
             "title": "Improve parser",
             "body": "Handle quoted fields.",
             "baseRefName": "main",
@@ -86,8 +83,6 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("GitHub unavailable")
             if args[1] == "api" and "/stacks?pull_request=" in args[2]:
                 return json.dumps(self.stacks)
-            if args[1:3] == ("api", "user"):
-                return "reviewer\n"
             if args[1:3] == ("repo", "view"):
                 return json.dumps({"isFork": False, "parent": None})
             return json.dumps(
@@ -260,6 +255,137 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(archived.pr.number, 1)
         self.assertEqual(archived.pr.state, "MERGED")
         self.assertFalse(archived.pending)
+
+    async def test_reused_branch_binds_only_the_session_observed_at_the_new_head(
+        self,
+    ) -> None:
+        self.tracker.associate("codex:one", str(self.path))
+        await self.refresh()
+        await self.refresh()
+        self.assertEqual(self.tracker.snapshot()[0].pr_sessions, ("codex:one",))
+        (self.path / "tracked").write_text("second\n")
+        self.git("commit", "-am", "Second change")
+        self.pr = {
+            **self.pr,
+            "number": 2,
+            "url": "https://example.test/team/repo/pull/2",
+            "headRefOid": self.git("rev-parse", "HEAD").strip(),
+        }
+        self.tracker.associate("claude:two", str(self.path))
+        await self.refresh()
+        pending = next(item for item in self.tracker.snapshot() if item.current)
+        self.assertEqual(pending.pr_sessions, ("codex:one",))
+        self.assertIn("claude:two", pending.sessions)
+        await self.refresh()
+        current = next(item for item in self.tracker.snapshot() if item.current)
+        archived = next(item for item in self.tracker.snapshot() if not item.current)
+        self.assertEqual(current.sessions, ("claude:two",))
+        self.assertEqual(current.pr_sessions, ("claude:two",))
+        self.assertEqual(archived.pr_sessions, ("codex:one",))
+        assert archived.pr is not None
+        self.assertEqual(archived.pr.url, "https://example.test/team/repo/pull/1")
+
+    async def test_restored_path_sessions_do_not_claim_a_replacement_pull_request(
+        self,
+    ) -> None:
+        self.tracker.associate("codex:one", str(self.path))
+        await self.refresh()
+        await self.refresh()
+        await self.tracker.close()
+        self.restore_tracker()
+        (self.path / "tracked").write_text("second\n")
+        self.git("commit", "-am", "Second change")
+        self.pr = {
+            **self.pr,
+            "number": 2,
+            "url": "https://example.test/team/repo/pull/2",
+            "headRefOid": self.git("rev-parse", "HEAD").strip(),
+        }
+        self.now += 180
+        await self.refresh()
+        await self.refresh()
+        current = next(item for item in self.tracker.snapshot() if item.current)
+        archived = next(item for item in self.tracker.snapshot() if not item.current)
+        self.assertEqual(current.sessions, ())
+        self.assertEqual(current.pr_sessions, ())
+        self.assertEqual(archived.pr_sessions, ("codex:one",))
+
+    async def test_same_pull_request_keeps_its_session_when_the_head_advances(
+        self,
+    ) -> None:
+        self.tracker.associate("codex:one", str(self.path))
+        await self.refresh()
+        await self.refresh()
+        (self.path / "tracked").write_text("second\n")
+        self.git("commit", "-am", "Second change")
+        self.pr["headRefOid"] = self.git("rev-parse", "HEAD").strip()
+        self.now += 180
+        await self.refresh()
+        await self.refresh()
+        self.assertEqual(len(self.tracker.snapshot()), 1)
+        self.assertEqual(self.tracker.snapshot()[0].pr_sessions, ("codex:one",))
+
+    async def test_same_head_replacement_does_not_reuse_session_claims(self) -> None:
+        self.tracker.associate("codex:one", str(self.path))
+        await self.refresh()
+        await self.refresh()
+        self.tracker.associate("claude:two", str(self.path))
+        self.pr = {
+            **self.pr,
+            "number": 2,
+            "url": "https://example.test/team/repo/pull/2",
+        }
+        await self.refresh()
+        await self.refresh()
+        current = next(item for item in self.tracker.snapshot() if item.current)
+        self.assertEqual(current.pr_sessions, ())
+        self.assertEqual(current.sessions, ("claude:two",))
+        self.now += 180
+        await self.refresh()
+        self.assertEqual(
+            next(item for item in self.tracker.snapshot() if item.current).pr_sessions,
+            (),
+        )
+
+    async def test_cached_mismatched_pull_request_cannot_confirm_a_session_claim(
+        self,
+    ) -> None:
+        self.tracker.associate("codex:one", str(self.path))
+        await self.refresh()
+        await self.refresh()
+        (self.path / "tracked").write_text("second\n")
+        self.git("commit", "-am", "Second change")
+        self.tracker.associate("claude:two", str(self.path))
+        await self.refresh()
+        await self.refresh()
+        current = self.tracker.snapshot()[0]
+        self.assertEqual(current.pr_sessions, ("codex:one",))
+        self.assertIn("claude:two", current.sessions)
+        self.github_unavailable = True
+        self.now += 180
+        await self.refresh()
+        self.assertEqual(self.tracker.snapshot()[0].pr_sessions, ("codex:one",))
+
+    async def test_absent_branch_pull_request_does_not_confirm_cached_session_claims(
+        self,
+    ) -> None:
+        self.tracker.associate("codex:one", str(self.path))
+        await self.refresh()
+        await self.refresh()
+
+        async def absent(*args: str, **kwargs: Unpack[CommandOptions]) -> str:
+            if args[:3] == ("gh", "pr", "list"):
+                return "[]"
+            return await self.command(*args, **kwargs)
+
+        self.tracker.run = absent
+        self.tracker.associate("claude:two", str(self.path))
+        await self.refresh()
+        await self.refresh()
+        current = self.tracker.snapshot()[0]
+        self.assertEqual(current.pr_sessions, ("codex:one",))
+        assert current.pr is not None
+        self.assertEqual(current.pr.url, self.pr["url"])
 
     async def test_local_branch_change_during_observation_preserves_previous_evidence(
         self,
@@ -466,6 +592,10 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         assert updated.pr is not None
         self.assertEqual(updated.pr.url, self.pr["url"])
         self.assertEqual(self.emitted[-1], updated)
+        self.assertNotIn("claude:two", updated.pr_sessions)
+        await self.refresh()
+        confirmed = next(item for item in self.tracker.snapshot() if item.current)
+        self.assertEqual(confirmed.pr_sessions, ("claude:two", "codex:one"))
 
     async def test_new_session_in_known_subdirectory_receives_root_after_fresh_poll(
         self,
@@ -511,6 +641,60 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         assert previous.pr is not None
         self.assertEqual(previous.pr.url, previous_url)
 
+    async def test_known_session_progress_claims_the_branch_at_the_next_normal_poll(
+        self,
+    ) -> None:
+        self.tracker.associate("codex:one", str(self.path))
+        self.tracker.associate("claude:two", str(self.path))
+        await self.refresh()
+        await self.refresh()
+        self.git("switch", "-c", "another")
+        self.pr = {
+            **self.pr,
+            "number": 2,
+            "url": "https://example.test/team/repo/pull/2",
+            "headRefName": "another",
+        }
+        self.now += 1
+        self.tracker.associate("codex:one", str(self.path))
+        await self.refresh()
+        self.assertEqual(self.tracker.snapshot()[0].branch, "feature")
+        self.now += 29
+        await self.refresh()
+        current = next(item for item in self.tracker.snapshot() if item.current)
+        self.assertEqual(current.branch, "another")
+        self.assertEqual(current.sessions, ("codex:one",))
+        await self.refresh()
+        current = next(item for item in self.tracker.snapshot() if item.current)
+        self.assertEqual(current.pr_sessions, ("codex:one",))
+        previous = next(item for item in self.tracker.snapshot() if not item.current)
+        self.assertEqual(previous.pr_sessions, ("claude:two", "codex:one"))
+
+    async def test_known_session_progress_claims_a_reused_branch_without_historical_sessions(
+        self,
+    ) -> None:
+        self.tracker.associate("codex:one", str(self.path))
+        self.tracker.associate("claude:two", str(self.path))
+        await self.refresh()
+        await self.refresh()
+        (self.path / "tracked").write_text("second\n")
+        self.git("commit", "-am", "Second change")
+        self.pr = {
+            **self.pr,
+            "number": 2,
+            "url": "https://example.test/team/repo/pull/2",
+            "headRefOid": self.git("rev-parse", "HEAD").strip(),
+        }
+        self.tracker.associate("codex:one", str(self.path))
+        self.now += 30
+        await self.refresh()
+        await self.refresh()
+        current = next(item for item in self.tracker.snapshot() if item.current)
+        self.assertEqual(current.sessions, ("codex:one",))
+        self.assertEqual(current.pr_sessions, ("codex:one",))
+        previous = next(item for item in self.tracker.snapshot() if not item.current)
+        self.assertEqual(previous.pr_sessions, ("claude:two", "codex:one"))
+
     async def test_repeated_session_events_preserve_poll_interval_and_new_session_refreshes(
         self,
     ) -> None:
@@ -530,9 +714,15 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
             self.tracker.associate("codex:one", str(self.path))
             await self.refresh()
         self.assertEqual(polls, [])
+        attempted = self.tracker.snapshot()[0].github_attempted_at
+        self.now += 27
+        await self.refresh()
+        current = self.tracker.snapshot()[0]
+        self.assertEqual(current.github_attempted_at, attempted)
+        self.assertEqual(current.session_heads, ())
         self.tracker.associate("claude:two", str(self.path))
         await self.refresh()
-        self.assertEqual(len(polls), 1)
+        self.assertEqual(len(polls), 2)
         self.assertIn(
             "claude:two",
             next(item for item in self.tracker.snapshot() if item.current).sessions,
@@ -613,30 +803,6 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observed.head_repository, "example.test/fork-owner/repo")
         listed = next(args for args in calls if args[1:3] == ("pr", "list"))
         self.assertEqual(listed[listed.index("--repo") + 1], "example.test/team/repo")
-
-    async def test_pull_request_preserves_draft_review_and_check_revision(self) -> None:
-        self.pr.update(
-            {
-                "isDraft": True,
-                "reviewRequests": [{"login": "reviewer"}, {"slug": "maintainers"}],
-                "statusCheckRollup": [
-                    {
-                        "__typename": "CheckRun",
-                        "name": "tests",
-                        "conclusion": "FAILURE",
-                        "headSha": self.pr["headRefOid"],
-                    }
-                ],
-            }
-        )
-        observed = await github.observe(None, "", run=self.command, url=self.pr["url"])
-        assert observed is not None
-        self.assertTrue(observed.is_draft)
-        self.assertEqual(observed.review_requests, ("maintainers", "reviewer"))
-        self.assertEqual(observed.check_revision, observed.head)
-        self.assertEqual(
-            observed.checks, (("tests", "FAILURE", "CheckRun", observed.head),)
-        )
 
     async def test_pull_request_retains_exact_subject_and_base_without_inferring_body_links(
         self,
@@ -829,35 +995,6 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         assert retained.pr.related_links_error is not None
         self.assertIn("unavailable", retained.pr.related_links_error)
         self.assertGreater(retained.github_checked_at, original.github_checked_at)
-
-    async def test_review_request_targets_the_authenticated_viewer(self) -> None:
-        self.pr["reviewRequests"] = [{"login": "reviewer"}]
-        requested = await github.observe(None, "", run=self.command, url=self.pr["url"])
-        assert requested is not None
-        self.assertTrue(requested.review_requested)
-        self.pr["reviewRequests"] = [{"login": "another-reviewer"}]
-        other = await github.observe(None, "", run=self.command, url=self.pr["url"])
-        assert other is not None
-        self.assertFalse(other.review_requested)
-        self.pr["reviewRequests"] = [{"slug": "maintainers"}]
-        team = await github.observe(None, "", run=self.command, url=self.pr["url"])
-        assert team is not None
-        self.assertIsNone(team.review_requested)
-
-    async def test_unknown_viewer_preserves_pull_request_with_uncertain_review_request(
-        self,
-    ) -> None:
-        self.pr["reviewRequests"] = [{"login": "reviewer"}]
-
-        async def unknown(*args: str, **kwargs: Unpack[CommandOptions]) -> str:
-            if args[0:3] == ("gh", "api", "user"):
-                raise RuntimeError("Viewer identity unavailable")
-            return await self.command(*args, **kwargs)
-
-        observed = await github.observe(None, "", run=unknown, url=self.pr["url"])
-        assert observed is not None
-        self.assertEqual(observed.number, 1)
-        self.assertIsNone(observed.review_requested)
 
     async def test_repository_without_hosted_identity_has_unknown_github_status(
         self,

@@ -82,6 +82,11 @@ class PullRequestAssociation:
 
 
 @dataclass(frozen=True)
+class ReferenceAssociation:
+    ref: str
+
+
+@dataclass(frozen=True)
 class StackAssociation:
     link: RelatedLink
     from_ref: str
@@ -106,6 +111,7 @@ type EvidencePayload = (
     | CheckoutAssociation
     | PullRequestAssociation
     | StackAssociation
+    | ReferenceAssociation
     | GitObservation
     | GitHubEvidence
     | AvailabilityEvidence
@@ -157,63 +163,9 @@ class Evidence:
         return EvidenceRecord(self.source, self.kind, self.payload, self.timestamp)
 
 
-@dataclass(frozen=True)
-class OpportunityContent:
-    intent: str
-    artifact: ArtifactDescriptor
-    evidence: tuple[EvidenceRecord, ...]
-    uncertainty: tuple[str, ...]
-    next_step: str
-    sessions: tuple[str, ...]
-
-
-@dataclass
-class OpportunityState:
-    id: str
-    work_id: str
-    kind: str
-    artifact_id: str
-    version: int
-    fingerprint: str
-    intent: str
-    artifact: ArtifactDescriptor
-    evidence: tuple[EvidenceRecord, ...]
-    uncertainty: tuple[str, ...]
-    next_step: str
-    sessions: tuple[str, ...]
-    active: bool
-    surfaced_version: int
-    changed_at: float
-
-
-@dataclass(frozen=True)
-class Opportunity:
-    id: str
-    version: int
-    kind: str
-    work_id: str
-    intent: str
-    artifact: ArtifactDescriptor
-    evidence: tuple[EvidenceRecord, ...]
-    uncertainty: tuple[str, ...]
-    next_step: str
-    changed_at: float
-    sessions: tuple[str, ...]
-
-
-@dataclass
-class Surfacing:
-    id: int
-    opportunity_id: str
-    version: int
-    outcome: str
-    timestamp: float
-
-
 @dataclass
 class WorkState:
     next_evidence_id: int = 1
-    next_surfacing_id: int = 1
     items: dict[str, WorkItem] = field(default_factory=dict)
     sessions: dict[str, str] = field(default_factory=dict)
     memberships: set[tuple[str, str]] = field(default_factory=set)
@@ -221,8 +173,6 @@ class WorkState:
     artifacts: dict[str, Artifact] = field(default_factory=dict)
     links: set[tuple[str, str]] = field(default_factory=set)
     evidence: list[Evidence] = field(default_factory=list)
-    opportunities: dict[str, OpportunityState] = field(default_factory=dict)
-    surfacings: list[Surfacing] = field(default_factory=list)
 
     def current(self, session: str) -> WorkItem | None:
         identifier = self.sessions.get(session)

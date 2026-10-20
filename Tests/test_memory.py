@@ -408,7 +408,7 @@ class MemoryTests(unittest.TestCase):
                 )
             )
         )
-        self.assertIn("Tests succeeded", self.memory.recent()[-1].summary)
+        self.assertNotIn("Tests succeeded", self.memory.recent()[-1].summary)
 
     def test_recall_matches_older_goals_within_the_repository(self) -> None:
         self.memory.close()
@@ -481,7 +481,7 @@ class MemoryTests(unittest.TestCase):
         )
         rows = self.memory.recent()
         self.assertNotIn("SECRET", json.dumps(rows, default=asdict))
-        self.assertNotIn("error_signature", asdict(rows[0]))
+        self.assertEqual(rows, [])
 
     def test_long_factual_fields_are_bounded_before_storage(self) -> None:
         self.event("猫" * 100000)
@@ -538,60 +538,234 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(len(events), 2)
         self.assertIn("First result", json.dumps(events, default=asdict))
 
-    def test_failure_facts_describe_broad_activity_and_cancellation(self) -> None:
-        for tool, category, expected in (
-            ("pytest", "testing", "Tests failed"),
-            ("cargo build", "building", "Build failed"),
-            ("./release.sh", "command", "Command failed"),
-            ("", "harness", "Agent run failed"),
-        ):
-            with self.subTest(activity=category):
-                self.memory.record_event(
-                    project_event(
-                        require(
-                            normalize_hook(
-                                {
-                                    "session": "one",
-                                    "harness": "claude",
-                                    "event": "tool_error",
-                                    "tool": tool,
-                                }
-                            )
-                        ),
-                        EventContext(
-                            id="claude:one",
-                            repo="",
-                            goal="",
-                            last_tool="",
-                            outcome=None,
-                            activity=category,
-                        ),
-                    )
-                )
-                self.assertIn(expected, self.memory.recent()[-1].summary)
+    def test_tool_commands_do_not_create_persisted_facts(self) -> None:
+        for kind in ("tool_start", "tool_done", "tool_error"):
+            self.event("Command output", event=kind, tool="pytest", outcome="error")
+        self.assertEqual(self.memory.recent(), [])
+
+    def test_cancellation_retains_the_agent_turn_fact(self) -> None:
         self.memory.record_event(
-            project_event(
-                require(
-                    normalize_hook(
-                        {
-                            "session": "one",
-                            "harness": "claude",
-                            "event": "interrupt",
-                            "outcome": "cancelled",
-                        }
-                    )
-                ),
-                EventContext(
-                    id="claude:one",
-                    repo="",
-                    goal="",
-                    last_tool="",
-                    outcome="cancelled",
-                    activity="harness",
-                ),
-            )
+            project_event(HookEvent("claude", "one", "interrupt", outcome="cancelled"))
         )
         self.assertIn("Agent run cancelled", self.memory.recent()[-1].summary)
+
+    def test_acceptance_commits_speech_outcome_and_considered_story_together(
+        self,
+    ) -> None:
+        self.assertTrue(
+            self.memory.record_acceptance(
+                "message",
+                "Parser covered",
+                "routine",
+                "work",
+                "revision",
+                50,
+                "revision",
+            )
+        )
+        self.assertFalse(
+            self.memory.record_acceptance(
+                "message", "Duplicate", "routine", "work", "new", 60, "new"
+            )
+        )
+        outcome = require(self.memory.message_outcome("message"))
+        self.assertEqual((outcome.subject_id, outcome.revision), ("work", "revision"))
+        self.assertEqual(
+            [item.text for item in self.memory.speech()], ["Parser covered"]
+        )
+        self.assertEqual(
+            self.memory.load_attention_history()["work"], HistoryRecord(50, "revision")
+        )
+
+    def test_late_acceptance_preserves_newer_consideration(self) -> None:
+        self.memory.save_attention_history("work", 60, "new")
+        self.memory.record_acceptance(
+            "message", "Earlier report", "routine", "work", "old"
+        )
+        self.assertEqual(
+            self.memory.load_attention_history()["work"], HistoryRecord(60, "new")
+        )
+        self.assertEqual(
+            require(self.memory.message_outcome("message")).revision, "old"
+        )
+
+    def test_failed_attention_write_rolls_back_speech_and_outcome(self) -> None:
+        self.memory.db.execute("""CREATE TRIGGER reject_attention BEFORE INSERT ON attention_history
+            BEGIN SELECT RAISE(ABORT, 'attention unavailable'); END""")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.memory.record_acceptance(
+                "message",
+                "Parser covered",
+                "routine",
+                "work",
+                "revision",
+                50,
+                "revision",
+            )
+        self.assertIsNone(self.memory.message_outcome("message"))
+        self.assertEqual(self.memory.speech(), [])
+        self.assertEqual(self.memory.load_attention_history(), {})
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.memory.record_delivery_failure(
+                "message",
+                "timeout",
+                subject_id="work",
+                revision="revision",
+                last_selected=50,
+                considered_revision="revision",
+            )
+        self.assertIsNone(self.memory.message_outcome("message"))
+
+    def test_failed_acceptance_pruning_rolls_back_the_message_transaction(self) -> None:
+        self.memory.db.execute(
+            "INSERT INTO speech(pet,text,reason,timestamp) VALUES ('fixture','Expired','routine',-10000)"
+        )
+        self.memory.db.execute("""CREATE TRIGGER reject_speech_pruning BEFORE DELETE ON speech
+            BEGIN SELECT RAISE(ABORT, 'pruning unavailable'); END""")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.memory.record_acceptance(
+                "message",
+                "Parser covered",
+                "routine",
+                "work",
+                "revision",
+                50,
+                "revision",
+            )
+        self.assertIsNone(self.memory.message_outcome("message"))
+        self.assertEqual(self.memory.speech(), [])
+        self.assertEqual(self.memory.load_attention_history(), {})
+        self.assertEqual(
+            self.memory.db.execute("SELECT text FROM speech").fetchone()[0], "Expired"
+        )
+
+    def test_failed_delivery_records_consideration_without_speech(self) -> None:
+        self.assertTrue(
+            self.memory.record_delivery_failure(
+                "message",
+                "timeout",
+                "Parser covered",
+                "work",
+                "revision",
+                50,
+                "revision",
+            )
+        )
+        self.assertFalse(
+            self.memory.record_delivery_failure(
+                "message", "duplicate", subject_id="work", considered_revision="other"
+            )
+        )
+        self.assertEqual(
+            require(self.memory.message_outcome("message")).outcome, "failed"
+        )
+        self.assertEqual(self.memory.speech(), [])
+        self.assertEqual(
+            self.memory.load_attention_history()["work"], HistoryRecord(50, "revision")
+        )
+        self.assertTrue(
+            self.memory.record_acceptance(
+                "message", "Parser covered", "routine", "work", "revision"
+            )
+        )
+        self.assertEqual(
+            require(self.memory.message_outcome("message")).outcome, "accepted"
+        )
+
+    def test_schema_seven_upgrade_preserves_history_and_ignores_legacy_actions(
+        self,
+    ) -> None:
+        self.assert_upgrade_preserves_history_and_ignores_legacy_actions(7)
+
+    def test_schema_eight_upgrade_preserves_history_and_ignores_legacy_actions(
+        self,
+    ) -> None:
+        self.assert_upgrade_preserves_history_and_ignores_legacy_actions(8)
+
+    def assert_upgrade_preserves_history_and_ignores_legacy_actions(
+        self, version: int
+    ) -> None:
+        from pet_daemon.storage.migrations import (
+            DELIVERY_SCHEMA,
+            MEMORY_SCHEMA,
+            WORK_SCHEMA,
+            execute_schema,
+        )
+
+        path = Path(self.temporary.name) / f"legacy-{version}.sqlite3"
+        legacy_delivery = DELIVERY_SCHEMA.replace(
+            "timestamp REAL NOT NULL,\n                subject_id TEXT, revision TEXT,",
+            "opportunity_id TEXT, version INTEGER, timestamp REAL NOT NULL,",
+        )
+        with sqlite3.connect(path) as database:
+            execute_schema(database, MEMORY_SCHEMA)
+            execute_schema(database, WORK_SCHEMA)
+            database.execute("""CREATE TABLE work_opportunities (
+                pet TEXT NOT NULL, id TEXT NOT NULL, work_id TEXT NOT NULL, kind TEXT NOT NULL,
+                artifact_id TEXT NOT NULL, version INTEGER NOT NULL, fingerprint TEXT NOT NULL,
+                data TEXT NOT NULL, active INTEGER NOT NULL, surfaced_version INTEGER NOT NULL,
+                changed_at REAL NOT NULL, PRIMARY KEY(pet,id))""")
+            database.execute("""CREATE TABLE work_surfacings (
+                id INTEGER PRIMARY KEY, pet TEXT NOT NULL, opportunity_id TEXT NOT NULL,
+                version INTEGER NOT NULL, outcome TEXT NOT NULL, timestamp REAL NOT NULL)""")
+            execute_schema(database, legacy_delivery)
+            database.execute(f"PRAGMA user_version = {version}")
+            database.execute(
+                "INSERT INTO speech VALUES (1,'fixture','Saved remark','routine',1000)"
+            )
+            database.execute(
+                "INSERT INTO message_outcomes VALUES ('fixture','legacy','accepted','Saved remark','routine','opportunity',3,1000)"
+            )
+            database.execute(
+                "INSERT INTO work_items VALUES ('fixture','work','Improve parser','active',1000)"
+            )
+            database.execute(
+                "INSERT INTO work_opportunities VALUES ('fixture','opportunity','work','resolve_checks','artifact',3,'fingerprint','not decoded',1,3,1000)"
+            )
+            database.execute(
+                "INSERT INTO work_surfacings VALUES (1,'fixture','opportunity',3,'accepted',1000)"
+            )
+        upgraded = Memory(path, "fixture", clock=lambda: self.now)
+        try:
+            self.assertEqual(upgraded.speech()[0].text, "Saved remark")
+            self.assertEqual(
+                require(upgraded.message_outcome("legacy")).subject_id, None
+            )
+            upgraded.work.session_intent("codex:one", "More parser work")
+            self.assertEqual(len(upgraded.work.work_items()), 2)
+            self.assertEqual(
+                upgraded.db.execute("SELECT data FROM work_opportunities").fetchone()[
+                    0
+                ],
+                "not decoded",
+            )
+            self.assertEqual(
+                upgraded.db.execute("SELECT COUNT(*) FROM work_surfacings").fetchone()[
+                    0
+                ],
+                1,
+            )
+            upgraded.record_acceptance(
+                "new", "More parser coverage", "routine", "work", "revision"
+            )
+            self.assertEqual(
+                require(upgraded.message_outcome("new")).revision, "revision"
+            )
+            upgraded.clear()
+            self.assertEqual(
+                upgraded.db.execute(
+                    "SELECT COUNT(*) FROM work_opportunities"
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                upgraded.db.execute("SELECT COUNT(*) FROM work_surfacings").fetchone()[
+                    0
+                ],
+                0,
+            )
+        finally:
+            upgraded.close()
 
     def test_session_context_survives_restart_with_its_original_anchor(self) -> None:
         self.memory.save_context(
@@ -720,7 +894,12 @@ class MemoryTests(unittest.TestCase):
         )
 
     def test_work_graph_creates_only_tables_with_automatic_producers(self) -> None:
-        for name in ("work_updates", "work_decisions"):
+        for name in (
+            "work_updates",
+            "work_decisions",
+            "work_opportunities",
+            "work_surfacings",
+        ):
             self.assertIsNone(
                 self.memory.db.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name=?",

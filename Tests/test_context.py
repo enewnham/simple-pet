@@ -12,7 +12,7 @@ from pet_daemon.commentary import Cognition
 from pet_daemon.commentary.context import CommentaryPayload, PreparedCommentary
 from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.config import Config
-from pet_daemon.runtime import WorkSnapshot
+from pet_daemon.runtime import CareTrigger, WorkSnapshot
 from pet_daemon.storage import Memory
 from pet_daemon.work import WorkSubject, build_work
 from pet_daemon.work.observations import (
@@ -20,6 +20,7 @@ from pet_daemon.work.observations import (
     PullRequest,
     RepositoryObservation,
 )
+from pet_daemon.work.views import ArtifactView
 from Tests.fixtures import (
     SessionOptions,
     capture_snapshot,
@@ -177,9 +178,9 @@ class ContextTests(unittest.TestCase):
     def output(
         self,
         *,
-        review: bool = True,
         head: str = "one",
-        checks: tuple[tuple[str, str], ...] = (),
+        state: str = "OPEN",
+        is_draft: bool = True,
     ) -> None:
         if not self.memory.work.work_for_session("cli:parser"):
             self.memory.work.session_intent(
@@ -201,17 +202,13 @@ class ContextTests(unittest.TestCase):
                 pr=PullRequest(
                     42,
                     "https://example.test/team/parser/pull/42",
-                    "OPEN",
+                    state,
                     None,
-                    "",
-                    tuple(checks),
-                    is_draft=True,
+                    is_draft=is_draft,
                     title="Persist coding session context",
                     head=head,
-                    check_revision=head,
                     head_repository="example.test/team/parser",
                     head_branch="persistence",
-                    review_requested=review,
                 ),
             )
         )
@@ -227,24 +224,73 @@ class ContextTests(unittest.TestCase):
         self.assertNotIn("cli:parser", encoded)
         self.assertIn("https://example.test/team/parser/pull/42", encoded)
 
-    def test_review_withdrawal_invalidates_the_selected_action(self) -> None:
-        self.output()
-        prepared = self.prepare()
-        assert prepared.selection.action is not None
-        self.assertEqual(prepared.selection.action.kind, "review_output")
-        self.output(review=False)
-        self.assertFalse(prepared.manifest.valid(self.current_snapshot()))
-
-    def test_resolved_checks_invalidate_the_selected_obstacle(self) -> None:
-        self.output(review=False, checks=(("tests", "FAILURE"),))
-        prepared = self.prepare()
-        assert prepared.selection.action is not None
-        self.assertEqual(prepared.selection.action.kind, "resolve_checks")
-        self.output(review=False, checks=(("tests", "SUCCESS"),))
-        self.assertFalse(prepared.manifest.valid(self.current_snapshot()))
-
-    def test_superseded_head_invalidates_a_selected_action(self) -> None:
+    def test_head_metadata_does_not_invalidate_the_agent_story(self) -> None:
         self.output()
         prepared = self.prepare()
         self.output(head="two")
+        self.assertTrue(prepared.manifest.valid(self.current_snapshot()))
+
+    def test_supplied_pull_request_state_invalidates_changed_context(self) -> None:
+        self.output()
+        prepared = self.prepare()
+        self.output(state="MERGED")
         self.assertFalse(prepared.manifest.valid(self.current_snapshot()))
+
+    def test_new_artifact_context_does_not_invalidate_captured_story(self) -> None:
+        self.output()
+        prepared = self.prepare()
+        self.work = tuple(
+            replace(
+                subject,
+                view=replace(
+                    subject.view,
+                    artifacts=(
+                        *subject.view.artifacts,
+                        ArtifactView("ticket", "https://example.test/tickets/123"),
+                    ),
+                ),
+            )
+            for subject in self.work
+        )
+        self.assertTrue(prepared.manifest.valid(self.current_snapshot()))
+
+    def test_disconnected_focus_invalidates_the_captured_subject(self) -> None:
+        self.output()
+        prepared = self.prepare()
+        self.work = tuple(replace(subject, sessions=()) for subject in self.work)
+        self.assertFalse(prepared.manifest.valid(self.current_snapshot()))
+
+    def test_selected_work_context_is_supplied_once(self) -> None:
+        self.output()
+        self.update_session(connected_work=self.work[0].view)
+        payload = self.payload(self.prepare())
+        self.assertIn("focus_work", payload)
+        focus = payload["focus_session"]
+        assert focus is not None
+        self.assertNotIn("connected_work", focus)
+
+    def test_resumed_work_invalidates_a_quiet_care_remark(self) -> None:
+        self.snapshot = sessions_snapshot()
+        snapshot = replace(self.current_snapshot(), trigger=CareTrigger("exercise"))
+        selection = self.attention.select(snapshot, "care")
+        prepared = self.cognition.context.prepare(
+            snapshot, selection, self.cognition.request
+        )
+        self.assertTrue(prepared.manifest.valid(snapshot))
+        resumed = capture_snapshot(
+            sessions_snapshot(session_snapshot(turn_active=True))
+        )
+        self.assertFalse(prepared.manifest.valid(resumed))
+
+    def test_new_input_wait_invalidates_a_quiet_greeting(self) -> None:
+        self.snapshot = sessions_snapshot()
+        prepared = self.prepare("click")
+        waiting = capture_snapshot(
+            sessions_snapshot(session_snapshot(waiting_for_input=True))
+        )
+        self.assertFalse(prepared.manifest.valid(waiting))
+
+    def test_summary_saved_from_the_same_result_preserves_commentary(self) -> None:
+        prepared = self.prepare()
+        self.update_session(session_context="The parser preserves its public API.")
+        self.assertTrue(prepared.manifest.valid(self.current_snapshot()))
