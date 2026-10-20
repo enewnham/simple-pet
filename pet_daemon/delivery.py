@@ -1,89 +1,95 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import time
 import uuid
 
 
-@dataclass
-class Attempt:
-    delivery_id: str
-    opportunity_id: str
-    version: int
+@dataclass(frozen=True)
+class SpeechMessage:
     text: str
     ttl: float
+    reason: str
+    selection_id: str
+    subject_id: str | None = None
+    revision: object = None
+    opportunity: tuple[str, int] | None = None
+    history_epoch: int = 0
+    message_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    support: object = None
+
+
+@dataclass(frozen=True)
+class DeliveryOutcome:
+    message: SpeechMessage
+    status: str
+
+
+@dataclass
+class Attempt:
+    message: SpeechMessage
     attempts: int = 0
     status: str = "pending"
     due: float = 0
+    expires: float = 0
 
 
 class SpeechDelivery:
-    def __init__(self, emit, clock=time.monotonic, on_outcome=None, valid=None, ack_timeout=2):
+    def __init__(self, emit, *, clock=time.monotonic, on_outcome, valid, ack_timeout=2):
         self.emit = emit
         self.clock = clock
-        self.on_outcome = on_outcome or (lambda identifier, version, outcome: None)
-        self.valid = valid or (lambda identifier, version: True)
+        self.on_outcome = on_outcome
+        self.valid = valid
         self.ack_timeout = ack_timeout
-        self.deliveries = {}
+        self.deliveries: dict[str, Attempt] = {}
 
-    def submit(self, text, ttl, opportunity_id, version):
-        key = (opportunity_id, version)
-        delivery = self.deliveries.get(key)
-        if delivery is not None:
-            if delivery.status == "cancelled" and delivery.attempts < 2:
-                delivery.status = "pending"
-                self._send(delivery)
-            return delivery.delivery_id
-        delivery = Attempt(str(uuid.uuid4()), opportunity_id, version, text, ttl)
-        self.deliveries[key] = delivery
-        self._send(delivery)
-        return delivery.delivery_id
+    def submit(self, message: SpeechMessage):
+        delivery = self.deliveries.get(message.message_id)
+        if delivery is None:
+            delivery = Attempt(message)
+            self.deliveries[message.message_id] = delivery
+            self._send(delivery)
+        return message.message_id
 
     def _send(self, delivery):
-        if not self.valid(delivery.opportunity_id, delivery.version):
+        message = delivery.message
+        if not self.valid(message):
             delivery.status = "cancelled"
             return
         delivery.attempts += 1
         delivery.due = self.clock() + self.ack_timeout
+        delivery.expires = self.clock() + message.ttl + 2 * self.ack_timeout
         try:
-            self.emit({"text": delivery.text, "ttl": delivery.ttl, "delivery_id": delivery.delivery_id})
+            self.emit({"text": message.text, "ttl": message.ttl, "delivery_id": message.message_id})
         except OSError:
             pass
 
     def acknowledge(self, packet):
         if packet.get("event") != "speech_accepted":
             return False
-        delivery_id = packet.get("delivery_id")
-        if not isinstance(delivery_id, str):
+        identifier = packet.get("delivery_id")
+        if not isinstance(identifier, str):
             return False
-        delivery = next((item for item in self.deliveries.values() if item.delivery_id == delivery_id), None)
-        if delivery is None or delivery.status != "pending":
+        delivery = self.deliveries.get(identifier)
+        if (delivery is None or not delivery.attempts or delivery.status == "accepted"
+                or self.clock() > delivery.expires):
             return False
-        if not self.valid(delivery.opportunity_id, delivery.version):
-            delivery.status = "cancelled"
-            return False
-        self.on_outcome(delivery.opportunity_id, delivery.version, "accepted")
+        self.on_outcome(DeliveryOutcome(delivery.message, "accepted"))
         delivery.status = "accepted"
         return True
 
     def tick(self):
-        for delivery in list(self.deliveries.values()):
-            if delivery.status != "pending":
-                continue
-            if not self.valid(delivery.opportunity_id, delivery.version):
-                delivery.status = "cancelled"
-            elif self.clock() >= delivery.due:
-                if delivery.attempts < 2:
-                    self._send(delivery)
-                else:
-                    delivery.status = "failed"
-                    self.on_outcome(delivery.opportunity_id, delivery.version, "failed")
-
-    def can_submit(self, opportunity_id, version):
-        delivery = self.deliveries.get((opportunity_id, version))
-        return delivery is None or (delivery.status == "cancelled" and delivery.attempts < 2)
-
-    def speech(self, opportunity_id, version):
-        delivery = self.deliveries.get((opportunity_id, version))
-        return delivery.text if delivery else None
+        now = self.clock()
+        for identifier, delivery in tuple(self.deliveries.items()):
+            if delivery.status == "pending":
+                if not self.valid(delivery.message):
+                    delivery.status = "cancelled"
+                elif now >= delivery.due:
+                    if delivery.attempts < 2:
+                        self._send(delivery)
+                    else:
+                        self.on_outcome(DeliveryOutcome(delivery.message, "failed"))
+                        delivery.status = "failed"
+            if delivery.status != "pending" and now > delivery.expires:
+                del self.deliveries[identifier]
 
     def clear(self):
         self.deliveries.clear()

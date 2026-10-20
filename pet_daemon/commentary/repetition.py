@@ -7,10 +7,10 @@ from pathlib import Path
 import re
 import unicodedata
 
-from .telemetry import event
+from ..telemetry import event
 
 
-SIMILARITY_BINARY = Path(__file__).resolve().parents[1] / ".build" / "pet-speech-similarity"
+SIMILARITY_BINARY = Path(__file__).resolve().parents[2] / ".build" / "pet-speech-similarity"
 SEMANTIC_THRESHOLD = 0.9
 NEGATIONS = {"no", "not", "never", "without", "nothing", "nobody", "cannot", "cant", "dont", "isnt", "arent", "wasnt", "werent", "hasnt", "havent", "wont", "didnt"}
 OUTCOMES = (

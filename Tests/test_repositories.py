@@ -1,18 +1,20 @@
+from pet_daemon.work.history import project_event
 import asyncio
-from dataclasses import replace
 import json
 from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from pet_daemon.memory import Memory
-from pet_daemon.repositories import RepositoryTracker
-from pet_daemon.repositories import git, github
-from pet_daemon.repositories.github import PullRequest
-from pet_daemon.repositories.tracker import RepositoryObservation
+from pet_daemon.storage.memory import Memory
+from pet_daemon.sources import RepositoryTarget, RepositoryTracker
+from pet_daemon.sources import git, github
+from pet_daemon.work.observations import RepositoryObservation, repository_observation_from_mapping
+from pet_daemon.sources.hooks import HookEvent, normalize_hook
 
 
 class RepositoryTests(unittest.IsolatedAsyncioTestCase):
@@ -35,16 +37,23 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
                    "title": "Improve parser", "body": "Handle quoted fields.", "baseRefName": "main", "baseRefOid": "base-head"}
         self.stacks = []
         self.related_prs = {}
-        self.fail = False
-        self.memory = Memory(Path(self.temp.name) / "memory.db", "pet", clock=lambda: self.now)
-        self.tracker = RepositoryTracker(self.memory, lambda: self.now, run=self.command)
+        self.github_unavailable = False
+        self.emitted = []
+        self.tracker = RepositoryTracker(self.emitted.append, lambda: self.now, run=self.command)
+
+    def restore_tracker(self, *, run=None):
+        previous = self.tracker
+        associations = [(session, path) for path, sessions in previous.associations.items() for session in sessions]
+        self.tracker = RepositoryTracker(self.emitted.append, lambda: self.now, run=run or self.command,
+                                         checkpoints=previous.snapshot(), associations=associations,
+                                         targets=tuple(previous.targets.values()))
 
     def git(self, *args):
         return subprocess.run(["git", *args], cwd=self.path, check=True, capture_output=True, text=True).stdout
 
     async def command(self, *args, **kwargs):
         if args[0] == "gh":
-            if self.fail:
+            if self.github_unavailable:
                 raise RuntimeError("GitHub unavailable")
             if args[1] == "api" and "/stacks?pull_request=" in args[2]:
                 return json.dumps(self.stacks)
@@ -61,7 +70,6 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await self.tracker.close()
-        self.memory.close()
         self.temp.cleanup()
 
     async def test_local_changes_and_merged_pull_request_remain_separate(self):
@@ -98,7 +106,7 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         await self.refresh()
         unchanged = self.tracker.snapshot()[0]
         self.assertEqual((original.changed_at, original.revision), (unchanged.changed_at, unchanged.revision))
-        self.fail = True
+        self.github_unavailable = True
         self.now += 180
         await self.refresh()
         failed = self.tracker.snapshot()[0]
@@ -118,7 +126,7 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(feature.current)
         self.assertTrue(feature.pending)
         await self.tracker.close()
-        self.tracker = RepositoryTracker(self.memory, lambda: self.now, run=self.command)
+        self.restore_tracker()
         restored = next(item for item in self.tracker.snapshot() if item.branch == "feature")
         self.assertEqual(restored.sessions, ("claude:two", "codex:one"))
         self.assertEqual(restored.pr.number, 1)
@@ -212,37 +220,33 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.tracker.tick()
         await entered.wait()
         tasks = list(self.tracker.tasks.values())
-        self.memory.clear()
         self.tracker.clear()
         release.set()
         await asyncio.gather(*tasks, return_exceptions=True)
         self.assertEqual(self.tracker.snapshot(), ())
-        self.assertEqual(self.memory.load_repositories(), [])
-        self.assertEqual(self.memory.repository_associations(), [])
+        self.assertEqual(self.tracker.associations, {})
 
-    async def test_removed_worktree_stops_polling_after_restart_and_preserves_history(self):
+    async def test_removed_worktree_stops_local_polling_after_restore(self):
         self.tracker.associate("codex:one", str(self.path))
-        self.memory.record_event({"event": "intent", "harness": "codex", "session": "one",
-                                  "repo": str(self.path), "goal": "Review parser"})
         await self.refresh()
         await self.refresh()
         self.assertEqual(self.tracker.snapshot()[0].pr.state, "OPEN")
+        self.tracker.track_artifact(RepositoryTarget("pull_request", self.pr["url"]))
         await self.tracker.close()
         shutil.rmtree(self.path)
-        self.tracker = RepositoryTracker(self.memory, lambda: self.now, run=self.command)
+        self.restore_tracker()
         await self.refresh()
         retained = self.tracker.snapshot()[0]
         self.assertFalse(retained.current)
         self.assertEqual(retained.pr.number, 1)
-        self.assertEqual(self.memory.repository_associations(), [])
-        self.assertEqual(sum(bool(item["worktree"]) for item in self.memory.load_repositories()), 1)
-        self.assertEqual(self.memory.recent()[0]["goal"], "Review parser")
+        self.assertEqual(self.tracker.associations, {})
+        self.assertEqual(sum(bool(item.worktree) for item in self.tracker.snapshot()), 1)
         await self.tracker.close()
-        self.tracker = RepositoryTracker(self.memory, lambda: self.now, run=self.command)
+        self.restore_tracker()
         self.now += 360
         self.pr["state"] = "MERGED"
         await self.refresh()
-        self.assertEqual(self.tracker.snapshot()[0].pr.state, "MERGED")
+        self.assertEqual(next(item for item in self.tracker.snapshot() if item.subject.startswith("pr:")).pr.state, "MERGED")
         self.assertEqual(self.tracker.paths, {})
 
     async def test_git_failure_retains_an_existing_worktree_for_retry(self):
@@ -256,7 +260,7 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         await self.refresh()
         self.assertEqual(self.tracker.snapshot()[0].local, original.local)
         self.assertIn("Temporary", self.tracker.snapshot()[0].local_error)
-        self.assertEqual(len(self.memory.repository_associations()), 1)
+        self.assertEqual(len(self.tracker.associations), 1)
         self.tracker.run = self.command
         self.now += 30
         await self.refresh()
@@ -273,20 +277,21 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.now += 30
         await self.refresh()
         self.assertEqual(len(self.tracker.snapshot()), 2)
+        self.tracker.track_artifact(RepositoryTarget("pull_request", self.pr["url"]))
         shutil.rmtree(worktree)
         self.git("worktree", "prune")
         self.now += 180
         await self.refresh()
-        self.assertEqual(len(self.tracker.snapshot()), 2)
+        self.assertEqual(len(self.tracker.snapshot()), 3)
         self.assertTrue(all(not item.current for item in self.tracker.snapshot()))
         self.assertEqual(next(item for item in self.tracker.snapshot() if item.pr).pr.number, 1)
-        self.assertEqual(len(self.memory.load_repositories()), 2)
-        self.assertEqual(self.memory.repository_associations(), [])
+        self.assertEqual(len(self.tracker.snapshot()), 3)
+        self.assertEqual(self.tracker.associations, {})
         self.assertEqual(self.tracker.paths, {})
         self.pr["state"] = "MERGED"
         self.now += 180
         await self.refresh()
-        self.assertEqual(next(item for item in self.tracker.snapshot() if item.pr).pr.state, "MERGED")
+        self.assertEqual(next(item for item in self.tracker.snapshot() if item.subject.startswith("pr:")).pr.state, "MERGED")
 
     async def test_explicit_pull_request_polls_without_checkout(self):
         calls = []
@@ -294,7 +299,7 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
             calls.append((args, kwargs))
             return await self.command(*args, **kwargs)
         self.tracker.run = recording
-        self.tracker.track_artifact({"kind": "pull_request", "ref": self.pr["url"]})
+        self.tracker.track_artifact(RepositoryTarget("pull_request", self.pr["url"]))
         await self.refresh()
         item = self.tracker.snapshot()[0]
         self.assertEqual(item.pr.number, 1)
@@ -305,49 +310,37 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(calls[0][1]["cwd"])
 
     async def test_explicit_branch_discovers_pull_request_without_checkout(self):
-        self.tracker.track_artifact({"kind": "branch", "ref": "feature", "repository": "https://example.test/team/repo.git"})
+        self.tracker.track_artifact(RepositoryTarget("branch", "feature", "https://example.test/team/repo.git"))
         await self.refresh()
         item = self.tracker.snapshot()[0]
         self.assertEqual(item.pr.head_repository, "example.test/team/repo")
         self.assertEqual(item.pr.head_branch, "feature")
         self.assertEqual(item.pr.head, self.git("rev-parse", "HEAD").strip())
 
-    async def test_session_pull_request_subscription_survives_restart_without_checkout(self):
-        self.memory.work.session_intent("codex:one", "Review parser")
-        self.tracker.associate("codex:one", str(self.path))
+    async def test_explicit_pull_request_target_survives_restore_without_checkout(self):
+        self.tracker.track_artifact(RepositoryTarget("pull_request", self.pr["url"]))
         await self.refresh()
-        await self.refresh()
-        self.assertTrue(any(artifact["kind"] == "pull_request"
-                            for artifact in self.memory.work.session_context("codex:one")["artifacts"]))
         await self.tracker.close()
-        shutil.rmtree(self.path)
-        self.tracker = RepositoryTracker(self.memory, lambda: self.now, run=self.command)
-        self.now += 180
-        await self.refresh()
-        self.assertTrue(any(item.pr and item.pr.number == 1 for item in self.tracker.snapshot()))
-        self.assertEqual(self.tracker.paths, {})
-        await self.tracker.close()
-        self.tracker = RepositoryTracker(self.memory, lambda: self.now, run=self.command)
+        self.restore_tracker()
         self.now += 180
         self.pr["state"] = "MERGED"
         await self.refresh()
-        self.assertTrue(all(item.pr.state == "MERGED" for item in self.tracker.snapshot() if item.pr))
+        self.assertEqual(self.tracker.snapshot()[0].pr.state, "MERGED")
+        self.assertEqual(self.tracker.paths, {})
 
     async def test_new_session_receives_checkout_and_pull_request_after_fresh_poll(self):
         self.tracker.associate("codex:one", str(self.path))
         await self.refresh()
         await self.refresh()
         original = next(item for item in self.tracker.snapshot() if item.current)
-        self.memory.work.session_intent("claude:two", "Improve parser")
         self.tracker.associate("claude:two", str(self.path))
         self.assertNotIn("claude:two", self.tracker.snapshot()[0].sessions)
-        self.assertEqual(self.memory.work.session_context("claude:two")["artifacts"], ())
         await self.refresh()
         updated = next(item for item in self.tracker.snapshot() if item.current)
         self.assertEqual(updated.sessions, ("claude:two", "codex:one"))
         self.assertEqual((updated.revision, updated.changed_at), (original.revision, original.changed_at))
-        artifacts = self.memory.work.session_context("claude:two")["artifacts"]
-        self.assertTrue(any(artifact["kind"] == "pull_request" and artifact["ref"] == self.pr["url"] for artifact in artifacts))
+        self.assertEqual(updated.pr.url, self.pr["url"])
+        self.assertEqual(self.emitted[-1], updated)
 
     async def test_new_session_in_known_subdirectory_receives_root_after_fresh_poll(self):
         nested = self.path / "nested"
@@ -355,17 +348,13 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.tracker.associate("codex:one", str(nested))
         await self.refresh()
         await self.refresh()
-        self.memory.work.session_intent("claude:two", "Improve parser")
         self.tracker.associate("claude:two", str(nested))
-        self.assertEqual(self.memory.work.session_context("claude:two")["artifacts"], ())
         await self.refresh()
         current = next(item for item in self.tracker.snapshot() if item.current)
         self.assertIn("claude:two", current.sessions)
-        self.assertTrue(any(artifact["kind"] == "pull_request"
-                            for artifact in self.memory.work.session_context("claude:two")["artifacts"]))
+        self.assertEqual(current.worktree, str(self.path.resolve()))
 
     async def test_new_session_after_branch_switch_never_inherits_cached_branch_or_pull_request(self):
-        self.memory.work.session_intent("codex:one", "Improve parser")
         self.tracker.associate("codex:one", str(self.path))
         await self.refresh()
         await self.refresh()
@@ -373,54 +362,16 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.related_prs[previous_url] = dict(self.pr)
         self.git("switch", "-c", "another")
         self.pr = {**self.pr, "number": 2, "url": "https://example.test/team/repo/pull/2", "headRefName": "another"}
-        self.memory.work.session_intent("claude:two", "Improve billing")
         self.tracker.associate("claude:two", str(self.path))
-        self.assertEqual(self.memory.work.session_context("claude:two")["artifacts"], ())
         await self.refresh()
         await self.refresh()
-        artifacts = self.memory.work.session_context("claude:two")["artifacts"]
-        self.assertEqual({artifact["ref"] for artifact in artifacts}, {"another", self.pr["url"]})
+        current = next(item for item in self.tracker.snapshot() if item.current)
+        self.assertEqual((current.branch, current.pr.url), ("another", self.pr["url"]))
+        self.assertIn("claude:two", current.sessions)
         previous = next(item for item in self.tracker.snapshot() if item.branch == "feature")
         self.assertNotIn("claude:two", previous.sessions)
         self.assertFalse(previous.current)
         self.assertEqual(previous.pr.url, previous_url)
-
-    async def test_slower_pull_request_refresh_and_cached_checkout_preserve_newer_merge(self):
-        self.memory.work.session_intent("codex:one", "Improve parser")
-        self.pr["statusCheckRollup"] = [{"name": "tests", "conclusion": "FAILURE"}]
-        self.tracker.associate("codex:one", str(self.path))
-        await self.refresh()
-        await self.refresh()
-        await self.tracker.close()
-        self.tracker = RepositoryTracker(self.memory, lambda: self.now, run=self.command)
-        checkout = next(item for item in self.tracker.snapshot() if item.current)
-        direct = next(item for item in self.tracker.snapshot() if item.subject.startswith("pr:"))
-        branch = next(item for item in self.tracker.snapshot() if item.subject.startswith("branch:"))
-        entered, release = asyncio.Event(), asyncio.Event()
-        old = dict(self.pr)
-        async def delayed(*args, **kwargs):
-            if args[:3] == ("gh", "pr", "view"):
-                entered.set()
-                await release.wait()
-                return json.dumps(old)
-            return await self.command(*args, **kwargs)
-        self.tracker.run = delayed
-        self.now += 1
-        task = asyncio.create_task(self.tracker._github(direct, self.tracker.epoch))
-        await entered.wait()
-        self.now += 1
-        self.pr.update(state="MERGED", mergedAt="2026-10-19T00:00:00Z")
-        await self.tracker._github(branch, self.tracker.epoch)
-        self.now += 1
-        release.set()
-        await task
-        await self.tracker._local(checkout.worktree, 1, self.tracker.epoch)
-        artifacts = self.memory.work.session_context("codex:one")["artifacts"]
-        pr = next(item for item in artifacts if item["kind"] == "pull_request")
-        observed = next(item for item in pr["evidence"] if item["source"] == "github" and item["kind"] == "observation")
-        self.assertEqual(observed["data"]["pr"]["state"], "MERGED")
-        self.assertEqual(observed["observed_at"], 1002)
-        self.assertEqual(self.memory.work.opportunities(), ())
 
     async def test_repeated_session_events_preserve_poll_interval_and_new_session_refreshes(self):
         self.tracker.associate("codex:one", str(self.path))
@@ -546,7 +497,7 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         observed = await github.observe(None, "", run=self.command, url=self.pr["url"])
         self.assertEqual(observed.related_links, ())
 
-    async def test_stack_peers_refresh_once_without_following_further_metadata(self):
+    async def test_explicit_stack_peer_target_skips_further_stack_metadata(self):
         stack = self.stack()
         stack["pull_requests"] = stack["pull_requests"][:2]
         self.stacks = [stack]
@@ -563,6 +514,11 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         await self.refresh()
         await self.refresh()
         await self.refresh()
+        root = next(item for item in self.tracker.snapshot() if item.current)
+        self.assertEqual(len(self.tracker.snapshot()), 1)
+        self.assertEqual(root.pr.related_links[0]["ref"], peer_url)
+        self.tracker.track_artifact(RepositoryTarget("pull_request", peer_url, include_links=False))
+        await self.refresh()
         peer = next(item for item in self.tracker.snapshot() if item.pr and item.pr.url == peer_url)
         root = next(item for item in self.tracker.snapshot() if item.current)
         self.assertEqual((root.pr.state, peer.pr.state), ("OPEN", "MERGED"))
@@ -571,7 +527,7 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(args[1:4] == ("pr", "view", peer_url) for args in calls))
         await self.tracker.close()
         shutil.rmtree(self.path)
-        self.tracker = RepositoryTracker(self.memory, lambda: self.now, run=recording)
+        self.restore_tracker(run=recording)
         self.now += 180
         await self.refresh()
         self.assertEqual(self.tracker.paths, {})
@@ -642,9 +598,9 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_legacy_snapshots_do_not_infer_repository_from_sessions(self):
         legacy = RepositoryObservation("legacy", str(self.path), "feature", sessions=("codex:one",))
-        self.memory.save_repository(legacy.subject, {key: value for key, value in legacy.__dict__.items() if key != "repository"})
+        checkpoint = repository_observation_from_mapping({key: value for key, value in legacy.__dict__.items() if key != "repository"})
         await self.tracker.close()
-        self.tracker = RepositoryTracker(self.memory, lambda: self.now, run=self.command)
+        self.tracker = RepositoryTracker(self.emitted.append, lambda: self.now, run=self.command, checkpoints=(checkpoint,))
         self.assertEqual(self.tracker.snapshot()[0].repository, "")
         self.assertEqual(self.tracker.paths, {})
 
@@ -657,11 +613,166 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.now += 30
         await self.refresh()
         self.assertEqual(self.tracker.snapshot()[0].worktree, str(self.path.resolve()))
-        self.assertEqual(self.memory.repository_associations(), [{"session": "codex:one", "worktree": str(self.path.resolve())}])
+        self.assertEqual(self.tracker.associations, {str(self.path.resolve()): {"codex:one"}})
         (self.path / "tracked").write_text("changed after the subdirectory disappeared\n")
         self.now += 30
         await self.refresh()
         self.assertEqual(self.tracker.snapshot()[0].local.unstaged, 1)
+
+    async def test_cancelled_subprocess_startup_terminates_the_spawned_process(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        processes = []
+        create = asyncio.create_subprocess_exec
+        async def starting(*args, **kwargs):
+            process = await create(*args, **kwargs)
+            processes.append(process)
+            entered.set()
+            await release.wait()
+            return process
+        try:
+            with patch("pet_daemon.sources.git.asyncio.create_subprocess_exec", side_effect=starting):
+                task = asyncio.create_task(git.command(sys.executable, "-c", "import time; time.sleep(60)"))
+                await entered.wait()
+                task.cancel()
+                release.set()
+                result = await asyncio.gather(task, return_exceptions=True)
+            self.assertIsInstance(result[0], asyncio.CancelledError)
+            self.assertIsNotNone(processes[0].returncode)
+        finally:
+            for process in processes:
+                if process.returncode is None:
+                    process.kill()
+                    await process.wait()
+
+    async def test_cancelled_command_terminates_its_subprocess(self):
+        entered = asyncio.Event()
+        processes = []
+        create = asyncio.create_subprocess_exec
+        async def started(*args, **kwargs):
+            process = await create(*args, **kwargs)
+            processes.append(process)
+            entered.set()
+            return process
+        with patch("pet_daemon.sources.git.asyncio.create_subprocess_exec", side_effect=started):
+            task = asyncio.create_task(git.command(sys.executable, "-c", "import time; time.sleep(60)"))
+            await entered.wait()
+            task.cancel()
+            result = await asyncio.gather(task, return_exceptions=True)
+        self.assertIsInstance(result[0], asyncio.CancelledError)
+        self.assertIsNotNone(processes[0].returncode)
+
+    async def test_pause_cancels_collection_and_resume_refreshes_preserved_facts(self):
+        self.tracker.associate("codex:one", str(self.path))
+        await self.refresh()
+        await self.refresh()
+        previous = self.tracker.snapshot()[0]
+        entered, cancelled = asyncio.Event(), asyncio.Event()
+        async def delayed(*args, **kwargs):
+            entered.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+        self.tracker.run = delayed
+        self.now += 180
+        self.tracker.tick()
+        await entered.wait()
+        tasks = list(self.tracker.tasks.values())
+        self.tracker.pause()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await cancelled.wait()
+        self.assertEqual(self.tracker.snapshot(), (previous,))
+        self.assertIsNone(self.tracker.snapshot()[0].github_error)
+        self.tracker.tick()
+        self.assertEqual(self.tracker.tasks, {})
+        self.tracker.run = self.command
+        self.pr["state"] = "MERGED"
+        self.tracker.resume()
+        await self.refresh()
+        self.assertEqual(self.tracker.snapshot()[0].pr.state, "MERGED")
+
+    async def test_pause_discards_late_results_after_runner_suppresses_cancellation(self):
+        self.tracker.associate("codex:one", str(self.path))
+        await self.refresh()
+        previous = self.tracker.snapshot()[0]
+        entered = asyncio.Event()
+        async def delayed(*args, **kwargs):
+            if args[0] == "gh" and not entered.is_set():
+                entered.set()
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    pass
+            return await self.command(*args, **kwargs)
+        self.tracker.run = delayed
+        self.tracker.tick()
+        await entered.wait()
+        tasks = list(self.tracker.tasks.values())
+        self.tracker.pause()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self.assertEqual(self.tracker.snapshot(), (previous,))
+        self.assertEqual(self.emitted, [previous])
+
+    async def test_retiring_checkout_target_stops_local_collection(self):
+        target = RepositoryTarget("branch", "feature", "example.test/team/repo", str(self.path))
+        self.tracker.reconcile_targets((target,))
+        await self.refresh()
+        self.assertTrue(any(item.current for item in self.tracker.snapshot()))
+        self.tracker.reconcile_targets(())
+        self.assertEqual(self.tracker.paths, {})
+        self.assertFalse(any(item.current for item in self.tracker.snapshot()))
+        self.now += 180
+        await self.refresh()
+        self.assertEqual(self.tracker.tasks, {})
+
+    async def test_retiring_checkout_target_keeps_session_collection(self):
+        self.tracker.associate("codex:one", str(self.path))
+        target = RepositoryTarget("branch", "feature", "example.test/team/repo", str(self.path))
+        self.tracker.reconcile_targets((target,))
+        await self.refresh()
+        self.tracker.reconcile_targets(())
+        self.assertIn(str(self.path.resolve()), self.tracker.paths)
+        self.assertTrue(any(item.current for item in self.tracker.snapshot()))
+
+    async def test_reconciling_targets_stops_retired_pull_request_polling(self):
+        target = RepositoryTarget("pull_request", self.pr["url"])
+        self.tracker.reconcile_targets((target,))
+        await self.refresh()
+        previous = self.tracker.snapshot()[0]
+        self.tracker.reconcile_targets(())
+        self.now += 180
+        self.pr["state"] = "MERGED"
+        await self.refresh()
+        self.assertEqual(self.tracker.snapshot(), (previous,))
+
+
+class HookObservationTests(unittest.TestCase):
+    def test_hook_preserves_session_routing_and_tool_metadata(self):
+        packet = {"kind": "event", "harness": "codex", "session": "child", "event": "tool_done",
+                  "aliases": ["native", "transcript"], "parent": "parent", "parent_call": "parent-call",
+                  "call": "tool-call", "turn": "turn-id", "tool": "uv run checks", "tool_name": "exec",
+                  "repo": "/repo", "goal": "Check parser", "progress": "Checks passed", "sentiment_text": "Great",
+                  "outcome": "success", "manual": True, "exit_code": 0,
+                  "owner": {"pid": 42, "started": "process-start"}}
+        observed = normalize_hook(packet)
+        self.assertIsInstance(observed, HookEvent)
+        self.assertEqual((observed.source, observed.subject), ("hook:codex", "codex:child"))
+        self.assertEqual(observed.packet(), packet)
+        packet["aliases"].append("later")
+        self.assertEqual(observed.aliases, ("native", "transcript"))
+
+    def test_hook_retains_absent_fields_and_empty_text(self):
+        event = normalize_hook({"harness": "claude", "session": "one", "event": "intent", "goal": ""})
+        self.assertEqual(event.packet(), {"kind": "event", "harness": "claude", "session": "one", "event": "intent", "goal": ""})
+        self.assertIsNone(event.outcome)
+
+    def test_hook_rejects_invalid_routing_and_event_values(self):
+        base = {"harness": "cursor", "session": "one", "event": "progress"}
+        for changes in ({"aliases": [""]}, {"parent_call": 2}, {"event": "unknown"},
+                        {"harness": "unknown"}, {"repo": "/repo\0"}, {"outcome": "unknown"}):
+            with self.subTest(changes=changes):
+                self.assertIsNone(normalize_hook({**base, **changes}))
 
 
 class RepositoryMigrationTests(unittest.TestCase):
@@ -669,7 +780,7 @@ class RepositoryMigrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "memory.db"
             memory = Memory(path, "pet", clock=lambda: 1000)
-            memory.record_event({"event": "intent", "harness": "codex", "session": "one", "repo": "/repo", "goal": "Work"})
+            memory.record_event(project_event({"event": "intent", "harness": "codex", "session": "one", "repo": "/repo", "goal": "Work"}))
             memory.record_speech("A thought", "routine")
             memory.save_context("codex:one", "Work", "Summary", ["Work"])
             memory.close()

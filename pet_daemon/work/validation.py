@@ -5,8 +5,7 @@ from urllib.parse import urlsplit
 
 KINDS = {"branch", "pull_request", "document", "ticket", "patch"}
 FAILURES = {"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"}
-TABLES = ("work_items", "work_sessions", "work_memberships", "work_aliases", "work_artifacts", "work_links",
-          "work_evidence", "work_opportunities", "work_surfacings")
+
 
 
 def canonical(value):

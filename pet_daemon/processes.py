@@ -1,26 +1,12 @@
 import asyncio
-from dataclasses import dataclass
 import os
 from pathlib import Path
 import shlex
 import subprocess
 import time
 
+from .runtime import ProcessIdentity
 
-@dataclass(frozen=True)
-class ProcessIdentity:
-    pid: int
-    started: str
-
-    @classmethod
-    def parse(cls, value):
-        if (isinstance(value, dict) and type(value.get("pid")) is int and value["pid"] > 1
-                and isinstance(value.get("started"), str) and 0 < len(value["started"]) <= 128):
-            return cls(value["pid"], value["started"])
-        return None
-
-    def packet(self):
-        return {"pid": self.pid, "started": self.started}
 
 
 def _parse_process(line):

@@ -97,15 +97,18 @@ It does not establish the quality of unsimulated model prose or desktop visual b
 
 ## Code layout and verification
 
-- `events.py` records accepted native activity and starts repository discovery.
-- `repositories/` collects Git, PR, and stack observations.
+- `application.py` ingests observations, reconciles collection targets, and coordinates commentary.
+- `events.py` applies accepted native activity and runtime reactions.
+- `sources/` collects hook, Git, PR, and stack observations.
 - `work/` connects facts and derives opportunities and shared work views.
-- `attention.py` selects subjects. `context.py` projects their meaningful facts.
-- `cognition.py` requests commentary. `commentary.py` schedules and revalidates it.
+- `attention.py` selects subjects. `commentary/context.py` projects their meaningful facts.
+- `commentary/cognition.py` requests commentary for the supplied selection.
+- `storage/` persists work, selection history, and atomic message acceptance.
 - `delivery.py` owns renderer acknowledgment and runtime retries.
 - `sessions.py` owns execution. `episodes.py` retains separate reaction bookkeeping.
 
-Schema version 6 adds work storage to version 4/5 history. Existing events, summaries,
-repository observations, and speech remain available. Clear-memory includes work records.
+Schema version 7 preserves version 4/5/6 history and records attention history and message
+outcomes. Speech history, message acceptance, and captured-version surfacing commit in one
+transaction. Clear-memory includes work records and message outcomes.
 `make check` covers Python, Swift core, assets, and shell syntax. `make build` compiles the
 renderer and speech similarity helper. Desktop visual checks require a logged-in session.

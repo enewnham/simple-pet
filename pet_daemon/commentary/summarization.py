@@ -1,7 +1,6 @@
 import json
 
-from .memory import bounded
-from .prompts import select_prompt
+from ..prompts import bounded, select_prompt
 
 
 SUMMARY_INSTRUCTIONS = """

@@ -12,7 +12,7 @@ from anthropic import AsyncAnthropic
 
 from pet_daemon.config import Config
 from pet_daemon.daemon import Daemon
-from pet_daemon.repositories.git import command
+from pet_daemon.sources.git import command
 from Tests.test_runtime import PNG, reply
 
 
@@ -89,8 +89,8 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def start_daemon(self):
         self.daemon = Daemon(self.config, self.client, rng=random.Random(7))
-        self.daemon.repositories.run = self.repository_command
-        self.daemon.attention.last_attempt = self.daemon.clock()
+        self.daemon.application.providers[0].run = self.repository_command
+        self.daemon.application.attention.last_attempt = self.daemon.clock()
         await self.daemon.start()
         self.send({"kind": "renderer", "event": "status", "x": 100, "y": 100,
                    "width": 200, "height": 160,
@@ -122,18 +122,18 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.send({"kind": "event", "harness": "codex", "session": "persistence", "event": "intent",
                    "turn": "implementation", "repo": str(self.repository_path),
                    "goal": "Preserve the coding session context across daemon restarts"})
-        await self.wait_for(lambda: "codex:persistence" in self.daemon.sessions.lanes)
+        await self.wait_for(lambda: "codex:persistence" in self.daemon.application.sessions.lanes)
         self.send({"kind": "event", "harness": "codex", "session": "persistence", "event": "turn_done",
                    "turn": "implementation", "repo": str(self.repository_path), "outcome": "success",
                    "progress": "Implemented session persistence; validation passed"})
-        await self.wait_for(lambda: self.daemon.sessions.lanes["codex:persistence"].outcome == "success")
-        self.daemon.attention.pending = None
-        await self.wait_for(lambda: any(item.kind == "resolve_checks" for item in self.daemon.memory.work.opportunities()))
-        await self.wait_for(lambda: not self.daemon.repositories.tasks)
+        await self.wait_for(lambda: self.daemon.application.sessions.lanes["codex:persistence"].outcome == "success")
+        self.daemon.application.attention.pending = None
+        await self.wait_for(lambda: any(item.kind == "resolve_checks" for item in self.daemon.application.memory.work.opportunities()))
+        await self.wait_for(lambda: not self.daemon.application.providers[0].tasks)
         self.assertEqual(self.requests, [])
         self.config.behavior.automatic_speech_cooldown_seconds = 0
         await self.drain()
-        return next(item for item in self.daemon.memory.work.opportunities() if item.kind == "resolve_checks")
+        return next(item for item in self.daemon.application.memory.work.opportunities() if item.kind == "resolve_checks")
 
     async def native_stack_work(self):
         sibling_url = "https://example.test/owner/repository/pull/8"
@@ -146,15 +146,15 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         ]}]
         await self.native_work()
         await self.wait_for(lambda: any(item.pr and item.pr.url == sibling_url
-                                       for item in self.daemon.repositories.snapshot()))
-        await self.wait_for(lambda: not self.daemon.repositories.tasks)
-        opportunity = next(item for item in self.daemon.memory.work.opportunities() if item.kind == "resolve_checks")
+                                       for item in self.daemon.application.providers[0].snapshot()))
+        await self.wait_for(lambda: not self.daemon.application.providers[0].tasks)
+        opportunity = next(item for item in self.daemon.application.memory.work.opportunities() if item.kind == "resolve_checks")
         return opportunity, sibling_url
 
     async def merge_sibling(self, sibling_url):
         self.related_prs[sibling_url].update(state="MERGED", mergedAt="2026-10-19T12:00:00Z")
         await self.refresh_sources(lambda: any(item.pr and item.pr.url == sibling_url and item.pr.state == "MERGED"
-                                              for item in self.daemon.repositories.snapshot()))
+                                              for item in self.daemon.application.providers[0].snapshot()))
 
     async def packet(self, predicate):
         async def receive():
@@ -181,18 +181,18 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def refresh_sources(self, predicate):
         previous = len(self.github_commands)
-        self.daemon.repositories.local_interval = 0
-        self.daemon.repositories.github_interval = 0
+        self.daemon.application.providers[0].local_interval = 0
+        self.daemon.application.providers[0].github_interval = 0
         try:
             await self.wait_for(lambda: len(self.github_commands) > previous and predicate())
         finally:
-            self.daemon.repositories.local_interval = 3600
-            self.daemon.repositories.github_interval = 3600
-        await self.wait_for(lambda: not self.daemon.repositories.tasks)
+            self.daemon.application.providers[0].local_interval = 3600
+            self.daemon.application.providers[0].github_interval = 3600
+        await self.wait_for(lambda: not self.daemon.application.providers[0].tasks)
 
     def schedule_routine(self):
-        self.daemon.attention.next_observation = self.daemon.clock()
-        self.daemon.commentary.tick()
+        self.daemon.application.attention.next_observation = self.daemon.clock()
+        self.daemon.application.tick()
 
     def focus(self):
         payload = json.loads(self.requests[-1]["messages"][-1]["content"])
@@ -200,13 +200,14 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def accept(self, speech):
         self.send({"kind": "renderer", "event": "speech_accepted", "delivery_id": speech["delivery_id"]})
-        await self.wait_for(lambda: any(item["text"] == speech["text"] for item in self.daemon.memory.speech()))
+        await self.wait_for(lambda: (outcome := self.daemon.application.memory.message_outcome(speech["delivery_id"]))
+                            is not None and outcome["outcome"] == "accepted")
 
     def assert_human_context(self, value):
         if isinstance(value, dict):
-            forbidden = {"id", "ref", "revision", "head", "number", "repository", "session", "work_id",
+            forbidden = {"id", "revision", "head", "number", "repository", "session", "work_id",
                          "worktree", "checkout", "staged", "unstaged", "untracked", "ahead", "behind",
-                         "check_revision", "count", "timestamp", "observed_at", "changed_at", "version", "delivery_id"}
+                         "check_revision", "count", "timestamp", "changed_at", "version", "delivery_id"}
             self.assertFalse(forbidden.intersection(value))
             for item in value.values():
                 self.assert_human_context(item)
@@ -220,45 +221,44 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         speech = await self.packet(lambda packet: "delivery_id" in packet)
         focus = self.focus()
         self.assertEqual(focus["intent"], "Preserve the coding session context across daemon restarts")
-        self.assertEqual(focus["action"], "resolve_checks")
+        self.assertEqual(focus["kind"], "resolve_checks")
         self.assertEqual(focus["artifact"]["kind"], "pull_request")
-        self.assertEqual(focus["artifact"]["subject"], "Persist coding session context")
-        github = next(item["data"] for item in focus["evidence"] if item["source"] == "github")
-        self.assertTrue(github["draft"])
+        self.assertEqual(focus["artifact"]["title"], "Persist coding session context")
+        github = next(item for item in focus["evidence"] if item["source"] == "github" and item["kind"] == "observation")
+        self.assertTrue(github["output"]["is_draft"])
         self.assertTrue(github["checks_current"])
-        self.assertEqual(github["checks"], [{"name": "Session persistence tests", "result": "FAILURE"}])
-        connected = focus["connected_work"]
-        agent = next(item["data"] for item in connected["evidence"] if item["source"] == "agent" and "reported_progress" in item["data"])
-        self.assertEqual(agent["reported_progress"], "Implemented session persistence; validation passed")
-        self.assertEqual(agent["reported_execution_outcome"], "success")
-        progress = next(item["data"] for item in connected["evidence"]
-                        if item["source"] == "agent" and item["kind"] == "progress")
+        self.assertEqual(github["checks"], [["Session persistence tests", "FAILURE"]])
+        progress = next(item for item in focus["evidence"] if item["source"] == "harness" and item["kind"] == "progress")
         self.assertEqual(progress["reported_progress"], "Implemented session persistence; validation passed")
         self.assertNotIn("execution", progress)
-        request = next(item["data"] for item in connected["evidence"] if item["source"] == "user")
-        self.assertEqual(request["request"], focus["intent"])
+        context = self.daemon.application.memory.work.session_context("codex:persistence")
+        execution = next(item["data"] for item in context["activity"] if item["kind"] == "execution")
+        self.assertEqual(execution["outcome"], "success")
         self.assertTrue(focus["uncertainty"])
-        self.assertEqual({item["kind"] for item in connected["artifacts"]}, {"branch", "pull_request"})
+        self.assertEqual({item["kind"] for item in context["artifacts"]}, {"branch", "pull_request"})
+        payload = json.loads(self.requests[-1]["messages"][-1]["content"])
+        self.assertNotIn("activity", payload)
+        self.assertIsNone(payload["focus_session"])
         self.assert_human_context(focus)
         encoded = json.dumps(focus)
         for identifier in (self.head, "codex:persistence", str(self.repository_path)):
             self.assertNotIn(identifier, encoded)
-        self.assertEqual(self.daemon.memory.speech(), [])
+        self.assertEqual(self.daemon.application.memory.speech(), [])
         self.send({"kind": "renderer", "event": "speech_accepted", "delivery_id": str(uuid.uuid4())})
         await asyncio.sleep(0)
-        self.assertEqual(self.daemon.memory.speech(), [])
+        self.assertEqual(self.daemon.application.memory.speech(), [])
         await self.accept(speech)
-        self.assertFalse(self.daemon.memory.work.is_current(opportunity.id, opportunity.version))
-        self.assertEqual(self.daemon.memory.speech()[0]["reason"], "opportunity")
-        await self.refresh_sources(lambda: any(item.pr for item in self.daemon.repositories.snapshot()))
-        self.assertFalse(self.daemon.memory.work.is_current(opportunity.id, opportunity.version))
+        self.assertFalse(self.daemon.application.memory.work.is_current(opportunity.id, opportunity.version))
+        self.assertEqual(self.daemon.application.memory.speech()[0]["reason"], "routine")
+        await self.refresh_sources(lambda: any(item.pr for item in self.daemon.application.providers[0].snapshot()))
+        self.assertFalse(self.daemon.application.memory.work.is_current(opportunity.id, opportunity.version))
         self.schedule_routine()
         await asyncio.sleep(0.06)
         self.assertEqual(len(self.requests), 1)
         await self.daemon.close()
         await self.start_daemon()
-        self.assertFalse(self.daemon.memory.work.is_current(opportunity.id, opportunity.version))
-        self.assertEqual(self.daemon.memory.speech()[0]["text"], speech["text"])
+        self.assertFalse(self.daemon.application.memory.work.is_current(opportunity.id, opportunity.version))
+        self.assertEqual(self.daemon.application.memory.speech()[0]["text"], speech["text"])
 
     async def test_new_head_reassesses_checks_and_green_checks_require_an_explicit_review_request(self):
         original = await self.native_work()
@@ -268,28 +268,28 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.pr.update(headRefOid=self.head, statusCheckRollup=self.checks("FAILURE"))
         await self.refresh_sources(lambda: any(item.kind == "resolve_checks" and item.version > original.version
                                                and item.artifact.get("revision") == self.head
-                                               for item in self.daemon.memory.work.opportunities()))
-        current = next(item for item in self.daemon.memory.work.opportunities() if item.kind == "resolve_checks")
+                                               for item in self.daemon.application.memory.work.opportunities()))
+        current = next(item for item in self.daemon.application.memory.work.opportunities() if item.kind == "resolve_checks")
         self.assertEqual(current.id, original.id)
         self.assertEqual(current.artifact["revision"], self.head)
         self.speech = "The revised session storage still has a failing check."
         self.schedule_routine()
         await self.accept(await self.packet(lambda packet: "delivery_id" in packet))
-        self.assertEqual(self.focus()["action"], "resolve_checks")
+        self.assertEqual(self.focus()["kind"], "resolve_checks")
         self.pr["statusCheckRollup"] = self.checks("SUCCESS")
         await self.refresh_sources(lambda: any(item.pr and item.pr.checks and item.pr.checks[0][1] == "SUCCESS"
-                                               for item in self.daemon.repositories.snapshot()))
-        self.assertFalse(any(item.kind == "resolve_checks" for item in self.daemon.memory.work.opportunities()))
-        self.assertFalse(any(item.kind == "review_output" for item in self.daemon.memory.work.opportunities()))
+                                               for item in self.daemon.application.providers[0].snapshot()))
+        self.assertFalse(any(item.kind == "resolve_checks" for item in self.daemon.application.memory.work.opportunities()))
+        self.assertFalse(any(item.kind == "review_output" for item in self.daemon.application.memory.work.opportunities()))
         self.pr["reviewRequests"] = [{"login": "elliot"}]
-        await self.refresh_sources(lambda: any(item.kind == "review_output" for item in self.daemon.memory.work.opportunities()))
+        await self.refresh_sources(lambda: any(item.kind == "review_output" for item in self.daemon.application.memory.work.opportunities()))
         self.speech = "There is a requested review on the session persistence change."
         self.schedule_routine()
-        await self.packet(lambda packet: "delivery_id" in packet)
+        await self.accept(await self.packet(lambda packet: "delivery_id" in packet))
         focus = self.focus()
-        self.assertEqual(focus["action"], "review_output")
-        github = next(item["data"] for item in focus["evidence"] if item["source"] == "github")
-        self.assertTrue(github["review_requested_from_you"])
+        self.assertEqual(focus["kind"], "review_output")
+        github = next(item for item in focus["evidence"] if item["source"] == "github" and item["kind"] == "observation")
+        self.assertTrue(github["output"]["review_requested"])
 
     async def test_merge_rejects_pending_generation_without_concluding_the_intended_work(self):
         await self.native_work()
@@ -297,66 +297,92 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.schedule_routine()
         await asyncio.wait_for(self.entered.wait(), 5)
         self.pr.update(state="MERGED", mergedAt="2026-10-18T12:00:00Z")
-        await self.refresh_sources(lambda: any(item.pr and item.pr.state == "MERGED" for item in self.daemon.repositories.snapshot()))
+        await self.refresh_sources(lambda: any(item.pr and item.pr.state == "MERGED" for item in self.daemon.application.providers[0].snapshot()))
         self.release.set()
-        await self.wait_for(lambda: self.daemon.commentary.task is None)
+        await self.wait_for(lambda: self.daemon.application.task is None)
         self.assertFalse(any(packet.get("text") for packet in await self.drain()))
-        self.assertEqual(self.daemon.memory.speech(), [])
-        self.assertFalse(any(item.kind == "resolve_checks" for item in self.daemon.memory.work.opportunities()))
-        work = self.daemon.memory.db.execute("SELECT intent,status FROM work_items WHERE pet=?", (self.daemon.memory.pet,)).fetchall()
+        self.assertEqual(self.daemon.application.memory.speech(), [])
+        self.assertFalse(any(item.kind == "resolve_checks" for item in self.daemon.application.memory.work.opportunities()))
+        work = self.daemon.application.memory.db.execute("SELECT intent,status FROM work_items WHERE pet=?", (self.daemon.application.memory.pet,)).fetchall()
         self.assertEqual([(item["intent"], item["status"]) for item in work],
                          [("Preserve the coding session context across daemon restarts", "active")])
 
-    async def test_sibling_merge_invalidates_pending_speech_for_the_same_primary_opportunity(self):
+    async def test_unselected_pull_request_metadata_preserves_supported_generation(self):
+        original = await self.native_work()
+        self.slow = True
+        self.schedule_routine()
+        await asyncio.wait_for(self.entered.wait(), 5)
+        self.pr["body"] = "Document the manual restart validation procedure."
+        await self.refresh_sources(lambda: any(item.pr and item.pr.body == self.pr["body"]
+                                              for item in self.daemon.application.providers[0].snapshot()))
+        current = self.daemon.application.memory.work.opportunity(original.id)
+        self.assertGreater(current.version, original.version)
+        self.assertEqual(current.artifact["revision"], original.artifact["revision"])
+        self.release.set()
+        speech = await self.packet(lambda packet: "delivery_id" in packet)
+        await self.accept(speech)
+        outcome = self.daemon.application.memory.message_outcome(speech["delivery_id"])
+        self.assertEqual((outcome["opportunity_id"], outcome["version"]), (original.id, original.version))
+        self.assertNotIn(self.pr["body"], json.dumps(self.focus()))
+        self.assertTrue(self.daemon.application.memory.work.is_current(current.id, current.version))
+
+    async def test_sibling_merge_preserves_generation_supported_by_primary_checks(self):
         original, sibling_url = await self.native_stack_work()
         self.slow = True
         self.schedule_routine()
         await asyncio.wait_for(self.entered.wait(), 5)
         await self.merge_sibling(sibling_url)
-        current = self.daemon.memory.work.opportunity(original.id)
+        current = self.daemon.application.memory.work.opportunity(original.id)
         self.assertEqual(current.id, original.id)
         self.assertGreater(current.version, original.version)
+        self.assertEqual(current.artifact["revision"], original.artifact["revision"])
         self.release.set()
-        await self.wait_for(lambda: self.daemon.commentary.task is None)
-        self.assertFalse(any(packet.get("text") for packet in await self.drain()))
-        self.assertEqual(self.daemon.memory.speech(), [])
-        self.assertFalse(self.daemon.memory.work.is_current(original.id, original.version))
+        speech = await self.packet(lambda packet: "delivery_id" in packet)
+        await self.accept(speech)
+        outcome = self.daemon.application.memory.message_outcome(speech["delivery_id"])
+        self.assertEqual((outcome["opportunity_id"], outcome["version"]), (original.id, original.version))
+        self.assertTrue(self.daemon.application.memory.work.is_current(current.id, current.version))
 
-    async def test_sibling_merge_cancels_unacknowledged_delivery_retries_and_old_acknowledgments(self):
+    async def test_sibling_merge_preserves_delivery_retry_and_captured_acceptance(self):
         original, sibling_url = await self.native_stack_work()
         self.schedule_routine()
         first = await self.packet(lambda packet: "delivery_id" in packet)
-        await self.wait_for(lambda: self.daemon.commentary.task is None)
+        await self.wait_for(lambda: self.daemon.application.task is None)
         await self.merge_sibling(sibling_url)
-        current = self.daemon.memory.work.opportunity(original.id)
+        current = self.daemon.application.memory.work.opportunity(original.id)
         self.assertGreater(current.version, original.version)
         now = self.daemon.clock() + 5
-        self.daemon.commentary.delivery.clock = lambda: now
-        self.daemon.commentary.tick()
-        self.assertFalse(any("delivery_id" in packet for packet in await self.drain()))
-        self.send({"kind": "renderer", "event": "speech_accepted", "delivery_id": first["delivery_id"]})
-        await asyncio.sleep(0.05)
-        self.assertEqual(self.daemon.memory.speech(), [])
-        self.assertTrue(self.daemon.memory.work.is_current(current.id, current.version))
-
-    async def test_sleep_pauses_delivery_and_wake_retries_the_same_runtime_message(self):
-        await self.native_work()
-        self.schedule_routine()
-        first = await self.packet(lambda packet: "delivery_id" in packet)
-        await self.wait_for(lambda: self.daemon.commentary.task is None)
-        self.send({"kind": "renderer", "event": "system_sleep"})
-        await self.wait_for(lambda: self.daemon.commentary.suspended)
-        now = self.daemon.clock() + 5
-        self.daemon.commentary.delivery.clock = lambda: now
-        self.daemon.commentary.tick()
-        self.assertFalse(any("delivery_id" in packet for packet in await self.drain()))
-        self.assertEqual(self.daemon.memory.speech(), [])
-        self.send({"kind": "renderer", "event": "system_wake"})
-        await self.wait_for(lambda: not self.daemon.commentary.suspended)
-        self.schedule_routine()
+        self.daemon.application.delivery.clock = lambda: now
+        self.daemon.application.tick()
         retry = await self.packet(lambda packet: "delivery_id" in packet)
         self.assertEqual(retry, first)
         await self.accept(retry)
+        outcome = self.daemon.application.memory.message_outcome(first["delivery_id"])
+        self.assertEqual((outcome["opportunity_id"], outcome["version"]), (original.id, original.version))
+        self.assertEqual(len(self.daemon.application.memory.speech()), 1)
+        self.assertTrue(self.daemon.application.memory.work.is_current(current.id, current.version))
+
+    async def test_sleep_cancels_retries_and_late_acceptance_records_the_visible_message(self):
+        opportunity = await self.native_work()
+        self.schedule_routine()
+        first = await self.packet(lambda packet: "delivery_id" in packet)
+        await self.wait_for(lambda: self.daemon.application.task is None)
+        self.send({"kind": "renderer", "event": "system_sleep"})
+        await self.wait_for(lambda: self.daemon.application.suspended)
+        now = self.daemon.clock() + 5
+        self.daemon.application.delivery.clock = lambda: now
+        self.daemon.application.tick()
+        self.assertFalse(any("delivery_id" in packet for packet in await self.drain()))
+        self.assertEqual(self.daemon.application.memory.speech(), [])
+        self.send({"kind": "renderer", "event": "system_wake"})
+        await self.wait_for(lambda: not self.daemon.application.suspended)
+        await self.wait_for(lambda: not self.daemon.application.providers[0].tasks)
+        self.daemon.application.tick()
+        self.assertFalse(any("delivery_id" in packet for packet in await self.drain()))
+        self.assertEqual(len(self.requests), 1)
+        await self.accept(first)
+        outcome = self.daemon.application.memory.message_outcome(first["delivery_id"])
+        self.assertEqual((outcome["opportunity_id"], outcome["version"]), (opportunity.id, opportunity.version))
 
 
 if __name__ == "__main__":

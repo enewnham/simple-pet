@@ -5,7 +5,7 @@ import time
 from . import telemetry
 from .activity import activity
 from .prompts import select_prompt
-from .processes import ProcessIdentity
+from .runtime import ProcessIdentity
 
 
 EVENTS = {
@@ -349,12 +349,12 @@ class Sessions:
                 lane.first_prompt = request if lane.request_count == 0 else lane.first_prompt
                 lane.recent_requests = [*lane.recent_requests, request][-4:]
                 lane.request_count += 1
-                lane.goal = lane.session_context or lane.first_prompt
+                lane.goal = lane.first_prompt
             elif kind == "subagent_start" and not lane.first_prompt and lane.parent in self.lanes:
                 parent = self.lanes[lane.parent]
                 lane.first_prompt = parent.first_prompt
                 lane.session_context = parent.session_context
-                lane.goal = lane.session_context or lane.first_prompt
+                lane.goal = lane.first_prompt
         elif kind == "tool_start":
             if not event.get("call"):
                 return self._ignored(event, "missing_call", key, lane)

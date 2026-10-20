@@ -5,10 +5,11 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 
-from pet_daemon.cognition import Cognition
+from pet_daemon.commentary.cognition import Cognition
 from pet_daemon.config import Config
-from pet_daemon.memory import Memory, bounded
-from pet_daemon.prompts import select_prompt
+from pet_daemon.work.history import project_event
+from pet_daemon.storage import Memory
+from pet_daemon.prompts import bounded, select_prompt
 
 
 class SummarizationTests(unittest.TestCase):
@@ -18,14 +19,14 @@ class SummarizationTests(unittest.TestCase):
         self.config = Config(pet_dir=Path(self.temp.name), summarize_first_request_only=False)
         self.memory = Memory(Path(self.temp.name) / "memory.sqlite3", "pet", clock=lambda: 1000)
         self.addCleanup(self.memory.close)
-        self.context = Cognition(None, self.config, SimpleNamespace(pet="pet"), clock=lambda: 1000, memory=self.memory)
+        self.context = Cognition(None, self.config, clock=lambda: 1000, memory=self.memory)
         self.focus = {"id": "codex:main", "first_prompt": "Plan: [ ] Implement parser. [ ] Verify parser.",
                       "recent_requests": ["Implement parser"], "session_context": "Parser work remains pending.",
                       "progress": "Parser implemented and tests passed", "outcome": "success", "turn_active": False}
 
     def event(self, kind, session="main", **values):
-        self.memory.record_event({"harness": "codex", "session": session, "event": kind,
-                                  "repo": "/repo", **values})
+        self.memory.record_event(project_event({"harness": "codex", "session": session, "event": kind,
+                                  "repo": "/repo", **values}))
 
     def payload(self, request=None):
         request = request or self.context.summary_request(self.focus)

@@ -11,6 +11,7 @@ import unittest
 import httpx
 from anthropic import AsyncAnthropic
 
+from pet_daemon.commentary.context import SITUATIONS
 from pet_daemon.config import Config
 from pet_daemon.daemon import Daemon
 
@@ -40,7 +41,7 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                 requests.append(body)
                 snapshot = json.loads(body["messages"][-1]["content"])
                 summary = body["output_config"]["format"]["schema"]["required"] == ["session_context"]
-                explicit = not summary and snapshot["reason"] == "explicit"
+                explicit = not summary and SITUATIONS["explicit"] in body["system"][-1]["text"]
                 if explicit:
                     entered.set()
                     await release.wait()
@@ -84,48 +85,48 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(json.loads(output), {} if expected is None else expected)
 
                 try:
-                    await wait_for(lambda: daemon.behavior.status is not None, 10)
-                    initial = (daemon.behavior.status["x"], daemon.behavior.status["y"])
+                    await wait_for(lambda: daemon.application.behavior.status is not None, 10)
+                    initial = (daemon.application.behavior.status["x"], daemon.application.behavior.status["y"])
                     elapsed[0] += 300
-                    await wait_for(lambda: (daemon.behavior.status["x"], daemon.behavior.status["y"]) != initial)
-                    status = daemon.behavior.status
+                    await wait_for(lambda: (daemon.application.behavior.status["x"], daemon.application.behavior.status["y"]) != initial)
+                    status = daemon.application.behavior.status
                     screen = status["screen"]
                     self.assertGreaterEqual(status["x"], screen["x"])
                     self.assertLessEqual(status["x"] + status["width"], screen["x"] + screen["width"])
                     config.behavior.naps = True
                     config.behavior.nap_interval = (0.2, 0.2)
                     config.behavior.nap_seconds = (2, 2)
-                    daemon.behavior.next_nap = daemon.clock() + 0.2
-                    await wait_for(lambda: daemon.behavior.status["sleeping"])
+                    daemon.application.behavior.next_nap = daemon.clock() + 0.2
+                    await wait_for(lambda: daemon.application.behavior.status["sleeping"])
                     config.behavior.nap_interval = (120, 240)
                     await cli("intent", "--session", "build", "--text", "Build the parser")
-                    await wait_for(lambda: not daemon.behavior.status["sleeping"])
+                    await wait_for(lambda: not daemon.application.behavior.status["sleeping"])
                     await cli("--session", "build", "--status", "start", "--tool", "cargo build")
                     await hook("cursor", "beforeSubmitPrompt", {"conversation_id": "cursor-tests", "prompt": "Test the parser"}, expected={"continue": True})
                     await hook("cursor", "preToolUse", {
                         "conversation_id": "cursor-tests", "generation_id": "cursor-turn", "tool_use_id": "tests",
                         "tool_name": "Shell", "tool_input": {"command": "pytest"},
                     })
-                    await wait_for(lambda: len(daemon.sessions.lanes) == 2 and daemon.sessions.working)
+                    await wait_for(lambda: len(daemon.application.sessions.lanes) == 2 and daemon.application.sessions.working)
                     await cli("speak", "--context", "Observe these parallel parser tasks", "--ttl", "1")
                     await asyncio.wait_for(entered.wait(), 2)
                     await cli("--session", "build", "--status", "done")
-                    await wait_for(lambda: daemon.sessions.lanes["cli:build"].finished)
-                    self.assertTrue(daemon.sessions.working)
+                    await wait_for(lambda: daemon.application.sessions.lanes["cli:build"].finished)
+                    self.assertTrue(daemon.application.sessions.working)
                     await hook("cursor", "postToolUseFailure", {
                         "conversation_id": "cursor-tests", "generation_id": "cursor-turn",
                         "tool_use_id": "tests", "tool_name": "Shell", "error_message": "Parser AssertionError",
                     })
-                    await wait_for(lambda: daemon.sessions.failed)
-                    self.assertEqual(daemon.behavior.state, "working")
+                    await wait_for(lambda: daemon.application.sessions.failed)
+                    self.assertEqual(daemon.application.behavior.state, "working")
                     self.assertFalse(release.is_set())
                     release.set()
-                    await wait_for(lambda: daemon.behavior.status["speech"])
+                    await wait_for(lambda: daemon.application.behavior.status["speech"])
                     self.assertGreater(len(speech.encode()), 2048)
-                    await wait_for(lambda: not daemon.behavior.status["speech"])
-                    self.assertTrue(daemon.cognition.memory.speech())
-                    self.assertTrue(daemon.sessions.working)
-                    self.assertTrue(any(json.loads(request["messages"][-1]["content"]).get("reason") == "explicit" for request in requests))
+                    await wait_for(lambda: not daemon.application.behavior.status["speech"])
+                    self.assertTrue(daemon.application.cognition.memory.speech())
+                    self.assertTrue(daemon.application.sessions.working)
+                    self.assertTrue(any(json.loads(request["messages"][-1]["content"]).get("context") == "Observe these parallel parser tasks" for request in requests))
                 finally:
                     release.set()
                     daemon.stopping.set()

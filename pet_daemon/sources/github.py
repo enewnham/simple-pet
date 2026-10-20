@@ -1,36 +1,10 @@
-from dataclasses import dataclass, replace
+from dataclasses import replace
 import json
 from urllib.parse import urlsplit
 
 from .git import canonical_repository, command
+from ..work.observations import PullRequest
 
-
-@dataclass(frozen=True)
-class PullRequest:
-    number: int
-    url: str
-    state: str
-    merged_at: str | None
-    review: str
-    checks: tuple
-    is_draft: bool | None = None
-    head: str = ""
-    head_repository: str = ""
-    head_branch: str = ""
-    review_requests: tuple = ()
-    repository: str = ""
-    check_revision: str = ""
-    review_requested: bool | None = None
-    title: str = ""
-    body: str = ""
-    base_branch: str = ""
-    base_head: str = ""
-    related_links: tuple = ()
-    related_links_error: str | None = None
-
-    @property
-    def pending(self):
-        return self.state == "OPEN"
 
 
 def pull_request_identity(url):

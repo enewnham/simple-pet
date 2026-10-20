@@ -1,42 +1,45 @@
 import asyncio
-from dataclasses import dataclass
 from pathlib import Path
 import re
 from urllib.parse import urlsplit
 
+from ..work.observations import GitObservation
+
+
+async def _finish(task):
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+
 
 async def command(*args, cwd=None, timeout=10):
-    process = await asyncio.create_subprocess_exec(*args, cwd=cwd, stdout=asyncio.subprocess.PIPE,
-                                                 stderr=asyncio.subprocess.PIPE)
+    startup = asyncio.create_task(asyncio.create_subprocess_exec(
+        *args, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE))
+    try:
+        process = await asyncio.shield(startup)
+    except asyncio.CancelledError:
+        try:
+            process = await _finish(startup)
+        except Exception:
+            pass
+        else:
+            if process.returncode is None:
+                process.kill()
+            await _finish(asyncio.create_task(process.wait()))
+        raise
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
     except BaseException:
         if process.returncode is None:
             process.kill()
-        await process.wait()
+        await _finish(asyncio.create_task(process.wait()))
         raise
     if process.returncode:
         raise RuntimeError(stderr.decode(errors="replace").strip()[:240])
     return stdout.decode(errors="replace")
-
-
-@dataclass(frozen=True)
-class GitObservation:
-    worktree: str
-    branch: str
-    head: str
-    staged: int
-    unstaged: int
-    untracked: int
-    conflicts: int
-    upstream: str
-    ahead: int
-    behind: int
-    repository: str = ""
-
-    @property
-    def pending(self):
-        return bool(self.staged or self.unstaged or self.untracked or self.conflicts or self.ahead)
 
 
 def canonical_repository(value):

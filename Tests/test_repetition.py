@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import unittest
 
-from pet_daemon.repetition import SIMILARITY_BINARY, repeat_match
+from pet_daemon.commentary.repetition import SIMILARITY_BINARY, repeat_match
 
 
 class RepetitionTests(unittest.IsolatedAsyncioTestCase):

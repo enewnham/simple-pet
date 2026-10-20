@@ -3,17 +3,17 @@ import sqlite3
 
 from .sentiment import analyzer, sentiment_score, NEGATIVE_THRESHOLD, REACTION_CHANCE, COOLDOWN_SECONDS, DUPLICATE_SECONDS
 from .telemetry import trace, verbose
+from .work.history import project_event
 
 
 log = logging.getLogger("pet-daemon")
 
 
 class AgentEvents:
-    def __init__(self, config, *, sessions, episodes, repositories, memory, behavior, queue, clock, rng):
+    def __init__(self, config, *, sessions, episodes, memory, behavior, queue, clock, rng):
         self.config = config
         self.sessions = sessions
         self.episodes = episodes
-        self.repositories = repositories
         self.memory = memory
         self.behavior = behavior
         self.queue = queue
@@ -37,14 +37,6 @@ class AgentEvents:
         if result:
             key = result["session"]
             lane = self.sessions.lanes[key]
-            try:
-                if packet["event"] in ("intent", "subagent_start") and packet.get("goal"):
-                    aliases = tuple(f"{packet['harness']}:{alias}" for alias in packet.get("aliases", ()))
-                    self.memory.work.session_intent(key, packet["goal"], aliases=aliases)
-                self.memory.work.session_event(key, packet)
-            except (sqlite3.Error, ValueError) as error:
-                log.warning("Could not record work evidence: %s", error)
-            self.repositories.associate(key, lane.repo, refresh=packet["event"] in ("intent", "subagent_start"))
             self.restore_context(packet, key, lane)
             self.record(packet, key, lane, result["activity"])
             trigger = {**packet, "target_session": key, "repo": lane.repo, "activity": result["activity"]}
@@ -59,6 +51,7 @@ class AgentEvents:
             if not sleeping:
                 self.behavior.tick(self.activity(), self.sessions)
         verbose("hook.received", packet=packet, result=result, snapshot=self.sessions.snapshot())
+        return result
 
     def restore_context(self, packet, key, lane):
         if lane.context_loaded:
@@ -78,7 +71,7 @@ class AgentEvents:
                 lane.recent_requests = [*stored["recent_requests"], *lane.recent_requests][-4:]
                 lane.request_count += stored["request_count"]
                 lane.first_summary_attempted = stored["first_summary_attempted"]
-                lane.goal = lane.session_context or lane.first_prompt
+                lane.goal = lane.first_prompt
         except sqlite3.Error as error:
             log.warning("Could not restore pet session context: %s", error)
 
@@ -92,7 +85,7 @@ class AgentEvents:
         state = {"id": key, "repo": lane.repo, "goal": lane.goal, "last_tool": lane.last_tool,
                  "outcome": lane.outcome, "activity": activity}
         try:
-            self.memory.record_event(packet, state)
+            self.memory.record_event(project_event(packet, state))
         except sqlite3.Error as error:
             log.warning("Could not record pet event: %s", error)
 

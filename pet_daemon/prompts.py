@@ -10,6 +10,10 @@ SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 PROMPT_MAX_CHARS = 1000
 
 
+def bounded(value, limit=240):
+    return " ".join(str(value or "").split())[:limit]
+
+
 def _byte_cost(text):
     return len(json.dumps(text, ensure_ascii=False).encode("utf-8"))
 
