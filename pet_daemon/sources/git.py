@@ -16,8 +16,14 @@ async def _finish(task):
 
 
 async def command(*args, cwd=None, timeout=10):
-    startup = asyncio.create_task(asyncio.create_subprocess_exec(
-        *args, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE))
+    startup = asyncio.create_task(
+        asyncio.create_subprocess_exec(
+            *args,
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    )
     try:
         process = await asyncio.shield(startup)
     except asyncio.CancelledError:
@@ -71,7 +77,11 @@ async def repository_identity(path, run=command):
         repository = canonical_repository(url)
         if repository:
             return repository
-    common = (await run("git", "rev-parse", "--path-format=absolute", "--git-common-dir", cwd=path)).strip()
+    common = (
+        await run(
+            "git", "rev-parse", "--path-format=absolute", "--git-common-dir", cwd=path
+        )
+    ).strip()
     return "local:" + str(Path(common).resolve())
 
 
@@ -80,7 +90,15 @@ async def discover(path, run=command):
 
 
 async def observe(path, run=command):
-    output = await run("git", "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=normal", cwd=path)
+    output = await run(
+        "git",
+        "status",
+        "--porcelain=v2",
+        "--branch",
+        "-z",
+        "--untracked-files=normal",
+        cwd=path,
+    )
     head = branch = upstream = ""
     staged = unstaged = untracked = conflicts = ahead = behind = 0
     records = iter(output.split("\0"))
@@ -103,14 +121,34 @@ async def observe(path, run=command):
             unstaged += record[3] != "."
             if record.startswith("2 "):
                 next(records, None)
-    identity = await run("git", "rev-parse", "--verify", "HEAD", cwd=path) if head != "(initial)" else ""
+    identity = (
+        await run("git", "rev-parse", "--verify", "HEAD", cwd=path)
+        if head != "(initial)"
+        else ""
+    )
     if head == "(initial)":
-        current_branch = (await run("git", "symbolic-ref", "--quiet", "--short", "HEAD", cwd=path)).strip()
+        current_branch = (
+            await run("git", "symbolic-ref", "--quiet", "--short", "HEAD", cwd=path)
+        ).strip()
     else:
-        current_branch = (await run("git", "rev-parse", "--abbrev-ref", "HEAD", cwd=path)).strip()
+        current_branch = (
+            await run("git", "rev-parse", "--abbrev-ref", "HEAD", cwd=path)
+        ).strip()
         if current_branch == "HEAD":
             current_branch = "(detached)"
     if (head != "(initial)" and identity.strip() != head) or current_branch != branch:
         raise RuntimeError("Repository changed during observation")
     repository = await repository_identity(path, run)
-    return GitObservation(path, branch, head, staged, unstaged, untracked, conflicts, upstream, ahead, behind, repository)
+    return GitObservation(
+        path,
+        branch,
+        head,
+        staged,
+        unstaged,
+        untracked,
+        conflicts,
+        upstream,
+        ahead,
+        behind,
+        repository,
+    )

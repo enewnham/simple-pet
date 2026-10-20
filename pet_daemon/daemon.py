@@ -40,7 +40,9 @@ def bind_socket(path):
         existing = None
     if existing:
         if not stat.S_ISSOCK(existing.st_mode) or existing.st_uid != os.getuid():
-            raise ValueError("Refusing to replace a non-socket or another user's socket")
+            raise ValueError(
+                "Refusing to replace a non-socket or another user's socket"
+            )
         with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as probe:
             try:
                 probe.connect(path)
@@ -88,23 +90,52 @@ class Daemon:
         self.clock = clock
         self.rng = rng or random.Random()
         self.pack = Pack(config.pet_dir)
-        sessions = Sessions(clock, config.stale_seconds, config.completed_retention_seconds, config.activity_fresh_seconds)
+        sessions = Sessions(
+            clock,
+            config.stale_seconds,
+            config.completed_retention_seconds,
+            config.activity_fresh_seconds,
+        )
         episodes = Episodes()
         attention = Attention(config, clock, self.rng)
         processes = ProcessTracker(clock=clock, interval=config.process_probe_seconds)
         behavior = Behavior(self.pack, config.behavior, clock, self.rng, self.emit)
-        memory = Memory(config.memory_file, self.pack.pet, time.time, config.memory_retention_days,
-                        config.memory_max_events, speech_history_seconds=config.speech_history_seconds)
+        memory = Memory(
+            config.memory_file,
+            self.pack.pet,
+            time.time,
+            config.memory_retention_days,
+            config.memory_max_events,
+            speech_history_seconds=config.speech_history_seconds,
+        )
         cognition = Cognition(AnthropicModelClient(client), config, memory=memory)
         repositories = RepositoryTracker(
             lambda observation: self.application.ingest(observation),
-            local_interval=config.repository_refresh_seconds, github_interval=config.github_refresh_seconds,
-            checkpoints=tuple(repository_observation_from_mapping(item) for item in memory.load_repositories()),
-            associations=tuple((item["session"], item["worktree"]) for item in memory.repository_associations()),
+            local_interval=config.repository_refresh_seconds,
+            github_interval=config.github_refresh_seconds,
+            checkpoints=tuple(
+                repository_observation_from_mapping(item)
+                for item in memory.load_repositories()
+            ),
+            associations=tuple(
+                (item["session"], item["worktree"])
+                for item in memory.repository_associations()
+            ),
         )
-        self.application = Application(config, sessions=sessions, episodes=episodes, attention=attention,
-                                       behavior=behavior, cognition=cognition, providers=(repositories,),
-                                       processes=processes, memory=memory, emit=self.emit, clock=clock, rng=self.rng)
+        self.application = Application(
+            config,
+            sessions=sessions,
+            episodes=episodes,
+            attention=attention,
+            behavior=behavior,
+            cognition=cognition,
+            providers=(repositories,),
+            processes=processes,
+            memory=memory,
+            emit=self.emit,
+            clock=clock,
+            rng=self.rng,
+        )
         self.application.reconcile_targets()
         self.transport = None
         self.identity = None
@@ -117,7 +148,12 @@ class Daemon:
         receiver, identity = bind_socket(self.config.daemon_socket)
         self.identity = identity
         try:
-            self.transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(lambda: Receiver(self), sock=receiver)
+            (
+                self.transport,
+                _,
+            ) = await asyncio.get_running_loop().create_datagram_endpoint(
+                lambda: Receiver(self), sock=receiver
+            )
         except BaseException:
             receiver.close()
             unlink_owned(self.config.daemon_socket, identity)
@@ -127,16 +163,29 @@ class Daemon:
         self.sender.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 131072)
         self.sender.setblocking(False)
         self.loop_task = asyncio.create_task(self.loop())
-        verbose("daemon.started", config=asdict(self.config), pet=self.pack.pet,
-              clips={key: asdict(clip) for key, clip in self.pack.clips.items()}, next_observation=self.application.attention.next_observation)
-        event("daemon.listening", socket=self.config.daemon_socket, pet=self.pack.pet, model=self.config.model,
-              stale_seconds=self.config.stale_seconds, retention_seconds=self.config.completed_retention_seconds)
+        verbose(
+            "daemon.started",
+            config=asdict(self.config),
+            pet=self.pack.pet,
+            clips={key: asdict(clip) for key, clip in self.pack.clips.items()},
+            next_observation=self.application.attention.next_observation,
+        )
+        event(
+            "daemon.listening",
+            socket=self.config.daemon_socket,
+            pet=self.pack.pet,
+            model=self.config.model,
+            stale_seconds=self.config.stale_seconds,
+            retention_seconds=self.config.completed_retention_seconds,
+        )
 
     def emit(self, packet):
         if self.sender is None:
             return False
         try:
-            data = json.dumps(packet, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
+            data = json.dumps(
+                packet, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+            ).encode()
             self.sender.sendto(data, self.config.overlay_socket)
             verbose("renderer.command", packet=packet)
             return True
@@ -168,7 +217,11 @@ class Daemon:
             await asyncio.sleep(0.05)
 
     async def close(self):
-        event("daemon.stopping", snapshot=self.application.sessions.snapshot(), sessions=len(self.application.sessions.lanes))
+        event(
+            "daemon.stopping",
+            snapshot=self.application.sessions.snapshot(),
+            sessions=len(self.application.sessions.lanes),
+        )
         if self.loop_task:
             self.loop_task.cancel()
         await self.application.close()
@@ -193,8 +246,12 @@ class Daemon:
         self.application.memory.close()
 
     async def run(self):
-        if not self.config.overlay_binary.is_file() or not os.access(self.config.overlay_binary, os.X_OK):
-            raise ValueError("Build the renderer with make build before starting the daemon")
+        if not self.config.overlay_binary.is_file() or not os.access(
+            self.config.overlay_binary, os.X_OK
+        ):
+            raise ValueError(
+                "Build the renderer with make build before starting the daemon"
+            )
         loop = asyncio.get_running_loop()
         for number in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(number, self.stopping.set)
@@ -202,13 +259,22 @@ class Daemon:
         try:
             await self.start()
             self.child = await asyncio.create_subprocess_exec(
-                str(self.config.overlay_binary), "--assets", str(self.pack.directory),
-                "--socket", self.config.overlay_socket, "--daemon-socket", self.config.daemon_socket,
-                "--pointer-radius", str(self.config.behavior.pointer_radius),
+                str(self.config.overlay_binary),
+                "--assets",
+                str(self.pack.directory),
+                "--socket",
+                self.config.overlay_socket,
+                "--daemon-socket",
+                self.config.daemon_socket,
+                "--pointer-radius",
+                str(self.config.behavior.pointer_radius),
             )
             child_wait = asyncio.create_task(self.child.wait())
             stop_wait = asyncio.create_task(self.stopping.wait())
-            finished, _ = await asyncio.wait((child_wait, stop_wait, self.loop_task), return_when=asyncio.FIRST_COMPLETED)
+            finished, _ = await asyncio.wait(
+                (child_wait, stop_wait, self.loop_task),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
             if self.loop_task in finished:
                 self.loop_task.result()
             if child_wait in finished and child_wait.result() != 0:
@@ -218,6 +284,9 @@ class Daemon:
             for task in (child_wait, stop_wait):
                 if task and not task.done():
                     task.cancel()
-            await asyncio.gather(*(task for task in (child_wait, stop_wait) if task), return_exceptions=True)
+            await asyncio.gather(
+                *(task for task in (child_wait, stop_wait) if task),
+                return_exceptions=True,
+            )
             for number in (signal.SIGINT, signal.SIGTERM):
                 loop.remove_signal_handler(number)

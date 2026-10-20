@@ -10,26 +10,47 @@ class DeliveryTests(unittest.TestCase):
         self.sent = []
         self.outcomes = []
         self.current = True
-        self.delivery = SpeechDelivery(self.sent.append, clock=lambda: self.now,
-                                       on_outcome=self.outcomes.append,
-                                       valid=lambda message: self.current)
-        self.message = SpeechMessage("The PR requests your review.", 10, "routine", "selection",
-                                     "work", 1, ("opportunity", 1))
+        self.delivery = SpeechDelivery(
+            self.sent.append,
+            clock=lambda: self.now,
+            on_outcome=self.outcomes.append,
+            valid=lambda message: self.current,
+        )
+        self.message = SpeechMessage(
+            "The PR requests your review.",
+            10,
+            "routine",
+            "selection",
+            "work",
+            1,
+            ("opportunity", 1),
+        )
 
     def acknowledge(self, identifier=None):
-        return self.delivery.acknowledge({"event": "speech_accepted",
-                                          "delivery_id": identifier or self.message.message_id})
+        return self.delivery.acknowledge(
+            {
+                "event": "speech_accepted",
+                "delivery_id": identifier or self.message.message_id,
+            }
+        )
 
     def test_acceptance_matches_a_sent_message_once(self):
         identifier = self.delivery.submit(self.message)
         uuid.UUID(identifier)
-        self.assertEqual(self.sent, [{"text": self.message.text, "ttl": 10, "delivery_id": identifier}])
+        self.assertEqual(
+            self.sent,
+            [{"text": self.message.text, "ttl": 10, "delivery_id": identifier}],
+        )
         self.assertFalse(self.acknowledge(str(uuid.uuid4())))
-        self.assertFalse(self.delivery.acknowledge({"event": "animation", "delivery_id": identifier}))
+        self.assertFalse(
+            self.delivery.acknowledge({"event": "animation", "delivery_id": identifier})
+        )
         self.assertTrue(self.acknowledge())
         self.assertFalse(self.acknowledge())
-        self.assertEqual([(item.message.opportunity, item.status) for item in self.outcomes],
-                         [(("opportunity", 1), "accepted")])
+        self.assertEqual(
+            [(item.message.opportunity, item.status) for item in self.outcomes],
+            [(("opportunity", 1), "accepted")],
+        )
 
     def test_missing_acknowledgment_retries_the_same_message_once(self):
         self.delivery.submit(self.message)
@@ -47,6 +68,7 @@ class DeliveryTests(unittest.TestCase):
         def unavailable(packet):
             self.sent.append(packet)
             raise OSError("offline")
+
         self.delivery.emit = unavailable
         self.delivery.submit(self.message)
         for _ in range(3):
@@ -78,7 +100,9 @@ class DeliveryTests(unittest.TestCase):
             self.now += 2
             self.delivery.tick()
         self.assertTrue(self.acknowledge())
-        self.assertEqual([item.status for item in self.outcomes], ["failed", "accepted"])
+        self.assertEqual(
+            [item.status for item in self.outcomes], ["failed", "accepted"]
+        )
 
     def test_unsent_invalid_message_cannot_be_acknowledged(self):
         self.current = False
@@ -104,8 +128,10 @@ class DeliveryTests(unittest.TestCase):
 
     def test_persistence_failure_leaves_acceptance_retryable(self):
         self.delivery.submit(self.message)
+
         def unavailable(outcome):
             raise RuntimeError("storage unavailable")
+
         self.delivery.on_outcome = unavailable
         with self.assertRaises(RuntimeError):
             self.acknowledge()

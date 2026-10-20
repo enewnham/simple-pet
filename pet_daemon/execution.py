@@ -44,10 +44,13 @@ class Execution:
 
     def completion(self, packet, now, pause):
         action = self.action
-        if (self.phase != "executing" or action.event is None
-                or packet.get("command_id") != action.command_id
-                or packet.get("event") != action.event
-                or packet.get("result") not in ("finished", "interrupted")):
+        if (
+            self.phase != "executing"
+            or action.event is None
+            or packet.get("command_id") != action.command_id
+            or packet.get("event") != action.event
+            or packet.get("result") not in ("finished", "interrupted")
+        ):
             return False
         self.finish(now, pause, packet["result"] == "interrupted")
         return True

@@ -15,19 +15,41 @@ async def run(config):
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         raise ValueError("Set ANTHROPIC_API_KEY before starting pet-daemon")
-    async with AsyncAnthropic(api_key=key, timeout=config.request_timeout, max_retries=0) as client:
+    async with AsyncAnthropic(
+        api_key=key, timeout=config.request_timeout, max_retries=0
+    ) as client:
         await Daemon(config, client).run()
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="pet-daemon", description="Track coding-agent work and run a native Haiku desktop pet")
-    parser.add_argument("--config", type=Path, default=Path(__file__).resolve().parents[1] / "pet.config.json")
+    parser = argparse.ArgumentParser(
+        prog="pet-daemon",
+        description="Track coding-agent work and run a native Haiku desktop pet",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path(__file__).resolve().parents[1] / "pet.config.json",
+    )
     detail = parser.add_mutually_exclusive_group()
-    detail.add_argument("--debug", action="store_true", help="Show debug events on stderr; JSONL includes all levels")
-    detail.add_argument("--verbose", action="store_true", help="Show verbose events and full payloads on stderr; JSONL includes all levels")
+    detail.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show debug events on stderr; JSONL includes all levels",
+    )
+    detail.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show verbose events and full payloads on stderr; JSONL includes all levels",
+    )
     args = parser.parse_args()
     console = logging.StreamHandler()
-    console.setFormatter(ConsoleFormatter(color=console.stream.isatty() and "NO_COLOR" not in os.environ, verbose=args.verbose))
+    console.setFormatter(
+        ConsoleFormatter(
+            color=console.stream.isatty() and "NO_COLOR" not in os.environ,
+            verbose=args.verbose,
+        )
+    )
     level = VERBOSE if args.verbose else logging.DEBUG if args.debug else logging.INFO
     logging.basicConfig(level=level, handlers=[console])
     logging.getLogger("httpx").setLevel(logging.WARNING)

@@ -26,7 +26,9 @@ def encode(payload):
         payload["goal"] = select_prompt(original_goal)
 
     def serialized():
-        return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
 
     data = serialized()
     for field in EXCERPT_FIELDS:
@@ -61,7 +63,9 @@ def send(payload):
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as client:
             client.setblocking(False)
-            client.sendto(data, os.environ.get("PET_DAEMON_SOCKET", "/tmp/pet-daemon.sock"))
+            client.sendto(
+                data, os.environ.get("PET_DAEMON_SOCKET", "/tmp/pet-daemon.sock")
+            )
         return True
     except OSError:
         return False
@@ -85,8 +89,14 @@ def main():
     parser.add_argument("--tool")
     parser.add_argument("--exit-code", type=int)
     commands = parser.add_subparsers(dest="command")
-    commands.add_parser("clear-memory", help="clear the running pet's saved knowledge and tracked sessions")
-    commands.add_parser("clear-speech", help="forget recent remarks and dismiss the current speech bubble")
+    commands.add_parser(
+        "clear-memory",
+        help="clear the running pet's saved knowledge and tracked sessions",
+    )
+    commands.add_parser(
+        "clear-speech",
+        help="forget recent remarks and dismiss the current speech bubble",
+    )
     intent = commands.add_parser("intent", help="record a session's goal")
     intent.add_argument("--session", required=True)
     intent.add_argument("--text", required=True)
@@ -103,14 +113,29 @@ def main():
         if args.ttl is not None:
             payload["ttl"] = args.ttl
     elif args.command == "intent":
-        payload = {"kind": "event", "harness": "cli", "session": args.session,
-                   "event": "intent", "goal": args.text, "manual": True}
+        payload = {
+            "kind": "event",
+            "harness": "cli",
+            "session": args.session,
+            "event": "intent",
+            "goal": args.text,
+            "manual": True,
+        }
     else:
         if not args.session or not args.status:
             parser.error("--session and --status are required for tool events")
-        payload = {"kind": "event", "harness": "cli", "session": args.session,
-                   "event": {"start": "tool_start", "done": "tool_done", "error": "tool_error"}[args.status],
-                   "call": args.call, "manual": True}
+        payload = {
+            "kind": "event",
+            "harness": "cli",
+            "session": args.session,
+            "event": {
+                "start": "tool_start",
+                "done": "tool_done",
+                "error": "tool_error",
+            }[args.status],
+            "call": args.call,
+            "manual": True,
+        }
         if args.tool:
             payload["tool"] = args.tool
         if args.exit_code is not None:

@@ -18,8 +18,11 @@ class PromptSelectionTests(unittest.TestCase):
         self.assertIn("[omitted]", selected)
 
     def test_code_keywords_do_not_outrank_a_prose_question(self):
-        prompt = ("Opening context.\n```python\n" + "fix = 1\n" * 160 +
-                  "```\nWhy does the reader discard the final line?\nClosing context.")
+        prompt = (
+            "Opening context.\n```python\n"
+            + "fix = 1\n" * 160
+            + "```\nWhy does the reader discard the final line?\nClosing context."
+        )
         selected = select_prompt(prompt, limit=140)
         self.assertIn("Why does the reader discard the final line?", selected)
         self.assertNotIn("fix = 1", selected)
@@ -27,7 +30,9 @@ class PromptSelectionTests(unittest.TestCase):
     def test_json_byte_budget_keeps_complete_unicode_characters(self):
         prompt = "猫" * 300 + "\nFix parser/猫.py for 🐈 input."
         selected = select_prompt(prompt, limit=1000, max_bytes=150)
-        self.assertLessEqual(len(json.dumps(selected, ensure_ascii=False).encode("utf-8")), 150)
+        self.assertLessEqual(
+            len(json.dumps(selected, ensure_ascii=False).encode("utf-8")), 150
+        )
         self.assertIn("Fix parser/猫.py for 🐈 input.", selected)
 
     def test_large_first_anchor_leaves_room_for_final_request(self):
@@ -45,5 +50,7 @@ class PromptSelectionTests(unittest.TestCase):
     def test_whitespace_only_prompt_obeys_json_byte_budget(self):
         selected = select_prompt(" " * 3000, limit=1000, max_bytes=40)
         self.assertLessEqual(len(selected), 1000)
-        self.assertLessEqual(len(json.dumps(selected, ensure_ascii=False).encode("utf-8")), 40)
+        self.assertLessEqual(
+            len(json.dumps(selected, ensure_ascii=False).encode("utf-8")), 40
+        )
         self.assertIn("[omitted]", selected)

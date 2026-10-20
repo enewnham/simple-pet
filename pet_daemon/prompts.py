@@ -4,8 +4,14 @@ import json
 import re
 
 
-ACTION = re.compile(r"^(?:[-*+]\s+|\d+[.)]\s+)?(?:fix|add|update|refactor|implement|create|build|remove|debug|test|explain|check|why|how)\b", re.I)
-ACTION_ANYWHERE = re.compile(r"\b(?:fix|add|update|refactor|implement|create|build|remove|debug|test|explain|check|why|how)\b", re.I)
+ACTION = re.compile(
+    r"^(?:[-*+]\s+|\d+[.)]\s+)?(?:fix|add|update|refactor|implement|create|build|remove|debug|test|explain|check|why|how)\b",
+    re.I,
+)
+ACTION_ANYWHERE = re.compile(
+    r"\b(?:fix|add|update|refactor|implement|create|build|remove|debug|test|explain|check|why|how)\b",
+    re.I,
+)
 SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 PROMPT_MAX_CHARS = 1000
 
@@ -78,7 +84,12 @@ def _shorten(text, limit, max_bytes, preceding=False, following=False):
 
 def select_prompt(text, limit=PROMPT_MAX_CHARS, max_bytes=None):
     """Select prose within character and JSON string byte budgets."""
-    if not isinstance(text, str) or not text or limit <= 0 or (max_bytes is not None and max_bytes < 2):
+    if (
+        not isinstance(text, str)
+        or not text
+        or limit <= 0
+        or (max_bytes is not None and max_bytes < 2)
+    ):
         return ""
     if _fits(text, limit, max_bytes):
         return text
@@ -88,9 +99,16 @@ def select_prompt(text, limit=PROMPT_MAX_CHARS, max_bytes=None):
         return _shorten(text, limit, max_bytes)
     prose = [index for index, (_, is_prose) in enumerate(units) if is_prose]
     anchors = list(dict.fromkeys((prose[-1], prose[0]))) if prose else []
-    preferred = max(prose, key=lambda index: (_rank(units[index]), index)) if prose else len(units) - 1
-    ranked = sorted((index for index in prose if index not in anchors),
-                    key=lambda index: (_rank(units[index]), index), reverse=True)
+    preferred = (
+        max(prose, key=lambda index: (_rank(units[index]), index))
+        if prose
+        else len(units) - 1
+    )
+    ranked = sorted(
+        (index for index in prose if index not in anchors),
+        key=lambda index: (_rank(units[index]), index),
+        reverse=True,
+    )
     selected = set()
 
     def render(indices):
@@ -107,8 +125,13 @@ def select_prompt(text, limit=PROMPT_MAX_CHARS, max_bytes=None):
 
     if anchors and not _fits(render({anchors[0]}), limit, max_bytes):
         index = preferred
-        return _shorten(units[index][0], limit, max_bytes,
-                        preceding=index > 0, following=index < len(units) - 1)
+        return _shorten(
+            units[index][0],
+            limit,
+            max_bytes,
+            preceding=index > 0,
+            following=index < len(units) - 1,
+        )
 
     for index in anchors + ranked:
         candidate = render(selected | {index})
@@ -118,5 +141,10 @@ def select_prompt(text, limit=PROMPT_MAX_CHARS, max_bytes=None):
         return render(selected)
 
     index = preferred
-    return _shorten(units[index][0], limit, max_bytes,
-                    preceding=index > 0, following=index < len(units) - 1)
+    return _shorten(
+        units[index][0],
+        limit,
+        max_bytes,
+        preceding=index > 0,
+        following=index < len(units) - 1,
+    )

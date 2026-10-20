@@ -4,12 +4,24 @@ from urllib.parse import urlsplit
 
 
 KINDS = {"branch", "pull_request", "document", "ticket", "patch"}
-FAILURES = {"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"}
-
+FAILURES = {
+    "FAILURE",
+    "ERROR",
+    "CANCELLED",
+    "TIMED_OUT",
+    "ACTION_REQUIRED",
+    "STARTUP_FAILURE",
+}
 
 
 def canonical(value):
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
 
 
 def repository_identity(value):
@@ -42,14 +54,20 @@ def descriptor(value):
         if value.get(key) not in (None, ""):
             result[key] = text(value[key], f"artifact.{key}")
     if "\0" in result.get("checkout", ""):
-        raise ValueError("artifact.checkout must be a filesystem path without NUL characters")
+        raise ValueError(
+            "artifact.checkout must be a filesystem path without NUL characters"
+        )
     result["repository"] = repository_identity(result.get("repository", ""))
     if kind == "branch" and not result["repository"]:
         raise ValueError("branch artifacts require repository")
-    if kind == "pull_request" and not re.match(r"https?://[^/]+/[^/]+/[^/]+/pull/\d+/?$", result["ref"]):
+    if kind == "pull_request" and not re.match(
+        r"https?://[^/]+/[^/]+/[^/]+/pull/\d+/?$", result["ref"]
+    ):
         raise ValueError("pull_request.ref must be a pull request URL")
     if kind == "pull_request":
         result["ref"] = result["ref"].rstrip("/")
         parsed = urlsplit(result["ref"])
-        result["repository"] = repository_identity(parsed.netloc + parsed.path.rsplit("/pull/", 1)[0])
+        result["repository"] = repository_identity(
+            parsed.netloc + parsed.path.rsplit("/pull/", 1)[0]
+        )
     return result

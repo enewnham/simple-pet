@@ -28,7 +28,12 @@ class Evidence:
     timestamp: float
 
     def record(self):
-        return {"source": self.source, "kind": self.kind, "data": self.data, "observed_at": self.timestamp}
+        return {
+            "source": self.source,
+            "kind": self.kind,
+            "data": self.data,
+            "observed_at": self.timestamp,
+        }
 
 
 @dataclass
@@ -94,4 +99,6 @@ class WorkState:
         return records
 
     def linked_work(self, artifact_id):
-        return {work_id for work_id, linked_id in self.links if linked_id == artifact_id}
+        return {
+            work_id for work_id, linked_id in self.links if linked_id == artifact_id
+        }

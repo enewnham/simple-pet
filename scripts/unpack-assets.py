@@ -13,8 +13,17 @@ MAX_UNPACKED_BYTES = 128 * 1024 * 1024
 
 
 def is_pack(directory):
-    files = ("pet.json", "manifest.json", "spritesheet.webp", "spritesheet.png", "idle.png", "rest.png")
-    return any((directory / name).is_file() for name in files) or any((directory / name).is_dir() for name in ("idle", "rest"))
+    files = (
+        "pet.json",
+        "manifest.json",
+        "spritesheet.webp",
+        "spritesheet.png",
+        "idle.png",
+        "rest.png",
+    )
+    return any((directory / name).is_file() for name in files) or any(
+        (directory / name).is_dir() for name in ("idle", "rest")
+    )
 
 
 def unpack(archive, destination):
@@ -26,7 +35,12 @@ def unpack(archive, destination):
         total = 0
         for entry in bundle.infolist():
             path = PurePosixPath(entry.filename)
-            if path.is_absolute() or ".." in path.parts or "\\" in entry.filename or any(ord(char) < 32 for char in entry.filename):
+            if (
+                path.is_absolute()
+                or ".." in path.parts
+                or "\\" in entry.filename
+                or any(ord(char) < 32 for char in entry.filename)
+            ):
                 raise ValueError("ZIP entries must stay inside the extracted directory")
             mode = entry.external_attr >> 16
             if stat.S_IFMT(mode) not in (0, stat.S_IFREG, stat.S_IFDIR):
@@ -53,9 +67,13 @@ def unpack(archive, destination):
     if is_pack(destination):
         source = destination
     else:
-        packs = [item for item in destination.iterdir() if item.is_dir() and is_pack(item)]
+        packs = [
+            item for item in destination.iterdir() if item.is_dir() and is_pack(item)
+        ]
         if len(packs) != 1:
-            raise ValueError("ZIP must contain one pet at its root or in one top-level folder")
+            raise ValueError(
+                "ZIP must contain one pet at its root or in one top-level folder"
+            )
         source = packs[0]
     identifier = None
     for filename, key in (("pet.json", "id"), ("manifest.json", "pet")):
@@ -68,7 +86,13 @@ def unpack(archive, destination):
             if identifier:
                 break
     identifier = identifier or archive.stem
-    if not isinstance(identifier, str) or not identifier or identifier in (".", "..") or "/" in identifier or "\\" in identifier:
+    if (
+        not isinstance(identifier, str)
+        or not identifier
+        or identifier in (".", "..")
+        or "/" in identifier
+        or "\\" in identifier
+    ):
         raise ValueError("Pet ID must be a directory name without slashes")
     return {"directory": str(source), "pet": identifier, "origin": str(archive)}
 

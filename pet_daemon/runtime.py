@@ -13,14 +13,18 @@ class ProcessIdentity:
 
     @classmethod
     def parse(cls, value):
-        if (isinstance(value, dict) and type(value.get("pid")) is int and value["pid"] > 1
-                and isinstance(value.get("started"), str) and 0 < len(value["started"]) <= 128):
+        if (
+            isinstance(value, dict)
+            and type(value.get("pid")) is int
+            and value["pid"] > 1
+            and isinstance(value.get("started"), str)
+            and 0 < len(value["started"]) <= 128
+        ):
             return cls(value["pid"], value["started"])
         return None
 
     def packet(self):
         return {"pid": self.pid, "started": self.started}
-
 
 
 if TYPE_CHECKING:
@@ -91,10 +95,20 @@ class SessionSnapshot(Record):
 
     @classmethod
     def capture(cls, values, connected_work):
-        return cls(**{**values, "recent_requests": tuple(values["recent_requests"]),
-                      "active_tools": tuple(ToolSnapshot(**tool) for tool in values["active_tools"]),
-                      "failure": FailureSnapshot(**values["failure"]) if values["failure"] else None,
-                      "owner": ProcessIdentity.parse(values["owner"]), "connected_work": connected_work})
+        return cls(
+            **{
+                **values,
+                "recent_requests": tuple(values["recent_requests"]),
+                "active_tools": tuple(
+                    ToolSnapshot(**tool) for tool in values["active_tools"]
+                ),
+                "failure": FailureSnapshot(**values["failure"])
+                if values["failure"]
+                else None,
+                "owner": ProcessIdentity.parse(values["owner"]),
+                "connected_work": connected_work,
+            }
+        )
 
 
 @dataclass(frozen=True)

@@ -33,7 +33,12 @@ class Pack:
                 raise ValueError(f"Clip {key} has no frames")
             for frame in frames:
                 file = (self.directory / frame).resolve()
-                if Path(frame).is_absolute() or not file.is_relative_to(self.directory) or file.suffix.lower() != ".png" or not file.is_file():
+                if (
+                    Path(frame).is_absolute()
+                    or not file.is_relative_to(self.directory)
+                    or file.suffix.lower() != ".png"
+                    or not file.is_file()
+                ):
                     raise ValueError(f"Invalid frame in clip {key}")
             maximum = value.get("max_repeats")
             if maximum is not None and (type(maximum) is not int or maximum <= 0):
@@ -45,10 +50,16 @@ class Pack:
         if not isinstance(self.pet, str) or not self.pet or self.rest not in self.clips:
             raise ValueError("Sprite pack requires a name and rest pose")
         self.gaze = data.get("gaze", [])
-        if self.gaze and (len(self.gaze) != 16 or any(key not in self.clips for key in self.gaze)):
+        if self.gaze and (
+            len(self.gaze) != 16 or any(key not in self.clips for key in self.gaze)
+        ):
             raise ValueError("Gaze requires sixteen existing poses")
         self.gaze_anchor = data.get("gazeAnchor", {"x": 0.5, "y": 0.5})
-        if not isinstance(self.gaze_anchor, dict) or any(type(self.gaze_anchor.get(k)) not in (int, float) or not 0 <= self.gaze_anchor[k] <= 1 for k in ("x", "y")):
+        if not isinstance(self.gaze_anchor, dict) or any(
+            type(self.gaze_anchor.get(k)) not in (int, float)
+            or not 0 <= self.gaze_anchor[k] <= 1
+            for k in ("x", "y")
+        ):
             raise ValueError("Gaze anchor must contain normalized x and y")
 
     def role(self, *roles):

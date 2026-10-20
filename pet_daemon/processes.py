@@ -8,7 +8,6 @@ import time
 from .runtime import ProcessIdentity
 
 
-
 def _parse_process(line):
     fields = line.strip().split(None, 8)
     if len(fields) != 9:
@@ -27,9 +26,18 @@ def _parse_process(line):
 
 
 def _processes(pid=None):
-    args = ["ps", "-ww", "-axo", "pid=,ppid=,lstart=,stat=,command="] if pid is None else [
-        "ps", "-ww", "-p", str(pid), "-o", "pid=,ppid=,lstart=,stat=,command="]
-    result = subprocess.run(args, capture_output=True, text=True, timeout=2, env={**os.environ, "LC_ALL": "C"})
+    args = (
+        ["ps", "-ww", "-axo", "pid=,ppid=,lstart=,stat=,command="]
+        if pid is None
+        else ["ps", "-ww", "-p", str(pid), "-o", "pid=,ppid=,lstart=,stat=,command="]
+    )
+    result = subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        timeout=2,
+        env={**os.environ, "LC_ALL": "C"},
+    )
     if result.returncode not in (0, 1) or (result.returncode and result.stderr.strip()):
         raise OSError("Process query failed")
     rows = [_parse_process(line) for line in result.stdout.splitlines()]
@@ -55,7 +63,11 @@ def discover_owner(harness, pid=None):
     started = os.environ.get("PET_OWNER_STARTED")
     if explicit and started:
         for identity, _, state, _ in ancestors:
-            if str(identity.pid) == explicit and identity.started == started and "Z" not in state:
+            if (
+                str(identity.pid) == explicit
+                and identity.started == started
+                and "Z" not in state
+            ):
                 return identity
     for identity, _, state, command in ancestors:
         if "Z" in state:
@@ -99,8 +111,16 @@ class ProcessTracker:
 
     async def refresh(self, identities):
         identities = set(identities)
-        self.checked = {identity: at for identity, at in self.checked.items() if identity in identities}
-        due = [identity for identity in identities if self.clock() - self.checked.get(identity, float("-inf")) >= self.interval]
+        self.checked = {
+            identity: at
+            for identity, at in self.checked.items()
+            if identity in identities
+        }
+        due = [
+            identity
+            for identity in identities
+            if self.clock() - self.checked.get(identity, float("-inf")) >= self.interval
+        ]
 
         async def check(identity):
             async with self.semaphore:

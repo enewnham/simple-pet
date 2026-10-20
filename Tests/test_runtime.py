@@ -18,7 +18,9 @@ from pet_daemon.daemon import Daemon, bind_socket
 from pet_daemon.sprites import Pack
 
 
-PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=")
+PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII="
+)
 
 
 def request_reason(body):
@@ -27,18 +29,29 @@ def request_reason(body):
         if direction in instruction:
             if situation == "opportunity":
                 return "routine"
-            return "check_in" if situation.startswith("check_in") else situation.split("_", 1)[0]
+            return (
+                "check_in"
+                if situation.startswith("check_in")
+                else situation.split("_", 1)[0]
+            )
     raise AssertionError(f"Unrecognized instruction: {instruction}")
 
 
 def reply(speak=None, session_context=None, summary=False):
     result = {"session_context": session_context} if summary else {"speak": speak}
-    return httpx.Response(200, json={
-        "id": "msg_fixture", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
-        "content": [{"type": "text", "text": json.dumps(result)}],
-        "stop_reason": "end_turn", "stop_sequence": None,
-        "usage": {"input_tokens": 100, "output_tokens": 20},
-    })
+    return httpx.Response(
+        200,
+        json={
+            "id": "msg_fixture",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-haiku-5-5",
+            "content": [{"type": "text", "text": json.dumps(result)}],
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 100, "output_tokens": 20},
+        },
+    )
 
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -46,11 +59,25 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory(dir="/tmp", prefix="pet-runtime-")
         root = Path(self.temp.name)
         (root / "pixel.png").write_bytes(PNG)
-        (root / "manifest.json").write_text(json.dumps({"pet": "quiet", "rest": "still", "clips": {
-            "still": {"frames": ["pixel.png"], "fps": 1, "role": "rest"},
-        }}))
-        self.config = Config(pet_dir=root, daemon_socket=str(root / "daemon.sock"), overlay_socket=str(root / "overlay.sock"),
-                             observation_seconds=(3600, 3600), request_timeout=2, memory_file=root / "memory.sqlite3")
+        (root / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "pet": "quiet",
+                    "rest": "still",
+                    "clips": {
+                        "still": {"frames": ["pixel.png"], "fps": 1, "role": "rest"},
+                    },
+                }
+            )
+        )
+        self.config = Config(
+            pet_dir=root,
+            daemon_socket=str(root / "daemon.sock"),
+            overlay_socket=str(root / "overlay.sock"),
+            observation_seconds=(3600, 3600),
+            request_timeout=2,
+            memory_file=root / "memory.sqlite3",
+        )
         self.config.behavior.automatic_speech_cooldown_seconds = 0
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
@@ -72,7 +99,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         async def handler(request):
             body = json.loads(request.content)
             response_context = self.session_context
-            summary = body["output_config"]["format"]["schema"]["required"] == ["session_context"]
+            summary = body["output_config"]["format"]["schema"]["required"] == [
+                "session_context"
+            ]
             requests = self.summary_requests if summary else self.requests
             requests.append(body)
             self.entered.set()
@@ -88,19 +117,33 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 await self.release.wait()
             status = self.summary_status if summary else self.http_status
             if status != 200:
-                return httpx.Response(status, json={"type": "error", "error": {"type": "api_error", "message": "fixture failure"}})
+                return httpx.Response(
+                    status,
+                    json={
+                        "type": "error",
+                        "error": {"type": "api_error", "message": "fixture failure"},
+                    },
+                )
             if summary:
                 return reply(session_context=response_context, summary=True)
             reason = request_reason(body)
-            if self.speech == self.fixture_speech and reason not in self.speech_by_reason:
+            if (
+                self.speech == self.fixture_speech
+                and reason not in self.speech_by_reason
+            ):
                 self.fixture_revision += 1
-                self.fixture_speech = f"The fixture checks reported revision {self.fixture_revision}."
+                self.fixture_speech = (
+                    f"The fixture checks reported revision {self.fixture_revision}."
+                )
                 self.speech = self.fixture_speech
             speech = self.speech_by_reason.get(reason, self.speech)
             return reply(speech, session_context=response_context)
 
-        self.client = AsyncAnthropic(api_key="test-fixture", max_retries=0,
-                                     http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        self.client = AsyncAnthropic(
+            api_key="test-fixture",
+            max_retries=0,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
         self.overlay = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         self.overlay.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 131072)
         self.overlay.bind(self.config.overlay_socket)
@@ -127,20 +170,46 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.hook.sendto(json.dumps(packet).encode(), self.config.daemon_socket)
 
     def event(self, event, session="one", harness="cli", **extra):
-        self.send({"kind": "event", "event": event, "harness": harness, "session": session, **extra})
+        self.send(
+            {
+                "kind": "event",
+                "event": event,
+                "harness": harness,
+                "session": session,
+                **extra,
+            }
+        )
 
     def send_status(self, **extra):
-        self.send({"kind": "renderer", "event": "status", "x": 100, "y": 100, "width": 200, "height": 160,
-                   "screen": {"x": 0, "y": 0, "width": 1000, "height": 800},
-                   "pointer": {"x": 2000, "y": 2000}, "dragging": False, "menu": False, "speech": False, **extra})
+        self.send(
+            {
+                "kind": "renderer",
+                "event": "status",
+                "x": 100,
+                "y": 100,
+                "width": 200,
+                "height": 160,
+                "screen": {"x": 0, "y": 0, "width": 1000, "height": 800},
+                "pointer": {"x": 2000, "y": 2000},
+                "dragging": False,
+                "menu": False,
+                "speech": False,
+                **extra,
+            }
+        )
 
     async def observe(self, *args, **kwargs):
         await self.daemon.application.observe(*args, **kwargs)
         if not self.overlay._closed:
-            pending = tuple(item for item in self.daemon.application.delivery.deliveries.values()
-                            if item.status == "pending")
+            pending = tuple(
+                item
+                for item in self.daemon.application.delivery.deliveries.values()
+                if item.status == "pending"
+            )
             if pending:
-                await self.wait_for(lambda: all(item.status != "pending" for item in pending))
+                await self.wait_for(
+                    lambda: all(item.status != "pending" for item in pending)
+                )
 
     async def render_packets(self):
         while True:
@@ -149,8 +218,18 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             except OSError:
                 return
             packet = json.loads(data)
-            if packet.get("delivery_id") and packet.get("text", "").strip() and packet.get("ttl", 0) > 0:
-                self.send({"kind": "renderer", "event": "speech_accepted", "delivery_id": packet["delivery_id"]})
+            if (
+                packet.get("delivery_id")
+                and packet.get("text", "").strip()
+                and packet.get("ttl", 0) > 0
+            ):
+                self.send(
+                    {
+                        "kind": "renderer",
+                        "event": "speech_accepted",
+                        "delivery_id": packet["delivery_id"],
+                    }
+                )
                 if packet["delivery_id"] in self.accepted_deliveries:
                     continue
                 self.accepted_deliveries.add(packet["delivery_id"])
@@ -161,16 +240,20 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             while True:
                 packet = await self.renderer_packets.get()
                 if predicate(packet):
-                    delivery = self.daemon.application.delivery.deliveries.get(packet.get("delivery_id"))
+                    delivery = self.daemon.application.delivery.deliveries.get(
+                        packet.get("delivery_id")
+                    )
                     if delivery is not None and delivery.status == "pending":
                         await self.wait_for(lambda: delivery.status != "pending")
                     return packet
+
         return await asyncio.wait_for(receive(), timeout)
 
     async def wait_for(self, condition, timeout=1):
         async def wait():
             while not condition():
                 await asyncio.sleep(0.005)
+
         await asyncio.wait_for(wait(), timeout)
 
     async def drain(self):
@@ -181,115 +264,225 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         return result
 
     def install_sentiment_clips(self):
-        path = self.config.pet_dir / 'manifest.json'
+        path = self.config.pet_dir / "manifest.json"
         manifest = json.loads(path.read_text())
-        for name, role in [('failed', 'error'), ('review', 'attention'), ('jumping', 'celebrate')]:
-            manifest['clips'][name] = {'frames': ['pixel.png'], 'fps': 1, 'role': role}
+        for name, role in [
+            ("failed", "error"),
+            ("review", "attention"),
+            ("jumping", "celebrate"),
+        ]:
+            manifest["clips"][name] = {"frames": ["pixel.png"], "fps": 1, "role": role}
         path.write_text(json.dumps(manifest))
-        self.daemon.pack = self.daemon.application.behavior.pack = Pack(self.config.pet_dir)
+        self.daemon.pack = self.daemon.application.behavior.pack = Pack(
+            self.config.pet_dir
+        )
 
     async def test_hook_frustration_plays_once_without_marking_work_failed(self):
         self.install_sentiment_clips()
         self.slow = True
         self.daemon.application.events.rng = random.Random(1)
         root = Path(__file__).resolve().parents[1]
-        hook = runpy.run_path(str(root / 'scripts' / 'pet-hook'))
-        packet = hook['update']('claude', 'UserPromptSubmit', {
-            'session_id': 'frustrated', 'prompt': 'This is terrible. Stop making this worse.'})
-        encoded = hook['CLIENT']['encode'](packet)
+        hook = runpy.run_path(str(root / "scripts" / "pet-hook"))
+        packet = hook["update"](
+            "claude",
+            "UserPromptSubmit",
+            {
+                "session_id": "frustrated",
+                "prompt": "This is terrible. Stop making this worse.",
+            },
+        )
+        encoded = hook["CLIENT"]["encode"](packet)
         self.daemon.receive(encoded)
-        reaction = await self.packet(lambda item: item.get('animation', {}).get('id') == 'failed')
-        self.assertEqual(reaction['animation']['repeats'], 3)
-        self.assertEqual(self.daemon.application.behavior.execution.action.name, 'frustration')
+        reaction = await self.packet(
+            lambda item: item.get("animation", {}).get("id") == "failed"
+        )
+        self.assertEqual(reaction["animation"]["repeats"], 3)
+        self.assertEqual(
+            self.daemon.application.behavior.execution.action.name, "frustration"
+        )
         self.assertFalse(self.daemon.application.sessions.failed)
         self.assertEqual(self.daemon.application.events.error_until, 0)
         snapshot = self.daemon.application.sessions.snapshot()
-        selection = self.daemon.application.attention.select(snapshot, 'prompt')
+        selection = self.daemon.application.attention.select(snapshot, "prompt")
         payload = self.daemon.application.cognition.context.prompt(snapshot, selection)
-        self.assertLessEqual(payload['focus_session']['user_sentiment']['compound'], -0.45)
+        self.assertLessEqual(
+            payload["focus_session"]["user_sentiment"]["compound"], -0.45
+        )
 
         self.daemon.receive(encoded)
         self.daemon.application.events.rng = random.Random(1)
-        packet['session'] = 'another'
-        self.daemon.receive(hook['CLIENT']['encode'](packet))
-        self.assertFalse(any(item.get('animation', {}).get('id') == 'failed' for item in await self.drain()))
+        packet["session"] = "another"
+        self.daemon.receive(hook["CLIENT"]["encode"](packet))
+        self.assertFalse(
+            any(
+                item.get("animation", {}).get("id") == "failed"
+                for item in await self.drain()
+            )
+        )
 
     async def test_skipped_frustration_is_not_retried_by_duplicate_hooks(self):
         self.install_sentiment_clips()
-        packet = {'kind': 'event', 'harness': 'claude', 'session': 'frustrated', 'event': 'intent',
-                  'goal': 'This is terrible. Stop making this worse.'}
+        packet = {
+            "kind": "event",
+            "harness": "claude",
+            "session": "frustrated",
+            "event": "intent",
+            "goal": "This is terrible. Stop making this worse.",
+        }
         self.daemon.application.events.rng = random.Random(2)
         self.daemon.receive(json.dumps(packet).encode())
         self.daemon.application.events.rng = random.Random(1)
         self.daemon.receive(json.dumps(packet).encode())
-        self.assertFalse(any(item.get('animation', {}).get('id') == 'failed' for item in await self.drain()))
+        self.assertFalse(
+            any(
+                item.get("animation", {}).get("id") == "failed"
+                for item in await self.drain()
+            )
+        )
 
-    async def test_sentiment_cooldown_expires_and_a_neutral_prompt_clears_the_signal(self):
+    async def test_sentiment_cooldown_expires_and_a_neutral_prompt_clears_the_signal(
+        self,
+    ):
         self.install_sentiment_clips()
         self.slow = True
         now = [self.daemon.clock()]
         clock = lambda: now[0]
-        self.daemon.clock = self.daemon.application.events.clock = self.daemon.application.clock = self.daemon.application.sessions.clock = self.daemon.application.behavior.clock = clock
-        packet = {'kind': 'event', 'harness': 'claude', 'session': 'frustrated', 'event': 'intent',
-                  'turn': 'first', 'goal': 'This is terrible. Stop making this worse.'}
+        self.daemon.clock = self.daemon.application.events.clock = (
+            self.daemon.application.clock
+        ) = self.daemon.application.sessions.clock = (
+            self.daemon.application.behavior.clock
+        ) = clock
+        packet = {
+            "kind": "event",
+            "harness": "claude",
+            "session": "frustrated",
+            "event": "intent",
+            "turn": "first",
+            "goal": "This is terrible. Stop making this worse.",
+        }
         self.daemon.application.events.rng = random.Random(1)
         self.daemon.receive(json.dumps(packet).encode())
         self.assertEqual(self.daemon.application.events.sentiment_after, now[0] + 90)
-        self.assertTrue(any(item.get('animation', {}).get('id') == 'failed' for item in await self.drain()))
+        self.assertTrue(
+            any(
+                item.get("animation", {}).get("id") == "failed"
+                for item in await self.drain()
+            )
+        )
 
         now[0] += 89
-        self.daemon.application.behavior.tick(self.daemon.application.events.activity(), self.daemon.application.sessions)
-        packet['turn'] = 'second'
+        self.daemon.application.behavior.tick(
+            self.daemon.application.events.activity(), self.daemon.application.sessions
+        )
+        packet["turn"] = "second"
         self.daemon.application.events.rng = random.Random(1)
         self.daemon.receive(json.dumps(packet).encode())
-        self.assertFalse(any(item.get('animation', {}).get('id') == 'failed' for item in await self.drain()))
+        self.assertFalse(
+            any(
+                item.get("animation", {}).get("id") == "failed"
+                for item in await self.drain()
+            )
+        )
 
         now[0] += 2
-        packet['turn'] = 'third'
+        packet["turn"] = "third"
         self.daemon.application.events.rng = random.Random(1)
         self.daemon.receive(json.dumps(packet).encode())
-        self.assertTrue(any(item.get('animation', {}).get('id') == 'failed' for item in await self.drain()))
+        self.assertTrue(
+            any(
+                item.get("animation", {}).get("id") == "failed"
+                for item in await self.drain()
+            )
+        )
         now[0] += 100
-        self.assertIn('user_sentiment', self.daemon.application.sessions.snapshot()['sessions'][0])
-        self.daemon.application.behavior.tick(self.daemon.application.events.activity(), self.daemon.application.sessions)
+        self.assertIn(
+            "user_sentiment", self.daemon.application.sessions.snapshot()["sessions"][0]
+        )
+        self.daemon.application.behavior.tick(
+            self.daemon.application.events.activity(), self.daemon.application.sessions
+        )
         self.daemon.application.events.rng = random.Random(1)
         self.daemon.receive(json.dumps(packet).encode())
-        self.assertFalse(any(item.get('animation', {}).get('id') == 'failed' for item in await self.drain()))
+        self.assertFalse(
+            any(
+                item.get("animation", {}).get("id") == "failed"
+                for item in await self.drain()
+            )
+        )
 
-        packet.update(turn='fourth', goal='Thank you, this looks great.')
+        packet.update(turn="fourth", goal="Thank you, this looks great.")
         self.daemon.receive(json.dumps(packet).encode())
-        self.assertNotIn('user_sentiment', self.daemon.application.sessions.snapshot()['sessions'][0])
+        self.assertNotIn(
+            "user_sentiment", self.daemon.application.sessions.snapshot()["sessions"][0]
+        )
 
     async def test_subagent_prompts_and_disabled_sentiment_do_not_react(self):
         self.install_sentiment_clips()
-        packet = {'kind': 'event', 'harness': 'claude', 'session': 'child', 'parent': 'parent',
-                  'event': 'intent', 'goal': 'This is terrible. Stop making this worse.'}
+        packet = {
+            "kind": "event",
+            "harness": "claude",
+            "session": "child",
+            "parent": "parent",
+            "event": "intent",
+            "goal": "This is terrible. Stop making this worse.",
+        }
         self.daemon.application.events.rng = random.Random(1)
         self.daemon.receive(json.dumps(packet).encode())
-        self.assertFalse(any(item.get('animation', {}).get('id') == 'failed' for item in await self.drain()))
-        self.assertNotIn('user_sentiment', self.daemon.application.sessions.snapshot()['sessions'][0])
+        self.assertFalse(
+            any(
+                item.get("animation", {}).get("id") == "failed"
+                for item in await self.drain()
+            )
+        )
+        self.assertNotIn(
+            "user_sentiment", self.daemon.application.sessions.snapshot()["sessions"][0]
+        )
         self.config.behavior.sentiment_reactions = False
-        packet.pop('parent')
-        packet['session'] = 'disabled'
+        packet.pop("parent")
+        packet["session"] = "disabled"
         self.daemon.receive(json.dumps(packet).encode())
-        self.assertFalse(any(item.get('animation', {}).get('id') == 'failed' for item in await self.drain()))
+        self.assertFalse(
+            any(
+                item.get("animation", {}).get("id") == "failed"
+                for item in await self.drain()
+            )
+        )
 
     async def test_blocked_frustration_is_dropped_and_respects_reaction_priority(self):
         self.install_sentiment_clips()
-        packet = {'kind': 'event', 'harness': 'claude', 'session': 'frustrated', 'event': 'intent',
-                  'goal': 'This is terrible. Stop making this worse.'}
-        self.daemon.application.behavior.status['menu'] = True
+        packet = {
+            "kind": "event",
+            "harness": "claude",
+            "session": "frustrated",
+            "event": "intent",
+            "goal": "This is terrible. Stop making this worse.",
+        }
+        self.daemon.application.behavior.status["menu"] = True
         self.daemon.application.events.rng = random.Random(1)
         self.daemon.receive(json.dumps(packet).encode())
-        self.daemon.application.behavior.status['menu'] = False
-        self.daemon.application.behavior.tick(self.daemon.application.events.activity(), self.daemon.application.sessions)
-        self.assertFalse(any(item.get('animation', {}).get('id') == 'failed' for item in await self.drain()))
-        self.daemon.application.behavior.react('success')
-        packet['session'] = 'another'
+        self.daemon.application.behavior.status["menu"] = False
+        self.daemon.application.behavior.tick(
+            self.daemon.application.events.activity(), self.daemon.application.sessions
+        )
+        self.assertFalse(
+            any(
+                item.get("animation", {}).get("id") == "failed"
+                for item in await self.drain()
+            )
+        )
+        self.daemon.application.behavior.react("success")
+        packet["session"] = "another"
         self.daemon.application.events.rng = random.Random(1)
         self.daemon.receive(json.dumps(packet).encode())
-        self.assertEqual(self.daemon.application.behavior.execution.action.name, 'success')
-        self.assertFalse(any(item.get('animation', {}).get('id') == 'failed' for item in await self.drain()))
+        self.assertEqual(
+            self.daemon.application.behavior.execution.action.name, "success"
+        )
+        self.assertFalse(
+            any(
+                item.get("animation", {}).get("id") == "failed"
+                for item in await self.drain()
+            )
+        )
 
     async def test_clear_memory_cancels_commentary_and_starts_fresh_sessions(self):
         self.slow = True
@@ -298,7 +491,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         memory = self.daemon.application.cognition.memory
         memory.record_speech("Remember the parser", "prompt")
         self.send({"kind": "clear_memory"})
-        await self.packet(lambda packet: packet.get("text") == "" and packet.get("ttl") == 0)
+        await self.packet(
+            lambda packet: packet.get("text") == "" and packet.get("ttl") == 0
+        )
         self.release.set()
         await self.wait_for(lambda: self.daemon.application.task is None)
         self.assertEqual(self.daemon.application.sessions.snapshot()["sessions"], [])
@@ -322,7 +517,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for_repository()
         await self.wait_for(lambda: self.daemon.application.task is None)
         self.event("tool_start", call="checks", tool="pytest")
-        await self.wait_for(lambda: bool(self.daemon.application.sessions.lanes["cli:one"].calls))
+        await self.wait_for(
+            lambda: bool(self.daemon.application.sessions.lanes["cli:one"].calls)
+        )
         memory = self.daemon.application.memory
         sessions = self.daemon.application.sessions
         context = memory.context("cli:one")
@@ -331,7 +528,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         repositories = self.daemon.application.providers[0].signature()
         last_attempt = self.daemon.application.attention.last_attempt
         self.send({"kind": "clear_speech"})
-        await self.packet(lambda packet: packet.get("text") == "" and packet.get("ttl") == 0)
+        await self.packet(
+            lambda packet: packet.get("text") == "" and packet.get("ttl") == 0
+        )
         self.assertEqual(memory.speech(), [])
         self.assertIsNone(self.daemon.application.last_speech)
         self.assertIs(self.daemon.application.sessions, sessions)
@@ -347,19 +546,28 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(payload["focus_session"])
         self.assertEqual(payload["context"], "Look at the parser")
 
-    async def test_clear_speech_discards_pending_remark_and_preserves_session_summary(self):
+    async def test_clear_speech_discards_pending_remark_and_preserves_session_summary(
+        self,
+    ):
         self.slow = True
         self.session_context = "Keep the parser API stable."
         self.daemon.application.memory.record_speech("Earlier remark", "routine")
         self.event("intent", goal="Improve parser")
-        await self.wait_for(lambda: len(self.requests) == 1 and len(self.summary_requests) == 1)
+        await self.wait_for(
+            lambda: len(self.requests) == 1 and len(self.summary_requests) == 1
+        )
         self.send({"kind": "clear_speech"})
-        await self.packet(lambda packet: packet.get("text") == "" and packet.get("ttl") == 0)
+        await self.packet(
+            lambda packet: packet.get("text") == "" and packet.get("ttl") == 0
+        )
         self.release.set()
         await self.wait_for(lambda: self.daemon.application.task is None)
         self.assertEqual(self.daemon.application.memory.speech(), [])
         self.assertTrue(self.daemon.application.sessions.active)
-        self.assertEqual(self.daemon.application.memory.context("cli:one")["session_context"], self.session_context)
+        self.assertEqual(
+            self.daemon.application.memory.context("cli:one")["session_context"],
+            self.session_context,
+        )
         self.assertFalse(any(packet.get("text") for packet in await self.drain()))
         self.slow = False
         await self.observe("explicit", "Check again")
@@ -385,73 +593,136 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def repository_fixture(self):
         from pet_daemon.sources.git import command
+
         self.repository_path = Path(self.temp.name) / "repository"
         self.repository_path.mkdir()
-        for args in (("init", "-b", "feature"), ("config", "user.email", "pet@example.test"),
-                     ("config", "user.name", "Pet")):
+        for args in (
+            ("init", "-b", "feature"),
+            ("config", "user.email", "pet@example.test"),
+            ("config", "user.name", "Pet"),
+        ):
             await command("git", *args, cwd=self.repository_path)
         (self.repository_path / "tracked").write_text("initial\n")
         await command("git", "add", ".", cwd=self.repository_path)
         await command("git", "commit", "-m", "Initial", cwd=self.repository_path)
-        await command("git", "remote", "add", "origin", "https://example.test/owner/repository.git", cwd=self.repository_path)
-        head = (await command("git", "rev-parse", "HEAD", cwd=self.repository_path)).strip()
+        await command(
+            "git",
+            "remote",
+            "add",
+            "origin",
+            "https://example.test/owner/repository.git",
+            cwd=self.repository_path,
+        )
+        head = (
+            await command("git", "rev-parse", "HEAD", cwd=self.repository_path)
+        ).strip()
         (self.repository_path / "tracked").write_text("pending edits\n")
-        self.repository_pr = {"number": 1, "url": "https://example.test/owner/repository/pull/1", "state": "OPEN", "mergedAt": None,
-                              "reviewDecision": "REVIEW_REQUIRED", "statusCheckRollup": [], "isDraft": True,
-                              "title": "Persist parser sessions", "body": "Preserve session context",
-                              "reviewRequests": [{"login": "elliot"}],
-                              "headRefOid": head, "headRefName": "feature",
-                              "headRepositoryOwner": {"login": "owner"}, "headRepository": {"name": "repository"}}
+        self.repository_pr = {
+            "number": 1,
+            "url": "https://example.test/owner/repository/pull/1",
+            "state": "OPEN",
+            "mergedAt": None,
+            "reviewDecision": "REVIEW_REQUIRED",
+            "statusCheckRollup": [],
+            "isDraft": True,
+            "title": "Persist parser sessions",
+            "body": "Preserve session context",
+            "reviewRequests": [{"login": "elliot"}],
+            "headRefOid": head,
+            "headRefName": "feature",
+            "headRepositoryOwner": {"login": "owner"},
+            "headRepository": {"name": "repository"},
+        }
+
         async def boundary(*args, **kwargs):
             if args[:3] == ("gh", "api", "user"):
                 return "elliot"
             if args[:3] == ("gh", "repo", "view"):
                 return json.dumps({"isFork": False})
             if args[0] == "gh":
-                return json.dumps([self.repository_pr] if args[2] == "list" else self.repository_pr)
+                return json.dumps(
+                    [self.repository_pr] if args[2] == "list" else self.repository_pr
+                )
             return await command(*args, **kwargs)
+
         self.repository_boundary = boundary
         self.daemon.application.providers[0].run = boundary
 
     async def wait_for_repository(self):
-        await self.wait_for(lambda: any(item.pr for item in self.daemon.application.providers[0].snapshot()), timeout=3)
-        return next(item for item in self.daemon.application.providers[0].snapshot() if item.current)
+        await self.wait_for(
+            lambda: any(
+                item.pr for item in self.daemon.application.providers[0].snapshot()
+            ),
+            timeout=3,
+        )
+        return next(
+            item
+            for item in self.daemon.application.providers[0].snapshot()
+            if item.current
+        )
 
     async def connect_repository_work(self):
         self.config.behavior.automatic_speech_cooldown_seconds = 90
         self.daemon.application.attention.last_attempt = self.daemon.clock()
-        self.event("intent", repo=str(self.repository_path), goal="Improve parser persistence")
-        await self.wait_for(lambda: bool(self.daemon.application.memory.work.session_context("cli:one").get("artifacts")), timeout=3)
+        self.event(
+            "intent", repo=str(self.repository_path), goal="Improve parser persistence"
+        )
+        await self.wait_for(
+            lambda: bool(
+                self.daemon.application.memory.work.session_context("cli:one").get(
+                    "artifacts"
+                )
+            ),
+            timeout=3,
+        )
         self.daemon.application.attention.pending = None
         self.config.behavior.automatic_speech_cooldown_seconds = 0
 
     async def test_exited_owner_leaves_connected_output_available_for_review(self):
         from pet_daemon.processes import process_identity
+
         await self.repository_fixture()
         await self.connect_repository_work()
         owner = await asyncio.create_subprocess_exec("sleep", "30")
         try:
             identity = await asyncio.to_thread(process_identity, owner.pid)
             self.assertIsNotNone(identity)
-            self.event("tool_start", call="edit", tool="editing", repo=str(self.repository_path), owner=identity.packet())
+            self.event(
+                "tool_start",
+                call="edit",
+                tool="editing",
+                repo=str(self.repository_path),
+                owner=identity.packet(),
+            )
             await self.wait_for_repository()
         finally:
             owner.terminate()
             await owner.wait()
         self.daemon.application.processes.checked.clear()
-        await self.wait_for(lambda: self.daemon.application.sessions.lanes["cli:one"].presence == "exited", timeout=3)
+        await self.wait_for(
+            lambda: (
+                self.daemon.application.sessions.lanes["cli:one"].presence == "exited"
+            ),
+            timeout=3,
+        )
         self.assertEqual(self.daemon.application.events.activity(), "idle")
         await self.observe("routine")
         payload = json.loads(self.requests[-1]["messages"][-1]["content"])
         self.assertNotIn("activity", payload)
-        self.assertEqual(self.daemon.application.sessions.lanes["cli:one"].presence, "exited")
+        self.assertEqual(
+            self.daemon.application.sessions.lanes["cli:one"].presence, "exited"
+        )
         self.assertFalse(self.daemon.application.sessions.lanes["cli:one"].active)
         self.assertIsNone(payload["focus_session"])
         self.assertEqual(payload["other_sessions"], [])
         self.assertEqual(payload["focus_opportunity"]["kind"], "review_output")
-        self.assertEqual(payload["focus_opportunity"]["artifact"]["title"], "Persist parser sessions")
+        self.assertEqual(
+            payload["focus_opportunity"]["artifact"]["title"], "Persist parser sessions"
+        )
 
-    async def test_pull_request_merge_discards_commentary_generated_for_pending_work(self):
+    async def test_pull_request_merge_discards_commentary_generated_for_pending_work(
+        self,
+    ):
         await self.repository_fixture()
         self.event("session_start", repo=str(self.repository_path))
         original = await self.wait_for_repository()
@@ -463,12 +734,25 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.entered.wait(), 1)
         self.repository_pr.update(state="MERGED", mergedAt="2026-10-17T00:00:00Z")
         self.daemon.application.providers[0].github_interval = 0
-        await self.wait_for(lambda: any(item.pr and item.pr.state == "MERGED" for item in self.daemon.application.providers[0].snapshot()), timeout=3)
+        await self.wait_for(
+            lambda: any(
+                item.pr and item.pr.state == "MERGED"
+                for item in self.daemon.application.providers[0].snapshot()
+            ),
+            timeout=3,
+        )
         self.release.set()
         await task
-        self.assertTrue(any(item.pr and item.pr.state == "MERGED" for item in self.daemon.application.providers[0].snapshot()))
+        self.assertTrue(
+            any(
+                item.pr and item.pr.state == "MERGED"
+                for item in self.daemon.application.providers[0].snapshot()
+            )
+        )
         self.assertEqual(self.daemon.application.memory.speech(), [])
-        self.assertFalse(any(packet.get("text") == self.speech for packet in await self.drain()))
+        self.assertFalse(
+            any(packet.get("text") == self.speech for packet in await self.drain())
+        )
 
     async def finish_observation_after_other_session_changes(self):
         self.config.behavior.automatic_speech_cooldown_seconds = 90
@@ -477,12 +761,18 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.event("intent", session="other", goal="Review the renderer")
         await self.wait_for(lambda: len(self.daemon.application.sessions.lanes) == 2)
         self.slow = True
-        task = asyncio.create_task(self.observe("routine", trigger={"target_session": "cli:focus"}))
+        task = asyncio.create_task(
+            self.observe("routine", trigger={"target_session": "cli:focus"})
+        )
         self.addCleanup(task.cancel)
         await asyncio.wait_for(self.entered.wait(), 1)
         payload = json.loads(self.requests[-1]["messages"][0]["content"])
         self.event("intent", session="other", goal="Document the renderer")
-        await self.wait_for(lambda: self.daemon.application.sessions.lanes["cli:other"].request_count == 2)
+        await self.wait_for(
+            lambda: (
+                self.daemon.application.sessions.lanes["cli:other"].request_count == 2
+            )
+        )
         self.release.set()
         await task
         return payload
@@ -491,37 +781,62 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.config.prompt_target_bytes = 1
         payload = await self.finish_observation_after_other_session_changes()
         self.assertEqual(payload["other_sessions"], [])
-        self.assertEqual([row["text"] for row in self.daemon.application.memory.speech()], [self.speech])
-        self.assertEqual((await self.packet(lambda packet: "text" in packet))["text"], self.speech)
+        self.assertEqual(
+            [row["text"] for row in self.daemon.application.memory.speech()],
+            [self.speech],
+        )
+        self.assertEqual(
+            (await self.packet(lambda packet: "text" in packet))["text"], self.speech
+        )
 
     async def test_unrelated_work_stays_outside_focused_commentary(self):
         payload = await self.finish_observation_after_other_session_changes()
         self.assertEqual(payload["other_sessions"], [])
         self.assertNotIn("Review the renderer", json.dumps(payload))
-        self.assertEqual([row["text"] for row in self.daemon.application.memory.speech()], [self.speech])
+        self.assertEqual(
+            [row["text"] for row in self.daemon.application.memory.speech()],
+            [self.speech],
+        )
 
     async def test_unrelated_repository_changes_preserve_session_commentary(self):
         await self.repository_fixture()
         self.config.behavior.automatic_speech_cooldown_seconds = 90
         self.daemon.application.attention.last_attempt = self.daemon.clock()
         self.config.prompt_target_bytes = 1
-        self.event("session_start", session="repository", repo=str(self.repository_path))
+        self.event(
+            "session_start", session="repository", repo=str(self.repository_path)
+        )
         original = await self.wait_for_repository()
         self.event("intent", session="focus", goal="Review parser behavior")
-        await self.wait_for(lambda: "cli:focus" in self.daemon.application.sessions.lanes)
+        await self.wait_for(
+            lambda: "cli:focus" in self.daemon.application.sessions.lanes
+        )
         self.slow = True
-        task = asyncio.create_task(self.observe("routine", trigger={"target_session": "cli:focus"}))
+        task = asyncio.create_task(
+            self.observe("routine", trigger={"target_session": "cli:focus"})
+        )
         self.addCleanup(task.cancel)
         await asyncio.wait_for(self.entered.wait(), 1)
         payload = json.loads(self.requests[-1]["messages"][0]["content"])
         self.assertIsNone(payload["focus_opportunity"])
         self.repository_pr.update(state="MERGED", mergedAt="2026-10-17T00:00:00Z")
         self.daemon.application.providers[0].github_interval = 0
-        await self.wait_for(lambda: self.daemon.application.providers[0].snapshot()[0].revision != original.revision, timeout=3)
+        await self.wait_for(
+            lambda: (
+                self.daemon.application.providers[0].snapshot()[0].revision
+                != original.revision
+            ),
+            timeout=3,
+        )
         self.release.set()
         await task
-        self.assertEqual([row["text"] for row in self.daemon.application.memory.speech()], [self.speech])
-        self.assertEqual((await self.packet(lambda packet: "text" in packet))["text"], self.speech)
+        self.assertEqual(
+            [row["text"] for row in self.daemon.application.memory.speech()],
+            [self.speech],
+        )
+        self.assertEqual(
+            (await self.packet(lambda packet: "text" in packet))["text"], self.speech
+        )
 
     async def test_pending_repository_associations_survive_daemon_restart(self):
         await self.repository_fixture()
@@ -542,18 +857,32 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.observe("routine")
         payload = json.loads(self.requests[-1]["messages"][-1]["content"])
         self.assertIsNone(payload["focus_session"])
-        self.assertEqual(payload["focus_opportunity"]["intent"], "Improve parser persistence")
+        self.assertEqual(
+            payload["focus_opportunity"]["intent"], "Improve parser persistence"
+        )
 
-    async def test_repository_changes_without_reported_output_do_not_create_opportunities(self):
+    async def test_repository_changes_without_reported_output_do_not_create_opportunities(
+        self,
+    ):
         await self.repository_fixture()
         self.event("session_start", repo=str(self.repository_path))
         await self.wait_for_repository()
         self.repository_pr.update(state="MERGED", mergedAt="2026-10-17T00:00:00Z")
         self.daemon.application.providers[0].github_interval = 0
-        await self.wait_for(lambda: any(item.pr and item.pr.state == "MERGED" for item in self.daemon.application.providers[0].snapshot()), timeout=3)
+        await self.wait_for(
+            lambda: any(
+                item.pr and item.pr.state == "MERGED"
+                for item in self.daemon.application.providers[0].snapshot()
+            ),
+            timeout=3,
+        )
         self.assertEqual(self.daemon.application.memory.work.opportunities(), ())
         self.daemon.application.attention.next_observation = self.daemon.clock()
-        await self.wait_for(lambda: self.daemon.application.attention.next_observation > self.daemon.clock())
+        await self.wait_for(
+            lambda: (
+                self.daemon.application.attention.next_observation > self.daemon.clock()
+            )
+        )
         self.assertEqual(self.requests, [])
 
     async def test_due_check_ins_mark_only_the_selected_session(self):
@@ -565,15 +894,23 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(lambda: len(self.daemon.application.sessions.lanes) == 2)
         self.now += 6
         await asyncio.wait_for(self.entered.wait(), 1)
-        checked = [key for key, lane in self.daemon.application.sessions.lanes.items() if lane.last_check_in is not None]
+        checked = [
+            key
+            for key, lane in self.daemon.application.sessions.lanes.items()
+            if lane.last_check_in is not None
+        ]
         self.assertEqual(len(checked), 1)
-        unchecked = next(key for key in self.daemon.application.sessions.lanes if key not in checked)
+        unchecked = next(
+            key for key in self.daemon.application.sessions.lanes if key not in checked
+        )
         payload = json.loads(self.requests[-1]["messages"][-1]["content"])
         self.assertEqual(payload["focus_session"]["active_tools"][0]["tool"], "pytest")
         self.release.set()
         await self.wait_for(lambda: len(self.requests) == 2)
         payload = json.loads(self.requests[-1]["messages"][-1]["content"])
-        self.assertIsNotNone(self.daemon.application.sessions.lanes[unchecked].last_check_in)
+        self.assertIsNotNone(
+            self.daemon.application.sessions.lanes[unchecked].last_check_in
+        )
 
     async def test_failed_opportunity_commentary_can_retry_without_new_evidence(self):
         await self.repository_fixture()
@@ -583,7 +920,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.http_status = 500
         with self.assertLogs("pet-daemon", level="WARNING"):
             self.daemon.application.attention.next_observation = self.daemon.clock()
-            await self.wait_for(lambda: len(self.requests) == 1 and self.daemon.application.task is None)
+            await self.wait_for(
+                lambda: len(self.requests) == 1 and self.daemon.application.task is None
+            )
         self.assertTrue(self.daemon.application.memory.work.opportunities())
         self.http_status = 200
         self.daemon.application.attention.next_observation = self.daemon.clock()
@@ -596,7 +935,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     def use_clock(self):
         self.now = 1000.0
         clock = lambda: self.now
-        self.daemon.clock = self.daemon.application.events.clock = self.daemon.application.clock = clock
+        self.daemon.clock = self.daemon.application.events.clock = (
+            self.daemon.application.clock
+        ) = clock
         self.daemon.application.attention.clock = clock
         self.daemon.application.processes.clock = clock
         self.daemon.application.sessions.clock = clock
@@ -608,7 +949,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_idle_exercise_speaks_and_click_resets_care(self):
         manifest_path = self.config.pet_dir / "manifest.json"
         manifest = json.loads(manifest_path.read_text())
-        manifest["clips"]["jumping"] = {"frames": ["pixel.png"], "fps": 1, "role": "celebrate"}
+        manifest["clips"]["jumping"] = {
+            "frames": ["pixel.png"],
+            "fps": 1,
+            "role": "celebrate",
+        }
         manifest_path.write_text(json.dumps(manifest))
         self.daemon.application.behavior.pack = Pack(self.config.pet_dir)
         self.use_clock()
@@ -619,12 +964,16 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         behavior.next_care = self.now
         behavior.next_care_speech = self.now
         behavior.execution.interrupt()
-        animation = await self.packet(lambda packet: packet.get("animation", {}).get("id") == "jumping")
+        animation = await self.packet(
+            lambda packet: packet.get("animation", {}).get("id") == "jumping"
+        )
         self.assertEqual(animation["animation"]["repeats"], 3)
         await self.packet(lambda packet: packet.get("text") == self.speech)
         payload = json.loads(self.requests[-1]["messages"][-1]["content"])
         self.assertEqual(request_reason(self.requests[-1]), "care")
-        self.assertIn(SITUATIONS["care_exercise"], self.requests[-1]["system"][-1]["text"])
+        self.assertIn(
+            SITUATIONS["care_exercise"], self.requests[-1]["system"][-1]["text"]
+        )
         self.send({"kind": "renderer", "event": "click"})
         await self.wait_for(lambda: len(self.requests) == 2)
         self.assertEqual(request_reason(self.requests[-1]), "click")
@@ -633,14 +982,18 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_new_work_discards_pending_care_speech(self):
         self.slow = True
-        task = asyncio.create_task(self.observe("care", trigger={"care": "consternation"}))
+        task = asyncio.create_task(
+            self.observe("care", trigger={"care": "consternation"})
+        )
         self.addCleanup(task.cancel)
         await asyncio.wait_for(self.entered.wait(), 1)
         self.event("intent", goal="Review the parser")
         await self.wait_for(lambda: self.daemon.application.sessions.active)
         self.release.set()
         await task
-        self.assertFalse(any(packet.get("text") == self.speech for packet in await self.drain()))
+        self.assertFalse(
+            any(packet.get("text") == self.speech for packet in await self.drain())
+        )
 
     async def test_real_socket_tracks_parallel_calls_without_model_latency(self):
         self.slow = True
@@ -648,14 +1001,20 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.entered.wait(), 1)
         self.event("tool_start", call="build", tool="cargo build", manual=True)
         await self.packet(lambda packet: packet.get("state") == "working")
-        self.event("tool_start", session="two", harness="cursor", call="lint", tool="lint")
+        self.event(
+            "tool_start", session="two", harness="cursor", call="lint", tool="lint"
+        )
         await self.wait_for(lambda: len(self.daemon.application.sessions.lanes) == 2)
         self.event("tool_done", call="build", manual=True)
-        await self.wait_for(lambda: not self.daemon.application.sessions.lanes["cli:one"].calls)
+        await self.wait_for(
+            lambda: not self.daemon.application.sessions.lanes["cli:one"].calls
+        )
         self.assertTrue(self.daemon.application.sessions.working)
         self.assertFalse(self.release.is_set())
         self.event("tool_done", session="two", harness="cursor", call="lint")
-        await self.wait_for(lambda: not self.daemon.application.sessions.lanes["cursor:two"].calls)
+        await self.wait_for(
+            lambda: not self.daemon.application.sessions.lanes["cursor:two"].calls
+        )
         self.assertEqual(self.daemon.application.events.activity(), "working")
         self.event("turn_done", session="two", harness="cursor")
         await self.packet(lambda packet: packet.get("state") == "idle")
@@ -665,10 +1024,16 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(speech["ttl"], 15)
         self.assertEqual(len(self.requests), 1)
 
-    async def test_investigation_and_input_wait_animate_while_commentary_is_pending(self):
+    async def test_investigation_and_input_wait_animate_while_commentary_is_pending(
+        self,
+    ):
         manifest_path = self.config.pet_dir / "manifest.json"
         manifest = json.loads(manifest_path.read_text())
-        for clip, role in (("review", "attention"), ("waiting", "attention"), ("running", "work")):
+        for clip, role in (
+            ("review", "attention"),
+            ("waiting", "attention"),
+            ("running", "work"),
+        ):
             manifest["clips"][clip] = {"frames": ["pixel.png"], "fps": 1, "role": role}
         manifest_path.write_text(json.dumps(manifest))
         self.daemon.application.behavior.pack = Pack(self.config.pet_dir)
@@ -677,15 +1042,30 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.slow = True
         self.event("intent", goal="Inspect the parser")
         await asyncio.wait_for(self.entered.wait(), 1)
-        await self.packet(lambda packet: packet.get("animation", {}).get("id") == "review")
+        await self.packet(
+            lambda packet: packet.get("animation", {}).get("id") == "review"
+        )
         self.now += 8
         self.event("tool_start", call="read", tool="parser.py", tool_name="Read")
-        reaction = await self.packet(lambda packet: packet.get("animation", {}).get("id") == "review" and packet["animation"].get("repeats") is not None)
+        reaction = await self.packet(
+            lambda packet: (
+                packet.get("animation", {}).get("id") == "review"
+                and packet["animation"].get("repeats") is not None
+            )
+        )
         self.assertGreater(reaction["animation"]["repeats"], 0)
         self.now += 60
-        self.send({"kind": "renderer", "event": "animation_done", "command_id": reaction["animation"]["command_id"]})
+        self.send(
+            {
+                "kind": "renderer",
+                "event": "animation_done",
+                "command_id": reaction["animation"]["command_id"],
+            }
+        )
         self.event("waiting", call="input", tool="AskUserQuestion")
-        waiting = await self.packet(lambda packet: packet.get("animation", {}).get("id") == "waiting")
+        waiting = await self.packet(
+            lambda packet: packet.get("animation", {}).get("id") == "waiting"
+        )
         self.assertGreater(waiting["animation"]["repeats"], 0)
         self.assertFalse(self.release.is_set())
         self.assertIsNotNone(self.daemon.application.task)
@@ -693,29 +1073,45 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_recovery_celebrates_without_waiting_for_commentary(self):
         manifest_path = self.config.pet_dir / "manifest.json"
         manifest = json.loads(manifest_path.read_text())
-        manifest["clips"]["hop"] = {"frames": ["pixel.png"], "fps": 1, "role": "celebrate"}
+        manifest["clips"]["hop"] = {
+            "frames": ["pixel.png"],
+            "fps": 1,
+            "role": "celebrate",
+        }
         manifest_path.write_text(json.dumps(manifest))
         self.daemon.application.behavior.pack = Pack(self.config.pet_dir)
         self.slow = True
         self.event("intent", goal="Run checks")
         await asyncio.wait_for(self.entered.wait(), 1)
         self.event("tool_start", call="tests", tool="pytest")
-        await self.wait_for(lambda: "tests" in self.daemon.application.sessions.lanes["cli:one"].calls)
+        await self.wait_for(
+            lambda: "tests" in self.daemon.application.sessions.lanes["cli:one"].calls
+        )
         self.event("tool_error", call="tests")
         await self.wait_for(lambda: self.daemon.application.sessions.failed)
         self.event("tool_start", call="retry", tool="pytest")
-        await self.wait_for(lambda: "retry" in self.daemon.application.sessions.lanes["cli:one"].calls)
+        await self.wait_for(
+            lambda: "retry" in self.daemon.application.sessions.lanes["cli:one"].calls
+        )
         self.event("tool_done", call="retry", outcome="success")
         await self.packet(lambda packet: packet.get("animation", {}).get("id") == "hop")
         self.assertTrue(self.daemon.application.sessions.active)
         self.assertFalse(self.release.is_set())
         await self.drain()
         self.event("tool_start", call="cancelled", tool="pytest")
-        await self.wait_for(lambda: "cancelled" in self.daemon.application.sessions.lanes["cli:one"].calls)
+        await self.wait_for(
+            lambda: (
+                "cancelled" in self.daemon.application.sessions.lanes["cli:one"].calls
+            )
+        )
         self.event("tool_done", call="cancelled", outcome="cancelled")
-        await self.wait_for(lambda: not self.daemon.application.sessions.lanes["cli:one"].calls)
+        await self.wait_for(
+            lambda: not self.daemon.application.sessions.lanes["cli:one"].calls
+        )
         packets = await self.drain()
-        self.assertFalse(any(packet.get("animation", {}).get("id") == "hop" for packet in packets))
+        self.assertFalse(
+            any(packet.get("animation", {}).get("id") == "hop" for packet in packets)
+        )
 
     async def test_prompt_triggers_commentary_without_waiting_for_routine_timer(self):
         self.event("intent", harness="codex", goal="Run local checks")
@@ -723,7 +1119,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(speech["text"], self.speech)
         snapshot = json.loads(self.requests[0]["messages"][-1]["content"])
         self.assertEqual(request_reason(self.requests[-1]), "prompt")
-        self.assertEqual(snapshot["focus_session"]["recent_requests"][-1], "Run local checks")
+        self.assertEqual(
+            snapshot["focus_session"]["recent_requests"][-1], "Run local checks"
+        )
 
     async def test_click_requests_fresh_speech_without_waiting_for_routine_timer(self):
         self.send({"kind": "renderer", "event": "click"})
@@ -789,7 +1187,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.requests), 2)
         self.assertEqual(request_reason(self.requests[-1]), "click")
 
-    async def test_clicks_during_a_request_use_its_response_without_another_model_pass(self):
+    async def test_clicks_during_a_request_use_its_response_without_another_model_pass(
+        self,
+    ):
         self.slow = True
         self.send({"kind": "renderer", "event": "click"})
         await asyncio.wait_for(self.entered.wait(), 1)
@@ -820,24 +1220,35 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         reasons = [request_reason(request) for request in self.requests]
         self.assertEqual(reasons, ["routine", "click"])
 
-    async def test_automatic_cooldown_allows_one_waiting_reminder_and_manual_speech(self):
+    async def test_automatic_cooldown_allows_one_waiting_reminder_and_manual_speech(
+        self,
+    ):
         self.use_clock()
         self.config.behavior.automatic_speech_cooldown_seconds = 90
         self.event("intent", goal="Inspect checks")
         await self.packet(lambda packet: "text" in packet)
         await self.wait_for(lambda: self.daemon.application.task is None)
         self.event("turn_done")
-        await self.wait_for(lambda: self.daemon.application.attention.pending is not None)
+        await self.wait_for(
+            lambda: self.daemon.application.attention.pending is not None
+        )
         self.now += 2
         await self.wait_for(lambda: self.daemon.application.attention.pending is None)
         self.assertEqual(len(self.requests), 1)
         self.event("intent", goal="Choose the next step")
-        await self.wait_for(lambda: self.daemon.application.attention.pending is None and self.daemon.application.sessions.active)
+        await self.wait_for(
+            lambda: (
+                self.daemon.application.attention.pending is None
+                and self.daemon.application.sessions.active
+            )
+        )
         self.event("waiting", call="question")
         await self.packet(lambda packet: "text" in packet)
         await self.wait_for(lambda: self.daemon.application.task is None)
         self.event("waiting", call="question")
-        await self.wait_for(lambda: self.daemon.application.sessions.lanes["cli:one"].waiting)
+        await self.wait_for(
+            lambda: self.daemon.application.sessions.lanes["cli:one"].waiting
+        )
         self.assertEqual(len(self.requests), 2)
         self.send({"kind": "renderer", "event": "click"})
         await self.packet(lambda packet: "text" in packet)
@@ -852,9 +1263,20 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.packet(lambda packet: "text" in packet)
         await self.wait_for(lambda: self.daemon.application.task is None)
         self.assertEqual(len(self.requests), 2)
-        self.assertEqual([json.loads(body["messages"][-1]["content"])["focus_session"]["progress"] for body in self.requests], ["Choose a strategy", "Choose a target"])
+        self.assertEqual(
+            [
+                json.loads(body["messages"][-1]["content"])["focus_session"]["progress"]
+                for body in self.requests
+            ],
+            ["Choose a strategy", "Choose a target"],
+        )
         self.event("waiting", call="second", progress="Still choosing a target")
-        await self.wait_for(lambda: self.daemon.application.sessions.lanes["cli:one"].progress == "Still choosing a target")
+        await self.wait_for(
+            lambda: (
+                self.daemon.application.sessions.lanes["cli:one"].progress
+                == "Still choosing a target"
+            )
+        )
         self.assertEqual(len(self.requests), 2)
 
     async def test_new_question_discards_the_pending_reminder_for_the_first(self):
@@ -862,13 +1284,23 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.event("waiting", call="first", progress="Choose a strategy")
         await asyncio.wait_for(self.entered.wait(), 1)
         self.event("waiting", call="second", progress="Choose a target")
-        await self.wait_for(lambda: self.daemon.application.sessions.lanes["cli:one"].waiting_call == "second")
+        await self.wait_for(
+            lambda: (
+                self.daemon.application.sessions.lanes["cli:one"].waiting_call
+                == "second"
+            )
+        )
         self.release.set()
         await self.packet(lambda packet: "text" in packet)
         await self.wait_for(lambda: self.daemon.application.task is None)
         self.assertEqual(len(self.requests), 2)
         self.assertEqual(len(self.daemon.application.cognition.memory.speech()), 1)
-        self.assertEqual(json.loads(self.requests[-1]["messages"][-1]["content"])["focus_session"]["progress"], "Choose a target")
+        self.assertEqual(
+            json.loads(self.requests[-1]["messages"][-1]["content"])["focus_session"][
+                "progress"
+            ],
+            "Choose a target",
+        )
 
     async def test_waiting_reminder_is_discarded_when_background_call_finishes(self):
         self.slow = True
@@ -876,7 +1308,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.event("waiting", call="question", progress="Choose a strategy")
         await asyncio.wait_for(self.entered.wait(), 1)
         self.event("tool_done", call="background")
-        await self.wait_for(lambda: not self.daemon.application.sessions.lanes["cli:one"].calls)
+        await self.wait_for(
+            lambda: not self.daemon.application.sessions.lanes["cli:one"].calls
+        )
         self.assertFalse(self.daemon.application.sessions.lanes["cli:one"].waiting)
         self.release.set()
         await self.wait_for(lambda: self.daemon.application.task is None)
@@ -884,18 +1318,31 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.daemon.application.cognition.memory.speech(), [])
         self.assertFalse(any("text" in packet for packet in await self.drain()))
 
-    async def test_native_permission_wait_without_call_id_ends_when_the_tool_completes(self):
+    async def test_native_permission_wait_without_call_id_ends_when_the_tool_completes(
+        self,
+    ):
         self.slow = True
         root = Path(__file__).resolve().parents[1]
         hook = runpy.run_path(str(root / "scripts" / "pet-hook"))
-        base = {"session_id": "native", "tool_name": "Bash", "tool_input": {"command": "pytest"}}
-        for name, fields in (("PreToolUse", {"tool_use_id": "tests"}), ("PermissionRequest", {})):
+        base = {
+            "session_id": "native",
+            "tool_name": "Bash",
+            "tool_input": {"command": "pytest"},
+        }
+        for name, fields in (
+            ("PreToolUse", {"tool_use_id": "tests"}),
+            ("PermissionRequest", {}),
+        ):
             packet = hook["update"]("claude", name, {**base, **fields})
             self.daemon.receive(hook["CLIENT"]["encode"](packet))
         self.assertNotIn("call", packet)
         await asyncio.wait_for(self.entered.wait(), 1)
         self.assertTrue(self.daemon.application.sessions.lanes["claude:native"].waiting)
-        packet = hook["update"]("claude", "PostToolUse", {**base, "tool_use_id": "tests", "tool_response": {"exit_code": 0}})
+        packet = hook["update"](
+            "claude",
+            "PostToolUse",
+            {**base, "tool_use_id": "tests", "tool_response": {"exit_code": 0}},
+        )
         self.daemon.receive(hook["CLIENT"]["encode"](packet))
         snapshot = self.daemon.application.sessions.snapshot()["sessions"][0]
         self.assertFalse(snapshot["waiting_for_input"])
@@ -915,7 +1362,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.packet(lambda packet: "text" in packet)
         await self.wait_for(lambda: self.daemon.application.task is None)
         self.event("turn_done")
-        await self.wait_for(lambda: self.daemon.application.attention.pending is not None)
+        await self.wait_for(
+            lambda: self.daemon.application.attention.pending is not None
+        )
         self.now += 2
         await self.wait_for(lambda: self.daemon.application.attention.pending is None)
         self.assertEqual(len(self.requests), 1)
@@ -931,31 +1380,50 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.release.set()
         speech = await self.packet(lambda packet: "text" in packet)
         self.assertEqual(speech["text"], self.speech)
-        self.assertEqual([request_reason(body) for body in self.requests], ["prompt", "click"])
-        self.assertNotIn("Superseded acknowledgment.", json.dumps(self.daemon.application.cognition.memory.speech()))
+        self.assertEqual(
+            [request_reason(body) for body in self.requests], ["prompt", "click"]
+        )
+        self.assertNotIn(
+            "Superseded acknowledgment.",
+            json.dumps(self.daemon.application.cognition.memory.speech()),
+        )
 
     async def test_hooks_persist_without_requesting_commentary(self):
         self.event("intent", goal="Repair the parser", cwd="/repo/parser")
-        await self.wait_for(lambda: bool(self.daemon.application.cognition.memory.recent()))
-        self.assertIn("Repair the parser", json.dumps(self.daemon.application.cognition.memory.recent()))
+        await self.wait_for(
+            lambda: bool(self.daemon.application.cognition.memory.recent())
+        )
+        self.assertIn(
+            "Repair the parser",
+            json.dumps(self.daemon.application.cognition.memory.recent()),
+        )
         self.assertEqual(self.requests, [])
 
     async def test_visible_speech_persists_after_renderer_delivery(self):
         await self.observe("explicit", "Inspect the build")
         await self.packet(lambda packet: "text" in packet)
-        self.assertIn(self.speech, json.dumps(self.daemon.application.cognition.memory.speech()))
+        self.assertIn(
+            self.speech, json.dumps(self.daemon.application.cognition.memory.speech())
+        )
 
     async def test_zero_duration_speech_is_absent_from_memory(self):
         await self.observe("explicit", "Inspect the build", ttl=0)
         await self.packet(lambda packet: "text" in packet)
         self.assertEqual(self.daemon.application.cognition.memory.speech(), [])
 
-    async def test_computer_sleep_cancels_commentary_and_click_recovers_after_wake(self):
+    async def test_computer_sleep_cancels_commentary_and_click_recovers_after_wake(
+        self,
+    ):
         self.slow = True
         self.send({"kind": "speak", "context": "Inspect the build"})
         await asyncio.wait_for(self.entered.wait(), 1)
         self.send({"kind": "renderer", "event": "system_sleep"})
-        await self.wait_for(lambda: self.daemon.application.suspended and self.daemon.application.task is None)
+        await self.wait_for(
+            lambda: (
+                self.daemon.application.suspended
+                and self.daemon.application.task is None
+            )
+        )
         self.release.set()
         self.assertEqual(self.daemon.application.cognition.memory.speech(), [])
         self.assertFalse(any("text" in packet for packet in await self.drain()))
@@ -965,7 +1433,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         packet = await self.packet(lambda packet: "text" in packet)
         self.assertEqual(packet["text"], self.speech)
 
-    async def test_computer_sleep_cancels_a_repeated_speech_retry_without_delivery(self):
+    async def test_computer_sleep_cancels_a_repeated_speech_retry_without_delivery(
+        self,
+    ):
         history = "The parser still needs its edge cases checked."
         self.speech = history
         self.daemon.application.memory.record_speech(history, "routine")
@@ -973,10 +1443,17 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.event("intent", goal="Review parser edge cases")
         await asyncio.wait_for(self.retry_entered.wait(), 1)
         self.send({"kind": "renderer", "event": "system_sleep"})
-        await self.wait_for(lambda: self.daemon.application.suspended and self.daemon.application.task is None)
+        await self.wait_for(
+            lambda: (
+                self.daemon.application.suspended
+                and self.daemon.application.task is None
+            )
+        )
         self.release.set()
         self.assertEqual(len(self.requests), 2)
-        self.assertEqual([row["text"] for row in self.daemon.application.memory.speech()], [history])
+        self.assertEqual(
+            [row["text"] for row in self.daemon.application.memory.speech()], [history]
+        )
         self.assertFalse(any(packet.get("text") for packet in await self.drain()))
 
     async def test_repeated_speech_retry_shares_the_observation_timeout(self):
@@ -990,7 +1467,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(self.retry_entered.wait(), 1)
             await self.wait_for(lambda: self.daemon.application.task is None)
         self.assertEqual(len(self.requests), 2)
-        self.assertEqual([row["text"] for row in self.daemon.application.memory.speech()], [history])
+        self.assertEqual(
+            [row["text"] for row in self.daemon.application.memory.speech()], [history]
+        )
         self.assertFalse(any(packet.get("text") for packet in await self.drain()))
 
     async def test_summary_updates_on_each_prompt_and_skips_completion_by_default(self):
@@ -1003,7 +1482,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(lambda: self.daemon.application.task is None)
         self.assertEqual(len(self.summary_requests), 2)
         payload = json.loads(self.summary_requests[-1]["messages"][0]["content"])
-        self.assertEqual(payload["recent_requests"][-1], "Investigate the parser timeout")
+        self.assertEqual(
+            payload["recent_requests"][-1], "Investigate the parser timeout"
+        )
         self.assertEqual(payload["historical_session_context"], self.session_context)
         await self.observe("completion")
         self.assertEqual(len(self.summary_requests), 2)
@@ -1015,25 +1496,35 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.packet(lambda packet: packet.get("text") == self.speech)
         await self.wait_for(lambda: self.daemon.application.task is None)
         lane = self.daemon.application.sessions.lanes["cli:one"]
-        self.session_context = "The parser " + "compatibility " *40 + "remains intact."
+        self.session_context = "The parser " + "compatibility " * 40 + "remains intact."
         self.event("intent", goal="Review parser compatibility")
         await self.packet(lambda packet: packet.get("text") == self.speech)
         await self.wait_for(lambda: self.daemon.application.task is None)
         self.assertEqual(lane.session_context, self.session_context)
-        self.assertEqual(self.daemon.application.memory.context("cli:one")["session_context"], self.session_context)
+        self.assertEqual(
+            self.daemon.application.memory.context("cli:one")["session_context"],
+            self.session_context,
+        )
         self.session_context += " Existing callers retain their signatures."
         self.event("intent", goal="Confirm parser compatibility")
         await self.packet(lambda packet: packet.get("text") == self.speech)
         await self.wait_for(lambda: self.daemon.application.task is None)
         self.assertEqual(lane.session_context, self.session_context)
-        self.assertEqual(self.daemon.application.memory.context("cli:one")["session_context"], self.session_context)
+        self.assertEqual(
+            self.daemon.application.memory.context("cli:one")["session_context"],
+            self.session_context,
+        )
         self.assertEqual(len(self.requests), 3)
 
-    async def test_first_request_summary_overrides_triggers_and_survives_a_failed_attempt_and_restart(self):
+    async def test_first_request_summary_overrides_triggers_and_survives_a_failed_attempt_and_restart(
+        self,
+    ):
         self.config.summarize_first_request_only = True
         self.config.summarize_on = []
         self.summary_status = 500
-        initial = "Refactor the parser while keeping the public interface unchanged. " * 8
+        initial = (
+            "Refactor the parser while keeping the public interface unchanged. " * 8
+        )
         self.event("intent", goal=initial)
         await self.packet(lambda packet: packet.get("text") == self.speech)
         await self.wait_for(lambda: self.daemon.application.task is None)
@@ -1077,32 +1568,57 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.speech = None
         self.session_context = "Parser refactor awaits validation."
         self.event("intent", goal="Refactor the parser", turn="first")
-        await self.wait_for(lambda: self.daemon.application.cognition.memory.context("cli:one") is not None and self.daemon.application.cognition.memory.context("cli:one")["session_context"] == self.session_context)
+        await self.wait_for(
+            lambda: (
+                self.daemon.application.cognition.memory.context("cli:one") is not None
+                and self.daemon.application.cognition.memory.context("cli:one")[
+                    "session_context"
+                ]
+                == self.session_context
+            )
+        )
         await self.wait_for(lambda: self.daemon.application.task is None)
         self.assertEqual(len(self.requests), 1)
         self.assertEqual(self.daemon.application.cognition.memory.speech(), [])
         self.now += 20
         self.daemon.application.attention.next_observation = self.now
-        await self.wait_for(lambda: self.daemon.application.attention.next_observation > self.now)
+        await self.wait_for(
+            lambda: self.daemon.application.attention.next_observation > self.now
+        )
         self.assertEqual(len(self.requests), 1)
         self.session_context = None
         self.speech = "The parser still needs validation."
         await self.observe("explicit", "Check the parser")
         await self.packet(lambda packet: "text" in packet)
-        session = json.loads(self.requests[-1]["messages"][0]["content"])["focus_session"]
+        session = json.loads(self.requests[-1]["messages"][0]["content"])[
+            "focus_session"
+        ]
         self.assertIsNone(session)
-        self.assertEqual(self.daemon.application.memory.context("cli:one")["session_context"], "Parser refactor awaits validation.")
+        self.assertEqual(
+            self.daemon.application.memory.context("cli:one")["session_context"],
+            "Parser refactor awaits validation.",
+        )
         self.speech = "The parser context guides compatibility checks."
         await self.observe("routine")
         await self.packet(lambda packet: "text" in packet)
-        session = json.loads(self.requests[-1]["messages"][0]["content"])["focus_session"]
-        self.assertEqual(session["session_context"], "Parser refactor awaits validation.")
+        session = json.loads(self.requests[-1]["messages"][0]["content"])[
+            "focus_session"
+        ]
+        self.assertEqual(
+            session["session_context"], "Parser refactor awaits validation."
+        )
         self.assertEqual(len(self.requests), 3)
 
-    async def test_first_request_summary_restores_bookkeeping_from_a_session_alias(self):
+    async def test_first_request_summary_restores_bookkeeping_from_a_session_alias(
+        self,
+    ):
         self.config.summarize_first_request_only = True
-        self.daemon.application.cognition.memory.save_context("cli:old-id", "Review hooks", "Hook review", ["Review hooks"], 1, True)
-        self.event("intent", session="new-id", aliases=["old-id"], goal="Check hook edge cases")
+        self.daemon.application.cognition.memory.save_context(
+            "cli:old-id", "Review hooks", "Hook review", ["Review hooks"], 1, True
+        )
+        self.event(
+            "intent", session="new-id", aliases=["old-id"], goal="Check hook edge cases"
+        )
         await self.packet(lambda packet: packet.get("text") == self.speech)
         await self.wait_for(lambda: self.daemon.application.task is None)
         self.assertEqual(self.summary_requests, [])
@@ -1111,11 +1627,22 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lane.request_count, 2)
         self.assertTrue(lane.first_summary_attempted)
 
-    async def test_first_request_summary_uses_the_initial_prompt_when_followups_are_queued_together(self):
+    async def test_first_request_summary_uses_the_initial_prompt_when_followups_are_queued_together(
+        self,
+    ):
         self.config.summarize_first_request_only = True
         for goal in ("Refactor the parser", "Keep its API unchanged"):
-            self.daemon.receive(json.dumps({"kind": "event", "event": "intent", "harness": "cli",
-                                           "session": "one", "goal": goal}).encode())
+            self.daemon.receive(
+                json.dumps(
+                    {
+                        "kind": "event",
+                        "event": "intent",
+                        "harness": "cli",
+                        "session": "one",
+                        "goal": goal,
+                    }
+                ).encode()
+            )
         await self.packet(lambda packet: packet.get("text") == self.speech)
         await self.wait_for(lambda: self.daemon.application.task is None)
         self.assertEqual(len(self.summary_requests), 1)
@@ -1124,7 +1651,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(payload), {"initial_intent"})
         self.assertNotIn("Keep its API unchanged", json.dumps(payload))
 
-    async def test_subagent_inherited_context_does_not_consume_its_first_request_summary(self):
+    async def test_subagent_inherited_context_does_not_consume_its_first_request_summary(
+        self,
+    ):
         self.config.summarize_first_request_only = True
         self.event("intent", goal="Refactor the parser")
         await self.packet(lambda packet: packet.get("text") == self.speech)
@@ -1143,27 +1672,45 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_interleaved_work_keeps_separate_summaries_and_commentary(self):
         self.session_context = "Keep the parser API stable."
-        self.event("intent", session="parser", goal="Refactor the parser without changing its API")
+        self.event(
+            "intent",
+            session="parser",
+            goal="Refactor the parser without changing its API",
+        )
         await self.packet(lambda packet: "text" in packet)
         await self.wait_for(lambda: self.daemon.application.task is None)
         self.session_context = "Remove redundant Python hook handling."
-        self.event("intent", session="hooks", goal="Review Python hooks for redundant handling")
+        self.event(
+            "intent", session="hooks", goal="Review Python hooks for redundant handling"
+        )
         await self.packet(lambda packet: "text" in packet)
         await self.wait_for(lambda: self.daemon.application.task is None)
         commentary = json.loads(self.requests[-1]["messages"][0]["content"])
-        self.assertEqual(commentary["focus_session"]["recent_requests"], ["Review Python hooks for redundant handling"])
+        self.assertEqual(
+            commentary["focus_session"]["recent_requests"],
+            ["Review Python hooks for redundant handling"],
+        )
         self.assertEqual(commentary["other_sessions"], [])
         self.assertNotIn("Refactor the parser", json.dumps(commentary))
         for request, excluded in zip(self.summary_requests, ("Python hooks", "parser")):
             self.assertNotIn(excluded, request["messages"][0]["content"])
         memory = self.daemon.application.cognition.memory
-        self.assertEqual(memory.context("cli:parser")["session_context"], "Keep the parser API stable.")
-        self.assertEqual(memory.context("cli:hooks")["session_context"], "Remove redundant Python hook handling.")
+        self.assertEqual(
+            memory.context("cli:parser")["session_context"],
+            "Keep the parser API stable.",
+        )
+        self.assertEqual(
+            memory.context("cli:hooks")["session_context"],
+            "Remove redundant Python hook handling.",
+        )
         self.event("turn_done", session="hooks", progress="Hook cleanup passed checks")
         await self.packet(lambda packet: "text" in packet, timeout=2)
         await self.wait_for(lambda: self.daemon.application.task is None)
         commentary = json.loads(self.requests[-1]["messages"][0]["content"])
-        self.assertEqual(commentary["focus_session"]["recent_requests"], ["Review Python hooks for redundant handling"])
+        self.assertEqual(
+            commentary["focus_session"]["recent_requests"],
+            ["Review Python hooks for redundant handling"],
+        )
         self.assertFalse(commentary["convergence"])
         self.assertEqual(commentary["other_sessions"], [])
         self.assertTrue(self.daemon.application.sessions.lanes["cli:parser"].active)
@@ -1180,32 +1727,63 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.event("intent", goal="Validate parser behavior")
         await self.packet(lambda packet: packet.get("text") == self.speech)
         await self.wait_for(lambda: self.daemon.application.task is None)
-        self.assertEqual(self.daemon.application.cognition.memory.context("cli:one")["session_context"], "Keep the parser API stable.")
+        self.assertEqual(
+            self.daemon.application.cognition.memory.context("cli:one")[
+                "session_context"
+            ],
+            "Keep the parser API stable.",
+        )
 
     async def test_followup_with_the_same_native_turn_reaches_the_next_prompt(self):
-        self.event("intent", harness="codex", goal="Compress the workflow", turn="native-turn")
+        self.event(
+            "intent", harness="codex", goal="Compress the workflow", turn="native-turn"
+        )
         await self.packet(lambda packet: "text" in packet)
         await self.wait_for(lambda: self.daemon.application.task is None)
-        self.event("intent", harness="codex", goal="Explain the counter limits", turn="native-turn")
+        self.event(
+            "intent",
+            harness="codex",
+            goal="Explain the counter limits",
+            turn="native-turn",
+        )
         await self.packet(lambda packet: "text" in packet)
         self.assertEqual(len(self.requests), 2)
         payload = json.loads(self.requests[-1]["messages"][0]["content"])
         self.assertEqual(request_reason(self.requests[-1]), "prompt")
         self.assertNotIn("first_prompt", payload["focus_session"])
-        self.assertEqual(payload["focus_session"]["recent_requests"], ["Explain the counter limits"])
-        self.assertEqual(payload["focus_session"]["recent_requests"][-1], "Explain the counter limits")
+        self.assertEqual(
+            payload["focus_session"]["recent_requests"], ["Explain the counter limits"]
+        )
+        self.assertEqual(
+            payload["focus_session"]["recent_requests"][-1],
+            "Explain the counter limits",
+        )
 
     async def test_followup_during_observation_refuses_stale_summary(self):
-        self.daemon.application.cognition.memory.save_context("cli:one", "Refactor the parser", "Keep its API stable", ["Refactor the parser"])
+        self.daemon.application.cognition.memory.save_context(
+            "cli:one",
+            "Refactor the parser",
+            "Keep its API stable",
+            ["Refactor the parser"],
+        )
         self.slow = True
         self.session_context = "Stale parser summary."
         self.event("intent", goal="Refactor the parser", turn="first")
         await asyncio.wait_for(self.entered.wait(), 1)
-        self.event("intent", goal="Keep the parser API unchanged", turn="first", manual=True)
-        await self.wait_for(lambda: "Keep the parser API unchanged" in self.daemon.application.sessions.lanes["cli:one"].recent_requests)
+        self.event(
+            "intent", goal="Keep the parser API unchanged", turn="first", manual=True
+        )
+        await self.wait_for(
+            lambda: (
+                "Keep the parser API unchanged"
+                in self.daemon.application.sessions.lanes["cli:one"].recent_requests
+            )
+        )
         self.session_context = None
         self.release.set()
-        await self.wait_for(lambda: self.daemon.application.task is None and len(self.requests) >= 2)
+        await self.wait_for(
+            lambda: self.daemon.application.task is None and len(self.requests) >= 2
+        )
         lane = self.daemon.application.sessions.lanes["cli:one"]
         self.assertNotEqual(lane.session_context, "Stale parser summary.")
         self.assertEqual(lane.first_prompt, "Refactor the parser")
@@ -1222,11 +1800,21 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.send({"kind": "speak", "context": "Comment on the parser"})
         await asyncio.wait_for(self.entered.wait(), 1)
         self.event("intent", goal="Keep the parser API unchanged", turn="first")
-        await self.wait_for(lambda: "Keep the parser API unchanged" in self.daemon.application.sessions.lanes["cli:one"].recent_requests)
+        await self.wait_for(
+            lambda: (
+                "Keep the parser API unchanged"
+                in self.daemon.application.sessions.lanes["cli:one"].recent_requests
+            )
+        )
         self.session_context = None
         self.release.set()
-        await self.wait_for(lambda: self.daemon.application.task is None and len(self.requests) >= 3)
-        self.assertNotEqual(self.daemon.application.sessions.lanes["cli:one"].session_context, "Stale explicit summary.")
+        await self.wait_for(
+            lambda: self.daemon.application.task is None and len(self.requests) >= 3
+        )
+        self.assertNotEqual(
+            self.daemon.application.sessions.lanes["cli:one"].session_context,
+            "Stale explicit summary.",
+        )
         saved = self.daemon.application.cognition.memory.context("cli:one")
         self.assertNotEqual(saved["session_context"], "Stale explicit summary.")
 
@@ -1244,15 +1832,30 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(lambda: len(self.requests) == 2)
         self.assertEqual(len(self.summary_requests), 1)
         self.event("progress", progress="Parser validation passed", turn="first")
-        await self.wait_for(lambda: self.daemon.application.sessions.lanes["cli:one"].progress == "Parser validation passed")
-        self.assertEqual(self.daemon.application.sessions.lanes["cli:one"].generation, generation)
+        await self.wait_for(
+            lambda: (
+                self.daemon.application.sessions.lanes["cli:one"].progress
+                == "Parser validation passed"
+            )
+        )
+        self.assertEqual(
+            self.daemon.application.sessions.lanes["cli:one"].generation, generation
+        )
         self.release.set()
         await self.packet(lambda packet: packet.get("text") == self.speech)
         await self.wait_for(lambda: self.daemon.application.task is None)
-        self.assertEqual(self.daemon.application.sessions.lanes["cli:one"].session_context, "Keep the parser API stable.")
-        self.assertEqual(self.daemon.application.memory.context("cli:one")["session_context"], "Keep the parser API stable.")
+        self.assertEqual(
+            self.daemon.application.sessions.lanes["cli:one"].session_context,
+            "Keep the parser API stable.",
+        )
+        self.assertEqual(
+            self.daemon.application.memory.context("cli:one")["session_context"],
+            "Keep the parser API stable.",
+        )
 
-    async def test_restart_restores_context_when_hooks_arrive_without_restoring_live_calls(self):
+    async def test_restart_restores_context_when_hooks_arrive_without_restoring_live_calls(
+        self,
+    ):
         self.session_context = "Parser checks are pending."
         self.event("intent", goal="Refactor the parser", turn="first")
         await self.packet(lambda packet: "text" in packet)
@@ -1287,18 +1890,46 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(lambda: self.daemon.application.behavior.status["x"] == 101)
         self.assertEqual(len(self.requests), 1)
         self.event("progress", progress="Parser checks passed")
-        await self.wait_for(lambda: self.daemon.application.sessions.lanes["cli:one"].progress == "Parser checks passed")
+        await self.wait_for(
+            lambda: (
+                self.daemon.application.sessions.lanes["cli:one"].progress
+                == "Parser checks passed"
+            )
+        )
         self.daemon.application.attention.next_observation = self.now
         await self.packet(lambda packet: "text" in packet)
         self.assertEqual(len(self.requests), 2)
 
-    async def test_repeated_failures_persist_and_request_speech_at_the_third_failure_once(self):
+    async def test_repeated_failures_persist_and_request_speech_at_the_third_failure_once(
+        self,
+    ):
         self.use_clock()
         for index in range(5):
             self.event("tool_start", call=f"check-{index}", tool="pytest")
-            await self.wait_for(lambda: "cli:one" in self.daemon.application.sessions.lanes and f"check-{index}" in self.daemon.application.sessions.lanes["cli:one"].calls)
-            self.event("tool_error", call=f"check-{index}", tool="pytest", detail="Parser assertion failed", error_signature="parser:error")
-            await self.wait_for(lambda: self.daemon.application.sessions.lanes["cli:one"].failure is not None and self.daemon.application.sessions.lanes["cli:one"].failure["count"] == index + 1)
+            await self.wait_for(
+                lambda: (
+                    "cli:one" in self.daemon.application.sessions.lanes
+                    and f"check-{index}"
+                    in self.daemon.application.sessions.lanes["cli:one"].calls
+                )
+            )
+            self.event(
+                "tool_error",
+                call=f"check-{index}",
+                tool="pytest",
+                detail="Parser assertion failed",
+                error_signature="parser:error",
+            )
+            await self.wait_for(
+                lambda: (
+                    self.daemon.application.sessions.lanes["cli:one"].failure
+                    is not None
+                    and self.daemon.application.sessions.lanes["cli:one"].failure[
+                        "count"
+                    ]
+                    == index + 1
+                )
+            )
             if index == 2:
                 self.now += 2
                 await self.packet(lambda packet: "text" in packet)
@@ -1310,43 +1941,119 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all("error_signature" not in event for event in failures))
         self.assertNotIn("Parser assertion failed", json.dumps(failures))
 
-    async def test_recovered_session_skips_queued_failure_when_another_session_is_still_failing(self):
+    async def test_recovered_session_skips_queued_failure_when_another_session_is_still_failing(
+        self,
+    ):
         self.use_clock()
         for session in ("one", "two"):
             self.event("tool_start", session=session, call="checks", tool="pytest")
-            await self.wait_for(lambda: f"cli:{session}" in self.daemon.application.sessions.lanes and "checks" in self.daemon.application.sessions.lanes[f"cli:{session}"].calls)
+            await self.wait_for(
+                lambda: (
+                    f"cli:{session}" in self.daemon.application.sessions.lanes
+                    and "checks"
+                    in self.daemon.application.sessions.lanes[f"cli:{session}"].calls
+                )
+            )
             self.event("tool_error", session=session, call="checks")
             for index in range(2):
                 call = f"failed-{index}"
                 self.event("tool_start", session=session, call=call, tool="pytest")
-                await self.wait_for(lambda: call in self.daemon.application.sessions.lanes[f"cli:{session}"].calls)
+                await self.wait_for(
+                    lambda: (
+                        call
+                        in self.daemon.application.sessions.lanes[
+                            f"cli:{session}"
+                        ].calls
+                    )
+                )
                 self.event("tool_error", session=session, call=call)
-                await self.wait_for(lambda: self.daemon.application.sessions.lanes[f"cli:{session}"].failure["count"] == index + 2)
-            await self.wait_for(lambda: self.daemon.application.attention.pending and self.daemon.application.attention.pending[2]["target_session"] == f"cli:{session}")
+                await self.wait_for(
+                    lambda: (
+                        self.daemon.application.sessions.lanes[
+                            f"cli:{session}"
+                        ].failure["count"]
+                        == index + 2
+                    )
+                )
+            await self.wait_for(
+                lambda: (
+                    self.daemon.application.attention.pending
+                    and self.daemon.application.attention.pending[2]["target_session"]
+                    == f"cli:{session}"
+                )
+            )
         self.event("tool_start", session="two", call="retry", tool="pytest")
-        await self.wait_for(lambda: "retry" in self.daemon.application.sessions.lanes["cli:two"].calls)
+        await self.wait_for(
+            lambda: "retry" in self.daemon.application.sessions.lanes["cli:two"].calls
+        )
         self.event("tool_done", session="two", call="retry")
-        await self.wait_for(lambda: self.daemon.application.sessions.lanes["cli:two"].failure["resolved"])
+        await self.wait_for(
+            lambda: self.daemon.application.sessions.lanes["cli:two"].failure[
+                "resolved"
+            ]
+        )
         self.now += 2
         await self.wait_for(lambda: self.daemon.application.attention.pending is None)
         self.assertTrue(self.daemon.application.sessions.failed)
-        self.assertFalse(any(request_reason(body) == "failure" for body in self.requests))
+        self.assertFalse(
+            any(request_reason(body) == "failure" for body in self.requests)
+        )
 
-    async def test_parent_routed_child_failure_is_persisted_under_the_child_session(self):
+    async def test_parent_routed_child_failure_is_persisted_under_the_child_session(
+        self,
+    ):
         self.use_clock()
-        self.event("subagent_start", session="child", harness="claude", parent="main", parent_call="delegate", goal="Inspect parser", repo="/repo/parser")
+        self.event(
+            "subagent_start",
+            session="child",
+            harness="claude",
+            parent="main",
+            parent_call="delegate",
+            goal="Inspect parser",
+            repo="/repo/parser",
+        )
         await self.packet(lambda packet: "text" in packet)
         await self.wait_for(lambda: self.daemon.application.task is None)
-        self.event("tool_start", session="main", harness="claude", parent_call="delegate", call="check", tool="pytest")
-        await self.wait_for(lambda: "check" in self.daemon.application.sessions.lanes["claude:child"].calls)
-        self.event("tool_error", session="main", harness="claude", parent_call="delegate", call="check", detail="Parser assertion failed", error_signature="parser:error")
-        await self.wait_for(lambda: self.daemon.application.sessions.lanes["claude:child"].failure is not None)
+        self.event(
+            "tool_start",
+            session="main",
+            harness="claude",
+            parent_call="delegate",
+            call="check",
+            tool="pytest",
+        )
+        await self.wait_for(
+            lambda: (
+                "check" in self.daemon.application.sessions.lanes["claude:child"].calls
+            )
+        )
+        self.event(
+            "tool_error",
+            session="main",
+            harness="claude",
+            parent_call="delegate",
+            call="check",
+            detail="Parser assertion failed",
+            error_signature="parser:error",
+        )
+        await self.wait_for(
+            lambda: (
+                self.daemon.application.sessions.lanes["claude:child"].failure
+                is not None
+            )
+        )
         self.event("turn_error", session="child", harness="claude")
-        await self.wait_for(lambda: self.daemon.application.sessions.lanes["claude:child"].finished)
+        await self.wait_for(
+            lambda: self.daemon.application.sessions.lanes["claude:child"].finished
+        )
         self.now += 2
         await self.packet(lambda packet: "text" in packet)
         self.assertEqual(request_reason(self.requests[-1]), "failure")
-        failures = [row for row in self.daemon.application.cognition.memory.recent(limit=10) if row["event_type"] == "tool_error"]
+        failures = [
+            row
+            for row in self.daemon.application.cognition.memory.recent(limit=10)
+            if row["event_type"] == "tool_error"
+        ]
         self.assertEqual(len(failures), 1)
         self.assertEqual(failures[0]["session"], "claude:child")
         self.assertEqual(failures[0]["repo"], "/repo/parser")
@@ -1355,14 +2062,24 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.use_clock()
         self.event("tool_start", call="check", tool="pytest")
         await self.wait_for(lambda: self.daemon.application.sessions.working)
-        self.event("tool_error", call="check", detail="SECRET PRIVATE STACK", error_signature="SECRET PRIVATE HASH", progress="SECRET FAILED COMMAND OUTPUT")
+        self.event(
+            "tool_error",
+            call="check",
+            detail="SECRET PRIVATE STACK",
+            error_signature="SECRET PRIVATE HASH",
+            progress="SECRET FAILED COMMAND OUTPUT",
+        )
         await self.wait_for(lambda: self.daemon.application.sessions.failed)
         await self.observe("failure")
         await self.packet(lambda packet: "text" in packet)
         body = self.requests[-1]
         self.assertNotIn("SECRET", json.dumps(body))
-        self.assertNotIn("SECRET", json.dumps(self.daemon.application.sessions.snapshot()))
-        self.assertNotIn("SECRET", json.dumps(self.daemon.application.cognition.memory.recent()))
+        self.assertNotIn(
+            "SECRET", json.dumps(self.daemon.application.sessions.snapshot())
+        )
+        self.assertNotIn(
+            "SECRET", json.dumps(self.daemon.application.cognition.memory.recent())
+        )
         failure = json.loads(body["messages"][0]["content"])["focus_session"]["failure"]
         self.assertEqual(failure["activity"], "testing")
         self.assertEqual(failure["count"], 1)
@@ -1373,9 +2090,17 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.daemon.application.cognition.memory.speech(), [])
         self.assertIsNone(self.daemon.application.last_speech)
 
-    async def test_completion_reacts_to_one_session_while_other_tools_keep_working(self):
+    async def test_completion_reacts_to_one_session_while_other_tools_keep_working(
+        self,
+    ):
         self.event("tool_start", harness="codex", call="checks", tool="pytest")
-        self.event("tool_start", session="two", harness="cursor", call="build", tool="cargo build")
+        self.event(
+            "tool_start",
+            session="two",
+            harness="cursor",
+            call="build",
+            tool="cargo build",
+        )
         await self.wait_for(lambda: len(self.daemon.application.sessions.lanes) == 2)
         self.event("turn_done", harness="codex", progress="Checks passed")
         speech = await self.packet(lambda packet: "text" in packet, timeout=2)
@@ -1395,20 +2120,33 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.entered.wait(), 1)
         self.event("tool_done", harness="codex", call="checks", progress="Tests passed")
         self.event("tool_start", harness="codex", call="lint", tool="lint")
-        await self.wait_for(lambda: "lint" in self.daemon.application.sessions.lanes["codex:one"].calls)
+        await self.wait_for(
+            lambda: "lint" in self.daemon.application.sessions.lanes["codex:one"].calls
+        )
         self.release.set()
         await task
         self.assertEqual(self.daemon.application.memory.speech(), [])
         self.assertFalse(any(packet.get("text") for packet in await self.drain()))
 
-    async def test_check_in_uses_each_tasks_quiet_time_and_repeats_after_the_interval(self):
+    async def test_check_in_uses_each_tasks_quiet_time_and_repeats_after_the_interval(
+        self,
+    ):
         self.use_clock()
         self.event("tool_start", harness="codex", call="checks", tool="pytest")
-        self.event("tool_start", session="two", harness="cursor", call="build", tool="build")
+        self.event(
+            "tool_start", session="two", harness="cursor", call="build", tool="build"
+        )
         await self.wait_for(lambda: len(self.daemon.application.sessions.lanes) == 2)
         self.now += 299
-        self.event("progress", session="two", harness="cursor", progress="Build progressing")
-        await self.wait_for(lambda: self.daemon.application.sessions.lanes["cursor:two"].progress == "Build progressing")
+        self.event(
+            "progress", session="two", harness="cursor", progress="Build progressing"
+        )
+        await self.wait_for(
+            lambda: (
+                self.daemon.application.sessions.lanes["cursor:two"].progress
+                == "Build progressing"
+            )
+        )
         await self.wait_for(lambda: self.daemon.application.next_prune > self.now)
         self.assertEqual(self.requests, [])
         self.now += 1
@@ -1417,12 +2155,16 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         snapshot = json.loads(self.requests[0]["messages"][-1]["content"])
         self.assertEqual(request_reason(self.requests[-1]), "check_in")
         self.assertEqual(snapshot["focus_session"]["active_tools"][0]["tool"], "pytest")
-        self.assertIsNotNone(self.daemon.application.sessions.lanes["codex:one"].last_check_in)
+        self.assertIsNotNone(
+            self.daemon.application.sessions.lanes["codex:one"].last_check_in
+        )
         self.assertEqual(snapshot["other_sessions"], [])
         self.assertTrue(self.daemon.application.sessions.lanes["cursor:two"].active)
         self.assertEqual(snapshot["focus_session"]["quiet_for"], "5 minutes")
         self.now += 299
-        self.event("progress", session="two", harness="cursor", progress="Build continuing")
+        self.event(
+            "progress", session="two", harness="cursor", progress="Build continuing"
+        )
         await self.wait_for(lambda: self.daemon.application.next_prune > self.now)
         self.assertEqual(len(self.requests), 1)
         self.now += 1
@@ -1450,16 +2192,26 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         snapshot = json.loads(self.requests[-1]["messages"][-1]["content"])
         self.assertEqual(request_reason(self.requests[-1]), "check_in")
 
-    async def test_waiting_check_in_is_discarded_after_progress_resumes_the_session(self):
+    async def test_waiting_check_in_is_discarded_after_progress_resumes_the_session(
+        self,
+    ):
         self.use_clock()
         self.slow = True
-        self.event("waiting", harness="claude", call="question", tool="AskUserQuestion", progress="Choose a strategy")
+        self.event(
+            "waiting",
+            harness="claude",
+            call="question",
+            tool="AskUserQuestion",
+            progress="Choose a strategy",
+        )
         await asyncio.wait_for(self.entered.wait(), 1)
         snapshot = json.loads(self.requests[0]["messages"][-1]["content"])
         self.assertEqual(request_reason(self.requests[0]), "check_in")
         self.assertTrue(snapshot["focus_session"]["waiting_for_input"])
         self.event("progress", harness="claude", progress="Investigating the strategy")
-        await self.wait_for(lambda: not self.daemon.application.sessions.lanes["claude:one"].waiting)
+        await self.wait_for(
+            lambda: not self.daemon.application.sessions.lanes["claude:one"].waiting
+        )
         self.release.set()
         await self.wait_for(lambda: self.daemon.application.task is None)
         self.assertEqual(self.daemon.application.cognition.memory.speech(), [])
@@ -1468,12 +2220,27 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_waiting_check_in_keeps_speech_while_another_task_progresses(self):
         self.use_clock()
         self.slow = True
-        self.event("waiting", harness="claude", call="question", tool="AskUserQuestion", progress="Choose a strategy")
-        self.event("tool_start", session="two", harness="cursor", call="build", tool="build")
+        self.event(
+            "waiting",
+            harness="claude",
+            call="question",
+            tool="AskUserQuestion",
+            progress="Choose a strategy",
+        )
+        self.event(
+            "tool_start", session="two", harness="cursor", call="build", tool="build"
+        )
         await self.wait_for(lambda: len(self.daemon.application.sessions.lanes) == 2)
         self.now += 299
-        self.event("progress", session="two", harness="cursor", progress="Building modules")
-        await self.wait_for(lambda: self.daemon.application.sessions.lanes["cursor:two"].progress == "Building modules")
+        self.event(
+            "progress", session="two", harness="cursor", progress="Building modules"
+        )
+        await self.wait_for(
+            lambda: (
+                self.daemon.application.sessions.lanes["cursor:two"].progress
+                == "Building modules"
+            )
+        )
         self.now += 1
         await asyncio.wait_for(self.entered.wait(), 1)
         snapshot = json.loads(self.requests[0]["messages"][-1]["content"])
@@ -1485,8 +2252,15 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["focus_session"]["waiting_for"], "5 minutes")
         self.assertEqual(self.daemon.application.events.activity(), "working")
         self.now += 1
-        self.event("progress", session="two", harness="cursor", progress="Linking build")
-        await self.wait_for(lambda: self.daemon.application.sessions.lanes["cursor:two"].progress == "Linking build")
+        self.event(
+            "progress", session="two", harness="cursor", progress="Linking build"
+        )
+        await self.wait_for(
+            lambda: (
+                self.daemon.application.sessions.lanes["cursor:two"].progress
+                == "Linking build"
+            )
+        )
         self.release.set()
         speech = await self.packet(lambda packet: "text" in packet)
         self.assertEqual(speech["text"], self.speech)
@@ -1495,14 +2269,30 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_waiting_after_progress_replaces_the_pending_reminder(self):
         self.use_clock()
         self.slow = True
-        self.event("waiting", harness="claude", call="question", tool="AskUserQuestion", progress="Choose a strategy")
+        self.event(
+            "waiting",
+            harness="claude",
+            call="question",
+            tool="AskUserQuestion",
+            progress="Choose a strategy",
+        )
         await asyncio.wait_for(self.entered.wait(), 1)
         self.now += 1
         self.event("progress", harness="claude", progress="Investigating the strategy")
-        await self.wait_for(lambda: not self.daemon.application.sessions.lanes["claude:one"].waiting)
+        await self.wait_for(
+            lambda: not self.daemon.application.sessions.lanes["claude:one"].waiting
+        )
         self.now += 1
-        self.event("waiting", harness="claude", call="question", tool="AskUserQuestion", progress="Choose a target")
-        await self.wait_for(lambda: self.daemon.application.sessions.lanes["claude:one"].waiting)
+        self.event(
+            "waiting",
+            harness="claude",
+            call="question",
+            tool="AskUserQuestion",
+            progress="Choose a target",
+        )
+        await self.wait_for(
+            lambda: self.daemon.application.sessions.lanes["claude:one"].waiting
+        )
         self.release.set()
         speech = await self.packet(lambda packet: "text" in packet)
         self.assertEqual(speech["text"], self.speech)
@@ -1512,7 +2302,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         snapshot = self.daemon.application.sessions.snapshot()["sessions"][0]
         self.assertTrue(snapshot["waiting_for_input"])
         self.assertEqual(snapshot["waiting_seconds"], 0)
-        self.assertEqual(json.loads(self.requests[-1]["messages"][-1]["content"])["focus_session"]["progress"], "Choose a target")
+        self.assertEqual(
+            json.loads(self.requests[-1]["messages"][-1]["content"])["focus_session"][
+                "progress"
+            ],
+            "Choose a target",
+        )
 
     async def test_check_in_discards_speech_when_the_active_call_finishes(self):
         self.use_clock()
@@ -1522,7 +2317,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.now += 300
         await asyncio.wait_for(self.entered.wait(), 1)
         self.event("tool_done", harness="codex", call="checks", progress="Tests passed")
-        await self.wait_for(lambda: not self.daemon.application.sessions.lanes["codex:one"].calls)
+        await self.wait_for(
+            lambda: not self.daemon.application.sessions.lanes["codex:one"].calls
+        )
         self.assertEqual(self.daemon.application.events.activity(), "working")
         self.release.set()
         await self.wait_for(lambda: self.daemon.application.task is None)
@@ -1538,7 +2335,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.entered.wait(), 1)
         self.event("tool_done", harness="codex", call="checks", progress="Tests passed")
         self.event("tool_start", harness="codex", call="lint", tool="lint")
-        await self.wait_for(lambda: "lint" in self.daemon.application.sessions.lanes["codex:one"].calls)
+        await self.wait_for(
+            lambda: "lint" in self.daemon.application.sessions.lanes["codex:one"].calls
+        )
         self.release.set()
         await self.wait_for(lambda: self.daemon.application.task is None)
         self.assertEqual(self.daemon.application.cognition.memory.speech(), [])
@@ -1562,7 +2361,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.daemon.application.cognition.memory.speech(), [])
         self.assertFalse(any("text" in packet for packet in await self.drain()))
 
-    async def test_trouble_speech_stays_discarded_after_recovery_and_another_failure(self):
+    async def test_trouble_speech_stays_discarded_after_recovery_and_another_failure(
+        self,
+    ):
         self.slow = True
         for index in range(3):
             self.event("tool_start", call=str(index), tool="pytest")
@@ -1573,13 +2374,19 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.event("tool_done", call="retry")
         self.event("tool_start", call="another", tool="pytest")
         self.event("tool_error", call="another")
-        await self.wait_for(lambda: self.daemon.application.sessions.lanes["cli:one"].failure["count"] == 1)
+        await self.wait_for(
+            lambda: (
+                self.daemon.application.sessions.lanes["cli:one"].failure["count"] == 1
+            )
+        )
         self.release.set()
         await self.wait_for(lambda: self.daemon.application.task is None)
         self.assertEqual(self.daemon.application.cognition.memory.speech(), [])
         self.assertFalse(any("text" in packet for packet in await self.drain()))
 
-    async def test_recovery_speech_stays_discarded_after_another_failure_and_recovery(self):
+    async def test_recovery_speech_stays_discarded_after_another_failure_and_recovery(
+        self,
+    ):
         self.slow = True
         self.event("tool_start", call="bad", tool="pytest")
         self.event("tool_error", call="bad")
@@ -1591,8 +2398,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.event("tool_error", call="another")
         self.event("tool_start", call="retry-again", tool="pytest")
         self.event("tool_done", call="retry-again")
-        await self.wait_for(lambda: self.daemon.application.sessions.lanes["cli:one"].last_tool == "pytest"
-                            and not self.daemon.application.sessions.lanes["cli:one"].calls)
+        await self.wait_for(
+            lambda: (
+                self.daemon.application.sessions.lanes["cli:one"].last_tool == "pytest"
+                and not self.daemon.application.sessions.lanes["cli:one"].calls
+            )
+        )
         await self.wait_for(lambda: self.daemon.application.episodes.serial >= 5)
         self.release.set()
         await self.wait_for(lambda: self.daemon.application.task is None)
@@ -1610,7 +2421,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.packet(lambda packet: packet.get("state") == "idle")
         self.http_status = 200
         await self.observe("routine")
-        self.assertEqual((await self.packet(lambda packet: "text" in packet))["text"], self.speech)
+        self.assertEqual(
+            (await self.packet(lambda packet: "text" in packet))["text"], self.speech
+        )
 
     async def test_timeout_cancels_request_and_accepts_next_commentary(self):
         self.slow = True
@@ -1642,9 +2455,19 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_wrapper_failure_records_command_activity_without_diagnostics(self):
         root = Path(__file__).resolve().parents[1]
         env = dict(os.environ, PET_DAEMON_SOCKET=self.config.daemon_socket)
-        child = await asyncio.create_subprocess_exec(str(root / "examples/pet-run"), "/bin/sh", "-c", "exit 7", env=env)
+        child = await asyncio.create_subprocess_exec(
+            str(root / "examples/pet-run"), "/bin/sh", "-c", "exit 7", env=env
+        )
         self.assertEqual(await child.wait(), 7)
-        await self.wait_for(lambda: bool(self.daemon.application.sessions.lanes) and all(lane.finished for lane in self.daemon.application.sessions.lanes.values()))
+        await self.wait_for(
+            lambda: (
+                bool(self.daemon.application.sessions.lanes)
+                and all(
+                    lane.finished
+                    for lane in self.daemon.application.sessions.lanes.values()
+                )
+            )
+        )
         lane = next(iter(self.daemon.application.sessions.lanes.values()))
         self.assertEqual(lane.outcome, "error")
         self.assertEqual(lane.failure["activity"], "command")
@@ -1688,9 +2511,14 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
 class ConfigurationTests(unittest.TestCase):
     def test_behavior_fields_reject_values_with_the_wrong_shape(self):
-        for name, value in (("care_interval", 5), ("nap_seconds", 20),
-                            ("idle_pause", 30), ("work_burst_seconds", 12),
-                            ("walk_speed", [20, 40]), ("pointer_radius", [50, 100])):
+        for name, value in (
+            ("care_interval", 5),
+            ("nap_seconds", 20),
+            ("idle_pause", 30),
+            ("work_burst_seconds", 12),
+            ("walk_speed", [20, 40]),
+            ("pointer_radius", [50, 100]),
+        ):
             with self.subTest(name=name, value=value):
                 config = Config(pet_dir=Path("fixture"))
                 setattr(config.behavior, name, value)
@@ -1701,7 +2529,10 @@ class ConfigurationTests(unittest.TestCase):
         config = Config(pet_dir=Path("fixture"))
         self.assertEqual(config.speech_history_seconds, 1800)
         for value in (0, -1, True, "30", float("inf")):
-            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "speech_history_seconds"):
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(ValueError, "speech_history_seconds"),
+            ):
                 Config(pet_dir=Path("fixture"), speech_history_seconds=value).validate()
 
     def test_summary_defaults_run_on_prompts(self):
@@ -1710,27 +2541,65 @@ class ConfigurationTests(unittest.TestCase):
         self.assertFalse(config.summarize_first_request_only)
 
     def test_summary_reasons_accept_every_commentary_trigger_and_an_empty_array(self):
-        for reasons in ([], ["prompt", "completion", "routine", "failure", "check_in", "click", "explicit"]):
+        for reasons in (
+            [],
+            [
+                "prompt",
+                "completion",
+                "routine",
+                "failure",
+                "check_in",
+                "click",
+                "explicit",
+            ],
+        ):
             with self.subTest(reasons=reasons):
                 Config(pet_dir=Path("fixture"), summarize_on=reasons).validate()
 
     def test_summary_configuration_rejects_unknown_reasons_and_nonboolean_flags(self):
         for reasons in ("prompt", None, ["intent"], [None], [[]]):
-            with self.subTest(reasons=reasons), self.assertRaisesRegex(ValueError, "summarize_on"):
+            with (
+                self.subTest(reasons=reasons),
+                self.assertRaisesRegex(ValueError, "summarize_on"),
+            ):
                 Config(pet_dir=Path("fixture"), summarize_on=reasons).validate()
         for value in (1, 0, "true", None):
-            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "summarize_first_request_only"):
-                Config(pet_dir=Path("fixture"), summarize_first_request_only=value).validate()
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(ValueError, "summarize_first_request_only"),
+            ):
+                Config(
+                    pet_dir=Path("fixture"), summarize_first_request_only=value
+                ).validate()
 
     def test_loads_startup_paths_relative_to_config_and_configurable_timing(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "pet.json"
-            path.write_text(json.dumps({"pet_dir": "pets/other", "observation_seconds": [15, 25], "idle_message_seconds": 450, "prompt_target_bytes": 12000, "memory_retention_days": 14, "memory_max_events": 500, "persona": "A calm garden companion.", "log_file": "analysis/pet.jsonl", "memory_file": "state/companion.sqlite3",
-                                        "behavior": {"walk_seconds": [2, 4], "roaming": False}}))
+            path.write_text(
+                json.dumps(
+                    {
+                        "pet_dir": "pets/other",
+                        "observation_seconds": [15, 25],
+                        "idle_message_seconds": 450,
+                        "prompt_target_bytes": 12000,
+                        "memory_retention_days": 14,
+                        "memory_max_events": 500,
+                        "persona": "A calm garden companion.",
+                        "log_file": "analysis/pet.jsonl",
+                        "memory_file": "state/companion.sqlite3",
+                        "behavior": {"walk_seconds": [2, 4], "roaming": False},
+                    }
+                )
+            )
             config = Config.load(path)
             self.assertEqual(config.pet_dir, Path(directory).resolve() / "pets/other")
-            self.assertEqual(config.log_file, Path(directory).resolve() / "analysis/pet.jsonl")
-            self.assertEqual(config.memory_file, Path(directory).resolve() / "state/companion.sqlite3")
+            self.assertEqual(
+                config.log_file, Path(directory).resolve() / "analysis/pet.jsonl"
+            )
+            self.assertEqual(
+                config.memory_file,
+                Path(directory).resolve() / "state/companion.sqlite3",
+            )
             self.assertEqual(config.persona, "A calm garden companion.")
             self.assertEqual(config.observation_seconds, [15, 25])
             self.assertEqual(config.idle_message_seconds, 450)
@@ -1745,7 +2614,10 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_rejects_nonpositive_or_nonfinite_idle_message_intervals(self):
         for seconds in (0, -1, True, "300", None, float("nan"), float("inf")):
-            with self.subTest(seconds=seconds), self.assertRaisesRegex(ValueError, "idle_message_seconds"):
+            with (
+                self.subTest(seconds=seconds),
+                self.assertRaisesRegex(ValueError, "idle_message_seconds"),
+            ):
                 Config(pet_dir=Path("fixture"), idle_message_seconds=seconds).validate()
 
     def test_rejects_empty_or_nontext_persona(self):
@@ -1762,9 +2634,16 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(config.persona, persona)
 
     def test_rejects_invalid_memory_limits(self):
-        for field in ("prompt_target_bytes", "memory_retention_days", "memory_max_events"):
+        for field in (
+            "prompt_target_bytes",
+            "memory_retention_days",
+            "memory_max_events",
+        ):
             for value in (0, -1, True):
-                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                with (
+                    self.subTest(field=field, value=value),
+                    self.assertRaises(ValueError),
+                ):
                     Config(pet_dir=Path("fixture"), **{field: value}).validate()
 
     def test_context_target_and_memory_retention_defaults(self):
@@ -1775,7 +2654,13 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(config.max_tokens, 512)
 
     def test_rejects_invalid_intervals_and_shared_socket_before_startup(self):
-        for config in (Config(pet_dir=Path("fixture"), observation_seconds=(90, 60)),
-                       Config(pet_dir=Path("fixture"), daemon_socket="/tmp/same", overlay_socket="/tmp/same")):
+        for config in (
+            Config(pet_dir=Path("fixture"), observation_seconds=(90, 60)),
+            Config(
+                pet_dir=Path("fixture"),
+                daemon_socket="/tmp/same",
+                overlay_socket="/tmp/same",
+            ),
+        ):
             with self.subTest(config=config), self.assertRaises(ValueError):
                 config.validate()

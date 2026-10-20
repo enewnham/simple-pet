@@ -23,4 +23,11 @@ def analyzer():
 
 def sentiment_score(text):
     sentences = re.split(r"(?<=[.!?])\s+|\n+", user_prose(text))
-    return min((analyzer().polarity_scores(sentence)["compound"] for sentence in sentences if sentence.strip()), default=0.0)
+    return min(
+        (
+            analyzer().polarity_scores(sentence)["compound"]
+            for sentence in sentences
+            if sentence.strip()
+        ),
+        default=0.0,
+    )

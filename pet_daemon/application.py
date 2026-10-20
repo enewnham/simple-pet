@@ -39,8 +39,22 @@ class MessageSupport:
 
 
 class Application:
-    def __init__(self, config, *, sessions, episodes, attention, behavior, cognition, providers: tuple[ObservationProvider, ...], processes,
-                 memory, emit, clock, rng):
+    def __init__(
+        self,
+        config,
+        *,
+        sessions,
+        episodes,
+        attention,
+        behavior,
+        cognition,
+        providers: tuple[ObservationProvider, ...],
+        processes,
+        memory,
+        emit,
+        clock,
+        rng,
+    ):
         self.config = config
         self.sessions = sessions
         self.episodes = episodes
@@ -65,10 +79,22 @@ class Application:
         self.process_task = None
         self.next_prune = 0
         self.reconciling = False
-        self.events = AgentEvents(config, sessions=sessions, episodes=episodes, memory=memory,
-                                  behavior=behavior, queue=self.queue, clock=clock, rng=rng)
-        self.delivery = SpeechDelivery(emit, clock=clock, on_outcome=self.delivery_outcome,
-                                       valid=self.delivery_valid)
+        self.events = AgentEvents(
+            config,
+            sessions=sessions,
+            episodes=episodes,
+            memory=memory,
+            behavior=behavior,
+            queue=self.queue,
+            clock=clock,
+            rng=rng,
+        )
+        self.delivery = SpeechDelivery(
+            emit,
+            clock=clock,
+            on_outcome=self.delivery_outcome,
+            valid=self.delivery_valid,
+        )
 
     def clear_memory(self):
         try:
@@ -78,8 +104,12 @@ class Application:
             return
         self.preempt()
         self.history_epoch += 1
-        self.sessions = Sessions(self.clock, self.config.stale_seconds,
-                                 self.config.completed_retention_seconds, self.config.activity_fresh_seconds)
+        self.sessions = Sessions(
+            self.clock,
+            self.config.stale_seconds,
+            self.config.completed_retention_seconds,
+            self.config.activity_fresh_seconds,
+        )
         self.episodes = Episodes()
         self.events.reset(self.sessions, self.episodes)
         self.manual = None
@@ -114,7 +144,9 @@ class Application:
             for lane in self.sessions.lanes.values():
                 if lane.active:
                     lane.last_check_in = self.clock()
-            self.attention.next_observation = self.clock() + self.rng.uniform(*self.config.observation_seconds)
+            self.attention.next_observation = self.clock() + self.rng.uniform(
+                *self.config.observation_seconds
+            )
 
     def speak(self, context, ttl=None):
         self.behavior.wake("speech_request")
@@ -136,8 +168,14 @@ class Application:
             work = state.current(session["id"])
             view = views.get(work.id) if work else None
             members.append(SessionSnapshot.capture(session, view))
-        return WorkSnapshot(runtime["activity"], tuple(members), self.behavior.sleeping,
-                            trigger=trigger, work=subjects, convergence=runtime["convergence"])
+        return WorkSnapshot(
+            runtime["activity"],
+            tuple(members),
+            self.behavior.sleeping,
+            trigger=trigger,
+            work=subjects,
+            convergence=runtime["convergence"],
+        )
 
     def ingest(self, observation: RepositoryObservation):
         try:
@@ -157,14 +195,25 @@ class Application:
         lane = self.sessions.lanes[key]
         try:
             with self.memory.transaction():
-                if packet["event"] in ("intent", "subagent_start") and packet.get("goal"):
-                    aliases = tuple(f"{packet['harness']}:{alias}" for alias in packet.get("aliases", ()))
-                    self.memory.work.session_intent(key, packet["goal"], aliases=aliases)
+                if packet["event"] in ("intent", "subagent_start") and packet.get(
+                    "goal"
+                ):
+                    aliases = tuple(
+                        f"{packet['harness']}:{alias}"
+                        for alias in packet.get("aliases", ())
+                    )
+                    self.memory.work.session_intent(
+                        key, packet["goal"], aliases=aliases
+                    )
                 self.memory.work.session_event(key, packet)
                 if lane.repo:
                     self.memory.associate_repository(key, lane.repo)
             for provider in self.providers:
-                provider.associate(key, lane.repo, refresh=packet["event"] in ("intent", "subagent_start"))
+                provider.associate(
+                    key,
+                    lane.repo,
+                    refresh=packet["event"] in ("intent", "subagent_start"),
+                )
             self.reconcile_targets()
         except (sqlite3.Error, ValueError) as error:
             log.warning("Could not record work evidence: %s", error)
@@ -190,7 +239,9 @@ class Application:
             self.receive_renderer(packet)
         elif kind == "speak" and isinstance(packet.get("context"), str):
             ttl = packet.get("ttl")
-            if ttl is None or (type(ttl) in (int, float) and math.isfinite(ttl) and ttl >= 0):
+            if ttl is None or (
+                type(ttl) in (int, float) and math.isfinite(ttl) and ttl >= 0
+            ):
                 self.speak(packet["context"], ttl)
 
     def receive_renderer(self, packet):
@@ -246,11 +297,24 @@ class Application:
         self.clicked = True
         trace("speech.requested", reason="click")
 
-    async def observe(self, reason, context=None, ttl=None, trigger=None, *, snapshot=None, selection=None):
+    async def observe(
+        self,
+        reason,
+        context=None,
+        ttl=None,
+        trigger=None,
+        *,
+        snapshot=None,
+        selection=None,
+    ):
         if self.suspended:
             return
         snapshot = self.snapshot(trigger) if snapshot is None else snapshot
-        selection = self.attention.select(snapshot, reason, context) if selection is None else selection
+        selection = (
+            self.attention.select(snapshot, reason, context)
+            if selection is None
+            else selection
+        )
         with observation() as usage:
             started = self.clock()
             outcome = "failed"
@@ -261,24 +325,41 @@ class Application:
             focus_session = focus_snapshot["id"] if focus_snapshot else None
             trace("observation.started", reason=reason, subject=selection.id)
             try:
-                if (self.config.summarize_first_request_only
-                        and self.cognition.should_summarize(focus_snapshot, reason)):
+                if (
+                    self.config.summarize_first_request_only
+                    and self.cognition.should_summarize(focus_snapshot, reason)
+                ):
                     focus = self.sessions.lanes[focus_session]
                     focus.first_summary_attempted = True
-                    self.memory.save_context(focus_session, focus.first_prompt, focus.session_context,
-                                             focus.recent_requests, focus.request_count, True)
+                    self.memory.save_context(
+                        focus_session,
+                        focus.first_prompt,
+                        focus.session_context,
+                        focus.recent_requests,
+                        focus.request_count,
+                        True,
+                    )
                 result = await asyncio.wait_for(
-                    self.cognition.observe(snapshot, selection, refresh=lambda: self.snapshot(trigger)),
+                    self.cognition.observe(
+                        snapshot, selection, refresh=lambda: self.snapshot(trigger)
+                    ),
                     timeout=self.config.request_timeout,
                 )
                 if sessions is not self.sessions:
                     outcome = "discarded"
                     return
                 self.save_summary(result)
-                if (epoch != self.revision or history_epoch != self.history_epoch
-                        or not self.selection_valid(result.prepared.manifest, trigger)):
+                if (
+                    epoch != self.revision
+                    or history_epoch != self.history_epoch
+                    or not self.selection_valid(result.prepared.manifest, trigger)
+                ):
                     outcome = "discarded"
-                    event("observation.discarded", reason="subject_superseded", subject=selection.id)
+                    event(
+                        "observation.discarded",
+                        reason="subject_superseded",
+                        subject=selection.id,
+                    )
                     return
                 selection = result.prepared.selection
                 if result.speak is None:
@@ -294,10 +375,19 @@ class Application:
                         self.behavior.stop_movement()
                         action = selection.action
                         opportunity = (action.id, action.version) if action else None
-                        message = SpeechMessage(result.speak, seconds, reason, str(uuid.uuid4()),
-                                                selection.id, selection.subject.revision if selection.subject else None,
-                                                opportunity, history_epoch,
-                                                support=MessageSupport(result.prepared.manifest, trigger, epoch))
+                        message = SpeechMessage(
+                            result.speak,
+                            seconds,
+                            reason,
+                            str(uuid.uuid4()),
+                            selection.id,
+                            selection.subject.revision if selection.subject else None,
+                            opportunity,
+                            history_epoch,
+                            support=MessageSupport(
+                                result.prepared.manifest, trigger, epoch
+                            ),
+                        )
                         self.delivery.submit(message)
                         self.mark_considered(selection)
                         outcome = "submitted"
@@ -305,14 +395,31 @@ class Application:
                 outcome = "cancelled"
                 raise
             except Exception as error:
-                event("observation.failed", level=logging.WARNING, reason=reason, session=focus_session,
-                      error=str(error), exc_info=True)
+                event(
+                    "observation.failed",
+                    level=logging.WARNING,
+                    reason=reason,
+                    session=focus_session,
+                    error=str(error),
+                    exc_info=True,
+                )
             finally:
-                event("observation.finished", reason=reason, subject=selection.id, session=focus_session,
-                      outcome=outcome, duration_seconds=round(self.clock() - started, 3), **usage.get(reason, {}))
+                event(
+                    "observation.finished",
+                    reason=reason,
+                    subject=selection.id,
+                    session=focus_session,
+                    outcome=outcome,
+                    duration_seconds=round(self.clock() - started, 3),
+                    **usage.get(reason, {}),
+                )
 
     def selection_valid(self, manifest, trigger):
-        if trigger and "episode" in trigger and not self.episodes.relevant(trigger, self.sessions):
+        if (
+            trigger
+            and "episode" in trigger
+            and not self.episodes.relevant(trigger, self.sessions)
+        ):
             return False
         return manifest.valid(self.snapshot(trigger))
 
@@ -328,8 +435,11 @@ class Application:
 
     def delivery_valid(self, message):
         support = message.support
-        return (message.history_epoch == self.history_epoch and support.request_epoch == self.revision
-                and self.selection_valid(support.manifest, support.trigger))
+        return (
+            message.history_epoch == self.history_epoch
+            and support.request_epoch == self.revision
+            and self.selection_valid(support.manifest, support.trigger)
+        )
 
     def save_summary(self, result):
         if result.session_context is None:
@@ -345,8 +455,14 @@ class Application:
             return
         focus.session_context = summary
         try:
-            self.memory.save_context(key, focus.first_prompt, summary, focus.recent_requests,
-                                     focus.request_count, focus.first_summary_attempted)
+            self.memory.save_context(
+                key,
+                focus.first_prompt,
+                summary,
+                focus.recent_requests,
+                focus.request_count,
+                focus.first_summary_attempted,
+            )
         except sqlite3.Error as error:
             log.warning("Could not save pet session context: %s", error)
         trace("memory.context_updated", session=key)
@@ -357,18 +473,33 @@ class Application:
             return
         opportunity_id, version = message.opportunity or (None, None)
         if outcome.status == "accepted":
-            self.memory.record_acceptance(message.message_id, message.text, message.reason,
-                                          opportunity_id=opportunity_id, version=version)
+            self.memory.record_acceptance(
+                message.message_id,
+                message.text,
+                message.reason,
+                opportunity_id=opportunity_id,
+                version=version,
+            )
             self.last_speech = (message.text, self.clock())
             self.attention.last_attempt = self.clock()
         elif outcome.status == "failed":
             try:
-                self.memory.record_delivery_failure(message.message_id, message.reason, text=message.text,
-                                                    opportunity_id=opportunity_id, version=version)
+                self.memory.record_delivery_failure(
+                    message.message_id,
+                    message.reason,
+                    text=message.text,
+                    opportunity_id=opportunity_id,
+                    version=version,
+                )
             except sqlite3.Error as error:
                 log.warning("Could not record failed speech delivery: %s", error)
-        event("speech.delivery", message=message.message_id, subject=message.subject_id,
-              version=message.revision, outcome=outcome.status)
+        event(
+            "speech.delivery",
+            message=message.message_id,
+            subject=message.subject_id,
+            version=message.revision,
+            outcome=outcome.status,
+        )
 
     async def probe_processes(self):
         sessions = self.sessions
@@ -399,11 +530,21 @@ class Application:
         if self.suspended or self.task is not None or not self.behavior.status:
             return
         snapshot = self.snapshot()
-        check_in = tuple(key for key in self.sessions.check_in_due(self.config.idle_message_seconds)
-                         if not self.sessions.lanes[key].waiting)
-        request = self.attention.request(snapshot, check_in=check_in, manual=self.manual,
-                                         clicked=self.clicked, care=self.behavior.care_remark,
-                                         episode_relevant=lambda trigger: self.episodes.relevant(trigger, self.sessions))
+        check_in = tuple(
+            key
+            for key in self.sessions.check_in_due(self.config.idle_message_seconds)
+            if not self.sessions.lanes[key].waiting
+        )
+        request = self.attention.request(
+            snapshot,
+            check_in=check_in,
+            manual=self.manual,
+            clicked=self.clicked,
+            care=self.behavior.care_remark,
+            episode_relevant=lambda trigger: self.episodes.relevant(
+                trigger, self.sessions
+            ),
+        )
         if request is None:
             return
         if request.reason == "explicit":
@@ -415,15 +556,25 @@ class Application:
         if not self.attention.allowed(request.reason, request.trigger):
             return
         snapshot = self.snapshot(request.trigger)
-        selection = self.attention.select(snapshot, request.reason, request.context, request.eligible)
+        selection = self.attention.select(
+            snapshot, request.reason, request.context, request.eligible
+        )
         if request.reason == "check_in" and selection.focus_session:
             self.sessions.lanes[selection.focus_session["id"]].last_check_in = now
         self.attention.scheduled(selection.id)
         self.persist_attention(selection.id)
         self.behavior.stop_movement()
         self.reason = request.reason
-        self.task = asyncio.create_task(self.observe(request.reason, request.context, request.ttl,
-                                                     request.trigger, snapshot=snapshot, selection=selection))
+        self.task = asyncio.create_task(
+            self.observe(
+                request.reason,
+                request.context,
+                request.ttl,
+                request.trigger,
+                snapshot=snapshot,
+                selection=selection,
+            )
+        )
 
     async def close(self):
         self.delivery.close()

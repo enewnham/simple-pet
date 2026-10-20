@@ -58,7 +58,13 @@ class SpeechDelivery:
         delivery.due = self.clock() + self.ack_timeout
         delivery.expires = self.clock() + message.ttl + 2 * self.ack_timeout
         try:
-            self.emit({"text": message.text, "ttl": message.ttl, "delivery_id": message.message_id})
+            self.emit(
+                {
+                    "text": message.text,
+                    "ttl": message.ttl,
+                    "delivery_id": message.message_id,
+                }
+            )
         except OSError:
             pass
 
@@ -69,8 +75,12 @@ class SpeechDelivery:
         if not isinstance(identifier, str):
             return False
         delivery = self.deliveries.get(identifier)
-        if (delivery is None or not delivery.attempts or delivery.status == "accepted"
-                or self.clock() > delivery.expires):
+        if (
+            delivery is None
+            or not delivery.attempts
+            or delivery.status == "accepted"
+            or self.clock() > delivery.expires
+        ):
             return False
         self.on_outcome(DeliveryOutcome(delivery.message, "accepted"))
         delivery.status = "accepted"

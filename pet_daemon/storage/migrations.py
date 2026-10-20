@@ -113,9 +113,17 @@ def migrate(db):
         context_columns = {row[1] for row in db.execute("PRAGMA table_info(contexts)")}
         for name in ("request_count", "first_summary_attempted"):
             if name not in context_columns:
-                db.execute(f"ALTER TABLE contexts ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
-        history_columns = {row[1] for row in db.execute("PRAGMA table_info(attention_history)")}
+                db.execute(
+                    f"ALTER TABLE contexts ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0"
+                )
+        history_columns = {
+            row[1] for row in db.execute("PRAGMA table_info(attention_history)")
+        }
         if "updated_at" not in history_columns:
-            db.execute("ALTER TABLE attention_history ADD COLUMN updated_at REAL NOT NULL DEFAULT 0")
-        db.execute("INSERT OR IGNORE INTO work_memberships SELECT pet,work_id,session FROM work_sessions")
+            db.execute(
+                "ALTER TABLE attention_history ADD COLUMN updated_at REAL NOT NULL DEFAULT 0"
+            )
+        db.execute(
+            "INSERT OR IGNORE INTO work_memberships SELECT pet,work_id,session FROM work_sessions"
+        )
         db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

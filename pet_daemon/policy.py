@@ -41,8 +41,13 @@ class ReactionSpec:
 
 
 ANIMATION_ROLES = {
-    "review": "attention", "waiting": "attention", "running": "work",
-    "failed": "error", "jumping": "celebrate", "waving": "greeting", "idle": "rest",
+    "review": "attention",
+    "waiting": "attention",
+    "running": "work",
+    "failed": "error",
+    "jumping": "celebrate",
+    "waving": "greeting",
+    "idle": "rest",
 }
 
 REACTIONS = {
@@ -61,24 +66,53 @@ REACTIONS = {
 CATALOGUE = (
     BehaviorSpec("rest", "rest", lambda o: True, lambda o: 0.35),
     BehaviorSpec("focus", "work", lambda o: o.working, lambda o: 0.85),
-    BehaviorSpec("attentive", "rest", lambda o: o.waiting and not o.working, lambda o: 0.85),
-    BehaviorSpec("observe", "gaze", lambda o: o.pointer_recent and not o.interacting, lambda o: 0.45),
-    BehaviorSpec("roam", "walk", lambda o: o.can_roam,
-                 lambda o: 0.2 + 0.6 * o.restlessness if o.working
-                 else (0.2 + 0.5 * o.restlessness) * (0.5 if o.active else 1)),
-    BehaviorSpec("nap", "sleep", lambda o: o.can_nap, lambda o: 0.9 * o.rest_pressure ** 2),
+    BehaviorSpec(
+        "attentive", "rest", lambda o: o.waiting and not o.working, lambda o: 0.85
+    ),
+    BehaviorSpec(
+        "observe",
+        "gaze",
+        lambda o: o.pointer_recent and not o.interacting,
+        lambda o: 0.45,
+    ),
+    BehaviorSpec(
+        "roam",
+        "walk",
+        lambda o: o.can_roam,
+        lambda o: (
+            0.2 + 0.6 * o.restlessness
+            if o.working
+            else (0.2 + 0.5 * o.restlessness) * (0.5 if o.active else 1)
+        ),
+    ),
+    BehaviorSpec(
+        "nap", "sleep", lambda o: o.can_nap, lambda o: 0.9 * o.rest_pressure**2
+    ),
 )
 
 
 class Policy:
     def candidates(self, observation):
-        return [Candidate(spec.name, spec.utility(observation),
-                          "attention" if spec.name == "focus" and observation.investigating else spec.role)
-                for spec in CATALOGUE if spec.eligible(observation)]
+        return [
+            Candidate(
+                spec.name,
+                spec.utility(observation),
+                "attention"
+                if spec.name == "focus" and observation.investigating
+                else spec.role,
+            )
+            for spec in CATALOGUE
+            if spec.eligible(observation)
+        ]
 
     def select(self, observation, last_completed, rng, available):
-        choices = [Candidate(c.name, c.score * (0.9 if c.name == last_completed else 1), c.role)
-                   for c in self.candidates(observation) if available(c)]
+        choices = [
+            Candidate(
+                c.name, c.score * (0.9 if c.name == last_completed else 1), c.role
+            )
+            for c in self.candidates(observation)
+            if available(c)
+        ]
         best = max(c.score for c in choices)
         choices = [c for c in choices if c.score >= best * 0.9]
         threshold = rng.random() * sum(c.score for c in choices)

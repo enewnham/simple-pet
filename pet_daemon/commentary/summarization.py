@@ -23,7 +23,11 @@ excerpts. Do not invent omitted facts or carry stale pending status into the sum
 def report_age(seconds):
     if seconds < 60:
         return "less than a minute ago"
-    for unit, duration, following in (("minute", 60, 3600), ("hour", 3600, 86400), ("day", 86400, float("inf"))):
+    for unit, duration, following in (
+        ("minute", 60, 3600),
+        ("hour", 3600, 86400),
+        ("day", 86400, float("inf")),
+    ):
         if seconds < following:
             count = int(seconds // duration)
             return f"about {count} {unit}{'s' if count != 1 else ''} ago"
@@ -33,31 +37,65 @@ def summary_request(config, memory, clock, make_request, focus):
     payload = {"initial_intent": select_prompt(focus.get("first_prompt", ""))}
     optional = []
     if not config.summarize_first_request_only:
-        recent = [select_prompt(value) for value in focus.get("recent_requests", [])[-4:]]
+        recent = [
+            select_prompt(value) for value in focus.get("recent_requests", [])[-4:]
+        ]
         payload.update(
-            recent_requests=list(recent[-1:]), historical_session_context="",
-            current_report={"progress": bounded(focus.get("progress"), 800), "outcome": focus.get("outcome")},
+            recent_requests=list(recent[-1:]),
+            historical_session_context="",
+            current_report={
+                "progress": bounded(focus.get("progress"), 800),
+                "outcome": focus.get("outcome"),
+            },
             reported_results=[],
         )
-        rows = memory.recent(limit=3, session=focus["id"], event_types=(
-            "turn_done", "turn_error", "subagent_done", "session_end", "interrupt"))
-        optional.extend(("reported_results", {
-            "age": report_age(clock() - row["timestamp"]),
-            "report": bounded(row["summary"].removeprefix(row["event_type"]).removeprefix(" | "), 320),
-        }) for row in reversed(rows))
-        optional.append(("historical_session_context", bounded(focus.get("session_context"), 400)))
+        rows = memory.recent(
+            limit=3,
+            session=focus["id"],
+            event_types=(
+                "turn_done",
+                "turn_error",
+                "subagent_done",
+                "session_end",
+                "interrupt",
+            ),
+        )
+        optional.extend(
+            (
+                "reported_results",
+                {
+                    "age": report_age(clock() - row["timestamp"]),
+                    "report": bounded(
+                        row["summary"]
+                        .removeprefix(row["event_type"])
+                        .removeprefix(" | "),
+                        320,
+                    ),
+                },
+            )
+            for row in reversed(rows)
+        )
+        optional.append(
+            ("historical_session_context", bounded(focus.get("session_context"), 400))
+        )
         optional.extend(("recent_requests", value) for value in reversed(recent[:-1]))
     request = make_request(payload, [{"type": "text", "text": SUMMARY_INSTRUCTIONS}])
     request["output_config"]["format"]["schema"] = {
         "type": "object",
-        "properties": {"session_context": {
-            "description": "Durable session intent, decisions, and reported results with provenance preserved. Null when no update is needed.",
-            "anyOf": [{"type": "string"}, {"type": "null"}],
-        }},
-        "required": ["session_context"], "additionalProperties": False,
+        "properties": {
+            "session_context": {
+                "description": "Durable session intent, decisions, and reported results with provenance preserved. Null when no update is needed.",
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+            }
+        },
+        "required": ["session_context"],
+        "additionalProperties": False,
     }
     for field, value in optional:
-        if len(json.dumps(request, ensure_ascii=False).encode("utf-8")) >= config.prompt_target_bytes:
+        if (
+            len(json.dumps(request, ensure_ascii=False).encode("utf-8"))
+            >= config.prompt_target_bytes
+        ):
             break
         if field == "historical_session_context":
             payload[field] = value

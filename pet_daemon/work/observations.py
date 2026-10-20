@@ -17,7 +17,13 @@ class GitObservation:
 
     @property
     def pending(self):
-        return bool(self.staged or self.unstaged or self.untracked or self.conflicts or self.ahead)
+        return bool(
+            self.staged
+            or self.unstaged
+            or self.untracked
+            or self.conflicts
+            or self.ahead
+        )
 
 
 @dataclass(frozen=True)
@@ -73,7 +79,10 @@ class RepositoryObservation:
 
     @property
     def pending(self):
-        return bool((self.current and self.local and self.local.pending) or (self.pr and self.pr.pending))
+        return bool(
+            (self.current and self.local and self.local.pending)
+            or (self.pr and self.pr.pending)
+        )
 
 
 @dataclass(frozen=True)
@@ -83,7 +92,6 @@ class RepositoryTarget:
     repository: str = ""
     checkout: str = ""
     include_links: bool = True
-
 
 
 def repository_observation_from_mapping(data):

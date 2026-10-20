@@ -10,7 +10,18 @@ You have the energy of a seasoned peer tackling the work: focused, wry about you
 stubborn bugs, and fundamentally on the developer's side. Never be cruel or insult them.
 """.strip()
 
-OBSERVATION_REASONS = frozenset({"prompt", "completion", "routine", "failure", "check_in", "click", "explicit", "care"})
+OBSERVATION_REASONS = frozenset(
+    {
+        "prompt",
+        "completion",
+        "routine",
+        "failure",
+        "check_in",
+        "click",
+        "explicit",
+        "care",
+    }
+)
 
 
 def positive(value):
@@ -18,7 +29,12 @@ def positive(value):
 
 
 def interval(value):
-    return isinstance(value, (list, tuple)) and len(value) == 2 and all(positive(v) for v in value) and value[0] <= value[1]
+    return (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+        and all(positive(v) for v in value)
+        and value[0] <= value[1]
+    )
 
 
 @dataclass
@@ -51,7 +67,9 @@ class BehaviorConfig:
             if item.type is bool:
                 valid = type(value) is bool
             elif item.name == "automatic_speech_cooldown_seconds":
-                valid = type(value) in (int, float) and math.isfinite(value) and value >= 0
+                valid = (
+                    type(value) in (int, float) and math.isfinite(value) and value >= 0
+                )
             elif item.type is tuple:
                 valid = interval(value)
             else:
@@ -106,17 +124,36 @@ class Config:
     def validate(self):
         self.behavior.validate()
         if not isinstance(self.summarize_on, list) or any(
-            not isinstance(reason, str) or reason not in OBSERVATION_REASONS for reason in self.summarize_on
+            not isinstance(reason, str) or reason not in OBSERVATION_REASONS
+            for reason in self.summarize_on
         ):
             raise ValueError("summarize_on must be an array of commentary reasons")
         if type(self.summarize_first_request_only) is not bool:
             raise ValueError("summarize_first_request_only must be a boolean")
         if not interval(self.observation_seconds):
-            raise ValueError("observation_seconds must be a positive [minimum, maximum]")
-        for name in ("prompt_target_bytes", "memory_retention_days", "memory_max_events", "max_tokens"):
+            raise ValueError(
+                "observation_seconds must be a positive [minimum, maximum]"
+            )
+        for name in (
+            "prompt_target_bytes",
+            "memory_retention_days",
+            "memory_max_events",
+            "max_tokens",
+        ):
             if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be a positive integer")
-        for name in ("idle_message_seconds", "speech_history_seconds", "speech_ttl", "request_timeout", "stale_seconds", "completed_retention_seconds", "process_probe_seconds", "activity_fresh_seconds", "repository_refresh_seconds", "github_refresh_seconds"):
+        for name in (
+            "idle_message_seconds",
+            "speech_history_seconds",
+            "speech_ttl",
+            "request_timeout",
+            "stale_seconds",
+            "completed_retention_seconds",
+            "process_probe_seconds",
+            "activity_fresh_seconds",
+            "repository_refresh_seconds",
+            "github_refresh_seconds",
+        ):
             if not positive(getattr(self, name)):
                 raise ValueError(f"{name} must be positive")
         if not isinstance(self.persona, str) or not self.persona.strip():
@@ -124,7 +161,12 @@ class Config:
         if not isinstance(self.model, str) or not self.model:
             raise ValueError("model must be nonempty")
         for path in (self.daemon_socket, self.overlay_socket):
-            if not isinstance(path, str) or not path or "\0" in path or len(path.encode()) >= 104:
+            if (
+                not isinstance(path, str)
+                or not path
+                or "\0" in path
+                or len(path.encode()) >= 104
+            ):
                 raise ValueError("Socket paths must fit the macOS UNIX socket address")
         if self.daemon_socket == self.overlay_socket:
             raise ValueError("Daemon and overlay sockets must differ")

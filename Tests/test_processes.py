@@ -5,7 +5,13 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from pet_daemon.processes import ProcessIdentity, ProcessTracker, discover_owner, probe, process_identity
+from pet_daemon.processes import (
+    ProcessIdentity,
+    ProcessTracker,
+    discover_owner,
+    probe,
+    process_identity,
+)
 from pet_daemon.sessions import Sessions
 
 
@@ -16,14 +22,25 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
             owner = process_identity(child.pid)
             self.assertIsNotNone(owner)
             sessions = Sessions(lambda: 1000)
-            sessions.handle({"event": "intent", "harness": "claude", "session": "main", "owner": owner.packet()})
+            sessions.handle(
+                {
+                    "event": "intent",
+                    "harness": "claude",
+                    "session": "main",
+                    "owner": owner.packet(),
+                }
+            )
             tracker = ProcessTracker(interval=0)
-            sessions.apply_process_status(await tracker.refresh(sessions.process_owners()))
+            sessions.apply_process_status(
+                await tracker.refresh(sessions.process_owners())
+            )
             self.assertTrue(sessions.active)
             self.assertEqual(sessions.snapshot()["sessions"][0]["presence"], "alive")
             child.terminate()
             await asyncio.to_thread(child.wait)
-            sessions.apply_process_status(await tracker.refresh(sessions.process_owners()))
+            sessions.apply_process_status(
+                await tracker.refresh(sessions.process_owners())
+            )
             self.assertFalse(sessions.active)
             self.assertEqual(sessions.lanes["claude:main"].outcome, "stale")
         finally:
@@ -37,7 +54,14 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await asyncio.to_thread(probe, replaced), "replaced")
         sessions = Sessions(lambda: 1000)
         for name, identity in (("current", owner), ("old", replaced)):
-            sessions.handle({"event": "intent", "harness": "claude", "session": name, "owner": identity.packet()})
+            sessions.handle(
+                {
+                    "event": "intent",
+                    "harness": "claude",
+                    "session": name,
+                    "owner": identity.packet(),
+                }
+            )
         tracker = ProcessTracker()
         sessions.apply_process_status(await tracker.refresh(sessions.process_owners()))
         self.assertTrue(sessions.lanes["claude:current"].active)
@@ -47,8 +71,18 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_probe_leaves_a_session_active_with_unknown_presence(self):
         owner = process_identity(os.getpid())
         sessions = Sessions(lambda: 1000)
-        sessions.handle({"event": "intent", "harness": "claude", "session": "main", "owner": owner.packet()})
-        with patch("pet_daemon.processes.subprocess.run", side_effect=subprocess.TimeoutExpired("ps", 2)):
+        sessions.handle(
+            {
+                "event": "intent",
+                "harness": "claude",
+                "session": "main",
+                "owner": owner.packet(),
+            }
+        )
+        with patch(
+            "pet_daemon.processes.subprocess.run",
+            side_effect=subprocess.TimeoutExpired("ps", 2),
+        ):
             results = await ProcessTracker().refresh(sessions.process_owners())
         sessions.apply_process_status(results)
         self.assertTrue(sessions.active)
@@ -57,9 +91,16 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
     def test_ancestry_crosses_shells_and_ignores_shared_hosts(self):
         def row(pid, parent, command):
             return (ProcessIdentity(pid, f"started-{pid}"), parent, "S", command)
-        rows = {30: row(30, 20, "sh -c pet-hook"), 20: row(20, 10, "/usr/bin/claude"),
-                10: row(10, 1, "/bin/zsh")}
-        with patch("pet_daemon.processes._processes", return_value=rows), patch.dict(os.environ, {}, clear=True):
+
+        rows = {
+            30: row(30, 20, "sh -c pet-hook"),
+            20: row(20, 10, "/usr/bin/claude"),
+            10: row(10, 1, "/bin/zsh"),
+        }
+        with (
+            patch("pet_daemon.processes._processes", return_value=rows),
+            patch.dict(os.environ, {}, clear=True),
+        ):
             self.assertEqual(discover_owner("claude", pid=30), rows[20][0])
             self.assertIsNone(discover_owner("cursor", pid=30))
             rows[20] = row(20, 10, "/usr/bin/codex app-server")
@@ -69,14 +110,22 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
 
     def test_explicit_wrapper_must_match_a_live_ancestor_identity(self):
         owner = ProcessIdentity(20, "wrapper-start")
-        rows = {30: (ProcessIdentity(30, "hook-start"), 20, "S", "python hook"),
-                20: (owner, 1, "S", "bash examples/pet-run")}
+        rows = {
+            30: (ProcessIdentity(30, "hook-start"), 20, "S", "python hook"),
+            20: (owner, 1, "S", "bash examples/pet-run"),
+        }
         with patch("pet_daemon.processes._processes", return_value=rows):
-            with patch.dict(os.environ, {"PET_OWNER_PID": "20", "PET_OWNER_STARTED": owner.started}):
+            with patch.dict(
+                os.environ, {"PET_OWNER_PID": "20", "PET_OWNER_STARTED": owner.started}
+            ):
                 self.assertEqual(discover_owner("cli", pid=30), owner)
-            with patch.dict(os.environ, {"PET_OWNER_PID": "20", "PET_OWNER_STARTED": "wrong"}):
+            with patch.dict(
+                os.environ, {"PET_OWNER_PID": "20", "PET_OWNER_STARTED": "wrong"}
+            ):
                 self.assertIsNone(discover_owner("cli", pid=30))
-            with patch.dict(os.environ, {"PET_OWNER_PID": "40", "PET_OWNER_STARTED": owner.started}):
+            with patch.dict(
+                os.environ, {"PET_OWNER_PID": "40", "PET_OWNER_STARTED": owner.started}
+            ):
                 self.assertIsNone(discover_owner("cli", pid=30))
 
 
@@ -86,7 +135,9 @@ class FreshnessTests(unittest.TestCase):
         self.sessions = Sessions(lambda: self.now)
 
     def event(self, kind, **fields):
-        return self.sessions.handle({"event": kind, "harness": "claude", "session": "main", **fields})
+        return self.sessions.handle(
+            {"event": kind, "harness": "claude", "session": "main", **fields}
+        )
 
     def test_quiet_live_turn_permits_rest_and_resumes_when_activity_arrives(self):
         owner = process_identity(os.getpid())
@@ -118,7 +169,14 @@ class FreshnessTests(unittest.TestCase):
     def test_owner_exit_retires_an_inherited_child_without_claiming_success(self):
         owner = process_identity(os.getpid())
         self.event("intent", owner=owner.packet())
-        self.sessions.handle({"event": "subagent_start", "harness": "claude", "session": "child", "parent": "main"})
+        self.sessions.handle(
+            {
+                "event": "subagent_start",
+                "harness": "claude",
+                "session": "child",
+                "parent": "main",
+            }
+        )
         self.assertEqual(self.sessions.lanes["claude:child"].owner, owner)
         self.sessions.apply_process_status({owner: "exited"})
         self.assertFalse(self.sessions.active)

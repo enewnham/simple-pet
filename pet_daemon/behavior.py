@@ -38,15 +38,25 @@ class Behavior:
 
     def satisfy(self):
         self.next_care = self.clock() + self.rng.uniform(*self.config.care_interval)
-        self.next_care_speech = self.clock() + self.rng.uniform(*self.config.care_speech_interval)
+        self.next_care_speech = self.clock() + self.rng.uniform(
+            *self.config.care_speech_interval
+        )
         self.care_remark = None
         self.care_choices = []
 
     def _care(self, sessions):
-        if not self.config.care or sessions.working or self.clock() < self.next_care or self._blocked():
+        if (
+            not self.config.care
+            or sessions.working
+            or self.clock() < self.next_care
+            or self._blocked()
+        ):
             return False
-        choices = [("exercise", "celebrate", "jumping"), ("attention", "greeting", "waving"),
-                   ("consternation", "error", "failed")]
+        choices = [
+            ("exercise", "celebrate", "jumping"),
+            ("attention", "greeting", "waving"),
+            ("consternation", "error", "failed"),
+        ]
         available = [item for item in choices if self.pack.role(item[1])]
         if sessions.engaged:
             available = [item for item in available if item[0] == "consternation"]
@@ -57,7 +67,11 @@ class Behavior:
             kind, role, preferred = self.rng.choice(available)
         else:
             if not self.care_choices:
-                self.care_choices = [item for item in available for _ in range(1 if item[0] == "consternation" else 2)]
+                self.care_choices = [
+                    item
+                    for item in available
+                    for _ in range(1 if item[0] == "consternation" else 2)
+                ]
             selected = self.rng.choice(self.care_choices)
             self.care_choices.remove(selected)
             kind, role, preferred = selected
@@ -65,7 +79,9 @@ class Behavior:
         self._play(clip, "care", "reaction", REACTION_SECONDS)
         if not sessions.engaged and self.clock() >= self.next_care_speech:
             self.care_remark = kind
-            self.next_care_speech = self.clock() + self.rng.uniform(*self.config.care_speech_interval)
+            self.next_care_speech = self.clock() + self.rng.uniform(
+                *self.config.care_speech_interval
+            )
         event("behavior.care", activity=kind)
         return True
 
@@ -74,8 +90,13 @@ class Behavior:
         action = self.execution.action
         if action is None or action.event is None:
             return None
-        return {"id": action.command_id, "event": action.event, "kind": action.kind,
-                "role": action.role, "until": action.until}
+        return {
+            "id": action.command_id,
+            "event": action.event,
+            "kind": action.kind,
+            "role": action.role,
+            "until": action.until,
+        }
 
     @property
     def sleeping(self):
@@ -86,13 +107,25 @@ class Behavior:
         return self.command
 
     def _pause(self):
-        return self.config.working_pause if self.observation and self.observation.working else self.config.idle_pause
+        return (
+            self.config.working_pause
+            if self.observation and self.observation.working
+            else self.config.idle_pause
+        )
 
     def _rest(self, clip_id=None):
         clip_id = clip_id or self.pack.rest
         if self.clip != clip_id:
             self.clip = clip_id
-            self.emit({"animation": {"id": clip_id, "repeats": None, "command_id": self._next_id()}})
+            self.emit(
+                {
+                    "animation": {
+                        "id": clip_id,
+                        "repeats": None,
+                        "command_id": self._next_id(),
+                    }
+                }
+            )
 
     def stop_movement(self):
         if self.execution.action and self.execution.action.kind == "walk":
@@ -136,15 +169,24 @@ class Behavior:
 
     def renderer_status(self, packet):
         for name in ("x", "y", "width", "height"):
-            if type(packet.get(name)) not in (int, float) or not math.isfinite(packet[name]):
+            if type(packet.get(name)) not in (int, float) or not math.isfinite(
+                packet[name]
+            ):
                 return False
         if packet["width"] <= 0 or packet["height"] <= 0:
             return False
         screen, pointer = packet.get("screen"), packet.get("pointer")
         if not isinstance(screen, dict) or not isinstance(pointer, dict):
             return False
-        for item, keys in ((screen, ("x", "y", "width", "height")), (pointer, ("x", "y"))):
-            if any(type(item.get(name)) not in (int, float) or not math.isfinite(item[name]) for name in keys):
+        for item, keys in (
+            (screen, ("x", "y", "width", "height")),
+            (pointer, ("x", "y")),
+        ):
+            if any(
+                type(item.get(name)) not in (int, float)
+                or not math.isfinite(item[name])
+                for name in keys
+            ):
                 return False
         if screen["width"] <= 0 or screen["height"] <= 0:
             return False
@@ -157,23 +199,42 @@ class Behavior:
             self.last_pointer = position
         if self.status is None:
             self.state = None
-        if self.status is None or any(self.status[name] != packet[name] for name in ("screen", "dragging", "menu", "speech")):
+        if self.status is None or any(
+            self.status[name] != packet[name]
+            for name in ("screen", "dragging", "menu", "speech")
+        ):
             verbose("renderer.status", packet=packet)
-        if self.preferred_position is None or (self.status and self.status["dragging"] and not packet["dragging"]):
+        if self.preferred_position is None or (
+            self.status and self.status["dragging"] and not packet["dragging"]
+        ):
             self.preferred_position = (packet["x"], packet["y"])
             self.last_movement = self.clock()
         screen = packet["screen"]
         home_x, home_y = self.preferred_position
         self.preferred_position = (
-            max(screen["x"], min(home_x, max(screen["x"], screen["x"] + screen["width"] - packet["width"]))),
-            max(screen["y"], min(home_y, max(screen["y"], screen["y"] + screen["height"] - packet["height"]))),
+            max(
+                screen["x"],
+                min(
+                    home_x,
+                    max(screen["x"], screen["x"] + screen["width"] - packet["width"]),
+                ),
+            ),
+            max(
+                screen["y"],
+                min(
+                    home_y,
+                    max(screen["y"], screen["y"] + screen["height"] - packet["height"]),
+                ),
+            ),
         )
         self.status = packet
         return True
 
     def completion(self, packet):
         walking = self.execution.action and self.execution.action.kind == "walk"
-        if self.execution.completion(packet, self.clock(), self.rng.uniform(*self._pause())):
+        if self.execution.completion(
+            packet, self.clock(), self.rng.uniform(*self._pause())
+        ):
             if walking:
                 self.last_movement = self.clock()
             self.clip = None
@@ -181,11 +242,20 @@ class Behavior:
 
     def _near_pointer(self):
         status = self.status
-        return math.hypot(status["pointer"]["x"] - (status["x"] + status["width"] / 2),
-                          status["pointer"]["y"] - (status["y"] + 52)) <= self.config.pointer_radius
+        return (
+            math.hypot(
+                status["pointer"]["x"] - (status["x"] + status["width"] / 2),
+                status["pointer"]["y"] - (status["y"] + 52),
+            )
+            <= self.config.pointer_radius
+        )
 
     def _blocked(self):
-        return not self.status or any(self.status[name] for name in ("speech", "dragging", "menu")) or self._near_pointer()
+        return (
+            not self.status
+            or any(self.status[name] for name in ("speech", "dragging", "menu"))
+            or self._near_pointer()
+        )
 
     def _play(self, clip, name, kind, seconds, session=None):
         repeats = max(1, math.ceil(seconds / clip.seconds))
@@ -193,18 +263,45 @@ class Behavior:
             repeats = min(repeats, clip.max_repeats)
         command = self._next_id()
         duration = clip.seconds * repeats
-        self.execution.start(Action(name, command, "animation", self.clock() + duration + 1, clip.role, kind))
+        self.execution.start(
+            Action(
+                name, command, "animation", self.clock() + duration + 1, clip.role, kind
+            )
+        )
         self.clip = clip.id
-        self.emit({"stop_motion": True, "animation": {"id": clip.id, "repeats": repeats, "command_id": command}})
+        self.emit(
+            {
+                "stop_motion": True,
+                "animation": {"id": clip.id, "repeats": repeats, "command_id": command},
+            }
+        )
         if kind in ("error", "success", "reaction"):
-            event("behavior.reaction", reaction=name, clip=clip.id, role=clip.role, repeats=repeats,
-                  duration_seconds=round(duration, 3), command_id=command, session=session)
+            event(
+                "behavior.reaction",
+                reaction=name,
+                clip=clip.id,
+                role=clip.role,
+                repeats=repeats,
+                duration_seconds=round(duration, 3),
+                command_id=command,
+                session=session,
+            )
         else:
-            trace("behavior.animation", activity=name, clip=clip.id, role=clip.role, repeats=repeats,
-                  duration_seconds=round(duration, 3), command_id=command)
+            trace(
+                "behavior.animation",
+                activity=name,
+                clip=clip.id,
+                role=clip.role,
+                repeats=repeats,
+                duration_seconds=round(duration, 3),
+                command_id=command,
+            )
 
     def _resolve_clip(self, role, preferred, fallback):
-        for candidate_role, candidate_id in ((role, preferred), (ANIMATION_ROLES[fallback], fallback)):
+        for candidate_role, candidate_id in (
+            (role, preferred),
+            (ANIMATION_ROLES[fallback], fallback),
+        ):
             clips = self.pack.role(candidate_role)
             preferred_clips = [clip for clip in clips if clip.id == candidate_id]
             custom_clips = [clip for clip in clips if clip.id not in ANIMATION_ROLES]
@@ -219,20 +316,44 @@ class Behavior:
 
     def react(self, kind, sessions=None, key=None):
         clip = self._reaction_clip(kind)
-        if not self.status or self.suspension or self.status["dragging"] or self.status["menu"]:
+        if (
+            not self.status
+            or self.suspension
+            or self.status["dragging"]
+            or self.status["menu"]
+        ):
             return False
         current = self.execution.action
         if current and current.name in REACTIONS:
-            if current.name == kind or REACTIONS[kind].priority < REACTIONS[current.name].priority:
+            if (
+                current.name == kind
+                or REACTIONS[kind].priority < REACTIONS[current.name].priority
+            ):
                 return False
         self.wake(kind)
         self._interrupt(kind)
         if clip.id == self.pack.rest:
             self._rest()
-            self.execution.start(Action(kind, self.command, None, self.clock() + self.config.baseline_dwell,
-                                        "rest", REACTIONS[kind].kind))
-            event("behavior.reaction", reaction=kind, clip=clip.id, role="rest", repeats=None,
-                  duration_seconds=self.config.baseline_dwell, command_id=self.command, session=key)
+            self.execution.start(
+                Action(
+                    kind,
+                    self.command,
+                    None,
+                    self.clock() + self.config.baseline_dwell,
+                    "rest",
+                    REACTIONS[kind].kind,
+                )
+            )
+            event(
+                "behavior.reaction",
+                reaction=kind,
+                clip=clip.id,
+                role="rest",
+                repeats=None,
+                duration_seconds=self.config.baseline_dwell,
+                command_id=self.command,
+                session=key,
+            )
         else:
             self._play(clip, kind, REACTIONS[kind].kind, REACTION_SECONDS, session=key)
         return True
@@ -249,13 +370,21 @@ class Behavior:
             scale = self.config.roaming_radius / distance
             x, y = home_x + (x - home_x) * scale, home_y + (y - home_y) * scale
         screen = status["screen"]
-        x = max(screen["x"], min(x, max(screen["x"], screen["x"] + screen["width"] - status["width"])))
-        y = max(screen["y"], min(y, max(screen["y"], screen["y"] + screen["height"] - status["height"])))
+        x = max(
+            screen["x"],
+            min(x, max(screen["x"], screen["x"] + screen["width"] - status["width"])),
+        )
+        y = max(
+            screen["y"],
+            min(y, max(screen["y"], screen["y"] + screen["height"] - status["height"])),
+        )
         distance = math.hypot(x - status["x"], y - status["y"])
         if distance < 1:
             return False
         seconds = min(seconds, distance / self.config.walk_speed)
-        clip = self.rng.choice(self.pack.role("walk-left" if x < status["x"] else "walk-right"))
+        clip = self.rng.choice(
+            self.pack.role("walk-left" if x < status["x"] else "walk-right")
+        )
         if clip.max_repeats is not None and seconds > clip.seconds * clip.max_repeats:
             scale = clip.seconds * clip.max_repeats / seconds
             x = status["x"] + (x - status["x"]) * scale
@@ -263,12 +392,31 @@ class Behavior:
             seconds = clip.seconds * clip.max_repeats
         command = self._next_id()
         self.last_movement = self.clock()
-        self.execution.start(Action("roam", command, "motion", self.clock() + seconds + 1, clip.role, "walk"))
+        self.execution.start(
+            Action(
+                "roam", command, "motion", self.clock() + seconds + 1, clip.role, "walk"
+            )
+        )
         self.clip = clip.id
-        self.emit({"animation": {"id": clip.id, "repeats": clip.max_repeats, "command_id": command},
-                   "motion": {"x": x, "y": y, "seconds": seconds, "command_id": command}})
-        trace("behavior.motion", activity="roam", clip=clip.id, duration_seconds=round(seconds, 3),
-              x=round(x, 1), y=round(y, 1), command_id=command)
+        self.emit(
+            {
+                "animation": {
+                    "id": clip.id,
+                    "repeats": clip.max_repeats,
+                    "command_id": command,
+                },
+                "motion": {"x": x, "y": y, "seconds": seconds, "command_id": command},
+            }
+        )
+        trace(
+            "behavior.motion",
+            activity="roam",
+            clip=clip.id,
+            duration_seconds=round(seconds, 3),
+            x=round(x, 1),
+            y=round(y, 1),
+            command_id=command,
+        )
         return True
 
     def _gaze_clip(self):
@@ -330,24 +478,43 @@ class Behavior:
                 self._interrupt("interaction")
         elif self.clear_since is None:
             self.clear_since = now
-        inactive_seconds = 0 if self.inactive_since is None else now - self.inactive_since
+        inactive_seconds = (
+            0 if self.inactive_since is None else now - self.inactive_since
+        )
         self.observation = Observation(
             active=sessions.engaged,
             working=sessions.working,
-            investigating=any(lane.working and lane.phase == "investigating" for lane in sessions.lanes.values()),
+            investigating=any(
+                lane.working and lane.phase == "investigating"
+                for lane in sessions.lanes.values()
+            ),
             waiting=any(lane.waiting for lane in sessions.lanes.values()),
             interacting=status["speech"],
             pointer_recent=now - self.pointer_moved < self.config.gaze_reset_seconds,
-            can_roam=(self.config.roaming and not blocked and self.clear_since is not None
-                      and now - self.clear_since >= self.config.resume_seconds),
-            can_nap=(self.config.naps and not sessions.engaged and not blocked and inactive_seconds >= 120
-                     and self.next_nap is not None and now >= self.next_nap),
+            can_roam=(
+                self.config.roaming
+                and not blocked
+                and self.clear_since is not None
+                and now - self.clear_since >= self.config.resume_seconds
+            ),
+            can_nap=(
+                self.config.naps
+                and not sessions.engaged
+                and not blocked
+                and inactive_seconds >= 120
+                and self.next_nap is not None
+                and now >= self.next_nap
+            ),
             restlessness=min(1, (now - self.last_movement) / 300),
             rest_pressure=min(1, inactive_seconds / 240),
         )
         if self.sleeping:
             if sessions.engaged or blocked or now >= self.nap_until:
-                self.wake("activity_or_interaction" if sessions.engaged or blocked else "nap_finished")
+                self.wake(
+                    "activity_or_interaction"
+                    if sessions.engaged or blocked
+                    else "nap_finished"
+                )
                 self._rest()
                 return
             return
@@ -356,13 +523,25 @@ class Behavior:
             if current is None or current.name not in REACTIONS:
                 self.react("start", sessions)
         current = self.execution.action
-        if (self.observation.pointer_recent and not status["speech"] and self._gaze_clip()
-                and (current is None or current.name in ("rest", "observe"))):
+        if (
+            self.observation.pointer_recent
+            and not status["speech"]
+            and self._gaze_clip()
+            and (current is None or current.name in ("rest", "observe"))
+        ):
             if current is None or current.name != "observe":
                 self._interrupt("pointer")
                 self._rest(self._gaze_clip())
-                self.execution.start(Action("observe", self.command, None,
-                                            now + self.config.gaze_reset_seconds, "gaze", "rest"))
+                self.execution.start(
+                    Action(
+                        "observe",
+                        self.command,
+                        None,
+                        now + self.config.gaze_reset_seconds,
+                        "gaze",
+                        "rest",
+                    )
+                )
             else:
                 self._rest(self._gaze_clip())
                 current.until = self.pointer_moved + self.config.gaze_reset_seconds
@@ -377,7 +556,9 @@ class Behavior:
             return
         if state != "error" and self._care(sessions):
             return
-        candidate = self.policy.select(self.observation, self.execution.last_completed, self.rng, self._available)
+        candidate = self.policy.select(
+            self.observation, self.execution.last_completed, self.rng, self._available
+        )
         if candidate.name == "roam" and self._walk():
             return
         if candidate.name == "nap":
@@ -385,19 +566,38 @@ class Behavior:
             event("behavior.napping", duration_seconds=round(self.nap_until - now, 2))
             self.emit({"sleeping": True, "stop_motion": True})
             self._rest()
-            self.execution.start(Action("nap", self.command, None, self.nap_until, "rest", "nap"))
+            self.execution.start(
+                Action("nap", self.command, None, self.nap_until, "rest", "nap")
+            )
             return
         if candidate.name == "focus":
-            preferred, fallback = ("review", "running") if self.observation.investigating else ("running", "review")
+            preferred, fallback = (
+                ("review", "running")
+                if self.observation.investigating
+                else ("running", "review")
+            )
             clip = self._resolve_clip(candidate.role, preferred, fallback)
             if clip.id == self.pack.rest:
                 self._rest()
                 duration = self.rng.uniform(*self._pause())
-                self.execution.start(Action("focus", self.command, None, now + duration, "rest", "rest"))
+                self.execution.start(
+                    Action("focus", self.command, None, now + duration, "rest", "rest")
+                )
             else:
-                self._play(clip, "focus", "focus", self.rng.uniform(*self.config.work_burst_seconds))
+                self._play(
+                    clip,
+                    "focus",
+                    "focus",
+                    self.rng.uniform(*self.config.work_burst_seconds),
+                )
             return
         clip_id = self._gaze_clip() if candidate.name == "observe" else self.pack.rest
         self._rest(clip_id)
-        duration = self.config.gaze_reset_seconds if candidate.name == "observe" else self.rng.uniform(*self._pause())
-        self.execution.start(Action(candidate.name, self.command, None, now + duration, "rest", "rest"))
+        duration = (
+            self.config.gaze_reset_seconds
+            if candidate.name == "observe"
+            else self.rng.uniform(*self._pause())
+        )
+        self.execution.start(
+            Action(candidate.name, self.command, None, now + duration, "rest", "rest")
+        )

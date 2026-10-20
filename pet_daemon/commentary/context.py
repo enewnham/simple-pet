@@ -119,75 +119,131 @@ def duration(seconds):
 
 def semantic(value):
     if isinstance(value, dict):
-        return {key: semantic(item) for key, item in value.items()
-                if key not in {'time', 'presence', 'session_context', 'observed', 'observed_at', 'age', 'active_for', 'quiet_for', 'waiting_for', 'running_for'}}
+        return {
+            key: semantic(item)
+            for key, item in value.items()
+            if key
+            not in {
+                "time",
+                "presence",
+                "session_context",
+                "observed",
+                "observed_at",
+                "age",
+                "active_for",
+                "quiet_for",
+                "waiting_for",
+                "running_for",
+            }
+        }
     if isinstance(value, (tuple, list)):
         return [semantic(item) for item in value]
     return value
 
 
 def session_record(session):
-    record = {key: session.get(key) for key in (
-        'turn_active', 'waiting_for_input', 'outcome', 'activity_uncertain', 'presence') if key in session}
-    record.update(project=bounded(Path(session.get('repo') or '').name, 120),
-                  session_context=bounded(session.get('session_context'), 400),
-                  recent_requests=[select_prompt(request) for request in session.get('recent_requests', ())[-4:]],
-                  progress=bounded(session.get('progress'), 240),
-                  active_for=duration(session.get('duration_seconds')),
-                  quiet_for=duration(session.get('quiet_seconds')))
-    if session.get('user_sentiment'):
-        record['user_sentiment'] = session['user_sentiment']
-    if session.get('waiting_for_input'):
-        record['waiting_for'] = duration(session.get('waiting_seconds'))
-    failure = session.get('failure')
-    record['failure'] = None
-    if failure and failure.get('current_turn') and not failure.get('resolved'):
-        record['failure'] = {'activity': bounded(failure.get('activity'), 120), 'count': failure.get('count'),
-                             'age': duration(failure.get('seconds_ago'))}
-    tools = session.get('active_tools', ())
-    record['active_tools'] = [{'tool': bounded(tool.get('tool'), 160),
-                              'running_for': duration(tool.get('duration_seconds'))} for tool in tools[:3]]
-    record['other_active_tools'] = max(0, len(tools) - 3)
-    if session.get('connected_work'):
-        record['connected_work'] = work_record(session['connected_work'])
+    record = {
+        key: session.get(key)
+        for key in (
+            "turn_active",
+            "waiting_for_input",
+            "outcome",
+            "activity_uncertain",
+            "presence",
+        )
+        if key in session
+    }
+    record.update(
+        project=bounded(Path(session.get("repo") or "").name, 120),
+        session_context=bounded(session.get("session_context"), 400),
+        recent_requests=[
+            select_prompt(request)
+            for request in session.get("recent_requests", ())[-4:]
+        ],
+        progress=bounded(session.get("progress"), 240),
+        active_for=duration(session.get("duration_seconds")),
+        quiet_for=duration(session.get("quiet_seconds")),
+    )
+    if session.get("user_sentiment"):
+        record["user_sentiment"] = session["user_sentiment"]
+    if session.get("waiting_for_input"):
+        record["waiting_for"] = duration(session.get("waiting_seconds"))
+    failure = session.get("failure")
+    record["failure"] = None
+    if failure and failure.get("current_turn") and not failure.get("resolved"):
+        record["failure"] = {
+            "activity": bounded(failure.get("activity"), 120),
+            "count": failure.get("count"),
+            "age": duration(failure.get("seconds_ago")),
+        }
+    tools = session.get("active_tools", ())
+    record["active_tools"] = [
+        {
+            "tool": bounded(tool.get("tool"), 160),
+            "running_for": duration(tool.get("duration_seconds")),
+        }
+        for tool in tools[:3]
+    ]
+    record["other_active_tools"] = max(0, len(tools) - 3)
+    if session.get("connected_work"):
+        record["connected_work"] = work_record(session["connected_work"])
     return record
 
+
 def project_payload(snapshot, selection, timestamp):
-    payload = {'activity': snapshot.get('activity', 'idle'), 'sleeping': snapshot.get('sleeping', False),
-               'time': datetime.fromtimestamp(timestamp).astimezone().strftime('%A %H:%M')}
-    if selection.situation.startswith('care_') or selection.situation == 'click_idle':
+    payload = {
+        "activity": snapshot.get("activity", "idle"),
+        "sleeping": snapshot.get("sleeping", False),
+        "time": datetime.fromtimestamp(timestamp).astimezone().strftime("%A %H:%M"),
+    }
+    if selection.situation.startswith("care_") or selection.situation == "click_idle":
         return payload
-    payload.pop('activity')
-    payload.update(context=selection.context[:2000] if selection.context is not None else None,
-                   focus_session=None, other_sessions=[], omitted_sessions={'active': 0, 'total': 0},
-                   focus_opportunity=None, convergence=False, memory={'recent_events': []})
-    if selection.context is not None or selection.reason == 'explicit':
+    payload.pop("activity")
+    payload.update(
+        context=selection.context[:2000] if selection.context is not None else None,
+        focus_session=None,
+        other_sessions=[],
+        omitted_sessions={"active": 0, "total": 0},
+        focus_opportunity=None,
+        convergence=False,
+        memory={"recent_events": []},
+    )
+    if selection.context is not None or selection.reason == "explicit":
         return payload
     if selection.action is not None:
-        payload['focus_opportunity'] = opportunity_record(selection.action)
+        payload["focus_opportunity"] = opportunity_record(selection.action)
         return payload
     focus = selection.focus_session
     if focus is None and selection.subject is not None:
-        payload['focus_work'] = work_record(selection.subject.view)
-    if selection.reason == 'prompt':
+        payload["focus_work"] = work_record(selection.subject.view)
+    if selection.reason == "prompt":
         if focus:
-            payload['focus_session'] = {
-                'project': bounded(Path(focus.get('repo') or '').name, 120),
-                'session_context': bounded(focus.get('session_context'), 400),
-                'recent_requests': [select_prompt(value) for value in focus.get('recent_requests', ())[-1:]],
+            payload["focus_session"] = {
+                "project": bounded(Path(focus.get("repo") or "").name, 120),
+                "session_context": bounded(focus.get("session_context"), 400),
+                "recent_requests": [
+                    select_prompt(value)
+                    for value in focus.get("recent_requests", ())[-1:]
+                ],
             }
-            if focus.get('user_sentiment'):
-                payload['focus_session']['user_sentiment'] = focus['user_sentiment']
-            if focus.get('connected_work'):
-                payload['focus_session']['connected_work'] = work_record(focus['connected_work'])
+            if focus.get("user_sentiment"):
+                payload["focus_session"]["user_sentiment"] = focus["user_sentiment"]
+            if focus.get("connected_work"):
+                payload["focus_session"]["connected_work"] = work_record(
+                    focus["connected_work"]
+                )
         return payload
     others = selection.context_sessions
-    payload.update(focus_session=session_record(focus) if focus else None,
-                   other_sessions=[session_record(session) for session in others[:2]],
-                   omitted_sessions={'active': sum(bool(session.get('turn_active')) for session in others[2:]),
-                                     'total': max(0, len(others) - 2)})
-    if selection.reason == 'failure' and payload['focus_session']:
-        payload['focus_session'].pop('progress', None)
+    payload.update(
+        focus_session=session_record(focus) if focus else None,
+        other_sessions=[session_record(session) for session in others[:2]],
+        omitted_sessions={
+            "active": sum(bool(session.get("turn_active")) for session in others[2:]),
+            "total": max(0, len(others) - 2),
+        },
+    )
+    if selection.reason == "failure" and payload["focus_session"]:
+        payload["focus_session"].pop("progress", None)
     return payload
 
 
@@ -198,10 +254,13 @@ class EvidenceManifest:
 
     @property
     def session_ids(self):
-        count = len(self.payload.get('other_sessions', ()))
+        count = len(self.payload.get("other_sessions", ()))
         focus = self.selection.focus_session
-        return ((focus['id'],) if self.payload.get('focus_session') is not None and focus else ()) + tuple(
-            session['id'] for session in self.selection.context_sessions[:count])
+        return (
+            (focus["id"],)
+            if self.payload.get("focus_session") is not None and focus
+            else ()
+        ) + tuple(session["id"] for session in self.selection.context_sessions[:count])
 
     def valid(self, snapshot):
         if not self.selection.supported(snapshot):
@@ -211,21 +270,28 @@ class EvidenceManifest:
             return False
         if self.selection.action is not None and refreshed.action is None:
             return False
-        if self.payload.get('focus_session') is not None and refreshed.focus_session is None:
+        if (
+            self.payload.get("focus_session") is not None
+            and refreshed.focus_session is None
+        ):
             return False
-        current_ids = {session['id'] for session in snapshot.get('sessions', ())}
+        current_ids = {session["id"] for session in snapshot.get("sessions", ())}
         if not set(self.session_ids) <= current_ids:
             return False
         current = project_payload(snapshot, refreshed, 0)
         expected = semantic(self.payload)
         actual = semantic(current)
-        if expected.get('focus_session') is not None:
-            requests = expected['focus_session'].get('recent_requests', ())
-            actual['focus_session']['recent_requests'] = actual['focus_session'].get('recent_requests', [])[-len(requests):] if requests else []
-        if 'other_sessions' in expected:
-            count = len(expected['other_sessions'])
-            actual['other_sessions'] = actual.get('other_sessions', [])[:count]
-        for field in ('omitted_sessions', 'convergence'):
+        if expected.get("focus_session") is not None:
+            requests = expected["focus_session"].get("recent_requests", ())
+            actual["focus_session"]["recent_requests"] = (
+                actual["focus_session"].get("recent_requests", [])[-len(requests) :]
+                if requests
+                else []
+            )
+        if "other_sessions" in expected:
+            count = len(expected["other_sessions"])
+            actual["other_sessions"] = actual.get("other_sessions", [])[:count]
+        for field in ("omitted_sessions", "convergence"):
             expected.pop(field, None)
             actual.pop(field, None)
         return actual == expected
@@ -245,55 +311,74 @@ class Context:
 
     def situation(self, selection):
         direction = SITUATIONS[selection.situation]
-        if selection.situation == 'completion':
-            outcome = (selection.focus_session or {}).get('outcome')
-            if outcome == 'cancelled':
-                direction += ' Acknowledge the cancellation without claiming success.'
-            elif outcome == 'error':
-                direction += ' Acknowledge the unsuccessful result without claiming success.'
+        if selection.situation == "completion":
+            outcome = (selection.focus_session or {}).get("outcome")
+            if outcome == "cancelled":
+                direction += " Acknowledge the cancellation without claiming success."
+            elif outcome == "error":
+                direction += (
+                    " Acknowledge the unsuccessful result without claiming success."
+                )
         return direction
 
     def system(self, selection, retry=False):
         direction = self.situation(selection)
-        direction = '<request>\n' + direction + '\n</request>'
+        direction = "<request>\n" + direction + "\n</request>"
         if retry:
-            direction += '\n<reconsideration>\n' + RETRY_INSTRUCTIONS + '\n</reconsideration>'
+            direction += (
+                "\n<reconsideration>\n" + RETRY_INSTRUCTIONS + "\n</reconsideration>"
+            )
         return [
-            {'type': 'text', 'text': '<persona>\n' + self.config.persona + '\n</persona>\n\n' + INSTRUCTIONS,
-             'cache_control': CACHE_CONTROL},
-            {'type': 'text', 'text': direction},
+            {
+                "type": "text",
+                "text": "<persona>\n"
+                + self.config.persona
+                + "\n</persona>\n\n"
+                + INSTRUCTIONS,
+                "cache_control": CACHE_CONTROL,
+            },
+            {"type": "text", "text": direction},
         ]
 
     def prompt(self, snapshot, selection):
         return project_payload(snapshot, selection, self.clock())
 
-    def prepare(self, snapshot, selection, make_request, speech_required=False, retry=False):
+    def prepare(
+        self, snapshot, selection, make_request, speech_required=False, retry=False
+    ):
         payload = self.prompt(snapshot, selection)
         system = self.system(selection, retry)
         selected = deepcopy(payload)
-        focus = selected.get('focus_session')
-        requests = focus.get('recent_requests', []) if focus else []
-        others = selected.get('other_sessions', [])
+        focus = selected.get("focus_session")
+        requests = focus.get("recent_requests", []) if focus else []
+        others = selected.get("other_sessions", [])
         if focus:
-            focus['recent_requests'] = requests[-1:]
+            focus["recent_requests"] = requests[-1:]
         if others:
-            selected['other_sessions'] = []
-            omitted = selected['omitted_sessions']
-            omitted['total'] += len(others)
-            omitted['active'] += sum(bool(item.get('turn_active')) for item in others)
+            selected["other_sessions"] = []
+            omitted = selected["omitted_sessions"]
+            omitted["total"] += len(others)
+            omitted["active"] += sum(bool(item.get("turn_active")) for item in others)
 
         def has_room():
-            return encoded_size(make_request(selected, system, speech_required=speech_required)) < self.config.prompt_target_bytes
+            return (
+                encoded_size(
+                    make_request(selected, system, speech_required=speech_required)
+                )
+                < self.config.prompt_target_bytes
+            )
 
         for previous in reversed(requests[:-1]):
             if not has_room():
                 break
-            focus['recent_requests'].insert(0, previous)
+            focus["recent_requests"].insert(0, previous)
         for other in others:
             if not has_room():
                 break
-            selected['other_sessions'].append(other)
-            selected['omitted_sessions']['total'] -= 1
-            selected['omitted_sessions']['active'] -= bool(other.get('turn_active'))
+            selected["other_sessions"].append(other)
+            selected["omitted_sessions"]["total"] -= 1
+            selected["omitted_sessions"]["active"] -= bool(other.get("turn_active"))
         request = make_request(selected, system, speech_required=speech_required)
-        return PreparedCommentary(selection, request, EvidenceManifest(selection, deepcopy(selected)))
+        return PreparedCommentary(
+            selection, request, EvidenceManifest(selection, deepcopy(selected))
+        )
