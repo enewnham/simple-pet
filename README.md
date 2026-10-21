@@ -16,7 +16,7 @@ Future plans
 
 ## Quick start
 
-Requires macOS 12+, Swift 5.9+, Git, [uv](https://docs.astral.sh/uv/), an Anthropic API key, and a pet sprite pack.
+Requires macOS 12+, Swift 6.0+, Git, [uv](https://docs.astral.sh/uv/), an Anthropic API key, and a pet sprite pack.
 
 Find pets at [OpenPets packs](https://openpets.dev/packs) or [OpenPet Hatchery](https://github.com/chenmi319/openpet-hatchery). Sprite sheets must use the V2 1536×2288 layout. Custom manifests and PNG sprite folders are also supported. Download a pet ZIP, then run these commands from the repository root:
 
@@ -89,11 +89,10 @@ Set `PET_DAEMON_SOCKET` if the daemon uses a custom socket path.
 
 ## Development checks
 
-Run the automated checks and compile the renderer:
+Run the checks in a logged-in macOS session:
 
 ```sh
 make check
-make build
 ```
 
 `make setup` installs runtime and development dependencies from `uv.lock`.
@@ -108,7 +107,7 @@ boundaries. Keep `TypedDict` for JSON payloads and typed keyword arguments, and
 validate external data when decoding it into internal records. Use standard
 dataclass helpers and explicit JSON codecs for serialization.
 
-Run `make desktop-check` in a logged-in macOS session to test the renderer. Checks use a fake API and make no paid model requests.
+`make test` includes renderer checks. Checks use a fake API and make no paid model requests.
 
 ## License and attribution
 

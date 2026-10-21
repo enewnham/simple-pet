@@ -1,4 +1,4 @@
-// swift-tools-version: 5.9
+// swift-tools-version: 6.0
 import PackageDescription
 
 let package = Package(
@@ -11,6 +11,13 @@ let package = Package(
     targets: [
         .target(name: "PetCore"),
         .executableTarget(name: "PetOverlay", dependencies: ["PetCore"]),
-        .executableTarget(name: "PetSpeechSimilarity")
-    ]
+        .executableTarget(name: "PetSpeechSimilarity"),
+        .executableTarget(name: "AssetImporter", path: "scripts",
+                          exclude: ["pet-hook", "fetch-assets.sh", "unpack-assets.py"],
+                          sources: ["import-assets.swift"]),
+        .testTarget(name: "PetCoreTests", dependencies: ["PetCore"]),
+        .testTarget(name: "AssetImportTests", dependencies: ["AssetImporter"]),
+        .testTarget(name: "PetOverlayTests", dependencies: ["PetOverlay", "PetCore"])
+    ],
+    swiftLanguageModes: [.v5]
 )

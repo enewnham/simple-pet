@@ -61,10 +61,19 @@ public final class PetModel {
     public private(set) var sleeping = false
     public var onChange: (() -> Void)?
     private var expiration: DispatchWorkItem?
+    private let scheduleExpiration: (TimeInterval, DispatchWorkItem) -> Void
     private var acceptedDeliveries = Set<String>()
     private var deliveryOrder: [String] = []
 
-    public init() {}
+    public convenience init() {
+        self.init { delay, work in
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        }
+    }
+
+    init(scheduleExpiration: @escaping (TimeInterval, DispatchWorkItem) -> Void) {
+        self.scheduleExpiration = scheduleExpiration
+    }
 
     @discardableResult
     public func apply(_ event: PetEvent) -> String? {
@@ -95,7 +104,7 @@ public final class PetModel {
                     self?.onChange?()
                 }
                 expiration = work
-                DispatchQueue.main.asyncAfter(deadline: .now() + (event.ttl ?? 15), execute: work)
+                scheduleExpiration(event.ttl ?? 15, work)
             }
         }
         onChange?()
