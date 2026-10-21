@@ -6,28 +6,29 @@ import sqlite3
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, replace
+from pathlib import Path
 from typing import Protocol
 
+from .agent_activity import ActivityCoordinator
 from .attention import Attention, AttentionSelection
 from .behavior import Behavior
-from .commentary import Cognition, EvidenceManifest, ObservationResult
+from .commentary import Cognition, CommentaryResult, CommentarySupport
 from .config import Config
 from .delivery import DeliveryOutcome, SpeechDelivery, SpeechMessage
 from .episodes import Episodes
-from .events import AgentEvents
 from .processes import ProcessTracker
 from .runtime import (
     EpisodeTrigger,
     HookEvent,
     OverlayPacket,
+    PetContext,
     RandomSource,
     Trigger,
-    WorkSnapshot,
 )
 from .sessions import Sessions
 from .storage import Memory
 from .telemetry import event, observation, trace
-from .work import build_work
+from .work.history import EventContext, project_event
 from .work.observations import RepositoryObservation
 
 log = logging.getLogger("pet-daemon")
@@ -43,7 +44,7 @@ class ObservationProvider(Protocol):
 
 @dataclass(frozen=True)
 class MessageSupport:
-    manifest: EvidenceManifest
+    commentary: CommentarySupport
     trigger: Trigger | None
     request_epoch: int
 
@@ -64,7 +65,7 @@ class Application:
         emit: Callable[[OverlayPacket], object],
         clock: Callable[[], float],
         rng: RandomSource,
-        session_target: Callable[[str, str, bool], None] | None = None,
+        checkout_target: Callable[[str, bool], None] | None = None,
         reconcile_work: Callable[[], None] | None = None,
     ) -> None:
         self.config = config
@@ -76,10 +77,11 @@ class Application:
         self.providers = tuple(providers)
         self.processes = processes
         self.memory = memory
+        self.sessions.aliases.update(memory.session_aliases())
         self.emit = emit
         self.clock = clock
         self.rng = rng
-        self.session_target = session_target
+        self.checkout_target = checkout_target
         self.reconcile_work = reconcile_work
         self.task: asyncio.Task[None] | None = None
         self.reason: str | None = None
@@ -93,11 +95,10 @@ class Application:
         self.process_task: asyncio.Task[None] | None = None
         self.next_prune = 0
         self.reconciling = False
-        self.events = AgentEvents(
+        self.agent_activity = ActivityCoordinator(
             config,
             sessions=sessions,
             episodes=episodes,
-            memory=memory,
             behavior=behavior,
             queue=self.queue,
             clock=clock,
@@ -131,7 +132,7 @@ class Application:
             self.config.activity_fresh_seconds,
         )
         self.episodes = Episodes()
-        self.events.reset(self.sessions, self.episodes)
+        self.agent_activity.reset(self.sessions, self.episodes)
         self.manual = None
         self.clicked = False
         self.last_speech = None
@@ -161,9 +162,9 @@ class Application:
             self.sessions.prune()
             for provider in self.providers:
                 provider.resume()
-            for lane in self.sessions.lanes.values():
-                if lane.active:
-                    lane.last_check_in = self.clock()
+            for session in self.sessions.by_id.values():
+                if session.active:
+                    session.last_check_in = self.clock()
             self.attention.next_observation = self.clock() + self.rng.uniform(
                 *self.config.observation_seconds
             )
@@ -178,17 +179,34 @@ class Application:
     def queue(self, reason: str, trigger: Trigger | None = None) -> None:
         self.attention.queue(reason, trigger, self.sessions.failed)
 
-    def snapshot(self, trigger: Trigger | None = None) -> WorkSnapshot:
-        runtime = self.sessions.snapshot()
-        state = self.memory.work.snapshot()
-        subjects = build_work(runtime, state)
-        views = {subject.id: subject.view for subject in subjects}
+    def context(self, trigger: Trigger | None = None) -> PetContext:
+        runtime = self.sessions.activity_view()
+        sessions = []
+        for session in runtime.sessions:
+            context = self.memory.context(session.id)
+            if context:
+                session = replace(
+                    session,
+                    goal=context.initial_request or session.goal,
+                    initial_request=context.initial_request,
+                    summary=context.summary,
+                    recent_requests=tuple(context.recent_requests),
+                    request_count=context.request_count,
+                    first_summary_attempted=context.first_summary_attempted,
+                )
+            sessions.append(session)
+        runtime = replace(runtime, sessions=tuple(sessions))
+        subjects = self.memory.connected_work(runtime)
+        stories = {
+            session: subject.story
+            for subject in subjects
+            for session in subject.sessions
+        }
         members = []
         for session in runtime.sessions:
-            work = state.current(session.id)
-            view = views.get(work.id) if work else None
-            members.append(replace(session, connected_work=view))
-        return WorkSnapshot(
+            story = stories.get(session.id)
+            members.append(replace(session, connected_work=story))
+        return PetContext(
             runtime.activity,
             tuple(members),
             self.behavior.sleeping,
@@ -202,33 +220,38 @@ class Application:
             self._ingest_hook(observation)
             return
         try:
-            with self.memory.transaction():
-                self.memory.save_repository(observation)
-                self.memory.work.observe_repository(observation)
+            self.memory.work.observe(observation)
             self.reconcile_targets()
         except (sqlite3.Error, ValueError) as error:
             log.warning("Could not ingest work observation: %s", error)
 
     def _ingest_hook(self, hook: HookEvent) -> None:
-        result = self.events.handle(hook, self.suspended)
+        if hook.repo:
+            hook = replace(hook, repo=str(Path(hook.repo).resolve()))
+        result = self.agent_activity.handle(hook, self.suspended)
         if not result:
             return
-        key = result.session
-        lane = self.sessions.lanes[key]
         try:
             with self.memory.transaction():
-                if hook.event in ("intent", "subagent_start") and hook.goal:
-                    aliases = tuple(f"{hook.harness}:{alias}" for alias in hook.aliases)
-                    self.memory.work.session_intent(key, hook.goal, aliases=aliases)
-                self.memory.work.session_event(
-                    key, hook, waiting_for_input=lane.waiting
+                self.memory.work.record_session(result.observation)
+                self.memory.observe_session_context(result.observation)
+                session = self.sessions.by_id[result.session]
+                self.memory.record_event(
+                    project_event(
+                        hook,
+                        EventContext(
+                            result.session,
+                            session.repo,
+                            session.goal,
+                            session.last_tool,
+                            session.outcome,
+                            result.activity,
+                        ),
+                    )
                 )
-                if lane.repo:
-                    self.memory.associate_repository(key, lane.repo)
-            if self.session_target is not None:
-                self.session_target(
-                    key,
-                    lane.repo,
+            if self.checkout_target is not None and hook.repo:
+                self.checkout_target(
+                    hook.repo,
                     hook.event in ("intent", "subagent_start"),
                 )
             self.reconcile_targets()
@@ -276,7 +299,7 @@ class Application:
                 assert status is not None
                 self.system_sleep_changed(status.system_sleeping)
                 if not self.suspended:
-                    self.behavior.tick(self.events.activity(), self.sessions)
+                    self.behavior.tick(self.agent_activity.activity(), self.sessions)
         elif feedback in ("system_sleep", "system_wake"):
             self.system_sleep_changed(feedback == "system_sleep")
         elif feedback == "click":
@@ -316,19 +339,19 @@ class Application:
         self.clicked = True
         trace("speech.requested", reason="click")
 
-    async def observe(
+    async def comment(
         self,
         reason: str,
         context: str | None = None,
         ttl: float | None = None,
         trigger: Trigger | None = None,
         *,
-        snapshot: WorkSnapshot | None = None,
+        snapshot: PetContext | None = None,
         selection: AttentionSelection | None = None,
     ) -> None:
         if self.suspended:
             return
-        snapshot = self.snapshot(trigger) if snapshot is None else snapshot
+        snapshot = self.context(trigger) if snapshot is None else snapshot
         selection = (
             self.attention.select(snapshot, reason, context)
             if selection is None
@@ -349,19 +372,19 @@ class Application:
                     and self.cognition.should_summarize(focus_snapshot, reason)
                 ):
                     assert focus_session is not None
-                    focus = self.sessions.lanes[focus_session]
-                    focus.first_summary_attempted = True
+                    assert focus_snapshot is not None
+                    focus = focus_snapshot
                     self.memory.save_context(
                         focus_session,
-                        focus.first_prompt,
-                        focus.session_context,
+                        focus.initial_request,
+                        focus.summary,
                         focus.recent_requests,
                         focus.request_count,
                         True,
                     )
                 result = await asyncio.wait_for(
-                    self.cognition.observe(
-                        snapshot, selection, refresh=lambda: self.snapshot(trigger)
+                    self.cognition.generate_commentary(
+                        snapshot, selection, refresh=lambda: self.context(trigger)
                     ),
                     timeout=self.config.request_timeout,
                 )
@@ -372,7 +395,7 @@ class Application:
                 if (
                     epoch != self.revision
                     or history_epoch != self.history_epoch
-                    or not self.selection_valid(result.prepared.manifest, trigger)
+                    or not self.selection_valid(result.prepared.support, trigger)
                 ):
                     outcome = "discarded"
                     event(
@@ -402,7 +425,7 @@ class Application:
                             selection.subject.revision if selection.subject else None,
                             history_epoch=history_epoch,
                             support=MessageSupport(
-                                result.prepared.manifest, trigger, epoch
+                                result.prepared.support, trigger, epoch
                             ),
                         )
                         self.delivery.submit(message)
@@ -432,13 +455,13 @@ class Application:
                 )
 
     def selection_valid(
-        self, manifest: EvidenceManifest, trigger: Trigger | None
+        self, support: CommentarySupport, trigger: Trigger | None
     ) -> bool:
         if isinstance(trigger, EpisodeTrigger) and not self.episodes.relevant(
             trigger.episode, self.sessions
         ):
             return False
-        return manifest.valid(self.snapshot(trigger))
+        return support.valid(self.context(trigger))
 
     def mark_considered(self, selection: AttentionSelection) -> None:
         if selection.subject is not None:
@@ -462,34 +485,35 @@ class Application:
         return (
             message.history_epoch == self.history_epoch
             and support.request_epoch == self.revision
-            and self.selection_valid(support.manifest, support.trigger)
+            and self.selection_valid(support.commentary, support.trigger)
         )
 
-    def save_summary(self, result: ObservationResult) -> None:
-        if result.session_context is None:
+    def save_summary(self, result: CommentaryResult) -> None:
+        if result.summary is None:
             return
-        summary = " ".join(result.session_context.split())
-        key = result.context_session
+        summary = " ".join(result.summary.split())
+        key = result.summary_session
         assert key is not None
-        focus = self.sessions.lanes.get(key)
-        if not summary or focus is None:
+        current = next(
+            (session for session in self.context().sessions if session.id == key),
+            None,
+        )
+        if not summary or current is None:
             return
-        current = self.sessions.snapshot(keys=[key]).sessions[0]
-        if self.cognition.summary_version(current) != result.context_version:
+        if self.cognition.summary_version(current) != result.summary_version:
             trace("memory.context_discarded", reason="session_changed", session=key)
             return
-        focus.session_context = summary
         try:
             self.memory.save_context(
                 key,
-                focus.first_prompt,
+                current.initial_request,
                 summary,
-                focus.recent_requests,
-                focus.request_count,
-                focus.first_summary_attempted,
+                current.recent_requests,
+                current.request_count,
+                current.first_summary_attempted,
             )
         except sqlite3.Error as error:
-            log.warning("Could not save pet session context: %s", error)
+            log.warning("Could not save pet session summary: %s", error)
         trace("memory.context_updated", session=key)
 
     def delivery_outcome(self, outcome: DeliveryOutcome) -> None:
@@ -497,7 +521,7 @@ class Application:
         if message.history_epoch != self.history_epoch:
             return
         subject = next(
-            (item for item in self.snapshot().work if item.id == message.subject_id),
+            (item for item in self.context().work if item.id == message.subject_id),
             None,
         )
         current = subject is not None and subject.revision == message.revision
@@ -568,7 +592,7 @@ class Application:
             self.sessions.prune()
             self.next_prune = now + 1
         if not self.suspended:
-            self.behavior.tick(self.events.activity(), self.sessions)
+            self.behavior.tick(self.agent_activity.activity(), self.sessions)
         if self.task and self.task.done():
             if not self.task.cancelled():
                 self.task.result()
@@ -576,11 +600,11 @@ class Application:
             self.reason = None
         if self.suspended or self.task is not None or not self.behavior.status:
             return
-        snapshot = self.snapshot()
+        snapshot = self.context()
         check_in = tuple(
             key
             for key in self.sessions.check_in_due(self.config.idle_message_seconds)
-            if not self.sessions.lanes[key].waiting
+            if not self.sessions.by_id[key].waiting
         )
         request = self.attention.request(
             snapshot,
@@ -603,18 +627,18 @@ class Application:
             self.behavior.care_remark = None
         if not self.attention.allowed(request.reason, request.trigger):
             return
-        snapshot = self.snapshot(request.trigger)
+        snapshot = self.context(request.trigger)
         selection = self.attention.select(
             snapshot, request.reason, request.context, request.eligible
         )
         if request.reason == "check_in" and selection.focus_session:
-            self.sessions.lanes[selection.focus_session.id].last_check_in = now
+            self.sessions.by_id[selection.focus_session.id].last_check_in = now
         self.attention.scheduled(selection.id)
         self.persist_attention(selection.id)
         self.behavior.stop_movement()
         self.reason = request.reason
         self.task = asyncio.create_task(
-            self.observe(
+            self.comment(
                 request.reason,
                 request.context,
                 request.ttl,

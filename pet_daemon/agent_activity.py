@@ -1,5 +1,3 @@
-import logging
-import sqlite3
 from collections.abc import Callable
 from dataclasses import asdict
 
@@ -15,22 +13,17 @@ from .sentiment import (
     analyzer,
     sentiment_score,
 )
-from .sessions import Lane, SessionResult, Sessions
-from .storage import Memory
+from .sessions import AgentSession, Sessions, SessionUpdate
 from .telemetry import trace, verbose
-from .work.history import EventContext, project_event
-
-log = logging.getLogger("pet-daemon")
 
 
-class AgentEvents:
+class ActivityCoordinator:
     def __init__(
         self,
         config: Config,
         *,
         sessions: Sessions,
         episodes: Episodes,
-        memory: Memory,
         behavior: Behavior,
         queue: Callable[[str, Trigger | None], None],
         clock: Callable[[], float],
@@ -39,7 +32,6 @@ class AgentEvents:
         self.config = config
         self.sessions = sessions
         self.episodes = episodes
-        self.memory = memory
         self.behavior = behavior
         self.queue = queue
         self.clock = clock
@@ -63,79 +55,26 @@ class AgentEvents:
             else "idle"
         )
 
-    def handle(self, packet: HookEvent, sleeping: bool = False) -> SessionResult | None:
+    def handle(self, packet: HookEvent, sleeping: bool = False) -> SessionUpdate | None:
         result = self.sessions.apply(packet)
         if result:
             key = result.session
-            lane = self.sessions.lanes[key]
-            self.restore_context(packet, key, lane)
-            self.record(packet, key, lane, result.activity)
+            session = self.sessions.by_id[key]
             for episode in self.episodes.handle(packet, result, self.sessions):
                 if not sleeping:
                     self.behavior.react(episode.kind, self.sessions, key)
                 self.queue_episode(episode, packet)
-            if packet.event == "intent" and not lane.parent:
-                self.react_to_sentiment(packet, key, lane, sleeping)
+            if packet.event == "intent" and not session.parent:
+                self.react_to_sentiment(packet, key, session, sleeping)
             if not sleeping:
                 self.behavior.tick(self.activity(), self.sessions)
         verbose(
             "hook.received",
             packet=packet.packet(),
             result=asdict(result) if result is not None else None,
-            snapshot=asdict(self.sessions.snapshot()),
+            snapshot=asdict(self.sessions.activity_view()),
         )
         return result
-
-    def restore_context(self, packet: HookEvent, key: str, lane: Lane) -> None:
-        if lane.context_loaded:
-            return
-        lane.context_loaded = True
-        try:
-            stored = self.memory.context(key)
-            if stored is None:
-                for alias in packet.aliases:
-                    stored = self.memory.context(f"{packet.harness}:{alias}")
-                    if stored is not None:
-                        break
-            if stored:
-                if stored.request_count or not lane.request_count:
-                    lane.first_prompt = stored.first_prompt or lane.first_prompt
-                lane.session_context = stored.session_context
-                lane.recent_requests = [
-                    *stored.recent_requests,
-                    *lane.recent_requests,
-                ][-4:]
-                lane.request_count += stored.request_count
-                lane.first_summary_attempted = stored.first_summary_attempted
-                lane.goal = lane.first_prompt
-        except sqlite3.Error as error:
-            log.warning("Could not restore pet session context: %s", error)
-
-    def record(self, packet: HookEvent, key: str, lane: Lane, activity: str) -> None:
-        if packet.event in ("intent", "subagent_start") and lane.first_prompt:
-            try:
-                self.memory.save_context(
-                    key,
-                    lane.first_prompt,
-                    lane.session_context,
-                    lane.recent_requests,
-                    lane.request_count,
-                    lane.first_summary_attempted,
-                )
-            except sqlite3.Error as error:
-                log.warning("Could not save pet session context: %s", error)
-        state = EventContext(
-            id=key,
-            repo=lane.repo,
-            goal=lane.goal,
-            last_tool=lane.last_tool,
-            outcome=lane.outcome,
-            activity=activity,
-        )
-        try:
-            self.memory.record_event(project_event(packet, state))
-        except sqlite3.Error as error:
-            log.warning("Could not record pet event: %s", error)
 
     def queue_episode(self, episode: Episode, hook: HookEvent) -> None:
         trigger = EpisodeTrigger(episode)
@@ -150,7 +89,7 @@ class AgentEvents:
             self.queue("completion", trigger)
 
     def react_to_sentiment(
-        self, packet: HookEvent, key: str, lane: Lane, sleeping: bool
+        self, packet: HookEvent, key: str, session: AgentSession, sleeping: bool
     ) -> None:
         if not self.config.behavior.sentiment_reactions:
             return
@@ -161,15 +100,15 @@ class AgentEvents:
             else packet.goal or ""
         )
         identity = (packet.turn, text)
-        if lane.sentiment_identity == identity and (
-            packet.turn or now - lane.sentiment_seen < DUPLICATE_SECONDS
+        if session.sentiment_identity == identity and (
+            packet.turn or now - session.sentiment_seen < DUPLICATE_SECONDS
         ):
             trace("sentiment.evaluated", session=key, decision="duplicate")
             return
-        lane.sentiment_identity = identity
-        lane.sentiment_seen = now
+        session.sentiment_identity = identity
+        session.sentiment_seen = now
         score = sentiment_score(text)
-        lane.user_sentiment = score if score <= NEGATIVE_THRESHOLD else None
+        session.user_sentiment = score if score <= NEGATIVE_THRESHOLD else None
         if score > NEGATIVE_THRESHOLD:
             decision = "neutral"
         elif now < self.sentiment_after:

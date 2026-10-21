@@ -11,10 +11,11 @@ from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.commentary.summarization import SummaryPayload
 from pet_daemon.config import Config
 from pet_daemon.prompts import bounded, select_prompt
+from pet_daemon.sessions import Sessions
 from pet_daemon.sources.hooks import HookEvent
 from pet_daemon.storage import Memory
 from pet_daemon.work.history import project_event
-from Tests.fixtures import session_snapshot
+from Tests.fixtures import capture_snapshot, require, session_snapshot
 
 
 class EventOptions(TypedDict, total=False):
@@ -43,9 +44,9 @@ class SummarizationTests(unittest.TestCase):
         )
         self.focus = session_snapshot(
             id="codex:main",
-            first_prompt="Plan: [ ] Implement parser. [ ] Verify parser.",
+            initial_request="Plan: [ ] Implement parser. [ ] Verify parser.",
             recent_requests=("Implement parser",),
-            session_context="Parser work remains pending.",
+            summary="Parser work remains pending.",
             progress="Parser implemented and tests passed",
             outcome="success",
             turn_active=False,
@@ -78,9 +79,7 @@ class SummarizationTests(unittest.TestCase):
         request = self.summary_request()
         payload = self.payload(request)
         self.assertIn("[ ] Implement parser", payload["initial_intent"])
-        self.assertEqual(
-            payload["historical_session_context"], "Parser work remains pending."
-        )
+        self.assertEqual(payload["historical_summary"], "Parser work remains pending.")
         self.assertEqual(payload["current_report"]["outcome"], "success")
         self.assertIn(
             "Parser implemented and tests passed",
@@ -97,7 +96,7 @@ class SummarizationTests(unittest.TestCase):
         self.assertIn("unchecked checklist", request["system"][0]["text"])
         self.assertEqual(
             request["output_config"]["format"]["schema"]["required"],
-            ["session_context"],
+            ["summary"],
         )
 
     def test_next_request_retains_its_session_completion_after_later_tools(
@@ -131,7 +130,44 @@ class SummarizationTests(unittest.TestCase):
         self.config.summarize_first_request_only = True
         self.event("turn_done", outcome="success", progress="Parser delivered")
         payload = self.payload()
-        self.assertEqual(payload, {"initial_intent": self.focus.first_prompt})
+        self.assertEqual(payload, {"initial_intent": self.focus.initial_request})
+
+    def test_next_turn_summary_preserves_failure_or_cancellation_with_progress(
+        self,
+    ) -> None:
+        for outcome in ("error", "cancelled"):
+            with self.subTest(outcome=outcome):
+                sessions = Sessions(lambda: 1000)
+                progress = "The parser change is ready."
+                for event in (
+                    HookEvent("codex", outcome, "intent", goal="Implement parser"),
+                    HookEvent(
+                        "codex",
+                        outcome,
+                        "turn_done",
+                        outcome=outcome,
+                        progress=progress,
+                    ),
+                    HookEvent("codex", outcome, "intent", goal="Review parser"),
+                ):
+                    result = require(sessions.apply(event))
+                    with self.memory.transaction():
+                        self.memory.work.record_session(result.observation)
+                        self.memory.observe_session_context(result.observation)
+                        self.memory.record_event(project_event(event))
+                focus = capture_snapshot(
+                    sessions.activity_view(), memory=self.memory
+                ).sessions[0]
+                payload = self.payload(self.context.summary_request(focus))
+                self.assertEqual(payload["initial_intent"], "Implement parser")
+                self.assertEqual(payload["recent_requests"][-1], "Review parser")
+                self.assertEqual(
+                    payload["current_report"], {"outcome": None, "progress": ""}
+                )
+                reports = payload["reported_results"]
+                self.assertEqual(len(reports), 1)
+                self.assertIn(outcome, reports[0]["report"])
+                self.assertIn(progress, reports[0]["report"])
 
     def test_missing_results_preserve_an_unknown_outcome(self) -> None:
         self.focus = replace(self.focus, progress="", outcome=None, turn_active=True)
@@ -146,7 +182,7 @@ class SummarizationTests(unittest.TestCase):
         self.config.prompt_target_bytes = 1
         self.focus = replace(
             self.focus,
-            first_prompt="Implement 猫 parser. " * 500,
+            initial_request="Implement 猫 parser. " * 500,
             recent_requests=("Earlier request", "Review 猫. " * 500),
             progress="Current 猫 progress. " * 100,
         )
@@ -162,7 +198,7 @@ class SummarizationTests(unittest.TestCase):
             self.config.prompt_target_bytes,
         )
         self.assertEqual(
-            payload["initial_intent"], select_prompt(self.focus.first_prompt)
+            payload["initial_intent"], select_prompt(self.focus.initial_request)
         )
         self.assertEqual(
             payload["recent_requests"],
@@ -172,7 +208,7 @@ class SummarizationTests(unittest.TestCase):
             payload["current_report"],
             {"progress": bounded(self.focus.progress, 800), "outcome": "success"},
         )
-        self.assertEqual(payload["historical_session_context"], "")
+        self.assertEqual(payload["historical_summary"], "")
         self.assertEqual(payload["reported_results"], [])
 
     def test_whole_latest_report_can_cross_target_before_other_context_is_added(
@@ -201,7 +237,7 @@ class SummarizationTests(unittest.TestCase):
             payload["reported_results"][0]["report"],
             bounded(row.summary.removeprefix("turn_done").removeprefix(" | "), 320),
         )
-        self.assertEqual(payload["historical_session_context"], "")
+        self.assertEqual(payload["historical_summary"], "")
 
     def test_optional_requests_retain_chronology_without_mutating_session_input(
         self,
@@ -217,7 +253,5 @@ class SummarizationTests(unittest.TestCase):
         before = deepcopy(self.focus)
         payload = self.payload()
         self.assertEqual(payload["recent_requests"], list(self.focus.recent_requests))
-        self.assertEqual(
-            payload["historical_session_context"], self.focus.session_context
-        )
+        self.assertEqual(payload["historical_summary"], self.focus.summary)
         self.assertEqual(self.focus, before)

@@ -1,11 +1,7 @@
 import ast
 import unittest
-from collections.abc import Iterator, Mapping
-from dataclasses import is_dataclass
+from collections.abc import Iterator
 from pathlib import Path
-
-from pet_daemon.runtime import WorkSnapshot
-from pet_daemon.sessions import Sessions
 
 ROOT = Path(__file__).resolve().parents[1] / "pet_daemon"
 
@@ -24,24 +20,6 @@ def imports(path: Path) -> Iterator[tuple[str, str | None]]:
 
 
 class ArchitectureTests(unittest.TestCase):
-    def test_runtime_snapshots_expose_records_without_mapping_interfaces(self) -> None:
-        sessions = Sessions(lambda: 1000)
-        sessions.handle(
-            {
-                "harness": "codex",
-                "session": "parser",
-                "event": "intent",
-                "goal": "Check parsing",
-            }
-        )
-        snapshot = sessions.snapshot()
-        work = WorkSnapshot(snapshot.activity, snapshot.sessions, False)
-        for record in (snapshot, snapshot.sessions[0], work):
-            with self.subTest(record=type(record).__name__):
-                self.assertTrue(is_dataclass(record))
-                self.assertNotIsInstance(record, Mapping)
-                self.assertFalse(hasattr(record, "get"))
-
     def assert_import_boundary(self, directory: str, forbidden: set[str]) -> None:
         for path in (ROOT / directory).rglob("*.py"):
             for module, name in imports(path):

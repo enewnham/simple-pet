@@ -11,14 +11,16 @@ from .activity import activity
 from .processes import ProcessStatus
 from .prompts import select_prompt
 from .runtime import (
+    ActiveTool,
     ConvergenceItem,
     FailureSnapshot,
     ProcessIdentity,
-    SentimentSnapshot,
-    SessionSnapshot,
-    SessionsSnapshot,
-    ToolSnapshot,
+    SessionContext,
+    SwarmActivity,
+    UserSentiment,
 )
+from .work.models import ExecutionEvidence, IntentEvidence, ProgressEvidence
+from .work.observations import SessionObservation
 
 if TYPE_CHECKING:
     from .runtime import HookEvent
@@ -38,11 +40,12 @@ class Failure:
 
 
 @dataclass(frozen=True)
-class SessionResult:
+class SessionUpdate:
     failure: bool
     convergence: bool
     session: str
     activity: str
+    observation: SessionObservation
 
 
 @dataclass
@@ -53,7 +56,7 @@ class Call:
 
 
 @dataclass
-class Lane:
+class AgentSession:
     harness: str
     id: str
     started: float
@@ -62,12 +65,7 @@ class Lane:
     last_event: str | None = None
     parent: str | None = None
     goal: str = ""
-    first_prompt: str = ""
-    recent_requests: list[str] = field(default_factory=list)
-    session_context: str = ""
-    context_loaded: bool = False
-    request_count: int = 0
-    first_summary_attempted: bool = False
+    intent_received: bool = False
     user_sentiment: float | None = None
     sentiment_seen: float = float("-inf")
     sentiment_identity: tuple[str | None, str] | None = None
@@ -124,7 +122,7 @@ class Sessions:
         self.quiet_seconds = fresh_seconds
         self.stale_seconds = stale_seconds
         self.retention_seconds = retention_seconds
-        self.lanes: dict[str, Lane] = {}
+        self.by_id: dict[str, AgentSession] = {}
         self.aliases: dict[str, str] = {}
         self.child_calls: dict[tuple[str, str, str], str] = {}
         self.members: set[str] = set()
@@ -133,33 +131,34 @@ class Sessions:
     @property
     def working(self) -> bool:
         self._refresh_activity()
-        return any(lane.working for lane in self.lanes.values())
+        return any(session.working for session in self.by_id.values())
 
     @property
     def engaged(self) -> bool:
         self._refresh_activity()
         return any(
-            lane.active and not lane.activity_uncertain for lane in self.lanes.values()
+            session.active and not session.activity_uncertain
+            for session in self.by_id.values()
         )
 
     @property
     def active(self) -> bool:
-        return any(lane.active for lane in self.lanes.values())
+        return any(session.active for session in self.by_id.values())
 
     @property
     def failed(self) -> bool:
-        return any(self._current_failure(lane) for lane in self.lanes.values())
+        return any(self._current_failure(session) for session in self.by_id.values())
 
-    def _current_failure(self, lane: Lane) -> bool:
+    def _current_failure(self, session: AgentSession) -> bool:
         return any(
-            failure.generation == lane.generation and not failure.resolved
-            for failure in lane.failures.values()
+            failure.generation == session.generation and not failure.resolved
+            for failure in session.failures.values()
         )
 
     def _failure(
-        self, lane: Lane, category: str, now: float, tool: str = ""
+        self, session: AgentSession, category: str, now: float, tool: str = ""
     ) -> Failure:
-        previous = lane.failures.get(category)
+        previous = session.failures.get(category)
         count = previous.count + 1 if previous and not previous.resolved else 1
         failure = Failure(
             tool=tool,
@@ -167,10 +166,10 @@ class Sessions:
             at=now,
             count=count,
             resolved=False,
-            generation=lane.generation,
-            goal=lane.goal,
+            generation=session.generation,
+            goal=session.goal,
         )
-        lane.failures[category] = failure
+        session.failures[category] = failure
         return failure
 
     @property
@@ -182,10 +181,14 @@ class Sessions:
         )
 
     def _key(self, harness: str, identifier: str) -> str:
-        key = f"{harness}:{identifier}"
+        key = (
+            identifier
+            if identifier.startswith(f"{harness}:")
+            else f"{harness}:{identifier}"
+        )
         return self.aliases.get(key, key)
 
-    def _lane(self, event: HookEvent, now: float) -> tuple[str, Lane] | None:
+    def _session(self, event: HookEvent, now: float) -> tuple[str, AgentSession] | None:
         harness = event.harness
         identifier = event.session
         key = self._key(harness, identifier)
@@ -203,71 +206,68 @@ class Sessions:
                 routed = True
         alternate = event.aliases
         matches = [self._key(harness, alias) for alias in alternate]
-        if key not in self.lanes:
-            key = next((match for match in matches if match in self.lanes), key)
+        if key not in self.by_id:
+            key = next((match for match in matches if match in self.by_id), key)
         parent = event.parent
         if parent and self._key(harness, parent) in {key, *matches}:
             return self._ignored(event, "invalid_parent")
-        created = key not in self.lanes
-        lane = self.lanes.setdefault(key, Lane(harness, identifier, now, now))
+        created = key not in self.by_id
+        session = self.by_id.setdefault(
+            key, AgentSession(harness, identifier, now, now)
+        )
         for alias in alternate if routed else [identifier, *alternate]:
             old_key = self._key(harness, alias)
-            if old_key != key and old_key in self.lanes:
-                other = self.lanes.pop(old_key)
-                if not lane.active and (
-                    other.active or (other.finished and not lane.finished)
+            if old_key != key and old_key in self.by_id:
+                other = self.by_id.pop(old_key)
+                if not session.active and (
+                    other.active or (other.finished and not session.finished)
                 ):
-                    lane, other = other, lane
-                    self.lanes[key] = lane
-                lane.calls.update(other.calls)
-                lane.active = lane.active or other.active
-                lane.goal = lane.goal or other.goal
-                lane.first_prompt = lane.first_prompt or other.first_prompt
-                lane.session_context = lane.session_context or other.session_context
-                lane.recent_requests = lane.recent_requests or other.recent_requests
-                lane.request_count += other.request_count
-                lane.first_summary_attempted = (
-                    lane.first_summary_attempted or other.first_summary_attempted
+                    session, other = other, session
+                    self.by_id[key] = session
+                session.calls.update(other.calls)
+                session.active = session.active or other.active
+                session.goal = session.goal or other.goal
+                session.intent_received = (
+                    session.intent_received or other.intent_received
                 )
-                if other.sentiment_seen > lane.sentiment_seen:
-                    lane.user_sentiment = other.user_sentiment
-                    lane.sentiment_seen = other.sentiment_seen
-                    lane.sentiment_identity = other.sentiment_identity
-                lane.context_loaded = lane.context_loaded or other.context_loaded
-                lane.repo = lane.repo or other.repo
-                lane.owner = lane.owner or other.owner
-                if lane.owner == other.owner:
-                    lane.presence = other.presence
+                if other.sentiment_seen > session.sentiment_seen:
+                    session.user_sentiment = other.user_sentiment
+                    session.sentiment_seen = other.sentiment_seen
+                    session.sentiment_identity = other.sentiment_identity
+                session.repo = session.repo or other.repo
+                session.owner = session.owner or other.owner
+                if session.owner == other.owner:
+                    session.presence = other.presence
                 if other.active:
                     adopt_waiting = other.waiting and (
-                        not lane.waiting
-                        or other.waiting_started >= lane.waiting_started
+                        not session.waiting
+                        or other.waiting_started >= session.waiting_started
                     )
                     if adopt_waiting:
-                        lane.waiting = True
-                        lane.waiting_call = other.waiting_call
-                        lane.waiting_since = other.waiting_since
-                        lane.last_check_in = other.last_check_in
-                    if adopt_waiting or other.last_seen > lane.last_seen:
-                        lane.phase = other.phase or lane.phase
-                        lane.last_tool = other.last_tool or lane.last_tool
-                        lane.progress = other.progress or lane.progress
-                    if other.last_seen > lane.last_seen:
-                        lane.last_event = other.last_event
-                        lane.changed_at = other.changed_at
-                    lane.last_seen = max(lane.last_seen, other.last_seen)
+                        session.waiting = True
+                        session.waiting_call = other.waiting_call
+                        session.waiting_since = other.waiting_since
+                        session.last_check_in = other.last_check_in
+                    if adopt_waiting or other.last_seen > session.last_seen:
+                        session.phase = other.phase or session.phase
+                        session.last_tool = other.last_tool or session.last_tool
+                        session.progress = other.progress or session.progress
+                    if other.last_seen > session.last_seen:
+                        session.last_event = other.last_event
+                        session.changed_at = other.changed_at
+                    session.last_seen = max(session.last_seen, other.last_seen)
                     for category, failure in other.failures.items():
                         if failure.generation == other.generation:
-                            failure.generation = lane.generation
-                            existing = lane.failures.get(category)
+                            failure.generation = session.generation
+                            existing = session.failures.get(category)
                             if existing is None or failure.at > existing.at:
-                                lane.failures[category] = failure
+                                session.failures[category] = failure
                     unresolved = [
-                        item for item in lane.failures.values() if not item.resolved
+                        item for item in session.failures.values() if not item.resolved
                     ]
                     if unresolved:
-                        lane.failure = max(unresolved, key=lambda item: item.at)
-                lane.started = min(lane.started, other.started)
+                        session.failure = max(unresolved, key=lambda item: item.at)
+                session.started = min(session.started, other.started)
                 self.aliases = {
                     name: key if target == old_key else target
                     for name, target in self.aliases.items()
@@ -276,7 +276,7 @@ class Sessions:
                     name: key if target == old_key else target
                     for name, target in self.child_calls.items()
                 }
-                for child in self.lanes.values():
+                for child in self.by_id.values():
                     if child.parent == old_key:
                         child.parent = key
                 if old_key in self.members:
@@ -286,115 +286,119 @@ class Sessions:
                     "session.merged",
                     session=key,
                     merged_session=old_key,
-                    active=lane.active,
-                    active_calls=list(lane.calls),
-                    parent=lane.parent,
+                    active=session.active,
+                    active_calls=list(session.calls),
+                    parent=session.parent,
                 )
-            alias_key = f"{harness}:{alias}"
+            alias_key = (
+                alias if alias.startswith(f"{harness}:") else f"{harness}:{alias}"
+            )
             if alias_key != key and self.aliases.get(alias_key) != key:
                 telemetry.event("session.aliased", session=key, alias=alias_key)
             self.aliases[alias_key] = key
         if parent:
-            lane.parent = self._key(harness, parent)
+            session.parent = self._key(harness, parent)
             if parent_call:
                 self.child_calls[(harness, parent, parent_call)] = key
-            parent_lane = self.lanes.get(lane.parent)
-            if parent_lane and not lane.goal:
-                lane.goal = parent_lane.goal
-            if parent_lane and not lane.repo:
-                lane.repo = parent_lane.repo
-            if parent_lane and not lane.owner:
-                lane.owner = parent_lane.owner
-                lane.presence = parent_lane.presence
+            parent_session = self.by_id.get(session.parent)
+            if parent_session and not session.goal:
+                session.goal = parent_session.goal
+            if parent_session and not session.repo:
+                session.repo = parent_session.repo
+            if parent_session and not session.owner:
+                session.owner = parent_session.owner
+                session.presence = parent_session.presence
         if created:
             telemetry.event(
                 "session.created",
                 session=key,
-                parent=lane.parent,
+                parent=session.parent,
                 source_event=event.event,
-                repo=event.repo or lane.repo,
-                active_sessions=sum(item.active for item in self.lanes.values()),
+                repo=event.repo or session.repo,
+                active_sessions=sum(item.active for item in self.by_id.values()),
             )
-        return key, lane
+        return key, session
 
-    def _open(self, key: str, lane: Lane, event: HookEvent, now: float) -> None:
-        previous_turn = lane.turn
-        replaced_calls = list(lane.calls)
+    def _open(
+        self, key: str, session: AgentSession, event: HookEvent, now: float
+    ) -> None:
+        previous_turn = session.turn
+        replaced_calls = list(session.calls)
         if not self.active:
             self.members.clear()
             self.convergence = None
-        lane.active = True
-        lane.activity_uncertain = False
-        lane.finished = False
-        lane.outcome = None
-        lane.cancelled = False
-        lane.ended = None
-        lane.generation += 1
-        lane.failures.clear()
-        lane.turn = None if event.event == "subagent_start" else event.turn
-        lane.started = now
-        lane.calls.clear()
-        lane.last_tool = ""
-        lane.phase = ""
-        lane.progress = ""
-        lane.waiting = False
-        lane.waiting_call = None
-        lane.waiting_since = None
-        lane.last_check_in = None
+        session.active = True
+        session.activity_uncertain = False
+        session.finished = False
+        session.outcome = None
+        session.cancelled = False
+        session.ended = None
+        session.generation += 1
+        session.failures.clear()
+        session.turn = None if event.event == "subagent_start" else event.turn
+        session.started = now
+        session.calls.clear()
+        session.last_tool = ""
+        session.phase = ""
+        session.progress = ""
+        session.waiting = False
+        session.waiting_call = None
+        session.waiting_since = None
+        session.last_check_in = None
         self.members.add(key)
         telemetry.event(
             "session.turn_started",
             session=key,
-            parent=lane.parent,
-            turn=lane.turn,
-            generation=lane.generation,
+            parent=session.parent,
+            turn=session.turn,
+            generation=session.generation,
             source_event=event.event,
-            repo=lane.repo or (event.repo if event.repo is not None else ""),
+            repo=session.repo or (event.repo if event.repo is not None else ""),
             previous_turn=previous_turn,
             replaced_calls=replaced_calls,
-            active_sessions=sum(item.active for item in self.lanes.values()),
+            active_sessions=sum(item.active for item in self.by_id.values()),
         )
 
     def _finish(
-        self, key: str, lane: Lane, outcome: str, now: float, reason: str
+        self, key: str, session: AgentSession, outcome: str, now: float, reason: str
     ) -> None:
         telemetry.event(
             "session.turn_finished",
             session=key,
-            parent=lane.parent,
-            turn=lane.turn,
-            generation=lane.generation,
+            parent=session.parent,
+            turn=session.turn,
+            generation=session.generation,
             outcome=outcome,
             reason=reason,
-            duration_seconds=round(now - lane.started, 2),
-            active_calls=list(lane.calls),
-            active_sessions=sum(item.active for item in self.lanes.values())
-            - int(lane.active),
+            duration_seconds=round(now - session.started, 2),
+            active_calls=list(session.calls),
+            active_sessions=sum(item.active for item in self.by_id.values())
+            - int(session.active),
             active_children=[
                 child_key
-                for child_key, child in self.lanes.items()
+                for child_key, child in self.by_id.items()
                 if child.parent == key and child.active
             ],
         )
-        lane.calls.clear()
-        lane.active = False
-        lane.finished = True
-        lane.ended = now
-        lane.changed_at = time.time()
-        lane.outcome = outcome
+        session.calls.clear()
+        session.active = False
+        session.finished = True
+        session.ended = now
+        session.changed_at = time.time()
+        session.outcome = outcome
         if outcome == "cancelled":
-            for failure in lane.failures.values():
+            for failure in session.failures.values():
                 failure.resolved = True
-        lane.waiting = False
-        lane.waiting_call = None
-        lane.waiting_since = None
+        session.waiting = False
+        session.waiting_call = None
+        session.waiting_since = None
 
     def _ignored(
         self,
         event: HookEvent,
         reason: str,
         key: str | None = None,
-        lane: Lane | None = None,
+        session: AgentSession | None = None,
     ) -> None:
         telemetry.trace(
             "session.event_ignored",
@@ -402,42 +406,47 @@ class Sessions:
             reason=reason,
             session=key or event.subject,
             turn=event.turn,
-            current_turn=lane.turn if lane else None,
+            current_turn=session.turn if session else None,
             call=event.call,
         )
 
-    def _accepted(self, key: str, lane: Lane, event: HookEvent) -> None:
-        lane.activity_uncertain = False
-        lane.last_event = event.event
-        lane.changed_at = time.time()
+    def _accepted(self, key: str, session: AgentSession, event: HookEvent) -> None:
+        session.activity_uncertain = False
+        session.last_event = event.event
+        session.changed_at = time.time()
         telemetry.verbose(
             "session.event_accepted",
             session=key,
             source_session=event.session,
             source_event=event.event,
-            turn=lane.turn,
-            generation=lane.generation,
+            turn=session.turn,
+            generation=session.generation,
             call=event.call,
             tool=event.tool,
-            active=lane.active,
-            waiting=lane.waiting,
-            active_calls=list(lane.calls),
+            active=session.active,
+            waiting=session.waiting,
+            active_calls=list(session.calls),
         )
 
     def _resumed(
-        self, key: str, lane: Lane, event: HookEvent, now: float, waiting_since: float
+        self,
+        key: str,
+        session: AgentSession,
+        event: HookEvent,
+        now: float,
+        waiting_since: float,
     ) -> None:
         telemetry.event(
             "session.resumed",
             session=key,
-            parent=lane.parent,
-            turn=lane.turn,
+            parent=session.parent,
+            turn=session.turn,
             source_event=event.event,
             waiting_seconds=round(now - waiting_since, 2),
             call=event.call,
         )
 
-    def handle(self, event: object) -> SessionResult | None:
+    def handle(self, event: object) -> SessionUpdate | None:
         from .sources.hooks import normalize_hook
 
         hook = normalize_hook(event)
@@ -446,19 +455,19 @@ class Sessions:
             return None
         return self.apply(hook)
 
-    def apply(self, event: HookEvent) -> SessionResult | None:
+    def apply(self, event: HookEvent) -> SessionUpdate | None:
         kind = event.event
         now = self.clock()
         previously_active = self.active
-        identity = self._lane(event, now)
+        identity = self._session(event, now)
         if identity is None:
             return None
-        key, lane = identity
+        key, session = identity
         turn = event.turn
         if (
             turn
-            and lane.turn
-            and turn != lane.turn
+            and session.turn
+            and turn != session.turn
             and kind
             not in (
                 "intent",
@@ -468,74 +477,71 @@ class Sessions:
                 "session_end",
             )
         ):
-            return self._ignored(event, "turn_mismatch", key, lane)
+            return self._ignored(event, "turn_mismatch", key, session)
         owner = event.owner
-        if owner and owner != lane.owner:
-            lane.owner = owner
-            lane.presence = "unknown"
-            lane.owner_checked = None
-            lane.owner_last_alive = None
-        waiting_since = lane.waiting_since
-        waiting_call = lane.waiting_call
+        if owner and owner != session.owner:
+            session.owner = owner
+            session.presence = "unknown"
+            session.owner_checked = None
+            session.owner_last_alive = None
+        waiting_since = session.waiting_since
+        waiting_call = session.waiting_call
+        was_active = session.active
+        was_finished = session.finished
         if event.repo:
-            lane.repo = event.repo
-        if kind == "subagent_start" and lane.active and lane.first_prompt:
-            return self._ignored(event, "duplicate_subagent_start", key, lane)
+            session.repo = event.repo
+        if kind == "subagent_start" and session.active and session.intent_received:
+            return self._ignored(event, "duplicate_subagent_start", key, session)
         failure = False
-        event_activity = lane.phase or "command"
+        event_activity = session.phase or "command"
         if kind == "session_start":
-            if lane.finished:
-                lane.finished = False
+            if session.finished:
+                session.finished = False
         elif kind in ("intent", "subagent_start"):
             new_native_turn = kind == "intent" and not event.manual
             if (
-                not lane.active
+                not session.active
                 or new_native_turn
-                or (kind == "intent" and turn and turn != lane.turn)
+                or (kind == "intent" and turn and turn != session.turn)
             ):
-                self._open(key, lane, event, now)
+                self._open(key, session, event, now)
             if event.goal:
                 request = select_prompt(event.goal)
-                lane.first_prompt = (
-                    request if lane.request_count == 0 else lane.first_prompt
-                )
-                lane.recent_requests = [*lane.recent_requests, request][-4:]
-                lane.request_count += 1
-                lane.goal = lane.first_prompt
-            elif (
-                kind == "subagent_start"
-                and not lane.first_prompt
-                and lane.parent in self.lanes
-            ):
-                parent = self.lanes[lane.parent]
-                lane.first_prompt = parent.first_prompt
-                lane.session_context = parent.session_context
-                lane.goal = lane.first_prompt
+                if not session.intent_received:
+                    session.goal = request
+                session.intent_received = True
+            elif kind == "subagent_start" and session.parent in self.by_id:
+                session.goal = self.by_id[session.parent].goal
+                session.intent_received = bool(session.goal)
         elif kind == "tool_start":
             if not event.call:
-                return self._ignored(event, "missing_call", key, lane)
-            if lane.finished and not event.manual:
-                return self._ignored(event, "finished_session", key, lane)
-            if not lane.active:
-                self._open(key, lane, event, now)
-            if turn and lane.turn is None:
-                lane.turn = turn
+                return self._ignored(event, "missing_call", key, session)
+            if session.finished and not event.manual:
+                return self._ignored(event, "finished_session", key, session)
+            if not session.active:
+                self._open(key, session, event, now)
+            if turn and session.turn is None:
+                session.turn = turn
             call_id = event.call
-            if call_id in lane.calls:
-                return self._ignored(event, "duplicate_call", key, lane)
+            if call_id in session.calls:
+                return self._ignored(event, "duplicate_call", key, session)
             tool = event.tool if event.tool is not None else ""
             event_activity = activity(
                 tool, (event.tool_name if event.tool_name is not None else "")
             )
-            lane.calls[call_id] = Call(tool, now, event_activity)
-            lane.last_tool = tool
-            lane.phase = event_activity
-            lane.progress = event.progress if event.progress is not None else ""
+            session.calls[call_id] = Call(tool, now, event_activity)
+            session.last_tool = tool
+            session.phase = event_activity
+            session.progress = event.progress if event.progress is not None else ""
         elif kind in ("tool_done", "tool_error"):
-            call = lane.calls.pop(event.call, None)
+            call = session.calls.pop(event.call, None)
             if call is None:
-                if lane.waiting and event.call and event.call == lane.waiting_call:
-                    tool = event.tool if event.tool is not None else lane.last_tool
+                if (
+                    session.waiting
+                    and event.call
+                    and event.call == session.waiting_call
+                ):
+                    tool = event.tool if event.tool is not None else session.last_tool
                     assert waiting_since is not None
                     call = Call(
                         tool,
@@ -546,38 +552,40 @@ class Sessions:
                         ),
                     )
                 else:
-                    return self._ignored(event, "unknown_call", key, lane)
+                    return self._ignored(event, "unknown_call", key, session)
             event_activity = call.activity
-            lane.progress = (
+            session.progress = (
                 ""
                 if kind == "tool_error" or event.outcome == "error"
-                else (event.progress if event.progress is not None else lane.progress)
+                else (
+                    event.progress if event.progress is not None else session.progress
+                )
             )
             if kind == "tool_error" or event.outcome == "error":
-                lane.failure = self._failure(lane, call.activity, now, call.tool)
+                session.failure = self._failure(session, call.activity, now, call.tool)
                 failure = True
             elif event.outcome == "cancelled":
-                lane.cancelled = True
-            elif call.activity in lane.failures:
-                recovered = lane.failures[call.activity]
+                session.cancelled = True
+            elif call.activity in session.failures:
+                recovered = session.failures[call.activity]
                 recovered.resolved = True
                 unresolved = [
-                    item for item in lane.failures.values() if not item.resolved
+                    item for item in session.failures.values() if not item.resolved
                 ]
-                lane.failure = (
+                session.failure = (
                     max(unresolved, key=lambda item: item.at)
                     if unresolved
                     else recovered
                 )
-            if event.manual and not lane.calls:
+            if event.manual and not session.calls:
                 outcome = (
                     "error"
-                    if self._current_failure(lane)
+                    if self._current_failure(session)
                     else "cancelled"
-                    if lane.cancelled
+                    if session.cancelled
                     else "success"
                 )
-                self._finish(key, lane, outcome, now, kind)
+                self._finish(key, session, outcome, now, kind)
         elif kind in (
             "turn_done",
             "subagent_done",
@@ -585,112 +593,165 @@ class Sessions:
             "interrupt",
             "session_end",
         ):
-            if lane.finished and kind != "session_end":
-                return self._ignored(event, "finished_session", key, lane)
+            if session.finished and kind != "session_end":
+                return self._ignored(event, "finished_session", key, session)
             outcome = event.outcome if event.outcome is not None else "success"
-            duplicate_end = kind == "session_end" and lane.finished
+            duplicate_end = kind == "session_end" and session.finished
             if (kind == "turn_error" or outcome == "error") and not duplicate_end:
                 outcome = "error"
-                if kind == "turn_error" or not self._current_failure(lane):
-                    lane.failure = self._failure(lane, "harness", now)
-                assert lane.failure is not None
-                event_activity = lane.failure.activity
+                if kind == "turn_error" or not self._current_failure(session):
+                    session.failure = self._failure(session, "harness", now)
+                assert session.failure is not None
+                event_activity = session.failure.activity
                 failure = True
             elif kind in ("interrupt", "session_end"):
                 outcome = event.outcome or (
-                    "cancelled" if lane.active else lane.outcome or "cancelled"
+                    "cancelled" if session.active else session.outcome or "cancelled"
                 )
-            elif self._current_failure(lane):
+            elif self._current_failure(session):
                 outcome = "error"
-            elif lane.cancelled:
+            elif session.cancelled:
                 outcome = "cancelled"
-            if outcome == "error" and lane.failure:
-                event_activity = lane.failure.activity
-            self._finish(key, lane, outcome, now, kind)
-            lane.progress = (
+            if outcome == "error" and session.failure:
+                event_activity = session.failure.activity
+            self._finish(key, session, outcome, now, kind)
+            session.progress = (
                 ""
                 if outcome == "error"
-                else (event.progress if event.progress is not None else lane.progress)
+                else (
+                    event.progress if event.progress is not None else session.progress
+                )
             )
             if kind in ("session_end", "interrupt"):
                 descendants = {key}
-                for _ in range(len(self.lanes)):
+                for _ in range(len(self.by_id)):
                     descendants.update(
                         child_key
-                        for child_key, child in self.lanes.items()
+                        for child_key, child in self.by_id.items()
                         if child.parent in descendants
                     )
                 for child_key in descendants - {key}:
-                    child = self.lanes[child_key]
+                    child = self.by_id[child_key]
                     if child.active:
                         self._finish(
                             child_key, child, "cancelled", now, f"parent_{kind}"
                         )
         elif kind in ("progress", "waiting"):
-            if lane.finished:
-                return self._ignored(event, "finished_session", key, lane)
-            if kind == "waiting" and not lane.active:
-                self._open(key, lane, event, now)
-            lane.progress = (
-                event.progress if event.progress is not None else lane.progress
+            if session.finished:
+                return self._ignored(event, "finished_session", key, session)
+            if kind == "waiting" and not session.active:
+                self._open(key, session, event, now)
+            session.progress = (
+                event.progress if event.progress is not None else session.progress
             )
             if kind == "waiting":
-                if not lane.waiting or lane.waiting_call != event.call:
-                    lane.waiting_since = now
-                lane.waiting = True
-                lane.waiting_call = event.call
-                lane.last_tool = (
-                    event.tool if event.tool is not None else lane.last_tool
+                if not session.waiting or session.waiting_call != event.call:
+                    session.waiting_since = now
+                session.waiting = True
+                session.waiting_call = event.call
+                session.last_tool = (
+                    event.tool if event.tool is not None else session.last_tool
                 )
         if kind in ("tool_start", "tool_done", "tool_error", "progress"):
-            lane.waiting = False
-            lane.waiting_call = None
-            lane.waiting_since = None
-        if lane.waiting and (
-            waiting_since is None or waiting_call != lane.waiting_call
+            session.waiting = False
+            session.waiting_call = None
+            session.waiting_since = None
+        if session.waiting and (
+            waiting_since is None or waiting_call != session.waiting_call
         ):
             telemetry.event(
                 "session.waiting",
                 session=key,
-                parent=lane.parent,
-                turn=lane.turn,
-                call=lane.waiting_call,
-                tool=lane.last_tool,
-                active_calls=list(lane.calls),
+                parent=session.parent,
+                turn=session.turn,
+                call=session.waiting_call,
+                tool=session.last_tool,
+                active_calls=list(session.calls),
             )
-        elif waiting_since is not None and not lane.waiting and lane.active:
-            self._resumed(key, lane, event, now, waiting_since)
-        self._accepted(key, lane, event)
-        lane.last_seen = now
+        elif waiting_since is not None and not session.waiting and session.active:
+            self._resumed(key, session, event, now, waiting_since)
+        self._accepted(key, session, event)
+        session.last_seen = now
         convergence = previously_active and not self.active
         if convergence:
             self.convergence = tuple(
-                ConvergenceItem(member, self.lanes[member].outcome)
+                ConvergenceItem(member, self.by_id[member].outcome)
                 for member in sorted(self.members)
-                if member in self.lanes
+                if member in self.by_id
             )
-        return SessionResult(
+        return SessionUpdate(
             failure=failure,
             convergence=convergence,
             session=key,
             activity=event_activity,
+            observation=self._observation(
+                key,
+                session,
+                event,
+                resumed=(waiting_since is not None or was_finished)
+                and session.active
+                and not session.waiting,
+                opened=not was_active and session.active,
+            ),
+        )
+
+    def _observation(
+        self,
+        key: str,
+        session: AgentSession,
+        event: HookEvent,
+        *,
+        resumed: bool,
+        opened: bool,
+    ) -> SessionObservation:
+        reports: list[IntentEvidence | ProgressEvidence | ExecutionEvidence] = []
+        if event.goal and event.event in ("intent", "subagent_start"):
+            reports.append(IntentEvidence(key, select_prompt(event.goal)))
+        if session.finished:
+            kind = "turn_done" if event.event.startswith("tool_") else event.event
+            reports.append(
+                ExecutionEvidence(key, kind, session.outcome, None, event.progress)
+            )
+        elif session.waiting:
+            reports.append(ExecutionEvidence(key, "waiting", None, None, None))
+        elif resumed:
+            reports.append(ExecutionEvidence(key, "resumed", None, None, None))
+        elif opened or event.event in ("intent", "subagent_start"):
+            reports.append(ExecutionEvidence(key, "turn_start", None, None, None))
+        if event.progress and not event.event.startswith("tool_"):
+            reports.append(ProgressEvidence(key, event.progress))
+        return SessionObservation(
+            session=key,
+            aliases=tuple(
+                sorted(
+                    alias
+                    for alias, target in self.aliases.items()
+                    if target == key and alias != key
+                )
+            ),
+            parent=session.parent,
+            location=event.repo,
+            reports=tuple(reports),
+            repository=event.repository,
+            branch=event.branch,
+            pull_request=event.pull_request,
         )
 
     def _refresh_activity(self) -> None:
         now = self.clock()
-        for lane in self.lanes.values():
-            lane.activity_uncertain = bool(
-                lane.active
-                and not lane.calls
-                and not lane.waiting
-                and now - lane.last_seen >= self.quiet_seconds
+        for session in self.by_id.values():
+            session.activity_uncertain = bool(
+                session.active
+                and not session.calls
+                and not session.waiting
+                and now - session.last_seen >= self.quiet_seconds
             )
 
     def process_owners(self) -> set[ProcessIdentity]:
         return {
-            lane.owner
-            for lane in self.lanes.values()
-            if lane.owner and lane.presence not in ("exited", "replaced")
+            session.owner
+            for session in self.by_id.values()
+            if session.owner and session.presence not in ("exited", "replaced")
         }
 
     def apply_process_status(
@@ -698,25 +759,25 @@ class Sessions:
     ) -> list[str]:
         now = self.clock()
         retired = []
-        for key, lane in self.lanes.items():
-            owner = lane.owner
+        for key, session in self.by_id.items():
+            owner = session.owner
             if owner is None:
                 continue
             status = results.get(owner)
             if status not in ("alive", "exited", "replaced", "unknown"):
                 continue
-            lane.presence = status
-            lane.owner_checked = now
+            session.presence = status
+            session.owner_checked = now
             if status == "alive":
-                lane.owner_last_alive = now
-            if status in ("exited", "replaced") and lane.active:
+                session.owner_last_alive = now
+            if status in ("exited", "replaced") and session.active:
                 telemetry.event(
                     "session.owner_retired",
                     session=key,
                     owner=owner.packet(),
                     status=status,
                 )
-                self._finish(key, lane, "stale", now, f"owner_{status}")
+                self._finish(key, session, "stale", now, f"owner_{status}")
                 retired.append(key)
             elif status == "unknown":
                 telemetry.trace(
@@ -732,46 +793,47 @@ class Sessions:
         self._refresh_activity()
         now = self.clock()
         changed = False
-        for key, lane in self.lanes.items():
-            if lane.active and now - lane.last_seen >= self.stale_seconds:
+        for key, session in self.by_id.items():
+            if session.active and now - session.last_seen >= self.stale_seconds:
                 telemetry.event(
                     "session.expired",
                     level=logging.WARNING,
                     session=key,
-                    parent=lane.parent,
-                    turn=lane.turn,
-                    generation=lane.generation,
-                    last_event=lane.last_event,
-                    quiet_seconds=round(now - lane.last_seen, 2),
+                    parent=session.parent,
+                    turn=session.turn,
+                    generation=session.generation,
+                    last_event=session.last_event,
+                    quiet_seconds=round(now - session.last_seen, 2),
                     stale_seconds=self.stale_seconds,
-                    waiting=lane.waiting,
-                    waiting_call=lane.waiting_call,
+                    waiting=session.waiting,
+                    waiting_call=session.waiting_call,
                     active_tools=[
                         {
                             "call": call_id,
                             "tool": call.tool,
                             "duration_seconds": round(now - call.started, 2),
                         }
-                        for call_id, call in lane.calls.items()
+                        for call_id, call in session.calls.items()
                     ],
                 )
-                self._finish(key, lane, "stale", now, "stale_timeout")
+                self._finish(key, session, "stale", now, "stale_timeout")
                 changed = True
         obsolete = {
             key
-            for key, lane in self.lanes.items()
-            if not lane.active
-            and now - (lane.ended if lane.ended is not None else lane.last_seen)
+            for key, session in self.by_id.items()
+            if not session.active
+            and now
+            - (session.ended if session.ended is not None else session.last_seen)
             >= self.retention_seconds
         }
         for key in obsolete:
-            lane = self.lanes[key]
+            session = self.by_id[key]
             telemetry.event(
                 "session.removed",
                 session=key,
-                parent=lane.parent,
-                outcome=lane.outcome,
-                quiet_seconds=round(now - lane.last_seen, 2),
+                parent=session.parent,
+                outcome=session.outcome,
+                quiet_seconds=round(now - session.last_seen, 2),
                 retention_seconds=self.retention_seconds,
                 aliases=[
                     alias
@@ -779,7 +841,7 @@ class Sessions:
                     if target == key and alias != key
                 ],
             )
-            del self.lanes[key]
+            del self.by_id[key]
         self.aliases = {
             name: key for name, key in self.aliases.items() if key not in obsolete
         }
@@ -796,85 +858,89 @@ class Sessions:
         now = self.clock()
         return [
             key
-            for key, lane in sorted(self.lanes.items())
-            if lane.active
-            and not lane.activity_uncertain
+            for key, session in sorted(self.by_id.items())
+            if session.active
+            and not session.activity_uncertain
             and now
             - max(
-                lane.waiting_started if lane.waiting else lane.last_seen,
-                lane.last_check_in if lane.last_check_in is not None else lane.started,
+                session.waiting_started if session.waiting else session.last_seen,
+                session.last_check_in
+                if session.last_check_in is not None
+                else session.started,
             )
             >= seconds
         ]
 
-    def snapshot(self, keys: Collection[str] | None = None) -> SessionsSnapshot:
+    def activity_view(self, keys: Collection[str] | None = None) -> SwarmActivity:
         self._refresh_activity()
         now = self.clock()
-        lanes = [
-            (key, lane)
-            for key, lane in sorted(self.lanes.items())
+        members = [
+            (key, session)
+            for key, session in sorted(self.by_id.items())
             if keys is None or key in keys
         ]
-        return SessionsSnapshot(
-            activity="working" if any(lane.working for _, lane in lanes) else "idle",
+        return SwarmActivity(
+            activity="working"
+            if any(session.working for _, session in members)
+            else "idle",
             sessions=tuple(
-                SessionSnapshot(
+                SessionContext(
                     id=key,
-                    changed_at=lane.changed_at,
-                    parent=lane.parent,
-                    goal=lane.goal,
-                    repo=lane.repo,
-                    phase=lane.phase,
-                    first_prompt=lane.first_prompt,
-                    session_context=lane.session_context,
-                    recent_requests=tuple(lane.recent_requests),
-                    generation=lane.generation,
-                    request_count=lane.request_count,
-                    first_summary_attempted=lane.first_summary_attempted,
-                    user_sentiment=SentimentSnapshot(
-                        compound=lane.user_sentiment,
-                        seconds_ago=round(now - lane.sentiment_seen),
+                    changed_at=session.changed_at,
+                    parent=session.parent,
+                    goal=session.goal,
+                    repo=session.repo,
+                    phase=session.phase,
+                    initial_request="",
+                    summary="",
+                    recent_requests=(),
+                    generation=session.generation,
+                    request_count=0,
+                    first_summary_attempted=False,
+                    user_sentiment=UserSentiment(
+                        compound=session.user_sentiment,
+                        seconds_ago=round(now - session.sentiment_seen),
                     )
-                    if lane.user_sentiment is not None
-                    and now - lane.sentiment_seen < SENTIMENT_CONTEXT_SECONDS
+                    if session.user_sentiment is not None
+                    and now - session.sentiment_seen < SENTIMENT_CONTEXT_SECONDS
                     else None,
-                    duration_seconds=round(now - lane.started),
-                    quiet_seconds=round(now - lane.last_seen),
-                    turn_active=lane.active,
-                    last_tool=lane.last_tool,
-                    presence=lane.presence,
-                    owner=lane.owner,
+                    duration_seconds=round(now - session.started),
+                    quiet_seconds=round(now - session.last_seen),
+                    turn_active=session.active,
+                    last_tool=session.last_tool,
+                    presence=session.presence,
+                    owner=session.owner,
                     owner_last_alive_seconds=None
-                    if lane.owner_last_alive is None
-                    else round(now - lane.owner_last_alive),
-                    activity_uncertain=lane.activity_uncertain,
-                    waiting_for_input=lane.waiting,
+                    if session.owner_last_alive is None
+                    else round(now - session.owner_last_alive),
+                    activity_uncertain=session.activity_uncertain,
+                    waiting_for_input=session.waiting,
                     waiting_seconds=None
-                    if lane.waiting_since is None
-                    else round(now - lane.waiting_since),
+                    if session.waiting_since is None
+                    else round(now - session.waiting_since),
                     active_tools=tuple(
-                        ToolSnapshot(
+                        ActiveTool(
                             call=call_id,
                             tool=call.tool,
                             activity=call.activity,
                             duration_seconds=round(now - call.started),
                         )
-                        for call_id, call in lane.calls.items()
+                        for call_id, call in session.calls.items()
                     ),
-                    progress=lane.progress,
+                    progress=session.progress,
                     failure=None
-                    if lane.failure is None
+                    if session.failure is None
                     else FailureSnapshot(
-                        activity=lane.failure.activity,
-                        count=lane.failure.count,
-                        goal=lane.failure.goal,
-                        resolved=lane.failure.resolved,
-                        current_turn=lane.failure.generation == lane.generation,
-                        seconds_ago=round(now - lane.failure.at),
+                        activity=session.failure.activity,
+                        count=session.failure.count,
+                        goal=session.failure.goal,
+                        resolved=session.failure.resolved,
+                        current_turn=session.failure.generation == session.generation,
+                        seconds_ago=round(now - session.failure.at),
                     ),
-                    outcome=lane.outcome,
+                    outcome=session.outcome,
                 )
-                for key, lane in lanes
+                for key, session in members
             ),
             convergence=self.convergence if keys is None else None,
         )

@@ -126,10 +126,7 @@ class Daemon:
             local_interval=config.repository_refresh_seconds,
             github_interval=config.github_refresh_seconds,
             checkpoints=memory.load_repositories(),
-            associations=tuple(
-                (item.session, item.worktree)
-                for item in memory.repository_associations()
-            ),
+            targets=memory.collection_targets(),
         )
         self.application = Application(
             config,
@@ -144,11 +141,11 @@ class Daemon:
             emit=self.emit,
             clock=clock,
             rng=self.rng,
-            session_target=lambda session, path, refresh: repositories.associate(
-                session, path, refresh=refresh
+            checkout_target=lambda path, refresh: repositories.track_checkout(
+                path, refresh=refresh
             ),
             reconcile_work=lambda: repositories.reconcile_targets(
-                memory.work.collection_targets()
+                memory.collection_targets()
             ),
         )
         self.application.reconcile_targets()
@@ -234,8 +231,8 @@ class Daemon:
     async def close(self) -> None:
         event(
             "daemon.stopping",
-            snapshot=asdict(self.application.sessions.snapshot()),
-            sessions=len(self.application.sessions.lanes),
+            snapshot=asdict(self.application.sessions.activity_view()),
+            sessions=len(self.application.sessions.by_id),
         )
         if self.loop_task:
             self.loop_task.cancel()

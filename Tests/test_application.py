@@ -24,9 +24,11 @@ from pet_daemon.sources import RepositoryTracker
 from pet_daemon.sources.hooks import normalize_hook
 from pet_daemon.sprites import Pack
 from pet_daemon.storage import Memory
-from pet_daemon.work import WorkView
-from pet_daemon.work.models import AvailabilityEvidence
+from pet_daemon.work import WorkStory
+from pet_daemon.work.models import RelatedLink
 from pet_daemon.work.observations import (
+    BranchObservation,
+    CheckoutObservation,
     GitObservation,
     PullRequest,
     RepositoryObservation,
@@ -154,13 +156,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         self.provider.publish(require(hook))
-        self.observation = RepositoryObservation(
-            "fixture:parser",
+        self.checkout = CheckoutObservation(
             "/fixture/parser",
-            "parser",
-            sessions=("codex:parser",),
-            pr_sessions=("codex:parser",),
-            local=GitObservation(
+            GitObservation(
                 "/fixture/parser",
                 "parser",
                 "head-one",
@@ -173,7 +171,12 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 0,
                 "example.test/team/parser",
             ),
-            pr=PullRequest(
+            self.now,
+        )
+        self.observation = BranchObservation(
+            "example.test/team/parser",
+            "parser",
+            PullRequest(
                 23,
                 "https://example.test/team/parser/pull/23",
                 "OPEN",
@@ -184,13 +187,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 repository="example.test/team/parser",
                 title="Handle quoted fields",
             ),
-            revision=1,
-            changed_at=self.now,
-            local_checked_at=self.now,
-            github_checked_at=self.now,
-            repository="example.test/team/parser",
-            source="fixture",
+            self.now,
         )
+        self.provider.publish(self.checkout)
         self.provider.publish(self.observation)
         self.attention.pending = None
 
@@ -203,9 +202,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.provider.publish(HookEvent("codex", session, "progress", progress=text))
 
     async def submit_commentary(self) -> tuple[SpeechPacket, AttentionSelection]:
-        snapshot = self.app.snapshot()
+        snapshot = self.app.context()
         selection = self.attention.select(snapshot, "routine")
-        await self.app.observe("routine", snapshot=snapshot, selection=selection)
+        await self.app.comment("routine", snapshot=snapshot, selection=selection)
         packet = next(
             packet for packet in reversed(self.packets) if "delivery_id" in packet
         )
@@ -225,17 +224,249 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-    async def test_agent_report_reaches_connected_work_and_accepted_speech(
+    async def test_failed_intent_write_keeps_the_original_story_after_the_next_report(
         self,
     ) -> None:
-        self.report(
-            "Quoted fields preserve escaped delimiters. Next I will document the cases."
+        failed_intent = "Replace the parser with an unrelated formatter"
+        self.memory.db.execute(
+            "CREATE TRIGGER reject_session_write BEFORE UPDATE ON work_sessions BEGIN SELECT RAISE(ABORT, 'fixture session failure'); END"
         )
+        with self.assertLogs("pet-daemon", level="WARNING"):
+            self.provider.publish(
+                HookEvent(
+                    "codex",
+                    "parser",
+                    "intent",
+                    goal=failed_intent,
+                    repo="/fixture/rejected-parser",
+                )
+            )
+        self.memory.db.execute("DROP TRIGGER reject_session_write")
+        self.report("Quoted fields preserve escaped delimiters.")
+        await self.submit_commentary()
+        payload = json.loads(self.model.requests[-1][0]["messages"][0]["content"])
+        work = payload["focus_work"]
+        self.assertEqual(work["intent"], "Improve quoted-field parsing")
+        self.assertIn("Quoted fields preserve escaped delimiters.", json.dumps(work))
+        self.assertNotIn(failed_intent, json.dumps(work))
+
+    async def test_late_pr_resolution_keeps_a_report_on_its_work_after_branch_reuse(
+        self,
+    ) -> None:
+        self.now += 1
+        self.provider.publish(replace(self.observation, pr=None, checked_at=self.now))
+        self.provider.publish(
+            HookEvent(
+                "codex",
+                "parser",
+                "turn_done",
+                outcome="success",
+                progress="The parser changes are ready.",
+            )
+        )
+        reported_pr = replace(
+            require(self.observation.pr),
+            number=24,
+            url="https://example.test/team/parser/pull/24",
+        )
+        self.now += 1
+        self.provider.publish(
+            replace(self.observation, pr=reported_pr, checked_at=self.now)
+        )
+        unrelated_pr = replace(
+            reported_pr,
+            number=25,
+            url="https://example.test/team/parser/pull/25",
+            head="unrelated-head",
+            title="Add unrelated import support",
+        )
+        self.now += 1
+        self.provider.publish(
+            replace(
+                self.checkout,
+                local=replace(require(self.checkout.local), head=unrelated_pr.head),
+                checked_at=self.now,
+            )
+        )
+        self.provider.publish(
+            replace(self.observation, pr=unrelated_pr, checked_at=self.now)
+        )
+        await self.submit_commentary()
+        payload = json.loads(self.model.requests[-1][0]["messages"][0]["content"])
+        work = payload["focus_work"]
+        report = next(
+            report
+            for report in work["activity"]
+            if report.get("reported_progress") == "The parser changes are ready."
+        )
+        self.assertEqual(report["context"]["pull_request"], reported_pr.url)
+        artifacts = {artifact["ref"] for artifact in work["artifacts"]}
+        self.assertIn(reported_pr.url, artifacts)
+        self.assertNotIn(unrelated_pr.url, artifacts)
+
+    async def test_repeated_progress_about_another_branch_becomes_commentary_for_its_pr(
+        self,
+    ) -> None:
+        self.report("Tests pass")
+        packet, _ = await self.submit_commentary()
+        first_payload = json.loads(self.model.requests[-1][0]["messages"][0]["content"])
+        first_report = next(
+            report
+            for report in first_payload["focus_work"]["activity"]
+            if report.get("reported_progress") == "Tests pass"
+        )
+        self.assertEqual(
+            first_report["context"]["pull_request"],
+            require(self.observation.pr).url,
+        )
+        self.accept(packet)
+        self.now += 1
+        next_pr = replace(
+            require(self.observation.pr),
+            number=24,
+            url="https://example.test/team/parser/pull/24",
+            head_branch="parser-examples",
+            title="Document quoted-field examples",
+        )
+        self.provider.publish(
+            replace(
+                self.checkout,
+                local=replace(require(self.checkout.local), branch=next_pr.head_branch),
+                checked_at=self.now,
+            )
+        )
+        self.provider.publish(
+            BranchObservation(
+                self.observation.repository, next_pr.head_branch, next_pr, self.now
+            )
+        )
+        self.attention.next_observation = self.now
+        self.assertIsNone(self.attention.request(self.app.context()))
+        self.report("Tests pass")
+        self.attention.next_observation = self.now
+        snapshot = self.app.context()
+        request = require(self.attention.request(snapshot))
+        selection = self.attention.select(snapshot, request.reason)
+        self.model.text = "The quoted-field examples pass their validation."
+        await self.app.comment(request.reason, snapshot=snapshot, selection=selection)
+        payload = json.loads(self.model.requests[-1][0]["messages"][0]["content"])
+        latest_report = next(
+            report
+            for report in payload["focus_work"]["activity"]
+            if report.get("reported_progress") == "Tests pass"
+        )
+        self.assertEqual(
+            latest_report["context"],
+            {"branch": next_pr.head_branch, "pull_request": next_pr.url},
+        )
+
+    async def test_repeated_progress_about_the_same_work_keeps_automatic_speech_quiet(
+        self,
+    ) -> None:
+        self.report("Tests pass")
+        packet, _ = await self.submit_commentary()
+        self.accept(packet)
+        self.now += 1
+        self.report("Tests pass")
+        self.attention.next_observation = self.now
+        self.assertIsNone(self.attention.request(self.app.context()))
+
+    async def test_parent_and_child_reports_share_stack_context_and_one_accepted_speech(
+        self,
+    ) -> None:
+        parent_pr = require(self.observation.pr)
+        child_pr = replace(
+            parent_pr,
+            number=24,
+            url="https://example.test/team/parser/pull/24",
+            head="child-head",
+            head_branch="parser-examples",
+            title="Document escaped delimiter examples",
+            related_links=(
+                RelatedLink(
+                    "pull_request",
+                    parent_pr.url,
+                    "stack_entry",
+                    "github_stack",
+                    stack=4,
+                    position=1,
+                ),
+            ),
+        )
+        self.provider.publish(
+            replace(
+                self.observation,
+                pr=replace(
+                    parent_pr,
+                    related_links=(
+                        RelatedLink(
+                            "pull_request",
+                            child_pr.url,
+                            "stack_entry",
+                            "github_stack",
+                            stack=4,
+                            position=2,
+                        ),
+                    ),
+                ),
+            )
+        )
+        parent_report = "Quoted fields preserve escaped delimiters. Next I will review the examples."
+        child_report = (
+            "Documented escaped delimiters. Next I will add a multiline example."
+        )
+        self.report(parent_report)
+        self.provider.publish(
+            HookEvent(
+                "codex",
+                "examples",
+                "subagent_start",
+                parent="parser",
+                goal="Document quoted-field examples",
+                repo="/fixture/parser-examples",
+            )
+        )
+        self.provider.publish(
+            CheckoutObservation(
+                "/fixture/parser-examples",
+                replace(
+                    require(self.checkout.local),
+                    worktree="/fixture/parser-examples",
+                    branch="parser-examples",
+                    head="child-head",
+                ),
+                self.now,
+            )
+        )
+        self.provider.publish(
+            BranchObservation(
+                self.observation.repository,
+                "parser-examples",
+                child_pr,
+                self.now,
+            )
+        )
+        self.report(child_report, session="examples")
+        subjects = self.app.context().work
+        self.assertEqual(len(subjects), 1)
+        self.assertEqual(subjects[0].sessions, ("codex:examples", "codex:parser"))
+        self.assertIsInstance(subjects[0].story, WorkStory)
+        self.assertEqual(subjects[0].story.intent, "Improve quoted-field parsing")
         packet, selection = await self.submit_commentary()
         payload = json.loads(self.model.requests[0][0]["messages"][0]["content"])
-        self.assertIsInstance(require(selection.subject).view, WorkView)
-        self.assertIn("Next I will document the cases", json.dumps(payload))
-        self.assertIn("Handle quoted fields", json.dumps(payload))
+        work = payload["focus_work"]
+        self.assertIn(parent_report, json.dumps(work["activity"]))
+        self.assertNotIn(child_report, json.dumps(work["activity"]))
+        child_session = next(
+            session
+            for session in work["sessions"]
+            if session["scope"] == "Document quoted-field examples"
+        )
+        self.assertIn(child_report, json.dumps(child_session["activity"]))
+        self.assertNotIn(parent_report, json.dumps(child_session["activity"]))
+        self.assertIn("Handle quoted fields", json.dumps(work))
+        self.assertIn("Document escaped delimiter examples", json.dumps(work))
+        self.assertIn("stack", json.dumps(work).lower())
         self.assertEqual(self.memory.speech(), [])
         self.assertTrue(self.attention.is_new(require(selection.subject)))
         self.assertTrue(self.app.delivery.has_pending())
@@ -250,7 +481,42 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             [item.text for item in self.memory.speech()], [self.model.text]
         )
         self.assertFalse(self.app.delivery.has_pending())
-        self.assertFalse(self.attention.is_new(self.app.snapshot().work[0]))
+        self.assertFalse(self.attention.is_new(self.app.context().work[0]))
+
+    async def test_child_location_comes_from_observed_hooks_and_parent_is_canonical(
+        self,
+    ) -> None:
+        self.provider.publish(
+            HookEvent("codex", "parser", "progress", aliases=("parser-alias",))
+        )
+        self.provider.publish(
+            HookEvent(
+                "codex",
+                "examples",
+                "subagent_start",
+                parent="parser-alias",
+                goal="Document quoted-field examples",
+            )
+        )
+        self.assertEqual(
+            self.app.sessions.by_id["codex:examples"].repo, "/fixture/parser"
+        )
+        subject = self.app.context().work[0]
+        self.assertEqual(subject.id, "codex:parser")
+        self.assertTrue({"codex:examples", "codex:parser"} <= set(subject.sessions))
+        self.assertEqual(require(subject.story.sessions[0].context).checkout, "")
+        self.provider.publish(
+            HookEvent(
+                "codex",
+                "examples",
+                "progress",
+                repo="/fixture/parser-examples",
+                progress="Documented the quoted-field examples.",
+            )
+        )
+        child = self.app.context().work[0].story.sessions[0]
+        self.assertEqual(require(child.context).checkout, "/fixture/parser-examples")
+        self.assertEqual(len(self.app.context().work), 1)
 
     async def test_pending_delivery_defers_other_work_and_queued_automatic_generation(
         self,
@@ -287,7 +553,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(restored.is_new(require(selection.subject)))
         self.assertIsNotNone(
             restored.request(
-                self.app.snapshot(), delivery_pending=self.app.delivery.has_pending()
+                self.app.context(), delivery_pending=self.app.delivery.has_pending()
             )
         )
         self.assertIsNone(self.memory.message_outcome(packet["delivery_id"]))
@@ -295,14 +561,14 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_silence_and_exhausted_delivery_persist_consideration(self) -> None:
         self.model.text = None
-        await self.app.observe("routine")
+        await self.app.comment("routine")
         restored = Attention(
             self.config,
             self.clock,
             random.Random(0),
             self.memory.load_attention_history(),
         )
-        self.assertFalse(restored.is_new(self.app.snapshot().work[0]))
+        self.assertFalse(restored.is_new(self.app.context().work[0]))
         self.report("Added examples for escaped delimiters.")
         self.model.text = "The examples cover escaped delimiters."
         packet, _ = await self.submit_commentary()
@@ -321,7 +587,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             random.Random(0),
             self.memory.load_attention_history(),
         )
-        self.assertFalse(restored.is_new(self.app.snapshot().work[0]))
+        self.assertFalse(restored.is_new(self.app.context().work[0]))
 
     async def test_late_acceptance_records_captured_story_without_suppressing_new_report(
         self,
@@ -332,7 +598,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.accept(packet)
         outcome = require(self.memory.message_outcome(packet["delivery_id"]))
         self.assertEqual(outcome.revision, require(selection.subject).revision)
-        self.assertTrue(self.attention.is_new(self.app.snapshot().work[0]))
+        self.assertTrue(self.attention.is_new(self.app.context().work[0]))
         self.assertEqual(len(self.memory.speech()), 1)
 
     async def test_reset_rejects_old_acceptance_and_callbacks(self) -> None:
@@ -343,7 +609,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.app.delivery_outcome(DeliveryOutcome(message, "accepted"))
         self.assertIsNone(self.memory.message_outcome(packet["delivery_id"]))
         self.assertEqual(self.memory.speech(), [])
-        self.assertEqual(self.memory.work.work_items(), ())
+        self.assertEqual(self.app.context().work, ())
 
     async def test_failed_acceptance_transaction_keeps_delivery_and_attention_retryable(
         self,
@@ -356,11 +622,11 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             self.accept(packet)
         self.assertIsNone(self.memory.message_outcome(packet["delivery_id"]))
         self.assertEqual(self.memory.speech(), [])
-        self.assertTrue(self.attention.is_new(self.app.snapshot().work[0]))
+        self.assertTrue(self.attention.is_new(self.app.context().work[0]))
         self.assertTrue(self.app.delivery.has_pending())
         self.memory.db.execute("DROP TRIGGER reject_speech")
         self.accept(packet)
-        self.assertFalse(self.attention.is_new(self.app.snapshot().work[0]))
+        self.assertFalse(self.attention.is_new(self.app.context().work[0]))
 
     async def test_basic_pr_state_refresh_preserves_consideration(self) -> None:
         packet, _ = await self.submit_commentary()
@@ -368,7 +634,6 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.provider.publish(
             replace(
                 self.observation,
-                revision=2,
                 pr=replace(
                     require(self.observation.pr),
                     state="MERGED",
@@ -376,47 +641,56 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
         )
-        subject = self.app.snapshot().work[0]
+        subject = self.app.context().work[0]
         self.assertFalse(self.attention.is_new(subject))
         self.attention.next_observation = self.now
-        self.assertIsNone(self.attention.request(self.app.snapshot()))
-        self.assertIn("MERGED", str(subject.view))
+        self.assertIsNone(self.attention.request(self.app.context()))
+        self.assertIn("MERGED", str(subject.story))
 
-    async def test_reconciliation_retains_last_successful_repository_evidence(
+    async def test_reconciliation_retains_successful_pr_facts_after_source_failure(
         self,
     ) -> None:
-        failed = replace(self.observation, github_error="GitHub unavailable")
+        failed = replace(
+            self.observation,
+            pr=None,
+            checked_at=self.now + 1,
+            error="GitHub unavailable",
+        )
         self.provider.publish(failed)
         source = RepositoryTracker(
-            self.app.ingest, clock=self.clock, checkpoints=(failed,)
+            self.app.ingest,
+            clock=self.clock,
+            checkpoints=(self.checkout, failed),
         )
         self.app.providers = (source,)
         self.app.reconcile_work = lambda: source.reconcile_targets(
-            self.memory.work.collection_targets()
+            self.memory.collection_targets()
         )
         self.app.reconcile_targets()
-        account = require(self.memory.work.session_context("codex:parser"))
+        self.assertIn("Handle quoted fields", str(self.app.context().work[0].story))
+        checkpoints = self.memory.load_repositories()
         branch = next(
-            item for item in account.artifacts if item.artifact.kind == "branch"
+            item for item in checkpoints if isinstance(item, BranchObservation)
         )
-        availability = next(
-            item.payload
-            for item in branch.evidence
-            if isinstance(item.payload, AvailabilityEvidence)
+        self.assertEqual(branch.error, "GitHub unavailable")
+        self.assertEqual(require(branch.pr).title, "Handle quoted fields")
+        checkout = next(
+            item for item in checkpoints if isinstance(item, CheckoutObservation)
         )
-        self.assertEqual(availability.github_error, "GitHub unavailable")
-        self.assertEqual(len(self.memory.load_repositories()), 1)
+        self.assertEqual(checkout.local, self.checkout.local)
+        self.assertEqual(checkout.last_success_at, self.checkout.checked_at)
+        self.assertEqual(branch.last_success_at, self.observation.checked_at)
 
     async def test_failed_reset_preserves_history_and_sessions(self) -> None:
         self.memory.record_speech("Earlier parser observation", "routine")
-        work = self.memory.work.work_items()
+        work = self.app.context().work
         sessions = self.app.sessions
         self.memory.db.execute(
             "CREATE TRIGGER reject_memory_reset BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT, 'fixture reset failure'); END"
         )
         with self.assertLogs("pet-daemon", level="WARNING"):
             self.app.clear_memory()
-        self.assertEqual(self.memory.work.work_items(), work)
+        self.assertEqual(self.app.context().work, work)
         self.assertEqual(
             [item.text for item in self.memory.speech()], ["Earlier parser observation"]
         )

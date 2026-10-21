@@ -157,7 +157,7 @@ class EpisodeTests(unittest.TestCase):
         self.assertEqual(
             self.event("session_start", session="native", aliases=["temporary"]), []
         )
-        lane = self.sessions.lanes["claude:native"]
+        lane = self.sessions.by_id["claude:native"]
         self.assertTrue(lane.waiting)
         self.assertEqual(lane.waiting_call, "question")
         captured = waiting

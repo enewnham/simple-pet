@@ -8,12 +8,12 @@ from .episodes import Episode
 from .runtime import (
     CareTrigger,
     EpisodeTrigger,
+    PetContext,
     RandomSource,
-    SessionSnapshot,
+    SessionContext,
     SessionTrigger,
     SubjectTrigger,
     Trigger,
-    WorkSnapshot,
 )
 from .storage.memory import HistoryRecord
 from .telemetry import trace
@@ -38,7 +38,7 @@ class SelectionSupport:
     def capture(
         cls,
         subject: WorkSubject | None,
-        focus: SessionSnapshot | None,
+        focus: SessionContext | None,
     ) -> "SelectionSupport":
         return cls(
             subject.revision if subject else None,
@@ -56,8 +56,8 @@ class SelectionSupport:
 @dataclass(frozen=True)
 class AttentionSelection:
     subject: WorkSubject | None
-    focus_session: SessionSnapshot | None
-    context_sessions: tuple[SessionSnapshot, ...]
+    focus_session: SessionContext | None
+    context_sessions: tuple[SessionContext, ...]
     reason: str
     situation: str
     context: str | None = None
@@ -73,7 +73,7 @@ class AttentionSelection:
             else None
         )
 
-    def supported(self, snapshot: WorkSnapshot) -> bool:
+    def supported(self, snapshot: PetContext) -> bool:
         current = self.refresh(snapshot)
         if self.subject is not None and current.subject is None:
             return False
@@ -93,7 +93,7 @@ class AttentionSelection:
                 return False
         return True
 
-    def refresh(self, snapshot: WorkSnapshot) -> "AttentionSelection":
+    def refresh(self, snapshot: PetContext) -> "AttentionSelection":
         subjects = {subject.id: subject for subject in snapshot.work}
         sessions = {session.id: session for session in snapshot.sessions}
         subject = subjects.get(self.subject.id) if self.subject is not None else None
@@ -111,14 +111,14 @@ class AttentionSelection:
         )
 
 
-def _sessions(subject: WorkSubject, snapshot: WorkSnapshot) -> list[SessionSnapshot]:
+def _sessions(subject: WorkSubject, snapshot: PetContext) -> list[SessionContext]:
     identifiers = set(subject.sessions)
     if subject.kind == "session":
         identifiers.add(subject.id)
     return [session for session in snapshot.sessions if session.id in identifiers]
 
 
-def _session_tier(session: SessionSnapshot) -> int:
+def _session_tier(session: SessionContext) -> int:
     if session.waiting_for_input:
         return 0
     if session.turn_active and not session.activity_uncertain:
@@ -188,11 +188,19 @@ class Attention:
             scheduled=self.pending,
         )
 
-    def routine_eligible(self, subject: WorkSubject, snapshot: WorkSnapshot) -> bool:
+    def routine_eligible(self, subject: WorkSubject, snapshot: PetContext) -> bool:
         if not self.is_new(subject):
             return False
-        view = subject.view
-        if view.intent or view.requests or view.activity:
+        story = subject.story
+        if (
+            story.intent
+            or story.requests
+            or story.activity
+            or any(
+                session.scope or session.requests or session.activity
+                for session in story.sessions
+            )
+        ):
             return True
         return any(
             session.turn_active or session.waiting_for_input or session.outcome
@@ -201,7 +209,7 @@ class Attention:
 
     def select(
         self,
-        snapshot: WorkSnapshot,
+        snapshot: PetContext,
         reason: str = "routine",
         context: str | None = None,
         eligible: Collection[str] | None = None,
@@ -209,7 +217,7 @@ class Attention:
         trigger = snapshot.trigger
         subject = None
         focus = None
-        others: tuple[SessionSnapshot, ...] = ()
+        others: tuple[SessionContext, ...] = ()
         if context is None and reason not in ("explicit", "care"):
             target_session = _target_session(trigger) if reason != "click" else None
             target_subject = (
@@ -365,7 +373,7 @@ class Attention:
 
     def request(
         self,
-        snapshot: WorkSnapshot,
+        snapshot: PetContext,
         *,
         check_in: Collection[str] = (),
         manual: tuple[str, float | None] | None = None,

@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 from typing import NotRequired, TypedDict
 
-from .views import (
+from ..work.models import ReportContext
+from ..work.views import (
     AssociationView,
     AvailabilityView,
     EvidenceView,
@@ -10,7 +13,7 @@ from .views import (
     MissingPullRequestView,
     ProgressView,
     PullRequestEvidenceView,
-    WorkView,
+    WorkStory,
 )
 
 
@@ -36,6 +39,19 @@ class EvidenceFields(TypedDict, total=False):
     text: str
     association: str
     authorship: str
+    context: ReportContextRecord
+
+
+class ReferenceRecord(TypedDict):
+    kind: str
+    ref: str
+
+
+class ReportContextRecord(TypedDict, total=False):
+    branch: str
+    pull_request: str
+    references: tuple[ReferenceRecord, ...]
+    uncertainty: tuple[str, ...]
 
 
 class PresentedEvidence(EvidenceFields):
@@ -56,6 +72,29 @@ class WorkRecord(TypedDict):
     requests: tuple[PresentedEvidence, ...]
     activity: tuple[PresentedEvidence, ...]
     artifacts: tuple[PresentedArtifact, ...]
+    sessions: NotRequired[tuple[AgentSessionRecord, ...]]
+
+
+class AgentSessionRecord(TypedDict):
+    scope: str
+    requests: tuple[PresentedEvidence, ...]
+    activity: tuple[PresentedEvidence, ...]
+    context: ReportContextRecord
+
+
+def context_record(context: ReportContext) -> ReportContextRecord:
+    result: ReportContextRecord = {}
+    if context.branch:
+        result["branch"] = context.branch
+    if context.pull_request:
+        result["pull_request"] = context.pull_request
+    if context.references:
+        result["references"] = tuple(
+            {"kind": item.kind, "ref": item.ref} for item in context.references
+        )
+    if context.checkout and not (context.repository and context.branch):
+        result["uncertainty"] = ("The report's checkout context was not resolved.",)
+    return result
 
 
 def evidence_record(record: EvidenceView) -> PresentedEvidence:
@@ -101,11 +140,13 @@ def evidence_record(record: EvidenceView) -> PresentedEvidence:
             )
     if record.observed_at is not None:
         result["observed_at"] = record.observed_at
+    if record.context is not None:
+        result["context"] = context_record(record.context)
     return result
 
 
-def work_record(work: WorkView) -> WorkRecord:
-    return {
+def work_record(work: WorkStory) -> WorkRecord:
+    result: WorkRecord = {
         "intent": work.intent,
         "requests": tuple(evidence_record(record) for record in work.requests),
         "activity": tuple(evidence_record(record) for record in work.activity),
@@ -119,3 +160,14 @@ def work_record(work: WorkView) -> WorkRecord:
             for item in work.artifacts
         ),
     }
+    if work.sessions:
+        result["sessions"] = tuple(
+            {
+                "scope": agent.scope,
+                "requests": tuple(evidence_record(record) for record in agent.requests),
+                "activity": tuple(evidence_record(record) for record in agent.activity),
+                "context": context_record(agent.context) if agent.context else {},
+            }
+            for agent in work.sessions
+        )
+    return result

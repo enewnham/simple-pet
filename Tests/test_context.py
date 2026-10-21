@@ -12,15 +12,19 @@ from pet_daemon.commentary import Cognition
 from pet_daemon.commentary.context import CommentaryPayload, PreparedCommentary
 from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.config import Config
-from pet_daemon.runtime import CareTrigger, WorkSnapshot
+from pet_daemon.runtime import CareTrigger, HookEvent, PetContext
+from pet_daemon.sessions import Sessions
 from pet_daemon.storage import Memory
-from pet_daemon.work import WorkSubject, build_work
+from pet_daemon.work import WorkSubject
+from pet_daemon.work.history import project_event
 from pet_daemon.work.observations import (
+    BranchObservation,
+    CheckoutObservation,
     GitObservation,
     PullRequest,
-    RepositoryObservation,
+    PullRequestObservation,
 )
-from pet_daemon.work.views import ArtifactView
+from pet_daemon.work.views import ArtifactContext
 from Tests.fixtures import (
     SessionOptions,
     capture_snapshot,
@@ -31,7 +35,7 @@ from Tests.fixtures import (
 
 class NoRequestsModel:
     async def complete(self, request: ModelRequest, reason: str) -> dict[str, object]:
-        raise AssertionError("Context preparation must not request model output")
+        raise AssertionError("PromptBuilder preparation must not request model output")
 
 
 class ContextTests(unittest.TestCase):
@@ -57,24 +61,33 @@ class ContextTests(unittest.TestCase):
                     "Keep the public API stable",
                 ),
                 progress="Checking parser compatibility",
-                session_context="Implement the parser.",
+                summary="Implement the parser.",
             )
         )
         self.work: tuple[WorkSubject, ...] = ()
+        self.sessions = Sessions(lambda: 1000)
+
+    def record_hook(self, hook: HookEvent) -> None:
+        result = self.sessions.apply(hook)
+        assert result is not None
+        with self.memory.transaction():
+            self.memory.work.record_session(result.observation)
+            self.memory.observe_session_context(result.observation)
+            self.memory.record_event(project_event(hook))
 
     def update_session(self, index: int = 0, **values: Unpack[SessionOptions]) -> None:
         sessions = list(self.snapshot.sessions)
         sessions[index] = replace(sessions[index], **values)
         self.snapshot = replace(self.snapshot, sessions=tuple(sessions))
 
-    def current_snapshot(self) -> WorkSnapshot:
+    def current_snapshot(self) -> PetContext:
         return capture_snapshot(self.snapshot, work=self.work)
 
     def prepare(
         self, reason: str = "routine", context: str | None = None
     ) -> PreparedCommentary:
         selection = self.attention.select(self.current_snapshot(), reason, context)
-        return self.cognition.context.prepare(
+        return self.cognition.prompts.prepare(
             self.current_snapshot(), selection, self.cognition.request
         )
 
@@ -88,7 +101,7 @@ class ContextTests(unittest.TestCase):
         focus = self.payload(prepared)["focus_session"]
         assert focus is not None
         self.assertEqual(focus["recent_requests"], ["Keep the public API stable"])
-        self.assertEqual(focus["session_context"], "Implement the parser.")
+        self.assertEqual(focus["summary"], "Implement the parser.")
         self.assertEqual(focus["progress"], "Checking parser compatibility")
         self.assertEqual(self.snapshot, before)
 
@@ -111,9 +124,9 @@ class ContextTests(unittest.TestCase):
             ),
         )
         prepared = self.prepare()
-        self.assertEqual(prepared.manifest.session_ids, ("cli:parser",))
+        self.assertEqual(prepared.support.session_ids, ("cli:parser",))
         self.update_session(1, progress="Renderer completed", turn_active=False)
-        self.assertTrue(prepared.manifest.valid(self.current_snapshot()))
+        self.assertTrue(prepared.support.valid(self.current_snapshot()))
 
     def test_manifest_ignores_a_request_omitted_by_the_budget(self) -> None:
         self.config.prompt_target_bytes = 1
@@ -124,45 +137,47 @@ class ContextTests(unittest.TestCase):
                 *self.snapshot.sessions[0].recent_requests[1:],
             )
         )
-        self.assertTrue(prepared.manifest.valid(self.current_snapshot()))
+        self.assertTrue(prepared.support.valid(self.current_snapshot()))
 
     def test_manifest_rejects_changed_included_progress(self) -> None:
         prepared = self.prepare()
         self.update_session(progress="Parser verification complete")
-        self.assertFalse(prepared.manifest.valid(self.current_snapshot()))
+        self.assertFalse(prepared.support.valid(self.current_snapshot()))
 
     def test_manifest_ignores_elapsed_time_and_metadata(self) -> None:
         prepared = self.prepare()
         self.update_session(duration_seconds=300, quiet_seconds=150, changed_at=1200)
-        self.assertTrue(prepared.manifest.valid(self.current_snapshot()))
+        self.assertTrue(prepared.support.valid(self.current_snapshot()))
 
     def test_process_presence_metadata_does_not_supersede_ongoing_work(self) -> None:
         self.update_session(presence="unknown")
         prepared = self.prepare()
         self.update_session(presence="alive")
-        self.assertTrue(prepared.manifest.valid(self.current_snapshot()))
+        self.assertTrue(prepared.support.valid(self.current_snapshot()))
 
     def test_quiet_connected_work_keeps_its_intent_without_a_live_session(self) -> None:
-        self.memory.work.session_intent("cli:parser", "Preserve parser compatibility")
+        self.record_hook(
+            HookEvent("cli", "parser", "intent", goal="Preserve parser compatibility")
+        )
         self.snapshot = replace(self.snapshot, sessions=())
-        self.work = build_work(self.snapshot, self.memory.work.snapshot())
+        self.work = self.memory.connected_work(self.snapshot)
         prepared = self.prepare()
         payload = self.payload(prepared)
         self.assertIsNone(payload["focus_session"])
         self.assertEqual(
             payload["focus_work"]["intent"], "Preserve parser compatibility"
         )
-        self.assertTrue(prepared.manifest.valid(self.current_snapshot()))
+        self.assertTrue(prepared.support.valid(self.current_snapshot()))
 
     def test_manifest_rejects_a_superseded_runtime_transition(self) -> None:
         prepared = self.prepare()
         self.update_session(turn_active=False, outcome="success")
-        self.assertFalse(prepared.manifest.valid(self.current_snapshot()))
+        self.assertFalse(prepared.support.valid(self.current_snapshot()))
 
     def test_quiet_greeting_remains_valid_without_session_context(self) -> None:
         self.snapshot = replace(self.snapshot, sessions=())
         prepared = self.prepare("click")
-        self.assertTrue(prepared.manifest.valid(self.current_snapshot()))
+        self.assertTrue(prepared.support.valid(self.current_snapshot()))
 
     def test_explicit_context_stays_in_data_and_keeps_work_out_of_the_prompt(
         self,
@@ -182,24 +197,40 @@ class ContextTests(unittest.TestCase):
         state: str = "OPEN",
         is_draft: bool = True,
     ) -> None:
-        if not self.memory.work.work_for_session("cli:parser"):
-            self.memory.work.session_intent(
-                "cli:parser", "Make session tracking survive restarts"
+        if not self.memory.recent(session="cli:parser", event_types=("intent",)):
+            self.record_hook(
+                HookEvent(
+                    "cli",
+                    "parser",
+                    "intent",
+                    goal="Make session tracking survive restarts",
+                )
             )
-        self.memory.work.observe_repository(
-            RepositoryObservation(
-                subject="parser",
-                repository="example.test/team/parser",
-                worktree="/parser",
-                branch="persistence",
-                sessions=("cli:parser",),
-                current=True,
-                local_checked_at=1000,
-                github_checked_at=1000,
-                local=GitObservation(
-                    "/parser", "persistence", head, 0, 7, 0, 0, "", 0, 0
+        self.memory.work.observe(
+            CheckoutObservation(
+                "/parser",
+                GitObservation(
+                    "/parser",
+                    "persistence",
+                    head,
+                    0,
+                    7,
+                    0,
+                    0,
+                    "",
+                    0,
+                    0,
+                    "example.test/team/parser",
                 ),
-                pr=PullRequest(
+                1000,
+            )
+        )
+        self.record_hook(HookEvent("cli", "parser", "session_start", repo="/parser"))
+        self.memory.work.observe(
+            BranchObservation(
+                "example.test/team/parser",
+                "persistence",
+                PullRequest(
                     42,
                     "https://example.test/team/parser/pull/42",
                     state,
@@ -210,9 +241,10 @@ class ContextTests(unittest.TestCase):
                     head_repository="example.test/team/parser",
                     head_branch="persistence",
                 ),
+                1000,
             )
         )
-        self.work = build_work(self.snapshot, self.memory.work.snapshot())
+        self.work = self.memory.connected_work(self.snapshot)
 
     def test_presented_work_omits_checkout_paths_and_internal_session_names(
         self,
@@ -228,13 +260,28 @@ class ContextTests(unittest.TestCase):
         self.output()
         prepared = self.prepare()
         self.output(head="two")
-        self.assertTrue(prepared.manifest.valid(self.current_snapshot()))
+        self.assertTrue(prepared.support.valid(self.current_snapshot()))
 
     def test_supplied_pull_request_state_invalidates_changed_context(self) -> None:
         self.output()
         prepared = self.prepare()
         self.output(state="MERGED")
-        self.assertFalse(prepared.manifest.valid(self.current_snapshot()))
+        self.assertFalse(prepared.support.valid(self.current_snapshot()))
+
+    def test_exact_pull_request_refresh_supplies_one_current_state(self) -> None:
+        self.output()
+        pr = PullRequest(
+            42,
+            "https://example.test/team/parser/pull/42",
+            "MERGED",
+            "2026-10-21T00:00:00Z",
+            title="Persist coding session context",
+        )
+        self.memory.work.observe(PullRequestObservation(pr.url, pr, 1001))
+        self.work = self.memory.connected_work(self.snapshot)
+        encoded = json.dumps(self.payload(self.prepare()))
+        self.assertIn("MERGED", encoded)
+        self.assertNotIn("OPEN", encoded)
 
     def test_new_artifact_context_does_not_invalidate_captured_story(self) -> None:
         self.output()
@@ -242,27 +289,27 @@ class ContextTests(unittest.TestCase):
         self.work = tuple(
             replace(
                 subject,
-                view=replace(
-                    subject.view,
+                story=replace(
+                    subject.story,
                     artifacts=(
-                        *subject.view.artifacts,
-                        ArtifactView("ticket", "https://example.test/tickets/123"),
+                        *subject.story.artifacts,
+                        ArtifactContext("ticket", "https://example.test/tickets/123"),
                     ),
                 ),
             )
             for subject in self.work
         )
-        self.assertTrue(prepared.manifest.valid(self.current_snapshot()))
+        self.assertTrue(prepared.support.valid(self.current_snapshot()))
 
     def test_disconnected_focus_invalidates_the_captured_subject(self) -> None:
         self.output()
         prepared = self.prepare()
         self.work = tuple(replace(subject, sessions=()) for subject in self.work)
-        self.assertFalse(prepared.manifest.valid(self.current_snapshot()))
+        self.assertFalse(prepared.support.valid(self.current_snapshot()))
 
     def test_selected_work_context_is_supplied_once(self) -> None:
         self.output()
-        self.update_session(connected_work=self.work[0].view)
+        self.update_session(connected_work=self.work[0].story)
         payload = self.payload(self.prepare())
         self.assertIn("focus_work", payload)
         focus = payload["focus_session"]
@@ -273,14 +320,14 @@ class ContextTests(unittest.TestCase):
         self.snapshot = sessions_snapshot()
         snapshot = replace(self.current_snapshot(), trigger=CareTrigger("exercise"))
         selection = self.attention.select(snapshot, "care")
-        prepared = self.cognition.context.prepare(
+        prepared = self.cognition.prompts.prepare(
             snapshot, selection, self.cognition.request
         )
-        self.assertTrue(prepared.manifest.valid(snapshot))
+        self.assertTrue(prepared.support.valid(snapshot))
         resumed = capture_snapshot(
             sessions_snapshot(session_snapshot(turn_active=True))
         )
-        self.assertFalse(prepared.manifest.valid(resumed))
+        self.assertFalse(prepared.support.valid(resumed))
 
     def test_new_input_wait_invalidates_a_quiet_greeting(self) -> None:
         self.snapshot = sessions_snapshot()
@@ -288,9 +335,9 @@ class ContextTests(unittest.TestCase):
         waiting = capture_snapshot(
             sessions_snapshot(session_snapshot(waiting_for_input=True))
         )
-        self.assertFalse(prepared.manifest.valid(waiting))
+        self.assertFalse(prepared.support.valid(waiting))
 
     def test_summary_saved_from_the_same_result_preserves_commentary(self) -> None:
         prepared = self.prepare()
-        self.update_session(session_context="The parser preserves its public API.")
-        self.assertTrue(prepared.manifest.valid(self.current_snapshot()))
+        self.update_session(summary="The parser preserves its public API.")
+        self.assertTrue(prepared.support.valid(self.current_snapshot()))

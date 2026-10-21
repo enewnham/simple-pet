@@ -1,13 +1,29 @@
 import asyncio
 import time
 from collections.abc import Callable, Coroutine, Iterable
-from dataclasses import replace
 from pathlib import Path
 
 from .. import telemetry
-from ..work.observations import RepositoryObservation, RepositoryTarget
+from ..work.observations import (
+    BranchObservation,
+    CheckoutObservation,
+    GitObservation,
+    PullRequestObservation,
+    RepositoryObservation,
+    RepositoryTarget,
+)
 from . import git, github
 from .git import RunCommand
+
+type CollectionKey = tuple[str, str]
+
+
+def _key(item: RepositoryObservation) -> CollectionKey:
+    if isinstance(item, CheckoutObservation):
+        return "checkout", item.worktree
+    if isinstance(item, BranchObservation):
+        return "branch", f"{item.repository}:{item.branch}"
+    return "pull_request", item.ref
 
 
 class RepositoryTracker:
@@ -21,7 +37,6 @@ class RepositoryTracker:
         concurrency: int = 2,
         *,
         checkpoints: Iterable[RepositoryObservation] = (),
-        associations: Iterable[tuple[str, str]] = (),
         targets: Iterable[RepositoryTarget] = (),
     ) -> None:
         self.emit = emit
@@ -29,115 +44,124 @@ class RepositoryTracker:
         self.local_interval = local_interval
         self.github_interval = github_interval
         self.run = run
-        self.observations = {
-            item.subject: replace(item, session_heads=()) for item in checkpoints
+        self.observations = {_key(item): item for item in checkpoints}
+        self.locals: dict[str, GitObservation] = {
+            item.worktree: item.local
+            for item in self.observations.values()
+            if isinstance(item, CheckoutObservation) and item.local is not None
         }
-        self.associations: dict[str, set[str]] = {}
-        self.claims: dict[str, set[str]] = {}
         self.paths: dict[str, float] = {}
-        self.tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
+        self.tasks: dict[CollectionKey, asyncio.Task[None]] = {}
         self.limit = asyncio.Semaphore(concurrency)
         self.closed = False
         self.paused = False
-        self.sequence = 0
-        self.applied = {}
         self.epoch = 0
-        self.roots = {}
-        self.targets: dict[str, RepositoryTarget] = {}
-        self.target_paths = set()
-        self.subscriptions = set()
-        for session, path in associations:
-            if path:
-                path = str(Path(path).resolve())
-                self.associations.setdefault(path, set()).add(session)
-                self.paths[path] = 0
+        self.sequence = 0
+        self.applied: dict[str, int] = {}
+        self.versions: dict[CollectionKey, int] = {}
+        self.roots: dict[str, str] = {}
+        targets = tuple(targets)
         for target in targets:
-            self.track_artifact(target)
+            if target.kind != "checkout":
+                continue
+            path = str(Path(target.ref).resolve())
+            enclosing = [
+                root
+                for root in self.locals
+                if path == root or path.startswith(root.rstrip("/") + "/")
+            ]
+            if enclosing:
+                self.roots[path] = max(enclosing, key=len)
+        self.missing: set[str] = {
+            item.worktree
+            for item in self.observations.values()
+            if isinstance(item, CheckoutObservation) and not item.available
+        }
+        self.targets: dict[CollectionKey, RepositoryTarget] = {}
+        self.subscriptions: dict[CollectionKey, RepositoryTarget] = {}
+        self.attempted: dict[CollectionKey, float] = {}
+        self.reconcile_targets(targets)
 
-    def associate(
-        self, session: str, path: str | Path, *, refresh: bool = False
-    ) -> None:
+    def track_checkout(self, path: str | Path, *, refresh: bool = False) -> None:
         if not path:
             return
-        path = str(Path(path).resolve())
-        sessions = self.associations.setdefault(path, set())
-        if refresh or session not in sessions or path not in self.paths:
-            self.paths[path] = 0
-        self.claims.setdefault(path, set()).add(session)
-        sessions.add(session)
-
-    def track_artifact(self, target: RepositoryTarget) -> None:
-        repository = git.canonical_repository(target.repository)
-        if target.kind == "pull_request":
-            repository, number = github.pull_request_identity(target.ref)
-            if number is None:
-                return
-            subject, branch = "pr:" + target.ref, ""
-        elif target.kind == "branch" and target.ref:
-            if target.checkout:
-                checkout = str(Path(target.checkout).resolve())
-                self.target_paths.add(checkout)
-                self.paths.setdefault(checkout, 0)
-            if not repository:
-                return
-            subject, branch = f"branch:{repository}:{target.ref}", target.ref
-        else:
-            return
-        self.targets[subject] = target
-        self.subscriptions.add(subject)
-        if subject not in self.observations:
-            self.observations[subject] = RepositoryObservation(
-                subject, "", branch, current=False, repository=repository
-            )
+        supplied = str(Path(path).resolve())
+        root = self.roots.get(supplied, supplied)
+        self.missing.discard(root)
+        self.missing.discard(supplied)
+        if refresh or root not in self.paths:
+            self.paths[root] = 0
+            self._invalidate(("checkout", root))
 
     def reconcile_targets(self, targets: Iterable[RepositoryTarget]) -> None:
-        previous_paths = self.target_paths
-        self.targets.clear()
-        self.target_paths = set()
-        self.subscriptions.clear()
+        desired = {}
+        paths = set()
         for target in targets:
-            self.track_artifact(target)
-        for path in previous_paths - self.target_paths:
-            root = self.roots.get(path, path)
-            retained_paths = self.target_paths | {
-                name for name, sessions in self.associations.items() if sessions
-            }
-            if any(self.roots.get(name, name) == root for name in retained_paths):
+            if target.kind == "checkout":
+                supplied = str(Path(target.ref).resolve())
+                root = self.roots.get(supplied, supplied)
+                if root not in self.missing:
+                    paths.add(root)
+                desired[("checkout", root)] = target
+            elif target.kind == "branch" and target.ref:
+                repository = git.canonical_repository(target.repository)
+                if repository:
+                    desired[("branch", f"{repository}:{target.ref}")] = (
+                        RepositoryTarget(
+                            "branch",
+                            target.ref,
+                            repository,
+                            include_links=target.include_links,
+                        )
+                    )
+            elif target.kind == "pull_request":
+                _, number = github.pull_request_identity(target.ref)
+                if number is not None:
+                    desired[("pull_request", target.ref)] = target
+        for path in self.paths.keys() - paths:
+            self._invalidate(("checkout", path))
+        self.paths = {path: self.paths.get(path, 0) for path in paths}
+        self.targets = desired
+        self._sync_subscriptions()
+
+    def _sync_subscriptions(self) -> None:
+        desired = {
+            key: target for key, target in self.targets.items() if key[0] != "checkout"
+        }
+        for path in self.paths:
+            local = self.locals.get(path)
+            if not local or not local.branch:
                 continue
-            for retired in {
-                root,
-                path,
-                *(name for name, value in self.roots.items() if value == root),
-            }:
-                self.paths.pop(retired, None)
-                self.associations.pop(retired, None)
-                self.claims.pop(retired, None)
-                self.roots.pop(retired, None)
-            for item in self.snapshot():
-                if item.worktree == root and item.current:
-                    self._save(replace(item, current=False, revision=item.revision + 1))
+            key = "branch", f"{local.repository}:{local.branch}"
+            desired.setdefault(
+                key, RepositoryTarget("branch", local.branch, local.repository)
+            )
+        for key, target in self.subscriptions.items():
+            if desired.get(key) != target:
+                self._invalidate(key)
+                self.attempted.pop(key, None)
+        for key in desired.keys() - self.subscriptions.keys():
+            self.attempted.pop(key, None)
+        self.subscriptions = desired
 
     def snapshot(self) -> tuple[RepositoryObservation, ...]:
         return tuple(self.observations[key] for key in sorted(self.observations))
 
-    def signature(self) -> tuple[tuple[str, int, bool, str | None, str | None], ...]:
-        return tuple(
-            (
-                item.subject,
-                item.revision,
-                item.current,
-                item.local_error,
-                item.github_error,
-            )
-            for item in self.snapshot()
-        )
+    def signature(self) -> tuple[RepositoryObservation, ...]:
+        return self.snapshot()
 
     def _save(self, item: RepositoryObservation) -> None:
-        self.observations[item.subject] = item
+        self.observations[_key(item)] = item
         self.emit(item)
 
+    def _invalidate(self, key: CollectionKey) -> None:
+        self.versions[key] = self.versions.get(key, 0) + 1
+        task = self.tasks.get(key)
+        if task:
+            task.cancel()
+
     def _launch(
-        self, key: tuple[str, str], coroutine: Coroutine[object, object, None]
+        self, key: CollectionKey, coroutine: Coroutine[object, object, None]
     ) -> None:
         self.tasks[key] = asyncio.create_task(coroutine)
 
@@ -151,22 +175,10 @@ class RepositoryTracker:
         try:
             Path(path).stat()
         except (FileNotFoundError, NotADirectoryError):
-            paths = {path, *(key for key, root in self.roots.items() if root == path)}
-            for retired in paths:
-                self.paths.pop(retired, None)
-                self.associations.pop(retired, None)
-                self.claims.pop(retired, None)
-                self.roots.pop(retired, None)
-            self.applied.pop(path, None)
-            for item in self.snapshot():
-                if item.worktree == path:
-                    self._save(
-                        replace(
-                            item,
-                            current=False,
-                            revision=item.revision + int(item.current),
-                        )
-                    )
+            self.paths.pop(path, None)
+            self.missing.add(path)
+            self._save(CheckoutObservation(path, None, self.clock(), available=False))
+            self._sync_subscriptions()
             telemetry.event("repository.retired", path=path)
             return True
         except OSError:
@@ -178,7 +190,8 @@ class RepositoryTracker:
             return
         now = self.clock()
         for path, checked in list(self.paths.items()):
-            if ("git", path) not in self.tasks and (
+            key = "checkout", path
+            if key not in self.tasks and (
                 not checked or now - checked >= self.local_interval
             ):
                 if self._retire_missing(path):
@@ -186,247 +199,77 @@ class RepositoryTracker:
                 self.paths[path] = now
                 self.sequence += 1
                 self._launch(
-                    ("git", path), self._local(path, self.sequence, self.epoch)
+                    key,
+                    self._local(
+                        path, self.sequence, self.versions.get(key, 0), self.epoch
+                    ),
                 )
-        for item in self.snapshot():
-            key = ("github", item.subject)
-            if (
-                key not in self.tasks
-                and (item.current or item.subject in self.subscriptions)
-                and (
-                    not item.github_attempted_at
-                    or now - item.github_attempted_at >= self.github_interval
-                )
+        for key, target in list(self.subscriptions.items()):
+            attempted = self.attempted.get(key)
+            if key not in self.tasks and (
+                attempted is None or now - attempted >= self.github_interval
             ):
-                self._launch(key, self._github(item, self.epoch))
+                self.attempted[key] = now
+                self._launch(
+                    key,
+                    self._github(key, target, self.versions.get(key, 0), self.epoch),
+                )
 
-    async def _local(self, path: str, sequence: int, epoch: int) -> None:
+    def _active(self, key: CollectionKey, version: int, epoch: int) -> bool:
+        return (
+            epoch == self.epoch
+            and version == self.versions.get(key, 0)
+            and (
+                key[1] in self.paths
+                if key[0] == "checkout"
+                else key in self.subscriptions
+            )
+        )
+
+    async def _local(self, path: str, sequence: int, version: int, epoch: int) -> None:
+        key = "checkout", path
+        checked_at = self.clock()
         try:
             async with self.limit:
-                checked_at = self.clock()
                 root = await git.discover(path, self.run)
                 local = await git.observe(root, self.run)
-            if (
-                epoch != self.epoch
-                or path not in self.paths
-                or sequence < self.applied.get(root, 0)
+            if not self._active(key, version, epoch) or sequence < self.applied.get(
+                root, 0
             ):
                 return
             if self._retire_missing(root):
+                self.paths.pop(path, None)
                 return
             self.roots[path] = root
             self.applied[root] = sequence
-            now = self.clock()
-            self.paths.setdefault(root, now)
-            self.associations.setdefault(root, set()).update(
-                self.associations.get(path, ())
-            )
-            claims = self.claims.pop(path, set())
-            subject = root + ":" + local.branch
-            for old in self.snapshot():
-                if old.worktree == root and old.subject != subject and old.current:
-                    self._save(replace(old, current=False, revision=old.revision + 1))
-            previous = self.observations.get(subject)
-            if previous and previous.repository != local.repository:
-                self._save(
-                    replace(
-                        previous,
-                        subject=subject + ":repository:" + previous.repository,
-                        current=False,
-                        local=None,
-                        session_heads=(),
-                        revision=previous.revision + 1,
-                    )
-                )
-                previous = None
-            sessions = set(previous.sessions if previous else ()) | claims
-            heads = dict(previous.session_heads if previous else ())
-            fresh_heads = {
-                session: local.head
-                for session in claims
-                if not (
-                    previous
-                    and previous.pr
-                    and session in previous.pr_sessions
-                    and previous.pr.head == local.head
-                )
-            }
-            claims_changed = any(
-                heads.get(session) != head for session, head in fresh_heads.items()
-            )
-            heads.update(fresh_heads)
-            changed = (
-                previous is None or previous.local != local or not previous.current
-            )
-            item = (
-                replace(
-                    previous,
-                    local=local,
-                    current=True,
-                    sessions=tuple(sorted(sessions)),
-                    session_heads=tuple(sorted(heads.items())),
-                    github_attempted_at=0
-                    if claims_changed
-                    else previous.github_attempted_at,
-                    local_checked_at=checked_at,
-                    local_error=None,
-                    revision=previous.revision + int(changed),
-                    changed_at=now if changed else previous.changed_at,
-                    repository=local.repository,
-                )
-                if previous
-                else RepositoryObservation(
-                    subject,
-                    root,
-                    local.branch,
-                    tuple(sorted(sessions)),
-                    local=local,
-                    revision=1,
-                    changed_at=now,
-                    local_checked_at=checked_at,
-                    repository=local.repository,
-                    session_heads=tuple(sorted(heads.items())),
-                )
-            )
-            self._save(item)
-            if changed:
-                telemetry.event(
-                    "repository.changed",
-                    subject=subject,
-                    revision=item.revision,
-                    pending=item.pending,
-                )
+            self.paths.pop(path, None)
+            self.paths[root] = checked_at
+            self.locals[root] = local
+            self._save(CheckoutObservation(root, local, checked_at))
+            self._sync_subscriptions()
         except (TimeoutError, OSError, RuntimeError, ValueError) as error:
-            if epoch != self.epoch:
+            if not self._active(key, version, epoch):
                 return
+            self._save(CheckoutObservation(path, None, checked_at, str(error)[:240]))
             telemetry.event(
                 "repository.refresh_failed", source="git", path=path, error=str(error)
             )
-            for item in self.snapshot():
-                if item.worktree == self.roots.get(path, path) and item.current:
-                    self._save(replace(item, local_error=str(error)[:240]))
 
-    async def _github(self, captured: RepositoryObservation, epoch: int) -> None:
+    async def _github(
+        self, key: CollectionKey, target: RepositoryTarget, version: int, epoch: int
+    ) -> None:
+        checked_at = self.clock()
+        error = None
+        pr = None
         try:
             async with self.limit:
-                checked_at = self.clock()
-                explicit_url = (
-                    captured.subject.removeprefix("pr:")
-                    if captured.subject.startswith("pr:")
-                    else ""
-                )
-                follows_branch = captured.current or (
-                    captured.subject in self.subscriptions
-                    and captured.subject.startswith("branch:")
-                )
-                url = (
-                    captured.pr.url
-                    if captured.pr and not follows_branch
-                    else explicit_url
-                )
-                target = self.targets.get(captured.subject)
-                include_links = target.include_links if target else True
                 pr = await github.observe(
                     None,
-                    captured.branch,
+                    target.ref if target.kind == "branch" else "",
                     run=self.run,
-                    repository=captured.repository,
-                    url=url,
-                    include_links=include_links,
-                )
-                local = (
-                    await git.observe(captured.worktree, self.run)
-                    if captured.current
-                    else None
-                )
-            current = self.observations.get(captured.subject)
-            if (
-                epoch != self.epoch
-                or current is None
-                or current.revision != captured.revision
-                or current.current != captured.current
-            ):
-                return
-            if not current.current and current.subject not in self.subscriptions:
-                return
-            if local is not None and local != captured.local:
-                self.paths[captured.worktree] = 0
-                return
-            observed_pr = pr
-            if pr is None and current.pr is not None:
-                pr = current.pr
-            if pr and current.pr and current.pr.url == pr.url:
-                if not include_links:
-                    pr = replace(
-                        pr,
-                        related_links=current.pr.related_links,
-                        related_links_error=current.pr.related_links_error,
-                    )
-                elif pr.related_links_error:
-                    pr = replace(pr, related_links=current.pr.related_links)
-            changed = (
-                replace(current.pr, related_links_error=None)
-                != replace(pr, related_links_error=None)
-                if current.pr and pr
-                else current.pr != pr
-            )
-            replacement = bool(current.pr and pr and current.pr.url != pr.url)
-            claims = dict(current.session_heads)
-            supported = {
-                session
-                for session, head in claims.items()
-                if observed_pr
-                and pr
-                and (not replacement or current.pr and head != current.pr.head)
-                and local
-                and local.repository == pr.head_repository
-                and local.branch == pr.head_branch
-                and head == local.head == pr.head
-            }
-            sessions = set(current.sessions)
-            pr_sessions = set(current.pr_sessions)
-            if replacement:
-                self._save(
-                    replace(
-                        current,
-                        subject=current.subject + f":pr:{current.pr.url}",
-                        current=False,
-                        local=None,
-                        sessions=current.pr_sessions,
-                        session_heads=(),
-                        revision=current.revision + 1,
-                    )
-                )
-                sessions = set(claims)
-                claims = {
-                    session: head
-                    for session, head in claims.items()
-                    if current.pr and head != current.pr.head
-                }
-                pr_sessions.clear()
-            pr_sessions.update(supported)
-            for session in supported:
-                claims.pop(session)
-            self._save(
-                replace(
-                    current,
-                    pr=pr,
-                    sessions=tuple(sorted(sessions)),
-                    pr_sessions=tuple(sorted(pr_sessions)),
-                    session_heads=tuple(sorted(claims.items())),
-                    github_checked_at=checked_at,
-                    github_attempted_at=self.clock(),
-                    github_error=None,
-                    revision=current.revision + int(changed),
-                    changed_at=self.clock() if changed else current.changed_at,
-                )
-            )
-            if changed:
-                telemetry.event(
-                    "repository.changed",
-                    subject=current.subject,
-                    source="github",
-                    state=pr.state if pr else None,
+                    repository=target.repository,
+                    url=target.ref if target.kind == "pull_request" else "",
+                    include_links=target.include_links,
                 )
         except (
             TimeoutError,
@@ -435,28 +278,22 @@ class RepositoryTracker:
             ValueError,
             KeyError,
             TypeError,
-        ) as error:
-            if epoch != self.epoch:
-                return
-            current = self.observations.get(captured.subject)
-            if (
-                epoch == self.epoch
-                and current
-                and current.revision == captured.revision
-            ):
-                self._save(
-                    replace(
-                        current,
-                        github_attempted_at=self.clock(),
-                        github_error=str(error)[:240],
-                    )
-                )
+        ) as failure:
+            error = str(failure)[:240]
             telemetry.event(
                 "repository.refresh_failed",
                 source="github",
-                subject=captured.subject,
-                error=str(error),
+                subject=key[1],
+                error=error,
             )
+        if not self._active(key, version, epoch):
+            return
+        item = (
+            BranchObservation(target.repository, target.ref, pr, checked_at, error)
+            if target.kind == "branch"
+            else PullRequestObservation(target.ref, pr, checked_at, error)
+        )
+        self._save(item)
 
     def pause(self) -> None:
         self.paused = True
@@ -469,10 +306,7 @@ class RepositoryTracker:
             return
         self.paused = False
         self.paths = dict.fromkeys(self.paths, 0)
-        self.observations = {
-            key: replace(item, github_attempted_at=0)
-            for key, item in self.observations.items()
-        }
+        self.attempted.clear()
 
     async def close(self) -> None:
         self.closed = True
@@ -484,11 +318,11 @@ class RepositoryTracker:
         for task in self.tasks.values():
             task.cancel()
         self.observations.clear()
-        self.associations.clear()
-        self.claims.clear()
+        self.locals.clear()
         self.paths.clear()
         self.applied.clear()
         self.roots.clear()
+        self.missing.clear()
         self.targets.clear()
-        self.target_paths.clear()
         self.subscriptions.clear()
+        self.attempted.clear()

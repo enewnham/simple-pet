@@ -133,6 +133,9 @@ def update(
     cwd = string(payload.get("cwd"))
     if cwd:
         result["repo"] = os.path.normpath(cwd)
+    for field in ("repository", "branch", "pull_request"):
+        if value := string(payload.get(field)):
+            result[field] = value
     if parent and parent != session:
         result["parent"] = parent
     if aliases:

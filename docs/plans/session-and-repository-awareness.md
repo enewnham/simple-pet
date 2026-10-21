@@ -98,7 +98,7 @@ It does not establish the quality of unsimulated model prose or desktop visual b
 ## Code layout and verification
 
 - `application.py` ingests observations, reconciles collection targets, and coordinates commentary.
-- `events.py` applies accepted native activity and runtime reactions.
+- `agent_activity.py` coordinates accepted hooks, activity reactions, and commentary triggers.
 - `sources/` collects hook, Git, PR, and stack observations.
 - `work/` connects facts and derives opportunities and shared work views.
 - `attention.py` selects subjects. `commentary/context.py` projects their meaningful facts.

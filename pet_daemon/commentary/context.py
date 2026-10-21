@@ -11,10 +11,10 @@ from anthropic.types import CacheControlEphemeralParam, TextBlockParam
 from ..attention import AttentionSelection
 from ..config import Config
 from ..prompts import bounded, select_prompt
-from ..runtime import SessionSnapshot, WorkSnapshot
+from ..runtime import PetContext, SessionContext
 from ..types import JSONObject
-from ..work.presentation import PresentedEvidence, WorkRecord, work_record
 from .contracts import ModelRequest, RequestFactory
+from .presentation import PresentedEvidence, WorkRecord, work_record
 
 INSTRUCTIONS = """
 <role>
@@ -41,7 +41,7 @@ focus_work and focus_session. Express the agents' intent, meaningful progress,
 reported outcomes, or next steps they explicitly described. Agents execute the work
 and shepherd their pull requests. Do not invent plans or assign work to the developer.
 
-recent_requests and progress supply the latest agent story. session_context summarizes
+recent_requests and progress supply the latest agent story. summary summarizes
 intent, decisions, and reported results and may be stale. Later requests and progress
 override it. Keep other_sessions work separate. omitted_sessions counts excluded
 sessions. [omitted] marks incomplete excerpts. user_sentiment is a fallible local score.
@@ -57,6 +57,9 @@ Use the supplied human durations for elapsed waits. Respect cancellations and st
 outcomes. An agent's reported success describes that report's scope.
 
 connected_work supplies context connecting the selected intent, reports, and artifacts.
+The sessions field describes subagent scopes and their own reports within the shared work.
+Keep each report within that scope. A report's context identifies its observed references.
+Current checkout context does not reattribute earlier reports to different work.
 Pull request state, links, tickets, and stacks identify the work. They do not establish
 what anyone should do next. Sharing an artifact establishes association, not authorship
 of every change. One merged pull request does not complete a stack or its intended work.
@@ -104,7 +107,7 @@ class SessionRecord(TypedDict, total=False):
     activity_uncertain: bool
     presence: str
     project: str
-    session_context: str
+    summary: str
     recent_requests: list[str]
     progress: str
     active_for: str | None
@@ -162,7 +165,7 @@ def story_facts(work: WorkRecord) -> WorkRecord:
             record.pop("observed_at", None)
         return result
 
-    return {
+    result: WorkRecord = {
         "intent": work["intent"],
         "requests": facts(work["requests"]),
         "activity": facts(work["activity"]),
@@ -171,13 +174,23 @@ def story_facts(work: WorkRecord) -> WorkRecord:
             for artifact in work["artifacts"]
         ),
     }
+    if "sessions" in work:
+        result["sessions"] = tuple(
+            {
+                **session,
+                "requests": facts(session["requests"]),
+                "activity": facts(session["activity"]),
+            }
+            for session in work["sessions"]
+        )
+    return result
 
 
 def session_facts(record: SessionRecord) -> SessionRecord:
     result = deepcopy(record)
     for field in (
         "presence",
-        "session_context",
+        "summary",
         "active_for",
         "quiet_for",
         "waiting_for",
@@ -223,7 +236,7 @@ def same_session(expected: SessionRecord, actual: SessionRecord) -> bool:
     return before == after
 
 
-def session_record(session: SessionSnapshot) -> SessionRecord:
+def session_record(session: SessionContext) -> SessionRecord:
     record: SessionRecord = {
         "turn_active": session.turn_active,
         "waiting_for_input": session.waiting_for_input,
@@ -233,7 +246,7 @@ def session_record(session: SessionSnapshot) -> SessionRecord:
     }
     record.update(
         project=bounded(Path(session.repo or "").name, 120),
-        session_context=bounded(session.session_context, 400),
+        summary=bounded(session.summary, 400),
         recent_requests=[
             select_prompt(request) for request in session.recent_requests[-4:]
         ],
@@ -271,7 +284,7 @@ def session_record(session: SessionSnapshot) -> SessionRecord:
 
 
 def project_payload(
-    snapshot: WorkSnapshot, selection: AttentionSelection, timestamp: float
+    snapshot: PetContext, selection: AttentionSelection, timestamp: float
 ) -> CommentaryPayload:
     payload: CommentaryPayload = {
         "activity": snapshot.activity,
@@ -293,12 +306,12 @@ def project_payload(
         return payload
     focus = selection.focus_session
     if selection.subject is not None:
-        payload["focus_work"] = work_record(selection.subject.view)
+        payload["focus_work"] = work_record(selection.subject.story)
     if selection.reason == "prompt":
         if focus:
             payload["focus_session"] = {
                 "project": bounded(Path(focus.repo or "").name, 120),
-                "session_context": bounded(focus.session_context, 400),
+                "summary": bounded(focus.summary, 400),
                 "recent_requests": [
                     select_prompt(value) for value in focus.recent_requests[-1:]
                 ],
@@ -335,7 +348,7 @@ def project_payload(
 
 
 @dataclass(frozen=True)
-class EvidenceManifest:
+class CommentarySupport:
     selection: AttentionSelection
     payload: CommentaryPayload
 
@@ -349,7 +362,7 @@ class EvidenceManifest:
             else ()
         ) + tuple(session.id for session in self.selection.context_sessions[:count])
 
-    def valid(self, snapshot: WorkSnapshot) -> bool:
+    def valid(self, snapshot: PetContext) -> bool:
         if self.selection.situation.startswith("care_"):
             return snapshot.sleeping == self.payload["sleeping"] and not any(
                 session.turn_active for session in snapshot.sessions
@@ -420,10 +433,10 @@ class EvidenceManifest:
 class PreparedCommentary:
     selection: AttentionSelection
     request: ModelRequest
-    manifest: EvidenceManifest
+    support: CommentarySupport
 
 
-class Context:
+class PromptBuilder:
     def __init__(self, config: Config, clock: Callable[[], float]) -> None:
         self.config = config
         self.clock = clock
@@ -464,13 +477,13 @@ class Context:
         ]
 
     def prompt(
-        self, snapshot: WorkSnapshot, selection: AttentionSelection
+        self, snapshot: PetContext, selection: AttentionSelection
     ) -> CommentaryPayload:
         return project_payload(snapshot, selection, self.clock())
 
     def prepare(
         self,
-        snapshot: WorkSnapshot,
+        snapshot: PetContext,
         selection: AttentionSelection,
         make_request: RequestFactory,
         speech_required: bool = False,
@@ -511,5 +524,5 @@ class Context:
             selected["omitted_sessions"]["active"] -= bool(other.get("turn_active"))
         request = make_request(selected, system, speech_required=speech_required)
         return PreparedCommentary(
-            selection, request, EvidenceManifest(selection, deepcopy(selected))
+            selection, request, CommentarySupport(selection, deepcopy(selected))
         )

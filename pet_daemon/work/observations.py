@@ -1,10 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TypedDict
+from typing import Literal, TypedDict
 
-from .models import RelatedLink
+from .models import ExecutionEvidence, IntentEvidence, ProgressEvidence, RelatedLink
 from .wire import PullRequestData, RelatedLinkData
+
+
+@dataclass(frozen=True)
+class SessionObservation:
+    session: str
+    aliases: tuple[str, ...] = ()
+    parent: str | None = None
+    location: str | None = None
+    reports: tuple[IntentEvidence | ProgressEvidence | ExecutionEvidence, ...] = ()
+    repository: str | None = None
+    branch: str | None = None
+    pull_request: str | None = None
 
 
 @dataclass(frozen=True)
@@ -92,59 +104,72 @@ class PullRequest:
 
 
 @dataclass(frozen=True)
-class RepositoryObservation:
-    subject: str
+class CheckoutObservation:
     worktree: str
-    branch: str
-    sessions: tuple[str, ...] = ()
-    local: GitObservation | None = None
-    pr: PullRequest | None = None
-    current: bool = True
-    revision: int = 0
-    changed_at: float = 0
-    local_checked_at: float = 0
-    github_checked_at: float = 0
-    github_attempted_at: float = 0
-    local_error: str | None = None
-    github_error: str | None = None
-    repository: str = ""
-    source: str = "repository"
-    pr_sessions: tuple[str, ...] = ()
-    # Retain fresh local head claims until GitHub confirms their pull request.
-    session_heads: tuple[tuple[str, str], ...] = ()
+    local: GitObservation | None
+    checked_at: float
+    error: str | None = None
+    available: bool = True
+    last_success_at: float | None = None
 
-    def packet(self) -> RepositoryObservationData:
+    def packet(self) -> CheckoutObservationData:
         return {
-            "subject": self.subject,
+            "kind": "checkout",
             "worktree": self.worktree,
-            "branch": self.branch,
-            "sessions": self.sessions,
             "local": self.local.data() if self.local else None,
-            "pr": self.pr.data() if self.pr else None,
-            "current": self.current,
-            "revision": self.revision,
-            "changed_at": self.changed_at,
-            "local_checked_at": self.local_checked_at,
-            "github_checked_at": self.github_checked_at,
-            "github_attempted_at": self.github_attempted_at,
-            "local_error": self.local_error,
-            "github_error": self.github_error,
-            "repository": self.repository,
-            "source": self.source,
-            "pr_sessions": self.pr_sessions,
-            "session_heads": self.session_heads,
+            "checked_at": self.checked_at,
+            "error": self.error,
+            "last_success_at": self.last_success_at,
+            "available": self.available,
         }
 
-    @property
-    def observed_at(self) -> float:
-        return max(self.local_checked_at, self.github_checked_at)
 
-    @property
-    def pending(self) -> bool:
-        return bool(
-            (self.current and self.local and self.local.pending)
-            or (self.pr and self.pr.pending)
-        )
+@dataclass(frozen=True)
+class BranchObservation:
+    repository: str
+    branch: str
+    pr: PullRequest | None
+    checked_at: float
+    error: str | None = None
+    last_success_at: float | None = None
+    # Retain observed PR resolutions so branch reuse cannot reattribute reports.
+    resolutions: tuple[str, ...] = ()
+
+    def packet(self) -> BranchObservationData:
+        return {
+            "kind": "branch",
+            "repository": self.repository,
+            "branch": self.branch,
+            "pr": self.pr.data() if self.pr else None,
+            "checked_at": self.checked_at,
+            "error": self.error,
+            "last_success_at": self.last_success_at,
+            "resolutions": self.resolutions,
+        }
+
+
+@dataclass(frozen=True)
+class PullRequestObservation:
+    ref: str
+    pr: PullRequest | None
+    checked_at: float
+    error: str | None = None
+    last_success_at: float | None = None
+
+    def packet(self) -> PullRequestObservationData:
+        return {
+            "kind": "pull_request",
+            "ref": self.ref,
+            "pr": self.pr.data() if self.pr else None,
+            "checked_at": self.checked_at,
+            "error": self.error,
+            "last_success_at": self.last_success_at,
+        }
+
+
+type RepositoryObservation = (
+    CheckoutObservation | BranchObservation | PullRequestObservation
+)
 
 
 @dataclass(frozen=True)
@@ -170,51 +195,72 @@ class GitObservationData(TypedDict):
     repository: str
 
 
-class RepositoryObservationData(TypedDict):
-    subject: str
+class CheckoutObservationData(TypedDict):
+    kind: Literal["checkout"]
     worktree: str
-    branch: str
-    sessions: tuple[str, ...]
     local: GitObservationData | None
-    pr: PullRequestData | None
-    current: bool
-    revision: int
-    changed_at: float
-    local_checked_at: float
-    github_checked_at: float
-    github_attempted_at: float
-    local_error: str | None
-    github_error: str | None
+    checked_at: float
+    error: str | None
+    last_success_at: float | None
+    available: bool
+
+
+class BranchObservationData(TypedDict):
+    kind: Literal["branch"]
     repository: str
-    source: str
-    pr_sessions: tuple[str, ...]
-    session_heads: tuple[tuple[str, str], ...]
+    branch: str
+    pr: PullRequestData | None
+    checked_at: float
+    error: str | None
+    last_success_at: float | None
+    resolutions: tuple[str, ...]
+
+
+class PullRequestObservationData(TypedDict):
+    kind: Literal["pull_request"]
+    ref: str
+    pr: PullRequestData | None
+    checked_at: float
+    error: str | None
+    last_success_at: float | None
+
+
+type RepositoryObservationData = (
+    CheckoutObservationData | BranchObservationData | PullRequestObservationData
+)
 
 
 def repository_observation_from_mapping(
     data: RepositoryObservationData,
 ) -> RepositoryObservation:
-    local = data["local"]
+    if data["kind"] == "checkout":
+        local = data["local"]
+        return CheckoutObservation(
+            data["worktree"],
+            GitObservation(**local) if local else None,
+            data["checked_at"],
+            data["error"],
+            data["available"],
+            data.get("last_success_at"),
+        )
     pr = data["pr"]
-    return RepositoryObservation(
-        subject=data["subject"],
-        worktree=data["worktree"],
-        branch=data["branch"],
-        sessions=tuple(data["sessions"]),
-        local=GitObservation(**local) if local else None,
-        pr=pull_request_from_data(pr) if pr else None,
-        current=data["current"],
-        revision=data["revision"],
-        changed_at=data["changed_at"],
-        local_checked_at=data["local_checked_at"],
-        github_checked_at=data["github_checked_at"],
-        github_attempted_at=data["github_attempted_at"],
-        local_error=data["local_error"],
-        github_error=data["github_error"],
-        repository=data["repository"],
-        source=data["source"],
-        pr_sessions=tuple(data.get("pr_sessions", ())),
-        session_heads=tuple(tuple(item) for item in data.get("session_heads", ())),
+    observed_pr = pull_request_from_data(pr) if pr else None
+    if data["kind"] == "branch":
+        return BranchObservation(
+            data["repository"],
+            data["branch"],
+            observed_pr,
+            data["checked_at"],
+            data["error"],
+            data.get("last_success_at"),
+            tuple(data["resolutions"]),
+        )
+    return PullRequestObservation(
+        data["ref"],
+        observed_pr,
+        data["checked_at"],
+        data["error"],
+        data.get("last_success_at"),
     )
 
 

@@ -12,7 +12,7 @@ from pet_daemon.processes import (
     probe,
     process_identity,
 )
-from pet_daemon.sessions import SessionResult, Sessions
+from pet_daemon.sessions import Sessions, SessionUpdate
 
 
 class ProcessTests(unittest.IsolatedAsyncioTestCase):
@@ -37,14 +37,14 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
                 await tracker.refresh(sessions.process_owners())
             )
             self.assertTrue(sessions.active)
-            self.assertEqual(sessions.snapshot().sessions[0].presence, "alive")
+            self.assertEqual(sessions.activity_view().sessions[0].presence, "alive")
             child.terminate()
             await child.wait()
             sessions.apply_process_status(
                 await tracker.refresh(sessions.process_owners())
             )
             self.assertFalse(sessions.active)
-            self.assertEqual(sessions.lanes["claude:main"].outcome, "stale")
+            self.assertEqual(sessions.by_id["claude:main"].outcome, "stale")
         finally:
             if child.returncode is None:
                 child.kill()
@@ -67,8 +67,8 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
             )
         tracker = ProcessTracker()
         sessions.apply_process_status(await tracker.refresh(sessions.process_owners()))
-        self.assertTrue(sessions.lanes["claude:current"].active)
-        self.assertFalse(sessions.lanes["claude:old"].active)
+        self.assertTrue(sessions.by_id["claude:current"].active)
+        self.assertFalse(sessions.by_id["claude:old"].active)
         self.assertEqual(await tracker.refresh(sessions.process_owners()), {})
 
     async def test_failed_probe_leaves_a_session_active_with_unknown_presence(
@@ -92,7 +92,7 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
             results = await ProcessTracker().refresh(sessions.process_owners())
         sessions.apply_process_status(results)
         self.assertTrue(sessions.active)
-        self.assertEqual(sessions.lanes["claude:main"].presence, "unknown")
+        self.assertEqual(sessions.by_id["claude:main"].presence, "unknown")
 
     def test_ancestry_crosses_shells_and_ignores_shared_hosts(self) -> None:
         def row(
@@ -142,7 +142,7 @@ class FreshnessTests(unittest.TestCase):
         self.now = 1000
         self.sessions = Sessions(lambda: self.now)
 
-    def event(self, kind: str, **fields: object) -> SessionResult | None:
+    def event(self, kind: str, **fields: object) -> SessionUpdate | None:
         return self.sessions.handle(
             {"event": kind, "harness": "claude", "session": "main", **fields}
         )
@@ -158,7 +158,7 @@ class FreshnessTests(unittest.TestCase):
         self.assertFalse(self.sessions.working)
         self.assertFalse(self.sessions.engaged)
         self.assertTrue(self.sessions.active)
-        item = self.sessions.snapshot().sessions[0]
+        item = self.sessions.activity_view().sessions[0]
         self.assertTrue(item.activity_uncertain)
         self.assertEqual(item.presence, "alive")
         self.event("progress", progress="Still looking")
@@ -191,7 +191,7 @@ class FreshnessTests(unittest.TestCase):
                 "parent": "main",
             }
         )
-        self.assertEqual(self.sessions.lanes["claude:child"].owner, owner)
+        self.assertEqual(self.sessions.by_id["claude:child"].owner, owner)
         self.sessions.apply_process_status({owner: "exited"})
         self.assertFalse(self.sessions.active)
         self.assertFalse(self.sessions.clean_convergence)
@@ -201,4 +201,4 @@ class FreshnessTests(unittest.TestCase):
         self.now += 3600
         self.sessions.prune()
         self.assertFalse(self.sessions.active)
-        self.assertEqual(self.sessions.lanes["claude:main"].outcome, "stale")
+        self.assertEqual(self.sessions.by_id["claude:main"].outcome, "stale")

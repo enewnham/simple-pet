@@ -10,12 +10,12 @@ from pet_daemon.runtime import (
     CareTrigger,
     EpisodeTrigger,
     FailureSnapshot,
-    SessionSnapshot,
+    PetContext,
+    SessionContext,
     SessionTrigger,
-    WorkSnapshot,
 )
 from pet_daemon.storage.memory import HistoryRecord
-from pet_daemon.work import WorkSubject, WorkView
+from pet_daemon.work import WorkStory, WorkSubject
 from Tests.fixtures import (
     capture_snapshot,
     require,
@@ -30,7 +30,7 @@ class AttentionTests(unittest.TestCase):
         self.config = Config(pet_dir=Path("."), observation_seconds=(30, 30))
         self.attention = Attention(self.config, lambda: self.now, random.Random(0))
 
-    def snapshot(self, *sessions: SessionSnapshot) -> WorkSnapshot:
+    def snapshot(self, *sessions: SessionContext) -> PetContext:
         members = sessions
         subjects = tuple(
             WorkSubject(
@@ -38,7 +38,7 @@ class AttentionTests(unittest.TestCase):
                 "session",
                 session.changed_at,
                 "one",
-                WorkView(session.id, "", "one"),
+                WorkStory(session.id, "", "one"),
                 (session.id,),
             )
             for session in members

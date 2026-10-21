@@ -1,32 +1,34 @@
+import json
 import sqlite3
-from collections.abc import Iterable
 from contextlib import AbstractContextManager
 
-type SQLValue = str | int | float | bytes | None
-
-
 from ..work.models import (
-    Artifact,
-    Evidence,
-    WorkItem,
-    WorkState,
+    ExecutionEvidence,
+    IntentEvidence,
+    ProgressEvidence,
+    SessionRecord,
+    SessionReport,
+    WorkFacts,
 )
-from ..work.serialization import (
-    decode_artifact,
-    decode_evidence,
-    encode_artifact,
-    encode_evidence,
+from ..work.observations import (
+    BranchObservation,
+    CheckoutObservation,
+    PullRequestObservation,
+    RepositoryObservation,
+    SessionObservation,
+    repository_observation_from_mapping,
 )
+from ..work.serialization import report_data, report_from_data
+from ..work.validation import canonical
 from .transactions import transaction
 
 TABLES = (
-    "work_items",
     "work_sessions",
-    "work_memberships",
+    "work_reports",
     "work_aliases",
-    "work_artifacts",
-    "work_links",
-    "work_evidence",
+    "work_checkouts",
+    "work_branches",
+    "work_pull_requests",
 )
 
 
@@ -38,185 +40,230 @@ class SQLiteWorkRepository:
     def transaction(self) -> AbstractContextManager[None]:
         return transaction(self.db)
 
-    def rows(self, table: str) -> list[sqlite3.Row]:
-        return self.db.execute(
-            f"SELECT * FROM {table} WHERE pet=?", (self.pet,)
-        ).fetchall()
-
-    def load(self) -> WorkState:
-        state = WorkState()
-        state.next_evidence_id = self.db.execute(
-            "SELECT COALESCE(MAX(id),0)+1 FROM work_evidence"
-        ).fetchone()[0]
-        state.items = {
-            row["id"]: WorkItem(
-                row["id"], row["intent"], row["status"], row["changed_at"]
+    def aliases(self) -> dict[str, str]:
+        return {
+            row["alias"]: row["session"]
+            for row in self.db.execute(
+                "SELECT alias,session FROM work_aliases WHERE pet=?", (self.pet,)
             )
-            for row in self.rows("work_items")
+        }
+
+    def session_location(self, session: str) -> str:
+        row = self.db.execute(
+            "SELECT location FROM work_sessions WHERE pet=? AND session=?",
+            (self.pet, session),
+        ).fetchone()
+        return row["location"] if row else ""
+
+    def save_session(self, observation: SessionObservation, now: float) -> None:
+        identity = observation.session
+        identities = (identity, *observation.aliases)
+        placeholders = ",".join("?" for _ in identities)
+        records = self.db.execute(
+            f"SELECT parent,location,location_at FROM work_sessions WHERE pet=? AND session IN ({placeholders}) ORDER BY location_at DESC",
+            (self.pet, *identities),
+        ).fetchall()
+        location = next((row["location"] for row in records if row["location"]), "")
+        location_at = next(
+            (row["location_at"] for row in records if row["location"]), 0
+        )
+        if observation.location is not None and observation.location != location:
+            location, location_at = observation.location, now
+        parent = observation.parent or next(
+            (row["parent"] for row in records if row["parent"]), None
+        )
+        self.db.execute(
+            "INSERT INTO work_sessions(pet,session,parent,location,location_at) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(pet,session) DO UPDATE SET "
+            "parent=excluded.parent,location=excluded.location,location_at=excluded.location_at",
+            (self.pet, identity, parent, location, location_at),
+        )
+        for alias in observation.aliases:
+            if alias == identity:
+                continue
+            self.db.execute(
+                "UPDATE work_aliases SET session=? WHERE pet=? AND session=?",
+                (identity, self.pet, alias),
+            )
+            self.db.execute(
+                "UPDATE work_sessions SET parent=? WHERE pet=? AND parent=?",
+                (identity, self.pet, alias),
+            )
+            self.db.execute(
+                "DELETE FROM work_sessions WHERE pet=? AND session=?",
+                (self.pet, alias),
+            )
+            self.bind_alias(alias, identity)
+
+    def append_report(self, report: SessionReport) -> None:
+        session = report.payload.session
+        kind = report.record().kind
+        identities = (
+            session,
+            *(alias for alias, target in self.aliases().items() if target == session),
+        )
+        placeholders = ",".join("?" for _ in identities)
+        row = self.db.execute(
+            f"SELECT data FROM work_reports WHERE pet=? AND session IN ({placeholders}) AND kind=? ORDER BY id DESC LIMIT 1",
+            (self.pet, *identities, kind),
+        ).fetchone()
+        if row:
+            recorded = report_from_data(json.loads(row["data"]))
+            if (
+                recorded.payload == report.payload
+                and recorded.context == report.context
+            ):
+                return
+        self.db.execute(
+            "INSERT INTO work_reports(pet,session,kind,data,observed_at) VALUES (?,?,?,?,?)",
+            (
+                self.pet,
+                session,
+                kind,
+                canonical(report_data(report)),
+                report.observed_at,
+            ),
+        )
+
+    def bind_alias(self, alias: str, session: str) -> None:
+        self.db.execute(
+            "INSERT INTO work_aliases VALUES (?,?,?) ON CONFLICT(pet,alias) DO UPDATE SET session=excluded.session",
+            (self.pet, alias, session),
+        )
+
+    def get_checkout(
+        self, path: str, *, enclosing: bool = False
+    ) -> CheckoutObservation | None:
+        value = (
+            self._observation(
+                "work_checkouts",
+                "(worktree=? OR instr(?,rtrim(worktree,'/')||'/')=1) ORDER BY length(worktree) DESC LIMIT 1",
+                (path, path),
+            )
+            if enclosing
+            else self._observation("work_checkouts", "worktree=?", (path,))
+        )
+        assert value is None or isinstance(value, CheckoutObservation)
+        return value
+
+    def get_branch(self, repository: str, branch: str) -> BranchObservation | None:
+        value = self._observation(
+            "work_branches", "repository=? AND branch=?", (repository, branch)
+        )
+        assert value is None or isinstance(value, BranchObservation)
+        return value
+
+    def get_pull_request(self, ref: str) -> PullRequestObservation | None:
+        value = self._observation("work_pull_requests", "ref=?", (ref,))
+        assert value is None or isinstance(value, PullRequestObservation)
+        return value
+
+    def _observation(
+        self, table: str, where: str, values: tuple[str, ...]
+    ) -> RepositoryObservation | None:
+        row = self.db.execute(
+            f"SELECT data FROM {table} WHERE pet=? AND {where}", (self.pet, *values)
+        ).fetchone()
+        return (
+            repository_observation_from_mapping(json.loads(row["data"]))
+            if row
+            else None
+        )
+
+    def put_observation(self, observation: RepositoryObservation) -> None:
+        data = canonical(observation.packet())
+        match observation:
+            case CheckoutObservation():
+                self.db.execute(
+                    "INSERT INTO work_checkouts VALUES (?,?,?) ON CONFLICT(pet,worktree) DO UPDATE SET data=excluded.data",
+                    (self.pet, observation.worktree, data),
+                )
+            case BranchObservation():
+                self.db.execute(
+                    "INSERT INTO work_branches VALUES (?,?,?,?) ON CONFLICT(pet,repository,branch) DO UPDATE SET data=excluded.data",
+                    (self.pet, observation.repository, observation.branch, data),
+                )
+            case PullRequestObservation():
+                self.db.execute(
+                    "INSERT INTO work_pull_requests VALUES (?,?,?) ON CONFLICT(pet,ref) DO UPDATE SET data=excluded.data",
+                    (self.pet, observation.ref, data),
+                )
+
+    def _session(self, row: sqlite3.Row) -> SessionRecord:
+        identity = row["session"]
+        identities = (
+            identity,
+            *(alias for alias, target in self.aliases().items() if target == identity),
+        )
+        placeholders = ",".join("?" for _ in identities)
+        records = self.db.execute(
+            f"SELECT data FROM work_reports WHERE pet=? AND session IN ({placeholders}) ORDER BY id",
+            (self.pet, *identities),
+        )
+        reports = tuple(
+            report_from_data(json.loads(record["data"])) for record in records
+        )
+        authored = tuple(
+            report
+            for report in reports
+            if isinstance(report.payload, IntentEvidence | ProgressEvidence)
+        )
+        execution = next(
+            (
+                report
+                for report in reversed(reports)
+                if isinstance(report.payload, ExecutionEvidence)
+            ),
+            None,
+        )
+        intent = next(
+            (
+                report.payload.text
+                for report in reversed(authored)
+                if isinstance(report.payload, IntentEvidence)
+            ),
+            "",
+        )
+        return SessionRecord(
+            id=identity,
+            goal=intent,
+            parent=row["parent"],
+            location=row["location"],
+            location_at=row["location_at"],
+            reports=authored,
+            execution=execution,
+            changed_at=reports[-1].observed_at if reports else 0,
+            aliases=identities[1:],
+        )
+
+    def load(self) -> WorkFacts:
+        state = WorkFacts()
+        state.aliases = {
+            row["alias"]: row["session"]
+            for row in self.db.execute(
+                "SELECT * FROM work_aliases WHERE pet=?", (self.pet,)
+            )
         }
         state.sessions = {
-            row["session"]: row["work_id"] for row in self.rows("work_sessions")
-        }
-        state.memberships = {
-            (row["work_id"], row["session"]) for row in self.rows("work_memberships")
-        }
-        state.aliases = {
-            row["alias"]: row["session"] for row in self.rows("work_aliases")
-        }
-        for row in self.rows("work_artifacts"):
-            descriptor = decode_artifact(row["data"])
-            state.artifacts[row["id"]] = Artifact(
-                kind=descriptor.kind,
-                ref=descriptor.ref,
-                repository=descriptor.repository,
-                revision=descriptor.revision,
-                checkout=descriptor.checkout,
-                title=descriptor.title,
-                id=row["id"],
-                version=row["version"],
+            row["session"]: self._session(row)
+            for row in self.db.execute(
+                "SELECT * FROM work_sessions WHERE pet=?", (self.pet,)
             )
-        state.links = {
-            (row["work_id"], row["artifact_id"]) for row in self.rows("work_links")
         }
-        state.evidence = [
-            Evidence(
-                row["id"],
-                row["work_id"],
-                row["artifact_id"],
-                row["source"],
-                row["kind"],
-                decode_evidence(row["source"], row["kind"], row["data"]),
-                row["timestamp"],
-            )
-            for row in sorted(self.rows("work_evidence"), key=lambda row: row["id"])
-        ]
+        for table in ("work_checkouts", "work_branches", "work_pull_requests"):
+            for row in self.db.execute(
+                f"SELECT data FROM {table} WHERE pet=?", (self.pet,)
+            ):
+                value = repository_observation_from_mapping(json.loads(row["data"]))
+                match value:
+                    case CheckoutObservation():
+                        state.checkouts[value.worktree] = value
+                    case BranchObservation():
+                        state.branches[value.repository, value.branch] = value
+                    case PullRequestObservation():
+                        state.pull_requests[value.ref] = value
         return state
-
-    def save(self, state: WorkState) -> None:
-        pet = self.pet
-        self._sync(
-            "work_items",
-            ("pet", "id", "intent", "status", "changed_at"),
-            ("id",),
-            (
-                (pet, item.id, item.intent, item.status, item.changed_at)
-                for item in state.items.values()
-            ),
-        )
-        self._sync(
-            "work_sessions",
-            ("pet", "session", "work_id"),
-            ("session",),
-            ((pet, session, work_id) for session, work_id in state.sessions.items()),
-        )
-        self._sync(
-            "work_memberships",
-            ("pet", "work_id", "session"),
-            ("work_id", "session"),
-            ((pet, work_id, session) for work_id, session in state.memberships),
-        )
-        self._sync(
-            "work_aliases",
-            ("pet", "alias", "session"),
-            ("alias",),
-            ((pet, alias, session) for alias, session in state.aliases.items()),
-        )
-        self._sync(
-            "work_artifacts",
-            ("pet", "id", "kind", "ref", "repository", "data", "version"),
-            ("id",),
-            (
-                (
-                    pet,
-                    item.id,
-                    item.kind,
-                    item.ref,
-                    item.repository,
-                    encode_artifact(item),
-                    item.version,
-                )
-                for item in state.artifacts.values()
-            ),
-        )
-        self._sync(
-            "work_links",
-            ("pet", "work_id", "artifact_id"),
-            ("work_id", "artifact_id"),
-            ((pet, work_id, artifact_id) for work_id, artifact_id in state.links),
-        )
-        self._sync(
-            "work_evidence",
-            (
-                "id",
-                "pet",
-                "work_id",
-                "artifact_id",
-                "source",
-                "kind",
-                "data",
-                "timestamp",
-            ),
-            ("id",),
-            (
-                (
-                    item.id,
-                    pet,
-                    item.work_id,
-                    item.artifact_id,
-                    item.source,
-                    item.kind,
-                    encode_evidence(item.payload),
-                    item.timestamp,
-                )
-                for item in state.evidence
-            ),
-        )
-
-    def _sync(
-        self,
-        table: str,
-        columns: tuple[str, ...],
-        keys: tuple[str, ...],
-        records: Iterable[tuple[SQLValue, ...]],
-    ) -> None:
-        key_positions = tuple(columns.index(key) for key in keys)
-        existing = {
-            tuple(row[key] for key in keys): tuple(row[column] for column in columns)
-            for row in self.rows(table)
-        }
-        desired = {
-            tuple(record[index] for index in key_positions): record
-            for record in records
-        }
-        where = " AND ".join(("pet=?", *(f"{key}=?" for key in keys)))
-        for key in existing.keys() - desired.keys():
-            self.db.execute(f"DELETE FROM {table} WHERE {where}", (self.pet, *key))
-        names = ",".join(columns)
-        placeholders = ",".join("?" for _ in columns)
-        for key, record in desired.items():
-            previous = existing.get(key)
-            if previous is None:
-                self.db.execute(
-                    f"INSERT INTO {table} ({names}) VALUES ({placeholders})", record
-                )
-            elif previous != record:
-                changed = tuple(
-                    index
-                    for index, value in enumerate(record)
-                    if previous[index] != value
-                )
-                assignments = ",".join(f"{columns[index]}=?" for index in changed)
-                values = tuple(record[index] for index in changed)
-                self.db.execute(
-                    f"UPDATE {table} SET {assignments} WHERE {where}",
-                    (*values, self.pet, *key),
-                )
 
     def clear(self) -> None:
         for table in TABLES:
             self.db.execute(f"DELETE FROM {table} WHERE pet=?", (self.pet,))
-        for table in ("work_opportunities", "work_surfacings"):
-            if self.db.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
-            ).fetchone():
-                self.db.execute(f"DELETE FROM {table} WHERE pet=?", (self.pet,))

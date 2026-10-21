@@ -1,8 +1,8 @@
-import json
+from dataclasses import asdict
 from typing import TypedDict
 
 from .models import (
-    ArtifactDescriptor,
+    ArtifactReference,
     AvailabilityEvidence,
     CheckoutAssociation,
     EvidencePayload,
@@ -13,82 +13,40 @@ from .models import (
     ProgressEvidence,
     PullRequestAssociation,
     ReferenceAssociation,
-    RelatedLink,
+    ReportContext,
+    SessionReport,
     StackAssociation,
 )
 from .observations import (
     GitObservation,
-    pull_request_from_data,
     related_link_data,
 )
-from .validation import canonical
-from .wire import PullRequestData
-
-StoredOrigin = TypedDict("StoredOrigin", {"from": str}, total=False)
 
 
-class StoredPayload(StoredOrigin, total=False):
+class StoredPayload(TypedDict, total=False):
     session: str
     text: str
     event: str
     outcome: str | None
     tool_name: str | None
     progress: str | None
-    worktree: str
-    branch: str
-    head: str
-    staged: int
-    unstaged: int
-    untracked: int
-    conflicts: int
-    upstream: str
-    ahead: int
-    behind: int
-    repository: str
-    pr: PullRequestData | None
-    local_error: str | None
-    github_error: str | None
+
+
+class StoredContext(TypedDict):
     checkout: str
-    kind: str
-    ref: str
-    relationship: str
-    source: str
-    stack: int | None
-    position: int | None
-    state: str | None
-    is_draft: bool | None
-    head_branch: str
-    title: str
+    repository: str
+    branch: str
+    pull_request: str
+    references: list[dict[str, str]]
+    branch_resolution: int
 
 
-class StoredEvidence(TypedDict):
+class StoredSessionReport(TypedDict):
     source: str
     kind: str
     data: StoredPayload
-    observed_at: float | None
-
-
-def artifact_record(artifact: ArtifactDescriptor) -> dict[str, str]:
-    result = {
-        "kind": artifact.kind,
-        "ref": artifact.ref,
-        "repository": artifact.repository,
-    }
-    if artifact.revision is not None:
-        result["revision"] = artifact.revision
-    if artifact.checkout is not None:
-        result["checkout"] = artifact.checkout
-    if artifact.title is not None:
-        result["title"] = artifact.title
-    return result
-
-
-def encode_artifact(artifact: ArtifactDescriptor) -> str:
-    return canonical(artifact_record(artifact))
-
-
-def decode_artifact(encoded: str) -> ArtifactDescriptor:
-    return ArtifactDescriptor(**json.loads(encoded))
+    observed_at: float
+    context: StoredContext
 
 
 def payload_record(payload: EvidencePayload) -> dict[str, object]:
@@ -139,74 +97,24 @@ def payload_record(payload: EvidencePayload) -> dict[str, object]:
             }
 
 
-def encode_evidence(payload: EvidencePayload) -> str:
-    return canonical(payload_record(payload))
-
-
-def decode_evidence(source: str, kind: str, encoded: str) -> EvidencePayload:
-    data: StoredPayload = json.loads(encoded)
-    return _decode_payload(source, kind, data)
-
-
-def _decode_payload(source: str, kind: str, data: StoredPayload) -> EvidencePayload:
-    if source == "user" and kind == "intent":
-        return IntentEvidence(data["session"], data["text"])
-    if source == "harness" and kind == "progress":
-        return ProgressEvidence(data["session"], data["text"])
-    if source == "harness" and kind == "execution":
-        return ExecutionEvidence(
-            data["session"],
-            data["event"],
-            data["outcome"],
-            data["tool_name"],
-            data["progress"],
-        )
-    if source == "git" and kind == "observation":
-        return GitObservation(
-            data["worktree"],
-            data["branch"],
-            data["head"],
-            data["staged"],
-            data["unstaged"],
-            data["untracked"],
-            data["conflicts"],
-            data["upstream"],
-            data["ahead"],
-            data["behind"],
-            data["repository"],
-        )
-    if source == "github" and kind == "observation":
-        pr = data["pr"]
-        return GitHubEvidence(
-            pull_request_from_data(pr) if pr else None, data["repository"]
-        )
-    if source == "observer" and kind == "availability":
-        return AvailabilityEvidence(data["local_error"], data["github_error"])
-    if kind == "relationship":
-        if source in {"user_reference", "agent_reference", "pr_reference"}:
-            return ReferenceAssociation(data["ref"])
-        if source == "harness":
-            return CheckoutAssociation(data["checkout"], data["branch"])
-        if source == "github":
-            return PullRequestAssociation(data["checkout"], data["branch"])
-        if source == "github_stack":
-            return StackAssociation(
-                RelatedLink(
-                    data["kind"],
-                    data["ref"],
-                    data["relationship"],
-                    data["source"],
-                    data["stack"],
-                    data["position"],
-                    data["state"],
-                    data["is_draft"],
-                    data["head"],
-                    data["head_branch"],
-                    data["title"],
-                ),
-                data["from"],
+def report_payload(
+    kind: str, data: StoredPayload
+) -> IntentEvidence | ProgressEvidence | ExecutionEvidence:
+    match kind:
+        case "intent":
+            return IntentEvidence(data["session"], data["text"])
+        case "progress":
+            return ProgressEvidence(data["session"], data["text"])
+        case "execution":
+            return ExecutionEvidence(
+                data["session"],
+                data["event"],
+                data["outcome"],
+                data["tool_name"],
+                data["progress"],
             )
-    raise ValueError(f"Unsupported evidence: {source}/{kind}")
+        case _:
+            raise ValueError(f"Unsupported session report: {kind}")
 
 
 def evidence_record(record: EvidenceRecord) -> dict[str, object]:
@@ -216,3 +124,23 @@ def evidence_record(record: EvidenceRecord) -> dict[str, object]:
         "data": payload_record(record.payload),
         "observed_at": record.observed_at,
     }
+
+
+def report_data(value: SessionReport) -> dict[str, object]:
+    return {**evidence_record(value.record()), "context": asdict(value.context)}
+
+
+def report_from_data(value: StoredSessionReport) -> SessionReport:
+    context = value["context"]
+    return SessionReport(
+        report_payload(value["kind"], value["data"]),
+        ReportContext(
+            context["checkout"],
+            context["repository"],
+            context["branch"],
+            context["pull_request"],
+            tuple(ArtifactReference(**item) for item in context["references"]),
+            context["branch_resolution"],
+        ),
+        value["observed_at"],
+    )

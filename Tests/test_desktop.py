@@ -56,7 +56,7 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                 body = json.loads(request.content)
                 requests.append(body)
                 summary = body["output_config"]["format"]["schema"]["required"] == [
-                    "session_context"
+                    "summary"
                 ]
                 explicit = (
                     not summary and SITUATIONS["explicit"] in body["system"][-1]["text"]
@@ -75,7 +75,7 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                             {
                                 "type": "text",
                                 "text": json.dumps(
-                                    {"session_context": "Build and test the parser."}
+                                    {"summary": "Build and test the parser."}
                                     if summary
                                     else {"speak": speech if explicit else None}
                                 ),
@@ -216,7 +216,7 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                     )
                     await wait_for(
                         lambda: (
-                            len(daemon.application.sessions.lanes) == 2
+                            len(daemon.application.sessions.by_id) == 2
                             and daemon.application.sessions.working
                         )
                     )
@@ -230,7 +230,7 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(entered.wait(), 2)
                     await cli("--session", "build", "--status", "done")
                     await wait_for(
-                        lambda: daemon.application.sessions.lanes["cli:build"].finished
+                        lambda: daemon.application.sessions.by_id["cli:build"].finished
                     )
                     self.assertTrue(daemon.application.sessions.working)
                     await hook(

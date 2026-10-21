@@ -74,11 +74,11 @@ def project_event(
     )
     if terminal:
         category = "harness"
-    if outcome == "error":
-        progress = ""
     result = result_summary(category, outcome) if outcome else ""
     if terminal and outcome == "success":
         result = "Turn completed (agent reported success)"
+    elif terminal and outcome:
+        result = f"{result} (agent reported {outcome})"
     facts = [
         kind,
         goal if kind in ("intent", "subagent_start") else "",

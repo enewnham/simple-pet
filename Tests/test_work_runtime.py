@@ -18,6 +18,7 @@ from pet_daemon.runtime import OverlayPacket
 from pet_daemon.sources import RepositoryTracker
 from pet_daemon.sources.git import CommandOptions, command
 from pet_daemon.types import JSONObject
+from pet_daemon.work.observations import BranchObservation, PullRequestObservation
 from Tests.fixtures import require
 from Tests.test_runtime import PNG, reply
 
@@ -160,11 +161,11 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         if args[0] != "gh":
             return await command(*args, **kwargs)
         self.github_commands.append(args)
-        if args[:3] == ("gh", "repo", "view"):
+        if args[:3] == ("gh", "repo", "story"):
             return json.dumps({"isFork": False})
         if args[:3] == ("gh", "pr", "list"):
             return json.dumps([self.pr])
-        if args[:3] == ("gh", "pr", "view"):
+        if args[:3] == ("gh", "pr", "story"):
             return json.dumps(self.related_prs.get(args[3], self.pr))
         if args[:2] == ("gh", "api") and "/stacks?" in args[2]:
             return json.dumps(self.stack_entries)
@@ -278,7 +279,14 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         await self.wait_for(
-            lambda: "codex:persistence" in self.daemon.application.sessions.lanes
+            lambda: "codex:persistence" in self.daemon.application.sessions.by_id
+        )
+        await self.wait_for(
+            lambda: any(
+                isinstance(item, (BranchObservation, PullRequestObservation))
+                and item.pr
+                for item in self.repositories.snapshot()
+            )
         )
         self.send(
             {
@@ -294,21 +302,27 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.wait_for(
             lambda: (
-                self.daemon.application.sessions.lanes["codex:persistence"].outcome
+                self.daemon.application.sessions.by_id["codex:persistence"].outcome
                 == "success"
             )
         )
         self.daemon.application.attention.pending = None
         await self.wait_for(
-            lambda: any(item.pr for item in self.repositories.snapshot())
+            lambda: any(
+                isinstance(item, (BranchObservation, PullRequestObservation))
+                and item.pr
+                for item in self.repositories.snapshot()
+            )
         )
         await self.wait_for(lambda: not self.repositories.tasks)
         self.assertEqual(self.requests, [])
         self.config.behavior.automatic_speech_cooldown_seconds = 0
         await self.drain()
-        return require(
-            self.daemon.application.memory.work.work_for_session("codex:persistence")
-        ).id
+        return next(
+            subject.id
+            for subject in self.daemon.application.context().work
+            if "codex:persistence" in subject.sessions
+        )
 
     async def test_native_agent_report_and_connected_pr_reach_accepted_commentary(
         self,
@@ -347,7 +361,9 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.pr.update(state="MERGED", mergedAt="2026-10-20T12:00:00Z")
         await self.refresh_sources(
             lambda: any(
-                item.pr and item.pr.state == "MERGED"
+                isinstance(item, (BranchObservation, PullRequestObservation))
+                and item.pr
+                and item.pr.state == "MERGED"
                 for item in self.repositories.snapshot()
             )
         )
@@ -378,7 +394,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: (
                 "update the examples"
-                in self.daemon.application.sessions.lanes["codex:persistence"].progress
+                in self.daemon.application.sessions.by_id["codex:persistence"].progress
             )
         )
         self.daemon.application.attention.pending = None
@@ -418,7 +434,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: (
                 "different approach"
-                in self.daemon.application.sessions.lanes["codex:persistence"].progress
+                in self.daemon.application.sessions.by_id["codex:persistence"].progress
             )
         )
         self.release.set()
@@ -434,7 +450,9 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.pr["body"] = "Additional context for the human author."
         await self.refresh_sources(
             lambda: any(
-                item.pr and item.pr.body == self.pr["body"]
+                isinstance(item, (BranchObservation, PullRequestObservation))
+                and item.pr
+                and item.pr.body == self.pr["body"]
                 for item in self.repositories.snapshot()
             )
         )

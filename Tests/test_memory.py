@@ -6,20 +6,22 @@ from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import patch
 
+from pet_daemon.sessions import Sessions
 from pet_daemon.sources.hooks import HookEvent, normalize_hook
 from pet_daemon.storage import Memory
 from pet_daemon.storage.memory import (
     ContextRecord,
     HistoryRecord,
-    RepositoryAssociation,
 )
 from pet_daemon.storage.migrations import SCHEMA_VERSION
 from pet_daemon.types import JSONValue
 from pet_daemon.work.history import EventContext, project_event, recall_query
 from pet_daemon.work.observations import (
-    RepositoryObservation,
+    CheckoutObservation,
+    GitObservation,
 )
-from Tests.fixtures import require
+from pet_daemon.work.views import IntentView, ProgressView
+from Tests.fixtures import require, sessions_snapshot
 
 
 class MemoryTests(unittest.TestCase):
@@ -28,10 +30,18 @@ class MemoryTests(unittest.TestCase):
         self.path = Path(self.temporary.name) / "memory.sqlite3"
         self.now = 1000
         self.memory = Memory(self.path, "fixture", clock=lambda: self.now, max_events=3)
+        self.sessions = Sessions(lambda: self.now)
 
     def tearDown(self) -> None:
         self.memory.close()
         self.temporary.cleanup()
+
+    def ingest(self, event: HookEvent, memory: Memory | None = None) -> None:
+        result = require(self.sessions.apply(event))
+        memory = memory or self.memory
+        with memory.transaction():
+            memory.work.record_session(result.observation)
+            memory.record_event(project_event(event))
 
     def context(self, session: str = "codex:one") -> ContextRecord:
         context = self.memory.context(session)
@@ -55,6 +65,36 @@ class MemoryTests(unittest.TestCase):
                     )
                 )
             )
+        )
+
+    def observe_checkout(self, memory: Memory | None = None) -> CheckoutObservation:
+        memory = memory or self.memory
+        self.ingest(
+            HookEvent("codex", "one", "session_start", repo="/repo/parser"), memory
+        )
+        checkpoint = CheckoutObservation(
+            "/repo/parser",
+            GitObservation(
+                "/repo/parser",
+                "feature",
+                "head",
+                0,
+                0,
+                0,
+                0,
+                "",
+                0,
+                0,
+                "github.com/team/project",
+            ),
+            self.now,
+        )
+        memory.work.observe(checkpoint)
+        return next(
+            item
+            for item in memory.load_repositories()
+            if isinstance(item, CheckoutObservation)
+            and item.worktree == checkpoint.worktree
         )
 
     def test_events_survive_restart_and_remain_separate_from_speech(self) -> None:
@@ -146,27 +186,19 @@ class MemoryTests(unittest.TestCase):
         self.memory.save_context(
             "codex:one", "Improve parser", "Parser summary", ["Improve parser"]
         )
-        self.memory.associate_repository("codex:one", "/repo/parser")
-        checkpoint = RepositoryObservation(
-            subject="/repo/parser:feature", worktree="/repo/parser", branch="feature"
-        )
-        self.memory.save_repository(checkpoint)
+        checkpoint = self.observe_checkout()
         other = Memory(self.path, "other-pet", clock=lambda: self.now)
         try:
             other.record_speech("Other pet remark", "routine")
             self.memory.clear_speech()
             self.assertEqual(self.memory.speech(), [])
             self.assertEqual(other.speech()[0].text, "Other pet remark")
-            self.assertEqual(self.context().session_context, "Parser summary")
+            self.assertEqual(self.context().summary, "Parser summary")
             self.assertIn(
                 "Parser checks passed", json.dumps(self.memory.recent(), default=asdict)
             )
             self.assertEqual(
                 self.memory.projects(["/repo/parser"])[0].goal, "Improve parser"
-            )
-            self.assertEqual(
-                self.memory.repository_associations(),
-                [RepositoryAssociation("codex:one", "/repo/parser")],
             )
             self.assertEqual(self.memory.load_repositories(), (checkpoint,))
             self.memory.close()
@@ -526,7 +558,7 @@ class MemoryTests(unittest.TestCase):
             )
         )
         summary = self.memory.recent()[0].summary
-        self.assertIn("failed", summary)
+        self.assertIn("reported error", summary)
         self.assertNotIn("success", summary)
 
     def test_duplicate_progress_does_not_displace_distinct_facts(self) -> None:
@@ -547,7 +579,7 @@ class MemoryTests(unittest.TestCase):
         self.memory.record_event(
             project_event(HookEvent("claude", "one", "interrupt", outcome="cancelled"))
         )
-        self.assertIn("Agent run cancelled", self.memory.recent()[-1].summary)
+        self.assertIn("reported cancelled", self.memory.recent()[-1].summary)
 
     def test_acceptance_commits_speech_outcome_and_considered_story_together(
         self,
@@ -672,101 +704,6 @@ class MemoryTests(unittest.TestCase):
             require(self.memory.message_outcome("message")).outcome, "accepted"
         )
 
-    def test_schema_seven_upgrade_preserves_history_and_ignores_legacy_actions(
-        self,
-    ) -> None:
-        self.assert_upgrade_preserves_history_and_ignores_legacy_actions(7)
-
-    def test_schema_eight_upgrade_preserves_history_and_ignores_legacy_actions(
-        self,
-    ) -> None:
-        self.assert_upgrade_preserves_history_and_ignores_legacy_actions(8)
-
-    def assert_upgrade_preserves_history_and_ignores_legacy_actions(
-        self, version: int
-    ) -> None:
-        from pet_daemon.storage.migrations import (
-            DELIVERY_SCHEMA,
-            MEMORY_SCHEMA,
-            WORK_SCHEMA,
-            execute_schema,
-        )
-
-        path = Path(self.temporary.name) / f"legacy-{version}.sqlite3"
-        legacy_delivery = DELIVERY_SCHEMA.replace(
-            "timestamp REAL NOT NULL,\n                subject_id TEXT, revision TEXT,",
-            "opportunity_id TEXT, version INTEGER, timestamp REAL NOT NULL,",
-        )
-        with sqlite3.connect(path) as database:
-            execute_schema(database, MEMORY_SCHEMA)
-            execute_schema(database, WORK_SCHEMA)
-            database.execute("""CREATE TABLE work_opportunities (
-                pet TEXT NOT NULL, id TEXT NOT NULL, work_id TEXT NOT NULL, kind TEXT NOT NULL,
-                artifact_id TEXT NOT NULL, version INTEGER NOT NULL, fingerprint TEXT NOT NULL,
-                data TEXT NOT NULL, active INTEGER NOT NULL, surfaced_version INTEGER NOT NULL,
-                changed_at REAL NOT NULL, PRIMARY KEY(pet,id))""")
-            database.execute("""CREATE TABLE work_surfacings (
-                id INTEGER PRIMARY KEY, pet TEXT NOT NULL, opportunity_id TEXT NOT NULL,
-                version INTEGER NOT NULL, outcome TEXT NOT NULL, timestamp REAL NOT NULL)""")
-            execute_schema(database, legacy_delivery)
-            database.execute(f"PRAGMA user_version = {version}")
-            database.execute(
-                "INSERT INTO speech VALUES (1,'fixture','Saved remark','routine',1000)"
-            )
-            database.execute(
-                "INSERT INTO message_outcomes VALUES ('fixture','legacy','accepted','Saved remark','routine','opportunity',3,1000)"
-            )
-            database.execute(
-                "INSERT INTO work_items VALUES ('fixture','work','Improve parser','active',1000)"
-            )
-            database.execute(
-                "INSERT INTO work_opportunities VALUES ('fixture','opportunity','work','resolve_checks','artifact',3,'fingerprint','not decoded',1,3,1000)"
-            )
-            database.execute(
-                "INSERT INTO work_surfacings VALUES (1,'fixture','opportunity',3,'accepted',1000)"
-            )
-        upgraded = Memory(path, "fixture", clock=lambda: self.now)
-        try:
-            self.assertEqual(upgraded.speech()[0].text, "Saved remark")
-            self.assertEqual(
-                require(upgraded.message_outcome("legacy")).subject_id, None
-            )
-            upgraded.work.session_intent("codex:one", "More parser work")
-            self.assertEqual(len(upgraded.work.work_items()), 2)
-            self.assertEqual(
-                upgraded.db.execute("SELECT data FROM work_opportunities").fetchone()[
-                    0
-                ],
-                "not decoded",
-            )
-            self.assertEqual(
-                upgraded.db.execute("SELECT COUNT(*) FROM work_surfacings").fetchone()[
-                    0
-                ],
-                1,
-            )
-            upgraded.record_acceptance(
-                "new", "More parser coverage", "routine", "work", "revision"
-            )
-            self.assertEqual(
-                require(upgraded.message_outcome("new")).revision, "revision"
-            )
-            upgraded.clear()
-            self.assertEqual(
-                upgraded.db.execute(
-                    "SELECT COUNT(*) FROM work_opportunities"
-                ).fetchone()[0],
-                0,
-            )
-            self.assertEqual(
-                upgraded.db.execute("SELECT COUNT(*) FROM work_surfacings").fetchone()[
-                    0
-                ],
-                0,
-            )
-        finally:
-            upgraded.close()
-
     def test_session_context_survives_restart_with_its_original_anchor(self) -> None:
         self.memory.save_context(
             "codex:one",
@@ -777,8 +714,8 @@ class MemoryTests(unittest.TestCase):
         self.memory.close()
         self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
         context = self.context()
-        self.assertEqual(context.first_prompt, "Refactor parser")
-        self.assertEqual(context.session_context, "Parser refactor awaits validation")
+        self.assertEqual(context.initial_request, "Refactor parser")
+        self.assertEqual(context.summary, "Parser refactor awaits validation")
         self.assertEqual(
             context.recent_requests, ["Refactor parser", "Check edge cases"]
         )
@@ -796,7 +733,7 @@ class MemoryTests(unittest.TestCase):
         )
         self.memory.close()
         self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
-        self.assertEqual(self.context().session_context, summary)
+        self.assertEqual(self.context().summary, summary)
 
     def test_pet_identity_keeps_session_context_separate(self) -> None:
         self.memory.save_context(
@@ -817,11 +754,7 @@ class MemoryTests(unittest.TestCase):
             "codex:one", "Improve parser", "Parser summary", ["Improve parser"]
         )
         self.memory.record_speech("Parser work", "prompt")
-        self.memory.associate_repository("codex:one", "/repo/parser")
-        checkpoint = RepositoryObservation(
-            subject="branch", worktree="/repo/parser", branch="feature"
-        )
-        self.memory.save_repository(checkpoint)
+        checkpoint = self.observe_checkout()
         self.memory.close()
         with sqlite3.connect(self.path) as database:
             database.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -829,15 +762,11 @@ class MemoryTests(unittest.TestCase):
         self.assertTrue(self.memory.recent())
         self.assertEqual(self.memory.speech()[0].text, "Parser work")
         self.assertEqual(
-            self.context().session_context,
+            self.context().summary,
             "Parser summary",
         )
         self.assertEqual(
             self.memory.projects(["/repo/parser"])[0].goal, "Improve parser"
-        )
-        self.assertEqual(
-            self.memory.repository_associations(),
-            [RepositoryAssociation("codex:one", "/repo/parser")],
         )
         self.assertEqual(self.memory.load_repositories(), (checkpoint,))
         self.assertEqual(
@@ -848,104 +777,92 @@ class MemoryTests(unittest.TestCase):
         other = Memory(self.path, "other-pet", clock=lambda: self.now)
         try:
             for memory in (self.memory, other):
-                memory.work.session_intent("codex:one", "Improve parser")
-                memory.work.observe_repository(
-                    RepositoryObservation(
-                        "fixture",
-                        "/repo/parser",
-                        "feature",
-                        sessions=("codex:one",),
-                        repository="github.com/team/project",
-                    )
+                self.ingest(
+                    HookEvent("codex", "one", "intent", goal="Improve parser"), memory
                 )
+                self.observe_checkout(memory)
             self.assertEqual(
-                len(require(self.memory.work.session_context("codex:one")).artifacts), 1
+                len(self.memory.connected_work(sessions_snapshot())[0].story.artifacts),
+                1,
             )
             self.memory.clear()
             self.memory.close()
             self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
-            self.assertEqual(self.memory.work.tracked_artifacts(), ())
-            self.assertIsNone(self.memory.work.session_context("codex:one"))
+            self.assertEqual(self.memory.collection_targets(), ())
+            self.assertEqual(self.memory.connected_work(sessions_snapshot()), ())
             self.assertEqual(
-                len(require(other.work.session_context("codex:one")).artifacts), 1
+                len(other.connected_work(sessions_snapshot())[0].story.artifacts), 1
             )
         finally:
             other.close()
 
-    def test_work_evidence_retention_uses_configured_memory_retention(self) -> None:
+    def test_session_keeps_its_intent_refinements_and_accepts_reports_after_pruning(
+        self,
+    ) -> None:
         self.memory.close()
         self.memory = Memory(
             self.path, "fixture", clock=lambda: self.now, retention_days=1
         )
-        self.memory.work.session_intent("codex:one", "Improve parser")
-        self.memory.work.session_intent("codex:one", "Check parser edge cases")
+        self.ingest(HookEvent("codex", "one", "intent", goal="Improve parser"))
+        self.ingest(HookEvent("codex", "one", "intent", goal="Check parser edge cases"))
         self.now += 2 * 86400
         self.memory.prune()
-        rows = self.memory.db.execute(
-            "SELECT data FROM work_evidence WHERE pet=? AND kind='intent'", ("fixture",)
-        ).fetchall()
-        self.assertEqual(len(rows), 1)
-        self.assertIn("Check parser edge cases", rows[0]["data"])
-        item = self.memory.work.work_for_session("codex:one")
-        assert item is not None
+        self.ingest(
+            HookEvent("codex", "one", "progress", progress="Parser edge cases pass")
+        )
+        story = self.memory.connected_work(sessions_snapshot())[0].story
+        self.assertEqual(story.intent, "Check parser edge cases")
         self.assertEqual(
-            item.intent,
-            "Check parser edge cases",
+            [request.details for request in story.requests],
+            [IntentView("Improve parser"), IntentView("Check parser edge cases")],
         )
-
-    def test_work_graph_creates_only_tables_with_automatic_producers(self) -> None:
-        for name in (
-            "work_updates",
-            "work_decisions",
-            "work_opportunities",
-            "work_surfacings",
-        ):
-            self.assertIsNone(
-                self.memory.db.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-                    (name,),
-                ).fetchone()
-            )
-        self.memory.work.session_intent("codex:one", "Improve parser")
-        self.memory.work.observe_repository(
-            RepositoryObservation(
-                "fixture",
-                "/repo/parser",
-                "feature",
-                sessions=("codex:one",),
-                repository="github.com/team/project",
-            )
+        self.assertEqual(
+            [
+                report.details
+                for report in story.activity
+                if isinstance(report.details, ProgressView)
+            ],
+            [ProgressView("Parser edge cases pass")],
         )
-        self.memory.close()
-        self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
-        self.assertEqual(self.memory.work.tracked_artifacts()[0].ref, "feature")
 
     def test_nested_ingestion_rolls_back_checkpoint_and_domain_changes_together(
         self,
     ) -> None:
-        self.memory.work.session_intent("codex:one", "Improve parser")
-        observation = RepositoryObservation(
-            "fixture",
+        self.ingest(HookEvent("codex", "one", "intent", goal="Improve parser"))
+        observation = CheckoutObservation(
             "/repo/parser",
-            "feature",
-            sessions=("codex:one",),
-            repository="github.com/team/project",
+            GitObservation(
+                "/repo/parser",
+                "feature",
+                "head",
+                0,
+                0,
+                0,
+                0,
+                "",
+                0,
+                0,
+                "github.com/team/project",
+            ),
+            self.now,
         )
         with (
             self.assertRaisesRegex(RuntimeError, "rollback"),
             self.memory.transaction(),
         ):
-            self.memory.save_repository(observation)
-            self.memory.work.observe_repository(observation)
+            self.ingest(HookEvent("codex", "one", "session_start", repo="/repo/parser"))
+            self.memory.work.observe(observation)
             raise RuntimeError("rollback")
         self.assertEqual(self.memory.load_repositories(), ())
         self.assertEqual(
-            require(self.memory.work.session_context("codex:one")).artifacts, ()
+            self.memory.connected_work(sessions_snapshot())[0].story.artifacts, ()
         )
         self.memory.close()
         self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
         self.assertEqual(self.memory.load_repositories(), ())
-        self.assertEqual(self.memory.work.tracked_artifacts(), ())
+        self.assertEqual(
+            self.memory.connected_work(sessions_snapshot())[0].story.artifacts, ()
+        )
 
     def test_attention_history_survives_pruning_restart_and_remains_pet_scoped(
         self,
@@ -972,18 +889,15 @@ class MemoryTests(unittest.TestCase):
             other.close()
 
     def test_version_changes_rebuild_local_memory_and_search(self) -> None:
-        for version in (0, 3, 4, 5, 6, SCHEMA_VERSION + 1):
+        for version in (0, 6):
             with self.subTest(version=version):
                 self.event("Parser inspection completed", goal="Improve parser")
                 self.memory.record_speech("Parser work", "routine")
                 self.memory.save_context(
                     "codex:one", "Improve parser", "Parser summary", ["Improve parser"]
                 )
-                self.memory.work.session_intent("codex:one", "Improve parser")
-                self.memory.associate_repository("codex:one", "/repo/parser")
-                self.memory.save_repository(
-                    RepositoryObservation("checkpoint", "/repo/parser", "feature")
-                )
+                self.ingest(HookEvent("codex", "one", "intent", goal="Improve parser"))
+                self.observe_checkout()
                 self.memory.close()
                 with sqlite3.connect(self.path) as database:
                     database.execute("CREATE TABLE work_updates (content TEXT)")
@@ -993,9 +907,8 @@ class MemoryTests(unittest.TestCase):
                 self.assertEqual(self.memory.recent(), [])
                 self.assertEqual(self.memory.speech(), [])
                 self.assertIsNone(self.memory.context("codex:one"))
-                self.assertIsNone(self.memory.work.work_for_session("codex:one"))
+                self.assertEqual(self.memory.connected_work(sessions_snapshot()), ())
                 self.assertEqual(self.memory.projects(["/repo/parser"]), [])
-                self.assertEqual(self.memory.repository_associations(), [])
                 self.assertEqual(self.memory.load_repositories(), ())
                 self.assertEqual(
                     self.memory.db.execute("PRAGMA user_version").fetchone()[0],
@@ -1020,6 +933,26 @@ class MemoryTests(unittest.TestCase):
                     ).fetchone()[0],
                     0,
                 )
+
+    def test_newer_schema_is_rejected_without_modifying_saved_memory(self) -> None:
+        self.event("Parser inspection completed")
+        self.memory.record_speech("Parser work", "routine")
+        self.memory.close()
+        newer = SCHEMA_VERSION + 1
+        with sqlite3.connect(self.path) as database:
+            database.execute(f"PRAGMA user_version = {newer}")
+        with self.assertRaises(ValueError):
+            Memory(self.path, "fixture", clock=lambda: self.now)
+        with sqlite3.connect(self.path) as database:
+            self.assertEqual(
+                database.execute("PRAGMA user_version").fetchone()[0], newer
+            )
+            self.assertEqual(
+                database.execute("SELECT text FROM speech").fetchone()[0], "Parser work"
+            )
+            database.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
+        self.assertIn("Parser inspection completed", self.memory.recent()[0].summary)
 
     def test_failed_rebuild_preserves_saved_memory_and_schema_version(self) -> None:
         self.event("Parser inspection completed")

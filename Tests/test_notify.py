@@ -14,6 +14,7 @@ from typing import TypedDict
 
 from pet_daemon.runtime import ProcessPacket
 from pet_daemon.sessions import Sessions
+from pet_daemon.sources.hooks import normalize_hook
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT = ROOT / "bin" / "pet-notify"
@@ -35,6 +36,9 @@ class ReceivedPacket(TypedDict, total=False):
     goal: str
     progress: str
     repo: str
+    repository: str
+    branch: str
+    pull_request: str
     tool_name: str
     sentiment_text: str
     outcome: str
@@ -350,7 +354,7 @@ class NotifyTests(unittest.TestCase):
                     if event == completion:
                         assert accepted is not None
                         self.assertEqual(accepted.failure, outcome == "error")
-                self.assertEqual(sessions.snapshot().sessions[0].outcome, outcome)
+                self.assertEqual(sessions.activity_view().sessions[0].outcome, outcome)
                 self.assertEqual(sessions.clean_convergence, outcome == "success")
 
     def test_codex_subagents_use_child_identity_and_parent_relationship(self) -> None:
@@ -370,6 +374,31 @@ class NotifyTests(unittest.TestCase):
                 ("child", "parent", expected),
             )
             self.assertNotIn("turn", packet)
+
+    def test_hook_preserves_explicit_report_references(self) -> None:
+        result = self.run_hook(
+            "codex",
+            "UserPromptSubmit",
+            {
+                "session_id": "worker",
+                "prompt": "Cover parser escapes",
+                "cwd": "/src/parser",
+                "repository": "github.com/team/parser",
+                "branch": "escapes",
+                "pull_request": "https://github.com/team/parser/pull/42",
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        event = normalize_hook(self.receive())
+        assert event is not None
+        self.assertEqual(
+            (event.repository, event.branch, event.pull_request),
+            (
+                "github.com/team/parser",
+                "escapes",
+                "https://github.com/team/parser/pull/42",
+            ),
+        )
 
     def test_codex_detects_structured_failures_without_guessing_from_output(
         self,

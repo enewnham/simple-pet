@@ -10,11 +10,13 @@ from typing import Never, Unpack
 from unittest.mock import patch
 
 from pet_daemon.sources import RepositoryTarget, RepositoryTracker, git, github
-from pet_daemon.sources.git import CommandOptions, RunCommand
+from pet_daemon.sources.git import CommandOptions
 from pet_daemon.sources.github import GitHubPullRequest
 from pet_daemon.sources.hooks import HookEvent, normalize_hook
 from pet_daemon.work.observations import (
-    RepositoryObservation,
+    BranchObservation,
+    CheckoutObservation,
+    PullRequestObservation,
     repository_observation_from_mapping,
 )
 from Tests.fixtures import StackFixture, SubprocessOptions
@@ -23,7 +25,7 @@ from Tests.fixtures import StackFixture, SubprocessOptions
 class RepositoryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
-        self.path = Path(self.temp.name) / "repo"
+        self.path = (Path(self.temp.name) / "repo").resolve()
         self.path.mkdir()
         self.git("init", "-b", "feature")
         self.git("remote", "add", "origin", "git@example.test:team/repo.git")
@@ -48,28 +50,13 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
             "baseRefName": "main",
             "baseRefOid": "base-head",
         }
-        self.stacks = []
+        self.candidates: list[GitHubPullRequest] | None = None
+        self.stacks: list[StackFixture] = []
         self.related_prs = {}
         self.github_unavailable = False
         self.emitted = []
         self.tracker = RepositoryTracker(
             self.emitted.append, lambda: self.now, run=self.command
-        )
-
-    def restore_tracker(self, *, run: RunCommand | None = None) -> None:
-        previous = self.tracker
-        associations = [
-            (session, path)
-            for path, sessions in previous.associations.items()
-            for session in sessions
-        ]
-        self.tracker = RepositoryTracker(
-            self.emitted.append,
-            lambda: self.now,
-            run=run or self.command,
-            checkpoints=previous.snapshot(),
-            associations=associations,
-            targets=tuple(previous.targets.values()),
         )
 
     def git(self, *args: str) -> str:
@@ -83,10 +70,10 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("GitHub unavailable")
             if args[1] == "api" and "/stacks?pull_request=" in args[2]:
                 return json.dumps(self.stacks)
-            if args[1:3] == ("repo", "view"):
+            if args[1:3] == ("repo", "story"):
                 return json.dumps({"isFork": False, "parent": None})
             return json.dumps(
-                [self.pr]
+                (self.candidates if self.candidates is not None else [self.pr])
                 if args[2] == "list"
                 else self.related_prs.get(args[3], self.pr)
             )
@@ -100,106 +87,409 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         await self.tracker.close()
         self.temp.cleanup()
 
-    async def test_local_changes_and_merged_pull_request_remain_separate(self) -> None:
-        self.tracker.associate("codex:one", str(self.path))
+    def checkout(self) -> CheckoutObservation:
+        return next(
+            item
+            for item in self.tracker.snapshot()
+            if isinstance(item, CheckoutObservation)
+        )
+
+    def branch(self) -> BranchObservation:
+        return next(
+            item
+            for item in self.tracker.snapshot()
+            if isinstance(item, BranchObservation)
+        )
+
+    async def test_checkout_and_pull_request_have_separate_observations(self) -> None:
+        self.tracker.track_checkout(self.path)
         (self.path / "tracked").write_text("changed\n")
         (self.path / "new").write_text("new\n")
         (self.path / "staged").write_text("staged\n")
         self.git("add", "staged")
         await self.refresh()
         await self.refresh()
-        item = self.tracker.snapshot()[0]
-        assert item.local is not None
-        self.assertEqual((item.local.unstaged, item.local.untracked), (1, 1))
-        self.assertEqual(item.local.staged, 1)
-        assert item.pr is not None
-        self.assertEqual(item.pr.state, "OPEN")
-        self.pr["state"] = "MERGED"
-        self.pr["mergedAt"] = "2026-10-17T00:00:00Z"
-        self.now += 180
-        await self.refresh()
-        item = self.tracker.snapshot()[0]
-        assert item.pr is not None
-        self.assertEqual(item.pr.state, "MERGED")
-        self.assertTrue(item.pending)
-        self.git("add", ".")
-        self.git("commit", "-m", "Manual changes")
-        self.now += 30
-        await self.refresh()
-        self.assertFalse(self.tracker.snapshot()[0].pending)
-
-    async def test_unchanged_polling_preserves_recency_and_query_failure_preserves_evidence(
-        self,
-    ) -> None:
-        self.tracker.associate("codex:one", str(self.path))
-        await self.refresh()
-        await self.refresh()
-        original = self.tracker.snapshot()[0]
-        self.now += 180
-        await self.refresh()
-        unchanged = self.tracker.snapshot()[0]
+        local = self.checkout().local
+        assert local is not None
+        self.assertEqual((local.unstaged, local.untracked, local.staged), (1, 1, 1))
         self.assertEqual(
-            (original.changed_at, original.revision),
-            (unchanged.changed_at, unchanged.revision),
+            self.branch().pr,
+            await github.observe(
+                None, "feature", run=self.command, repository="example.test/team/repo"
+            ),
         )
-        self.github_unavailable = True
-        self.now += 180
-        await self.refresh()
-        failed = self.tracker.snapshot()[0]
-        self.assertEqual(failed.pr, original.pr)
-        self.assertEqual(failed.changed_at, original.changed_at)
-        assert failed.github_error is not None
-        self.assertIn("unavailable", failed.github_error)
+        for item in self.tracker.snapshot():
+            self.assertEqual(repository_observation_from_mapping(item.packet()), item)
 
-    async def test_associations_and_pending_pull_requests_survive_restart_and_branch_switch(
-        self,
-    ) -> None:
-        self.tracker.associate("codex:one", str(self.path))
-        self.tracker.associate("claude:two", str(self.path))
+    async def test_unchanged_polls_keep_local_and_github_intervals(self) -> None:
+        self.tracker.track_checkout(self.path)
+        await self.refresh()
+        await self.refresh()
+        original = self.tracker.snapshot()
+        for _ in range(3):
+            self.now += 1
+            self.tracker.track_checkout(self.path)
+            await self.refresh()
+        self.assertEqual(self.tracker.snapshot(), original)
+        self.now += 27
+        await self.refresh()
+        self.assertEqual(self.checkout().checked_at, self.now)
+        self.assertEqual(self.branch().checked_at, 1000)
+        self.now += 150
+        await self.refresh()
+        self.assertEqual(self.branch().checked_at, self.now)
+
+    async def test_multiple_checkouts_share_one_branch_lookup(self) -> None:
+        linked = self.path.parent / "linked"
+        self.git("worktree", "add", "--force", str(linked), "feature")
+        calls = []
+
+        async def recording(*args: str, **kwargs: Unpack[CommandOptions]) -> str:
+            calls.append(args)
+            return await self.command(*args, **kwargs)
+
+        self.tracker.run = recording
+        self.tracker.track_checkout(self.path)
+        self.tracker.track_checkout(linked)
+        await self.refresh()
+        await self.refresh()
+        self.assertEqual(sum(args[:3] == ("gh", "pr", "list") for args in calls), 1)
+        self.assertEqual(
+            sum(
+                isinstance(item, CheckoutObservation)
+                for item in self.tracker.snapshot()
+            ),
+            2,
+        )
+        pr = self.branch().pr
+        assert pr is not None
+        self.assertEqual(pr.number, 1)
+
+    async def test_branch_switch_stops_polling_the_previous_branch(self) -> None:
+        self.tracker.track_checkout(self.path)
         await self.refresh()
         await self.refresh()
         self.git("switch", "-c", "another")
         self.now += 30
         await self.refresh()
-        feature = next(
-            item for item in self.tracker.snapshot() if item.branch == "feature"
-        )
-        self.assertFalse(feature.current)
-        self.assertTrue(feature.pending)
-        await self.tracker.close()
-        self.restore_tracker()
-        restored = next(
-            item for item in self.tracker.snapshot() if item.branch == "feature"
-        )
-        self.assertEqual(restored.sessions, ("claude:two", "codex:one"))
-        assert restored.pr is not None
-        self.assertEqual(restored.pr.number, 1)
-
-    async def test_branch_switch_during_github_refresh_rejects_result(self) -> None:
-        self.tracker.associate("codex:one", str(self.path))
         await self.refresh()
-        entered, release = asyncio.Event(), asyncio.Event()
+        self.assertEqual(
+            set(self.tracker.subscriptions),
+            {("branch", "example.test/team/repo:another")},
+        )
+        another = next(
+            item
+            for item in self.tracker.snapshot()
+            if isinstance(item, BranchObservation) and item.branch == "another"
+        )
+        self.assertIsNone(another.pr)
+        self.assertIsNone(another.error)
+
+    async def test_successful_empty_lookup_clears_branch_match(self) -> None:
+        self.tracker.reconcile_targets(
+            (RepositoryTarget("branch", "feature", "example.test/team/repo"),)
+        )
+        await self.refresh()
+        self.assertIsNotNone(self.branch().pr)
+        self.candidates = []
+        self.now += 180
+        await self.refresh()
+        self.assertIsNone(self.branch().pr)
+        self.assertIsNone(self.branch().error)
+
+    async def test_failed_branch_lookup_emits_uncertainty(self) -> None:
+        self.tracker.reconcile_targets(
+            (RepositoryTarget("branch", "feature", "example.test/team/repo"),)
+        )
+        await self.refresh()
+        previous = self.branch()
+        self.github_unavailable = True
+        self.now += 180
+        await self.refresh()
+        self.assertIsNotNone(previous.pr)
+        self.assertIsNone(self.branch().pr)
+        self.assertEqual(self.branch().checked_at, self.now)
+        self.assertIn("unavailable", self.branch().error or "")
+
+    async def test_ambiguous_historical_requests_emit_an_error(self) -> None:
+        self.candidates = [
+            {**self.pr, "state": "MERGED"},
+            {**self.pr, "number": 2, "state": "CLOSED"},
+        ]
+        self.tracker.reconcile_targets(
+            (RepositoryTarget("branch", "feature", "example.test/team/repo"),)
+        )
+        await self.refresh()
+        self.assertIsNone(self.branch().pr)
+        self.assertIn("Multiple historical", self.branch().error or "")
+        self.candidates.append(self.pr)
+        self.now += 180
+        await self.refresh()
+        pr = self.branch().pr
+        assert pr is not None
+        self.assertEqual(pr.number, 1)
+        self.assertIsNone(self.branch().error)
+
+    async def test_explicit_pull_request_keeps_polling_after_checkout_removal(
+        self,
+    ) -> None:
+        targets = (
+            RepositoryTarget("checkout", str(self.path)),
+            RepositoryTarget("pull_request", self.pr["url"]),
+        )
+        self.tracker.reconcile_targets(targets)
+        await self.refresh()
+        shutil.rmtree(self.path)
+        self.pr["state"] = "MERGED"
+        self.now += 180
+        await self.refresh()
+        self.assertFalse(self.checkout().available)
+        self.assertEqual(self.tracker.paths, {})
+        exact = next(
+            item
+            for item in self.tracker.snapshot()
+            if isinstance(item, PullRequestObservation)
+        )
+        assert exact.pr is not None
+        self.assertEqual(exact.pr.state, "MERGED")
+        self.tracker.reconcile_targets(targets)
+        self.assertEqual(self.tracker.paths, {})
+        self.assertEqual(
+            set(self.tracker.subscriptions), {("pull_request", self.pr["url"])}
+        )
+
+    async def test_missing_checkout_requires_a_fresh_track_request(self) -> None:
+        target = RepositoryTarget("checkout", str(self.path))
+        self.tracker.reconcile_targets((target,))
+        await self.refresh()
+        moved = self.path.parent / "moved"
+        self.path.rename(moved)
+        self.now += 30
+        await self.refresh()
+        self.assertFalse(self.checkout().available)
+        moved.rename(self.path)
+        self.tracker.reconcile_targets((target,))
+        self.now += 30
+        await self.refresh()
+        self.assertFalse(self.checkout().available)
+        self.tracker.track_checkout(self.path)
+        await self.refresh()
+        self.assertTrue(self.checkout().available)
+
+    async def test_removed_subdirectory_keeps_polling_the_checkout_root(self) -> None:
+        nested = self.path / "nested"
+        nested.mkdir()
+        self.tracker.track_checkout(nested)
+        await self.refresh()
+        nested.rmdir()
+        (self.path / "tracked").write_text("changed\n")
+        self.now += 30
+        await self.refresh()
+        self.assertEqual(self.checkout().worktree, str(self.path))
+        local = self.checkout().local
+        assert local is not None
+        self.assertEqual(local.unstaged, 1)
+        self.assertEqual(set(self.tracker.paths), {str(self.path)})
+
+    async def test_restart_polls_known_checkout_after_nested_location_disappears(
+        self,
+    ) -> None:
+        nested = self.path / "src"
+        nested.mkdir()
+        self.tracker.track_checkout(nested)
+        await self.refresh()
+        checkpoints = self.tracker.snapshot()
+        await self.tracker.close()
+        nested.rmdir()
+        (self.path / "tracked").write_text("changed after restart\n")
+        self.tracker = RepositoryTracker(
+            self.emitted.append,
+            lambda: self.now,
+            run=self.command,
+            checkpoints=checkpoints,
+            targets=(RepositoryTarget("checkout", str(nested)),),
+        )
+        await self.refresh()
+        local = self.checkout().local
+        assert local is not None
+        self.assertTrue(self.checkout().available)
+        self.assertEqual(local.unstaged, 1)
+        self.assertEqual(set(self.tracker.paths), {str(self.path)})
+        self.assertEqual(
+            [
+                item.worktree
+                for item in self.tracker.snapshot()
+                if isinstance(item, CheckoutObservation)
+            ],
+            [str(self.path)],
+        )
+
+    async def test_restart_keeps_missing_root_suppressed_for_nested_location(
+        self,
+    ) -> None:
+        nested = self.path / "src"
+        nested.mkdir()
+        self.tracker.track_checkout(nested)
+        await self.refresh()
+        previous = self.checkout()
+        checkpoints = (
+            CheckoutObservation(
+                previous.worktree, previous.local, self.now, available=False
+            ),
+        )
+        await self.tracker.close()
+        nested.rmdir()
+        self.tracker = RepositoryTracker(
+            self.emitted.append,
+            lambda: self.now,
+            run=self.command,
+            checkpoints=checkpoints,
+            targets=(RepositoryTarget("checkout", str(nested)),),
+        )
+        await self.refresh()
+        self.assertFalse(self.checkout().available)
+        self.assertEqual(self.tracker.paths, {})
+        self.tracker.track_checkout(nested)
+        await self.refresh()
+        self.assertTrue(self.checkout().available)
+        self.assertEqual(set(self.tracker.paths), {str(self.path)})
+
+    async def test_targets_and_observations_restore_without_checkout(self) -> None:
+        target = RepositoryTarget("pull_request", self.pr["url"])
+        self.tracker.reconcile_targets((target,))
+        await self.refresh()
+        checkpoint = self.tracker.snapshot()
+        await self.tracker.close()
+        shutil.rmtree(self.path)
+        self.tracker = RepositoryTracker(
+            self.emitted.append,
+            lambda: self.now,
+            run=self.command,
+            checkpoints=checkpoint,
+            targets=(target,),
+        )
+        self.assertEqual(self.tracker.snapshot(), checkpoint)
+        self.pr["state"] = "MERGED"
+        await self.refresh()
+        exact = next(
+            item
+            for item in self.tracker.snapshot()
+            if isinstance(item, PullRequestObservation)
+        )
+        assert exact.pr is not None
+        self.assertEqual(exact.pr.state, "MERGED")
+        self.assertEqual(self.tracker.paths, {})
+
+    async def test_retiring_targets_cancels_and_discards_late_callbacks(self) -> None:
+        target = RepositoryTarget("pull_request", self.pr["url"])
+        self.tracker.reconcile_targets((target,))
+        entered, released = asyncio.Event(), asyncio.Event()
 
         async def delayed(*args: str, **kwargs: Unpack[CommandOptions]) -> str:
-            if args[0] == "gh":
-                entered.set()
-                await release.wait()
+            entered.set()
+            try:
+                await released.wait()
+            except asyncio.CancelledError:
+                await released.wait()
             return await self.command(*args, **kwargs)
 
         self.tracker.run = delayed
         self.tracker.tick()
         await entered.wait()
-        self.git("switch", "-c", "another")
-        release.set()
-        await asyncio.gather(*list(self.tracker.tasks.values()))
-        feature = self.tracker.snapshot()[0]
-        self.assertIsNone(feature.pr)
+        tasks = list(self.tracker.tasks.values())
+        self.tracker.reconcile_targets(())
+        self.tracker.reconcile_targets((target,))
+        released.set()
+        await asyncio.gather(*tasks)
+        self.assertEqual(self.emitted, [])
+        self.tracker.run = self.command
         await self.refresh()
-        self.assertFalse(
-            next(
-                item for item in self.tracker.snapshot() if item.branch == "feature"
-            ).current
+        self.assertEqual(len(self.emitted), 1)
+
+    async def test_pause_discards_late_results_and_resume_refreshes(self) -> None:
+        target = RepositoryTarget("pull_request", self.pr["url"])
+        self.tracker.reconcile_targets((target,))
+        await self.refresh()
+        previous = self.tracker.snapshot()
+        entered = asyncio.Event()
+
+        async def delayed(*args: str, **kwargs: Unpack[CommandOptions]) -> str:
+            if not entered.is_set():
+                entered.set()
+                try:
+                    await asyncio.Future[Never]()
+                except asyncio.CancelledError:
+                    pass
+            return await self.command(*args, **kwargs)
+
+        self.tracker.run = delayed
+        self.now += 180
+        self.tracker.tick()
+        await entered.wait()
+        tasks = list(self.tracker.tasks.values())
+        self.tracker.pause()
+        await asyncio.gather(*tasks)
+        self.assertEqual(self.tracker.snapshot(), previous)
+        self.tracker.tick()
+        self.assertEqual(self.tracker.tasks, {})
+        self.tracker.run = self.command
+        self.pr["state"] = "MERGED"
+        self.tracker.resume()
+        await self.refresh()
+        exact = next(
+            item
+            for item in self.tracker.snapshot()
+            if isinstance(item, PullRequestObservation)
         )
+        assert exact.pr is not None
+        self.assertEqual(exact.pr.state, "MERGED")
+
+    async def test_clear_cancels_collection_and_discards_late_callbacks(self) -> None:
+        self.tracker.track_checkout(self.path)
+        entered = asyncio.Event()
+
+        async def delayed(*args: str, **kwargs: Unpack[CommandOptions]) -> str:
+            if not entered.is_set():
+                entered.set()
+                try:
+                    await asyncio.Future[Never]()
+                except asyncio.CancelledError:
+                    pass
+            return await self.command(*args, **kwargs)
+
+        self.tracker.run = delayed
+        self.tracker.tick()
+        await entered.wait()
+        tasks = list(self.tracker.tasks.values())
+        self.tracker.clear()
+        await asyncio.gather(*tasks)
+        self.assertEqual(self.emitted, [])
+        self.assertEqual(self.tracker.snapshot(), ())
+        self.assertEqual(self.tracker.paths, {})
+
+    async def test_local_refresh_error_retries_at_the_next_interval(self) -> None:
+        self.tracker.track_checkout(self.path)
+        await self.refresh()
+        original = self.checkout()
+        ordinary = self.command
+
+        async def unavailable(*args: str, **kwargs: Unpack[CommandOptions]) -> str:
+            if args[0] == "git":
+                raise RuntimeError("Git unavailable")
+            return await ordinary(*args, **kwargs)
+
+        self.tracker.run = unavailable
+        self.now += 30
+        await self.refresh()
+        self.assertIsNotNone(original.local)
+        self.assertIsNone(self.checkout().local)
+        self.assertIn("unavailable", self.checkout().error or "")
+        self.assertIn(str(self.path), self.tracker.paths)
+        self.tracker.run = self.command
+        self.now += 30
+        await self.refresh()
+        self.assertEqual(self.checkout().local, original.local)
+        self.assertIsNone(self.checkout().error)
 
     async def test_tracks_conflicts_and_locally_known_ahead_behind_counts(self) -> None:
         self.git("branch", "base")
@@ -225,508 +515,6 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         local = await git.observe(str(self.path))
         self.assertEqual(local.conflicts, 1)
         self.assertTrue(local.pending)
-
-    async def test_reused_branch_discovers_new_pull_request_and_preserves_merged_association(
-        self,
-    ) -> None:
-        self.pr["state"] = "MERGED"
-        self.pr["mergedAt"] = "2026-10-17T00:00:00Z"
-        self.tracker.associate("codex:one", str(self.path))
-        await self.refresh()
-        await self.refresh()
-        pr = self.tracker.snapshot()[0].pr
-        assert pr is not None
-        self.assertEqual(pr.state, "MERGED")
-        self.pr: GitHubPullRequest = {
-            **self.pr,
-            "number": 2,
-            "url": "https://example.test/team/repo/pull/2",
-            "state": "OPEN",
-            "mergedAt": None,
-        }
-        self.now += 180
-        await self.refresh()
-        current = next(item for item in self.tracker.snapshot() if item.current)
-        archived = next(item for item in self.tracker.snapshot() if not item.current)
-        assert current.pr is not None
-        self.assertEqual(current.pr.number, 2)
-        self.assertTrue(current.pending)
-        assert archived.pr is not None
-        self.assertEqual(archived.pr.number, 1)
-        self.assertEqual(archived.pr.state, "MERGED")
-        self.assertFalse(archived.pending)
-
-    async def test_reused_branch_binds_only_the_session_observed_at_the_new_head(
-        self,
-    ) -> None:
-        self.tracker.associate("codex:one", str(self.path))
-        await self.refresh()
-        await self.refresh()
-        self.assertEqual(self.tracker.snapshot()[0].pr_sessions, ("codex:one",))
-        (self.path / "tracked").write_text("second\n")
-        self.git("commit", "-am", "Second change")
-        self.pr = {
-            **self.pr,
-            "number": 2,
-            "url": "https://example.test/team/repo/pull/2",
-            "headRefOid": self.git("rev-parse", "HEAD").strip(),
-        }
-        self.tracker.associate("claude:two", str(self.path))
-        await self.refresh()
-        pending = next(item for item in self.tracker.snapshot() if item.current)
-        self.assertEqual(pending.pr_sessions, ("codex:one",))
-        self.assertIn("claude:two", pending.sessions)
-        await self.refresh()
-        current = next(item for item in self.tracker.snapshot() if item.current)
-        archived = next(item for item in self.tracker.snapshot() if not item.current)
-        self.assertEqual(current.sessions, ("claude:two",))
-        self.assertEqual(current.pr_sessions, ("claude:two",))
-        self.assertEqual(archived.pr_sessions, ("codex:one",))
-        assert archived.pr is not None
-        self.assertEqual(archived.pr.url, "https://example.test/team/repo/pull/1")
-
-    async def test_restored_path_sessions_do_not_claim_a_replacement_pull_request(
-        self,
-    ) -> None:
-        self.tracker.associate("codex:one", str(self.path))
-        await self.refresh()
-        await self.refresh()
-        await self.tracker.close()
-        self.restore_tracker()
-        (self.path / "tracked").write_text("second\n")
-        self.git("commit", "-am", "Second change")
-        self.pr = {
-            **self.pr,
-            "number": 2,
-            "url": "https://example.test/team/repo/pull/2",
-            "headRefOid": self.git("rev-parse", "HEAD").strip(),
-        }
-        self.now += 180
-        await self.refresh()
-        await self.refresh()
-        current = next(item for item in self.tracker.snapshot() if item.current)
-        archived = next(item for item in self.tracker.snapshot() if not item.current)
-        self.assertEqual(current.sessions, ())
-        self.assertEqual(current.pr_sessions, ())
-        self.assertEqual(archived.pr_sessions, ("codex:one",))
-
-    async def test_same_pull_request_keeps_its_session_when_the_head_advances(
-        self,
-    ) -> None:
-        self.tracker.associate("codex:one", str(self.path))
-        await self.refresh()
-        await self.refresh()
-        (self.path / "tracked").write_text("second\n")
-        self.git("commit", "-am", "Second change")
-        self.pr["headRefOid"] = self.git("rev-parse", "HEAD").strip()
-        self.now += 180
-        await self.refresh()
-        await self.refresh()
-        self.assertEqual(len(self.tracker.snapshot()), 1)
-        self.assertEqual(self.tracker.snapshot()[0].pr_sessions, ("codex:one",))
-
-    async def test_same_head_replacement_does_not_reuse_session_claims(self) -> None:
-        self.tracker.associate("codex:one", str(self.path))
-        await self.refresh()
-        await self.refresh()
-        self.tracker.associate("claude:two", str(self.path))
-        self.pr = {
-            **self.pr,
-            "number": 2,
-            "url": "https://example.test/team/repo/pull/2",
-        }
-        await self.refresh()
-        await self.refresh()
-        current = next(item for item in self.tracker.snapshot() if item.current)
-        self.assertEqual(current.pr_sessions, ())
-        self.assertEqual(current.sessions, ("claude:two",))
-        self.now += 180
-        await self.refresh()
-        self.assertEqual(
-            next(item for item in self.tracker.snapshot() if item.current).pr_sessions,
-            (),
-        )
-
-    async def test_cached_mismatched_pull_request_cannot_confirm_a_session_claim(
-        self,
-    ) -> None:
-        self.tracker.associate("codex:one", str(self.path))
-        await self.refresh()
-        await self.refresh()
-        (self.path / "tracked").write_text("second\n")
-        self.git("commit", "-am", "Second change")
-        self.tracker.associate("claude:two", str(self.path))
-        await self.refresh()
-        await self.refresh()
-        current = self.tracker.snapshot()[0]
-        self.assertEqual(current.pr_sessions, ("codex:one",))
-        self.assertIn("claude:two", current.sessions)
-        self.github_unavailable = True
-        self.now += 180
-        await self.refresh()
-        self.assertEqual(self.tracker.snapshot()[0].pr_sessions, ("codex:one",))
-
-    async def test_absent_branch_pull_request_does_not_confirm_cached_session_claims(
-        self,
-    ) -> None:
-        self.tracker.associate("codex:one", str(self.path))
-        await self.refresh()
-        await self.refresh()
-
-        async def absent(*args: str, **kwargs: Unpack[CommandOptions]) -> str:
-            if args[:3] == ("gh", "pr", "list"):
-                return "[]"
-            return await self.command(*args, **kwargs)
-
-        self.tracker.run = absent
-        self.tracker.associate("claude:two", str(self.path))
-        await self.refresh()
-        await self.refresh()
-        current = self.tracker.snapshot()[0]
-        self.assertEqual(current.pr_sessions, ("codex:one",))
-        assert current.pr is not None
-        self.assertEqual(current.pr.url, self.pr["url"])
-
-    async def test_local_branch_change_during_observation_preserves_previous_evidence(
-        self,
-    ) -> None:
-        self.tracker.associate("codex:one", str(self.path))
-        await self.refresh()
-        await self.refresh()
-        original = self.tracker.snapshot()[0]
-        changed = False
-
-        async def switching(*args: str, **kwargs: Unpack[CommandOptions]) -> str:
-            nonlocal changed
-            output = await self.command(*args, **kwargs)
-            if args[0:2] == ("git", "status") and not changed:
-                self.git("switch", "-c", "another")
-                changed = True
-            return output
-
-        self.tracker.run = switching
-        self.now += 30
-        await self.refresh()
-        item = self.tracker.snapshot()[0]
-        self.assertEqual(item.local, original.local)
-        self.assertEqual(item.changed_at, original.changed_at)
-        assert item.local_error is not None
-        self.assertIn("changed during", item.local_error)
-
-    async def test_clear_discards_observations_during_refresh(self) -> None:
-        self.tracker.associate("codex:one", str(self.path))
-        entered, release = asyncio.Event(), asyncio.Event()
-
-        async def delayed(*args: str, **kwargs: Unpack[CommandOptions]) -> str:
-            entered.set()
-            await release.wait()
-            return await self.command(*args, **kwargs)
-
-        self.tracker.run = delayed
-        self.tracker.tick()
-        await entered.wait()
-        tasks = list(self.tracker.tasks.values())
-        self.tracker.clear()
-        release.set()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        self.assertEqual(self.tracker.snapshot(), ())
-        self.assertEqual(self.tracker.associations, {})
-
-    async def test_removed_worktree_stops_local_polling_after_restore(self) -> None:
-        self.tracker.associate("codex:one", str(self.path))
-        await self.refresh()
-        await self.refresh()
-        pr = self.tracker.snapshot()[0].pr
-        assert pr is not None
-        self.assertEqual(pr.state, "OPEN")
-        self.tracker.track_artifact(RepositoryTarget("pull_request", self.pr["url"]))
-        await self.tracker.close()
-        shutil.rmtree(self.path)
-        self.restore_tracker()
-        await self.refresh()
-        retained = self.tracker.snapshot()[0]
-        self.assertFalse(retained.current)
-        assert retained.pr is not None
-        self.assertEqual(retained.pr.number, 1)
-        self.assertEqual(self.tracker.associations, {})
-        self.assertEqual(
-            sum(bool(item.worktree) for item in self.tracker.snapshot()), 1
-        )
-        await self.tracker.close()
-        self.restore_tracker()
-        self.now += 360
-        self.pr["state"] = "MERGED"
-        await self.refresh()
-        pr = next(
-            item for item in self.tracker.snapshot() if item.subject.startswith("pr:")
-        ).pr
-        assert pr is not None
-        self.assertEqual(pr.state, "MERGED")
-        self.assertEqual(self.tracker.paths, {})
-
-    async def test_git_failure_retains_an_existing_worktree_for_retry(self) -> None:
-        self.tracker.associate("codex:one", str(self.path))
-        await self.refresh()
-        original = self.tracker.snapshot()[0]
-
-        async def unavailable(*args: str, **kwargs: Unpack[CommandOptions]) -> Never:
-            raise OSError("Temporary process failure")
-
-        self.tracker.run = unavailable
-        self.now += 30
-        await self.refresh()
-        self.assertEqual(self.tracker.snapshot()[0].local, original.local)
-        local_error = self.tracker.snapshot()[0].local_error
-        assert local_error is not None
-        self.assertIn("Temporary", local_error)
-        self.assertEqual(len(self.tracker.associations), 1)
-        self.tracker.run = self.command
-        self.now += 30
-        await self.refresh()
-        self.assertIsNone(self.tracker.snapshot()[0].local_error)
-
-    async def test_pruned_worktree_retains_pull_requests_and_stops_local_polling(
-        self,
-    ) -> None:
-        worktree = self.path.parent / "worktree"
-        self.git("worktree", "add", "-b", "temporary", str(worktree))
-        self.pr["headRefName"] = "temporary"
-        self.tracker.associate("codex:one", str(worktree))
-        await self.refresh()
-        await self.refresh()
-        await asyncio.to_thread(
-            subprocess.run,
-            ["git", "switch", "-c", "another"],
-            cwd=worktree,
-            check=True,
-            capture_output=True,
-        )
-        self.now += 30
-        await self.refresh()
-        self.assertEqual(len(self.tracker.snapshot()), 2)
-        self.tracker.track_artifact(RepositoryTarget("pull_request", self.pr["url"]))
-        shutil.rmtree(worktree)
-        self.git("worktree", "prune")
-        self.now += 180
-        await self.refresh()
-        self.assertEqual(len(self.tracker.snapshot()), 3)
-        self.assertTrue(all(not item.current for item in self.tracker.snapshot()))
-        pr = next(item for item in self.tracker.snapshot() if item.pr).pr
-        assert pr is not None
-        self.assertEqual(pr.number, 1)
-        self.assertEqual(len(self.tracker.snapshot()), 3)
-        self.assertEqual(self.tracker.associations, {})
-        self.assertEqual(self.tracker.paths, {})
-        self.pr["state"] = "MERGED"
-        self.now += 180
-        await self.refresh()
-        pr = next(
-            item for item in self.tracker.snapshot() if item.subject.startswith("pr:")
-        ).pr
-        assert pr is not None
-        self.assertEqual(pr.state, "MERGED")
-
-    async def test_explicit_pull_request_polls_without_checkout(self) -> None:
-        calls = []
-
-        async def recording(*args: str, **kwargs: Unpack[CommandOptions]) -> str:
-            calls.append((args, kwargs))
-            return await self.command(*args, **kwargs)
-
-        self.tracker.run = recording
-        self.tracker.track_artifact(RepositoryTarget("pull_request", self.pr["url"]))
-        await self.refresh()
-        item = self.tracker.snapshot()[0]
-        assert item.pr is not None
-        self.assertEqual(item.pr.number, 1)
-        self.assertEqual(item.repository, "example.test/team/repo")
-        self.assertFalse(item.current)
-        self.assertEqual(self.tracker.paths, {})
-        self.assertEqual(calls[0][0][0:4], ("gh", "pr", "view", self.pr["url"]))
-        self.assertIsNone(calls[0][1]["cwd"])
-
-    async def test_explicit_branch_discovers_pull_request_without_checkout(
-        self,
-    ) -> None:
-        self.tracker.track_artifact(
-            RepositoryTarget("branch", "feature", "https://example.test/team/repo.git")
-        )
-        await self.refresh()
-        item = self.tracker.snapshot()[0]
-        assert item.pr is not None
-        self.assertEqual(item.pr.head_repository, "example.test/team/repo")
-        self.assertEqual(item.pr.head_branch, "feature")
-        self.assertEqual(item.pr.head, self.git("rev-parse", "HEAD").strip())
-
-    async def test_explicit_pull_request_target_survives_restore_without_checkout(
-        self,
-    ) -> None:
-        self.tracker.track_artifact(RepositoryTarget("pull_request", self.pr["url"]))
-        await self.refresh()
-        await self.tracker.close()
-        self.restore_tracker()
-        self.now += 180
-        self.pr["state"] = "MERGED"
-        await self.refresh()
-        pr = self.tracker.snapshot()[0].pr
-        assert pr is not None
-        self.assertEqual(pr.state, "MERGED")
-        self.assertEqual(self.tracker.paths, {})
-
-    async def test_new_session_receives_checkout_and_pull_request_after_fresh_poll(
-        self,
-    ) -> None:
-        self.tracker.associate("codex:one", str(self.path))
-        await self.refresh()
-        await self.refresh()
-        original = next(item for item in self.tracker.snapshot() if item.current)
-        self.tracker.associate("claude:two", str(self.path))
-        self.assertNotIn("claude:two", self.tracker.snapshot()[0].sessions)
-        await self.refresh()
-        updated = next(item for item in self.tracker.snapshot() if item.current)
-        self.assertEqual(updated.sessions, ("claude:two", "codex:one"))
-        self.assertEqual(
-            (updated.revision, updated.changed_at),
-            (original.revision, original.changed_at),
-        )
-        assert updated.pr is not None
-        self.assertEqual(updated.pr.url, self.pr["url"])
-        self.assertEqual(self.emitted[-1], updated)
-        self.assertNotIn("claude:two", updated.pr_sessions)
-        await self.refresh()
-        confirmed = next(item for item in self.tracker.snapshot() if item.current)
-        self.assertEqual(confirmed.pr_sessions, ("claude:two", "codex:one"))
-
-    async def test_new_session_in_known_subdirectory_receives_root_after_fresh_poll(
-        self,
-    ) -> None:
-        nested = self.path / "nested"
-        nested.mkdir()
-        self.tracker.associate("codex:one", str(nested))
-        await self.refresh()
-        await self.refresh()
-        self.tracker.associate("claude:two", str(nested))
-        await self.refresh()
-        current = next(item for item in self.tracker.snapshot() if item.current)
-        self.assertIn("claude:two", current.sessions)
-        self.assertEqual(current.worktree, str(self.path.resolve()))
-
-    async def test_new_session_after_branch_switch_never_inherits_cached_branch_or_pull_request(
-        self,
-    ) -> None:
-        self.tracker.associate("codex:one", str(self.path))
-        await self.refresh()
-        await self.refresh()
-        previous_url = self.pr["url"]
-        self.related_prs[previous_url] = dict(self.pr)
-        self.git("switch", "-c", "another")
-        self.pr: GitHubPullRequest = {
-            **self.pr,
-            "number": 2,
-            "url": "https://example.test/team/repo/pull/2",
-            "headRefName": "another",
-        }
-        self.tracker.associate("claude:two", str(self.path))
-        await self.refresh()
-        await self.refresh()
-        current = next(item for item in self.tracker.snapshot() if item.current)
-        assert current.pr is not None
-        self.assertEqual((current.branch, current.pr.url), ("another", self.pr["url"]))
-        self.assertIn("claude:two", current.sessions)
-        previous = next(
-            item for item in self.tracker.snapshot() if item.branch == "feature"
-        )
-        self.assertNotIn("claude:two", previous.sessions)
-        self.assertFalse(previous.current)
-        assert previous.pr is not None
-        self.assertEqual(previous.pr.url, previous_url)
-
-    async def test_known_session_progress_claims_the_branch_at_the_next_normal_poll(
-        self,
-    ) -> None:
-        self.tracker.associate("codex:one", str(self.path))
-        self.tracker.associate("claude:two", str(self.path))
-        await self.refresh()
-        await self.refresh()
-        self.git("switch", "-c", "another")
-        self.pr = {
-            **self.pr,
-            "number": 2,
-            "url": "https://example.test/team/repo/pull/2",
-            "headRefName": "another",
-        }
-        self.now += 1
-        self.tracker.associate("codex:one", str(self.path))
-        await self.refresh()
-        self.assertEqual(self.tracker.snapshot()[0].branch, "feature")
-        self.now += 29
-        await self.refresh()
-        current = next(item for item in self.tracker.snapshot() if item.current)
-        self.assertEqual(current.branch, "another")
-        self.assertEqual(current.sessions, ("codex:one",))
-        await self.refresh()
-        current = next(item for item in self.tracker.snapshot() if item.current)
-        self.assertEqual(current.pr_sessions, ("codex:one",))
-        previous = next(item for item in self.tracker.snapshot() if not item.current)
-        self.assertEqual(previous.pr_sessions, ("claude:two", "codex:one"))
-
-    async def test_known_session_progress_claims_a_reused_branch_without_historical_sessions(
-        self,
-    ) -> None:
-        self.tracker.associate("codex:one", str(self.path))
-        self.tracker.associate("claude:two", str(self.path))
-        await self.refresh()
-        await self.refresh()
-        (self.path / "tracked").write_text("second\n")
-        self.git("commit", "-am", "Second change")
-        self.pr = {
-            **self.pr,
-            "number": 2,
-            "url": "https://example.test/team/repo/pull/2",
-            "headRefOid": self.git("rev-parse", "HEAD").strip(),
-        }
-        self.tracker.associate("codex:one", str(self.path))
-        self.now += 30
-        await self.refresh()
-        await self.refresh()
-        current = next(item for item in self.tracker.snapshot() if item.current)
-        self.assertEqual(current.sessions, ("codex:one",))
-        self.assertEqual(current.pr_sessions, ("codex:one",))
-        previous = next(item for item in self.tracker.snapshot() if not item.current)
-        self.assertEqual(previous.pr_sessions, ("claude:two", "codex:one"))
-
-    async def test_repeated_session_events_preserve_poll_interval_and_new_session_refreshes(
-        self,
-    ) -> None:
-        self.tracker.associate("codex:one", str(self.path))
-        await self.refresh()
-        await self.refresh()
-        polls = []
-
-        async def counted(*args: str, **kwargs: Unpack[CommandOptions]) -> str:
-            if args[:2] == ("git", "status"):
-                polls.append(args)
-            return await self.command(*args, **kwargs)
-
-        self.tracker.run = counted
-        for _ in range(3):
-            self.now += 1
-            self.tracker.associate("codex:one", str(self.path))
-            await self.refresh()
-        self.assertEqual(polls, [])
-        attempted = self.tracker.snapshot()[0].github_attempted_at
-        self.now += 27
-        await self.refresh()
-        current = self.tracker.snapshot()[0]
-        self.assertEqual(current.github_attempted_at, attempted)
-        self.assertEqual(current.session_heads, ())
-        self.tracker.associate("claude:two", str(self.path))
-        await self.refresh()
-        self.assertEqual(len(polls), 2)
-        self.assertIn(
-            "claude:two",
-            next(item for item in self.tracker.snapshot() if item.current).sessions,
-        )
 
     async def test_exact_head_repository_filters_forks_and_ambiguous_open_requests(
         self,
@@ -757,28 +545,6 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
                 None, "feature", run=self.command, repository="example.test/team/repo"
             )
 
-    async def test_ambiguous_branch_refresh_preserves_known_pull_request_with_uncertainty(
-        self,
-    ) -> None:
-        self.tracker.associate("codex:one", str(self.path))
-        await self.refresh()
-        await self.refresh()
-        original = self.tracker.snapshot()[0]
-
-        async def ambiguous(*args: str, **kwargs: Unpack[CommandOptions]) -> str:
-            if args[0:3] == ("gh", "pr", "list"):
-                return json.dumps([self.pr, {**self.pr, "number": 2}])
-            return await self.command(*args, **kwargs)
-
-        self.tracker.run = ambiguous
-        self.now += 180
-        await self.refresh()
-        retained = self.tracker.snapshot()[0]
-        self.assertEqual(retained.pr, original.pr)
-        self.assertEqual(retained.github_checked_at, original.github_checked_at)
-        assert retained.github_error is not None
-        self.assertIn("Multiple open", retained.github_error)
-
     async def test_fork_discovers_upstream_pull_request_using_its_head_identity(
         self,
     ) -> None:
@@ -787,7 +553,7 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
 
         async def forked(*args: str, **kwargs: Unpack[CommandOptions]) -> str:
             calls.append(args)
-            if args[0:3] == ("gh", "repo", "view"):
+            if args[0:3] == ("gh", "repo", "story"):
                 return json.dumps(
                     {
                         "isFork": True,
@@ -900,116 +666,6 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         assert observed is not None
         self.assertEqual(observed.related_links, ())
 
-    async def test_explicit_stack_peer_target_skips_further_stack_metadata(
-        self,
-    ) -> None:
-        stack = self.stack()
-        stack["pull_requests"] = stack["pull_requests"][:2]
-        self.stacks = [stack]
-        peer_url = "https://example.test/team/repo/pull/2"
-        self.related_prs[peer_url] = {
-            **self.pr,
-            "number": 2,
-            "url": peer_url,
-            "state": "MERGED",
-            "mergedAt": "2026-10-17T00:00:00Z",
-            "headRefName": "base-layer",
-            "headRefOid": "base-layer-head",
-            "title": "Add parser foundation",
-        }
-        calls = []
-
-        async def recording(*args: str, **kwargs: Unpack[CommandOptions]) -> str:
-            calls.append(args)
-            return await self.command(*args, **kwargs)
-
-        self.tracker.run = recording
-        self.tracker.associate("codex:one", str(self.path))
-        await self.refresh()
-        await self.refresh()
-        await self.refresh()
-        root = next(item for item in self.tracker.snapshot() if item.current)
-        self.assertEqual(len(self.tracker.snapshot()), 1)
-        assert root.pr is not None
-        self.assertEqual(root.pr.related_links[0].ref, peer_url)
-        self.tracker.track_artifact(
-            RepositoryTarget("pull_request", peer_url, include_links=False)
-        )
-        await self.refresh()
-        peer = next(
-            item
-            for item in self.tracker.snapshot()
-            if item.pr and item.pr.url == peer_url
-        )
-        root = next(item for item in self.tracker.snapshot() if item.current)
-        assert root.pr is not None
-        assert peer.pr is not None
-        self.assertEqual((root.pr.state, peer.pr.state), ("OPEN", "MERGED"))
-        self.assertEqual(peer.pr.title, "Add parser foundation")
-        self.assertFalse(
-            any(
-                args[1] == "api" and args[2].endswith("pull_request=2")
-                for args in calls
-            )
-        )
-        self.assertTrue(any(args[1:4] == ("pr", "view", peer_url) for args in calls))
-        await self.tracker.close()
-        shutil.rmtree(self.path)
-        self.restore_tracker(run=recording)
-        self.now += 180
-        await self.refresh()
-        self.assertEqual(self.tracker.paths, {})
-        peer = next(
-            item
-            for item in self.tracker.snapshot()
-            if item.pr and item.pr.url == peer_url
-        )
-        assert peer.pr is not None
-        self.assertEqual(peer.pr.title, "Add parser foundation")
-
-    async def test_stack_lookup_failure_retains_known_links_without_advancing_change_recency(
-        self,
-    ) -> None:
-        self.stacks = [self.stack()]
-        self.tracker.associate("codex:one", str(self.path))
-        await self.refresh()
-        await self.refresh()
-        original = next(item for item in self.tracker.snapshot() if item.current)
-
-        async def unavailable(*args: str, **kwargs: Unpack[CommandOptions]) -> str:
-            if args[0:2] == ("gh", "api") and "/stacks?pull_request=" in args[2]:
-                raise RuntimeError("Stack lookup unavailable")
-            return await self.command(*args, **kwargs)
-
-        self.tracker.run = unavailable
-        self.now += 180
-        await self.refresh()
-        retained = next(item for item in self.tracker.snapshot() if item.current)
-        assert retained.pr is not None
-        assert original.pr is not None
-        self.assertEqual(retained.pr.related_links, original.pr.related_links)
-        self.assertEqual(
-            (retained.revision, retained.changed_at),
-            (original.revision, original.changed_at),
-        )
-        assert retained.pr.related_links_error is not None
-        self.assertIn("unavailable", retained.pr.related_links_error)
-        self.assertGreater(retained.github_checked_at, original.github_checked_at)
-
-    async def test_repository_without_hosted_identity_has_unknown_github_status(
-        self,
-    ) -> None:
-        self.git("remote", "remove", "origin")
-        self.tracker.associate("codex:one", str(self.path))
-        await self.refresh()
-        await self.refresh()
-        item = self.tracker.snapshot()[0]
-        self.assertTrue(item.repository.startswith("local:"))
-        self.assertIsNone(item.pr)
-        self.assertEqual(item.github_checked_at, 0)
-        assert item.github_error is not None
-        self.assertIn("identity is unavailable", item.github_error)
-
     async def test_remote_aliases_and_linked_worktrees_share_repository_identity(
         self,
     ) -> None:
@@ -1030,42 +686,6 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             original.repository, "local:" + str((self.path / ".git").resolve())
         )
-
-    async def test_checkpoints_do_not_infer_repository_from_sessions(self) -> None:
-        legacy = RepositoryObservation(
-            "legacy", str(self.path), "feature", sessions=("codex:one",)
-        )
-        checkpoint = repository_observation_from_mapping(legacy.packet())
-        await self.tracker.close()
-        self.tracker = RepositoryTracker(
-            self.emitted.append,
-            lambda: self.now,
-            run=self.command,
-            checkpoints=(checkpoint,),
-        )
-        self.assertEqual(self.tracker.snapshot()[0].repository, "")
-        self.assertEqual(self.tracker.paths, {})
-
-    async def test_removed_subdirectory_keeps_its_existing_repository(self) -> None:
-        nested = self.path / "nested"
-        nested.mkdir()
-        self.tracker.associate("codex:one", str(nested))
-        await self.refresh()
-        nested.rmdir()
-        self.now += 30
-        await self.refresh()
-        self.assertEqual(self.tracker.snapshot()[0].worktree, str(self.path.resolve()))
-        self.assertEqual(
-            self.tracker.associations, {str(self.path.resolve()): {"codex:one"}}
-        )
-        (self.path / "tracked").write_text(
-            "changed after the subdirectory disappeared\n"
-        )
-        self.now += 30
-        await self.refresh()
-        local = self.tracker.snapshot()[0].local
-        assert local is not None
-        self.assertEqual(local.unstaged, 1)
 
     async def test_cancelled_subprocess_startup_terminates_the_spawned_process(
         self,
@@ -1127,105 +747,6 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
             result = await asyncio.gather(task, return_exceptions=True)
         self.assertIsInstance(result[0], asyncio.CancelledError)
         self.assertIsNotNone(processes[0].returncode)
-
-    async def test_pause_cancels_collection_and_resume_refreshes_preserved_facts(
-        self,
-    ) -> None:
-        self.tracker.associate("codex:one", str(self.path))
-        await self.refresh()
-        await self.refresh()
-        previous = self.tracker.snapshot()[0]
-        entered, cancelled = asyncio.Event(), asyncio.Event()
-
-        async def delayed(*args: str, **kwargs: Unpack[CommandOptions]) -> Never:
-            entered.set()
-            try:
-                await asyncio.Future[Never]()
-            except asyncio.CancelledError:
-                cancelled.set()
-                raise
-
-        self.tracker.run = delayed
-        self.now += 180
-        self.tracker.tick()
-        await entered.wait()
-        tasks = list(self.tracker.tasks.values())
-        self.tracker.pause()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        await cancelled.wait()
-        self.assertEqual(self.tracker.snapshot(), (previous,))
-        self.assertIsNone(self.tracker.snapshot()[0].github_error)
-        self.tracker.tick()
-        self.assertEqual(self.tracker.tasks, {})
-        self.tracker.run = self.command
-        self.pr["state"] = "MERGED"
-        self.tracker.resume()
-        await self.refresh()
-        pr = self.tracker.snapshot()[0].pr
-        assert pr is not None
-        self.assertEqual(pr.state, "MERGED")
-
-    async def test_pause_discards_late_results_after_runner_suppresses_cancellation(
-        self,
-    ) -> None:
-        self.tracker.associate("codex:one", str(self.path))
-        await self.refresh()
-        previous = self.tracker.snapshot()[0]
-        entered = asyncio.Event()
-
-        async def delayed(*args: str, **kwargs: Unpack[CommandOptions]) -> str:
-            if args[0] == "gh" and not entered.is_set():
-                entered.set()
-                try:
-                    await asyncio.Future()
-                except asyncio.CancelledError:
-                    pass
-            return await self.command(*args, **kwargs)
-
-        self.tracker.run = delayed
-        self.tracker.tick()
-        await entered.wait()
-        tasks = list(self.tracker.tasks.values())
-        self.tracker.pause()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        self.assertEqual(self.tracker.snapshot(), (previous,))
-        self.assertEqual(self.emitted, [previous])
-
-    async def test_retiring_checkout_target_stops_local_collection(self) -> None:
-        target = RepositoryTarget(
-            "branch", "feature", "example.test/team/repo", str(self.path)
-        )
-        self.tracker.reconcile_targets((target,))
-        await self.refresh()
-        self.assertTrue(any(item.current for item in self.tracker.snapshot()))
-        self.tracker.reconcile_targets(())
-        self.assertEqual(self.tracker.paths, {})
-        self.assertFalse(any(item.current for item in self.tracker.snapshot()))
-        self.now += 180
-        await self.refresh()
-        self.assertEqual(self.tracker.tasks, {})
-
-    async def test_retiring_checkout_target_keeps_session_collection(self) -> None:
-        self.tracker.associate("codex:one", str(self.path))
-        target = RepositoryTarget(
-            "branch", "feature", "example.test/team/repo", str(self.path)
-        )
-        self.tracker.reconcile_targets((target,))
-        await self.refresh()
-        self.tracker.reconcile_targets(())
-        self.assertIn(str(self.path.resolve()), self.tracker.paths)
-        self.assertTrue(any(item.current for item in self.tracker.snapshot()))
-
-    async def test_reconciling_targets_stops_retired_pull_request_polling(self) -> None:
-        target = RepositoryTarget("pull_request", self.pr["url"])
-        self.tracker.reconcile_targets((target,))
-        await self.refresh()
-        previous = self.tracker.snapshot()[0]
-        self.tracker.reconcile_targets(())
-        self.now += 180
-        self.pr["state"] = "MERGED"
-        await self.refresh()
-        self.assertEqual(self.tracker.snapshot(), (previous,))
 
 
 class HookObservationTests(unittest.TestCase):

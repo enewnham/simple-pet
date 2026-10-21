@@ -2,7 +2,7 @@ import sqlite3
 
 from .transactions import transaction
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 14
 
 
 MEMORY_SCHEMA = """
@@ -10,7 +10,7 @@ MEMORY_SCHEMA = """
             CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY, pet TEXT NOT NULL, session TEXT NOT NULL,
                 repo TEXT NOT NULL, event_type TEXT NOT NULL, summary TEXT NOT NULL,
-                goal TEXT NOT NULL, timestamp REAL NOT NULL
+                goal TEXT NOT NULL, timestamp REAL NOT NULL, data TEXT
             );
             CREATE INDEX IF NOT EXISTS events_scope ON events(pet, repo, id);
             CREATE INDEX IF NOT EXISTS events_age ON events(timestamp);
@@ -36,41 +36,31 @@ MEMORY_SCHEMA = """
                 request_count INTEGER NOT NULL DEFAULT 0, first_summary_attempted INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(pet, session)
             );
-            CREATE TABLE IF NOT EXISTS repository_associations (
-                pet TEXT NOT NULL, session TEXT NOT NULL, worktree TEXT NOT NULL,
-                PRIMARY KEY(pet, session, worktree)
-            );
-            CREATE TABLE IF NOT EXISTS repositories (
-                pet TEXT NOT NULL, worktree TEXT NOT NULL, observation TEXT NOT NULL,
-                PRIMARY KEY(pet, worktree)
-            );
+
 """
 
 WORK_SCHEMA = """
-            CREATE TABLE IF NOT EXISTS work_items (
-                pet TEXT NOT NULL, id TEXT NOT NULL, intent TEXT NOT NULL, status TEXT NOT NULL,
-                changed_at REAL NOT NULL, PRIMARY KEY(pet,id));
-            CREATE TABLE IF NOT EXISTS work_sessions (
-                pet TEXT NOT NULL, session TEXT NOT NULL, work_id TEXT NOT NULL,
-                PRIMARY KEY(pet,session));
-            CREATE TABLE IF NOT EXISTS work_memberships (
-                pet TEXT NOT NULL, work_id TEXT NOT NULL, session TEXT NOT NULL,
-                PRIMARY KEY(pet,work_id,session));
-            CREATE TABLE IF NOT EXISTS work_aliases (
-                pet TEXT NOT NULL, alias TEXT NOT NULL, session TEXT NOT NULL,
-                PRIMARY KEY(pet,alias));
-            CREATE TABLE IF NOT EXISTS work_artifacts (
-                pet TEXT NOT NULL, id TEXT NOT NULL, kind TEXT NOT NULL, ref TEXT NOT NULL,
-                repository TEXT NOT NULL, data TEXT NOT NULL, version INTEGER NOT NULL,
-                PRIMARY KEY(pet,id));
-            CREATE TABLE IF NOT EXISTS work_links (
-                pet TEXT NOT NULL, work_id TEXT NOT NULL, artifact_id TEXT NOT NULL,
-                PRIMARY KEY(pet,work_id,artifact_id));
-            CREATE TABLE IF NOT EXISTS work_evidence (
-                id INTEGER PRIMARY KEY, pet TEXT NOT NULL, work_id TEXT NOT NULL,
-                artifact_id TEXT NOT NULL, source TEXT NOT NULL, kind TEXT NOT NULL,
-                data TEXT NOT NULL, timestamp REAL NOT NULL);
-            CREATE INDEX IF NOT EXISTS work_evidence_scope ON work_evidence(pet,work_id,artifact_id,source,kind,id);
+    CREATE TABLE IF NOT EXISTS work_sessions (
+        pet TEXT NOT NULL, session TEXT NOT NULL, parent TEXT,
+        location TEXT NOT NULL DEFAULT '', location_at REAL NOT NULL DEFAULT 0,
+        PRIMARY KEY(pet,session));
+    CREATE TABLE IF NOT EXISTS work_reports (
+        id INTEGER PRIMARY KEY, pet TEXT NOT NULL, session TEXT NOT NULL,
+        kind TEXT NOT NULL, data TEXT NOT NULL,
+        observed_at REAL NOT NULL);
+    CREATE INDEX IF NOT EXISTS reports_session ON work_reports(pet,session,id);
+    CREATE TABLE IF NOT EXISTS work_aliases (
+        pet TEXT NOT NULL, alias TEXT NOT NULL, session TEXT NOT NULL,
+        PRIMARY KEY(pet,alias));
+    CREATE TABLE IF NOT EXISTS work_checkouts (
+        pet TEXT NOT NULL, worktree TEXT NOT NULL, data TEXT NOT NULL,
+        PRIMARY KEY(pet,worktree));
+    CREATE TABLE IF NOT EXISTS work_branches (
+        pet TEXT NOT NULL, repository TEXT NOT NULL, branch TEXT NOT NULL, data TEXT NOT NULL,
+        PRIMARY KEY(pet,repository,branch));
+    CREATE TABLE IF NOT EXISTS work_pull_requests (
+        pet TEXT NOT NULL, ref TEXT NOT NULL, data TEXT NOT NULL,
+        PRIMARY KEY(pet,ref));
 """
 
 DELIVERY_SCHEMA = """
@@ -104,11 +94,16 @@ DROP_SCHEMA = """
     DROP TABLE IF EXISTS repositories;
     DROP TABLE IF EXISTS work_items;
     DROP TABLE IF EXISTS work_sessions;
+    DROP TABLE IF EXISTS work_reports;
     DROP TABLE IF EXISTS work_memberships;
     DROP TABLE IF EXISTS work_aliases;
     DROP TABLE IF EXISTS work_artifacts;
     DROP TABLE IF EXISTS work_links;
     DROP TABLE IF EXISTS work_evidence;
+    DROP TABLE IF EXISTS work_attempts;
+    DROP TABLE IF EXISTS work_checkouts;
+    DROP TABLE IF EXISTS work_branches;
+    DROP TABLE IF EXISTS work_pull_requests;
     DROP TABLE IF EXISTS work_opportunities;
     DROP TABLE IF EXISTS work_surfacings;
     DROP TABLE IF EXISTS attention_history;
@@ -120,15 +115,13 @@ DROP_SCHEMA = """
 
 def migrate(db: sqlite3.Connection) -> None:
     version = db.execute("PRAGMA user_version").fetchone()[0]
+    if version > SCHEMA_VERSION:
+        raise ValueError(f"Unsupported memory schema version {version}")
     if version == SCHEMA_VERSION:
         return
     with transaction(db):
-        if version in {7, 8}:
-            db.execute("ALTER TABLE message_outcomes ADD COLUMN subject_id TEXT")
-            db.execute("ALTER TABLE message_outcomes ADD COLUMN revision TEXT")
-        else:
-            execute_schema(db, DROP_SCHEMA)
-            execute_schema(db, MEMORY_SCHEMA)
-            execute_schema(db, WORK_SCHEMA)
-            execute_schema(db, DELIVERY_SCHEMA)
+        execute_schema(db, DROP_SCHEMA)
+        execute_schema(db, MEMORY_SCHEMA)
+        execute_schema(db, WORK_SCHEMA)
+        execute_schema(db, DELIVERY_SCHEMA)
         db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

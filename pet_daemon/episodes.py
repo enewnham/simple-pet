@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 
 from .runtime import HookEvent
-from .sessions import Lane, SessionResult, Sessions
+from .sessions import AgentSession, Sessions, SessionUpdate
 
 
 @dataclass(frozen=True)
@@ -15,7 +15,7 @@ class Episode:
 
 @dataclass
 class EpisodeState:
-    lane: Lane
+    session: AgentSession
     generation: int
     started: bool = False
     waiting: bool = False
@@ -34,25 +34,32 @@ class Episodes:
         self.serial = 0
 
     def handle(
-        self, packet: HookEvent, result: SessionResult, sessions: Sessions
+        self, packet: HookEvent, result: SessionUpdate, sessions: Sessions
     ) -> list[Episode]:
         reconciled: dict[tuple[str, int], EpisodeState] = {}
         for (key, generation), state in self.states.items():
-            if state.lane.generation != state.generation:
+            if state.session.generation != state.generation:
                 continue
             canonical = sessions.aliases.get(key, key)
-            lane = sessions.lanes.get(canonical)
-            if lane is None or (canonical == key and generation != lane.generation):
+            session = sessions.by_id.get(canonical)
+            if session is None or (
+                canonical == key and generation != session.generation
+            ):
                 continue
-            state.lane = lane
-            state.generation = lane.generation
-            identity = (canonical, lane.generation if canonical != key else generation)
+            state.session = session
+            state.generation = session.generation
+            identity = (
+                canonical,
+                session.generation if canonical != key else generation,
+            )
             previous = reconciled.get(identity)
             if previous:
                 previous.started |= state.started
                 previous.waiting |= state.waiting
                 waiting_identity = (
-                    (lane.waiting_call, lane.waiting_since) if lane.waiting else None
+                    (session.waiting_call, session.waiting_since)
+                    if session.waiting
+                    else None
                 )
                 if state.waiting_identity == waiting_identity and (
                     previous.waiting_identity != waiting_identity
@@ -72,46 +79,48 @@ class Episodes:
                 reconciled[identity] = state
         self.states = reconciled
         key = result.session
-        lane = sessions.lanes[key]
+        session = sessions.by_id[key]
         state = self.states.setdefault(
-            (key, lane.generation), EpisodeState(lane, lane.generation)
+            (key, session.generation), EpisodeState(session, session.generation)
         )
         emitted = []
 
         def add(kind: str, activity: str = result.activity) -> None:
             self.serial += 1
-            emitted.append(Episode(kind, key, lane.generation, activity, self.serial))
+            emitted.append(
+                Episode(kind, key, session.generation, activity, self.serial)
+            )
             if kind in ("trouble", "recovery"):
                 state.category_serials[activity] = self.serial
 
         event = packet.event
-        if lane.active and (
+        if session.active and (
             not state.started or (event == "intent" and packet.manual and packet.goal)
         ):
             state.started = True
             add("start")
         waiting_identity = (
-            (lane.waiting_call, lane.waiting_since) if lane.waiting else None
+            (session.waiting_call, session.waiting_since) if session.waiting else None
         )
-        if lane.waiting and (
+        if session.waiting and (
             not state.waiting or waiting_identity != state.waiting_identity
         ):
             add("waiting")
             state.waiting_serial = self.serial
-        state.waiting = lane.waiting
+        state.waiting = session.waiting
         state.waiting_identity = waiting_identity
         unresolved = {
             category
-            for category, failure in lane.failures.items()
-            if failure.generation == lane.generation and not failure.resolved
+            for category, failure in session.failures.items()
+            if failure.generation == session.generation and not failure.resolved
         }
         recovered = state.unresolved - unresolved
-        if lane.active:
+        if session.active:
             for category in sorted(recovered):
                 add("recovery", category)
         state.trouble.difference_update(recovered)
         state.unresolved = unresolved
-        terminal = lane.finished and event in (
+        terminal = session.finished and event in (
             "turn_done",
             "turn_error",
             "subagent_done",
@@ -124,52 +133,52 @@ class Episodes:
             state.terminal = True
             add(
                 "failure"
-                if lane.outcome == "error"
+                if session.outcome == "error"
                 else "cancelled"
-                if lane.outcome == "cancelled"
+                if session.outcome == "cancelled"
                 else "success"
             )
         elif result.failure:
-            failure = lane.failures[result.activity]
+            failure = session.failures[result.activity]
             if failure.count >= 3 and result.activity not in state.trouble:
                 state.trouble.add(result.activity)
                 add("trouble")
             elif result.activity not in state.trouble:
                 add("investigation")
-        elif lane.phase == "investigating" and not state.investigating:
+        elif session.phase == "investigating" and not state.investigating:
             add("investigation")
-        state.investigating = lane.phase == "investigating"
+        state.investigating = session.phase == "investigating"
         return emitted
 
     def relevant(self, episode: Episode, sessions: Sessions) -> bool:
         key = sessions.aliases.get(episode.session, episode.session)
-        lane = sessions.lanes.get(key)
-        if lane is None or lane.generation != episode.generation:
+        session = sessions.by_id.get(key)
+        if session is None or session.generation != episode.generation:
             return False
         kind = episode.kind
-        state = self.states.get((key, lane.generation))
+        state = self.states.get((key, session.generation))
         if kind == "waiting":
             return bool(
-                lane.waiting and state and state.waiting_serial == episode.serial
+                session.waiting and state and state.waiting_serial == episode.serial
             )
         if kind in ("trouble", "recovery") and (
             not state or state.category_serials.get(episode.activity) != episode.serial
         ):
             return False
         if kind == "trouble":
-            failure = lane.failures.get(episode.activity)
+            failure = session.failures.get(episode.activity)
             return bool(
                 failure
                 and not failure.resolved
-                and failure.generation == lane.generation
+                and failure.generation == session.generation
             )
         if kind == "failure":
-            return lane.finished and lane.outcome == "error"
+            return session.finished and session.outcome == "error"
         if kind in ("success", "cancelled"):
-            return lane.finished and lane.outcome == (
+            return session.finished and session.outcome == (
                 "success" if kind == "success" else "cancelled"
             )
         if kind == "recovery":
-            failure = lane.failures.get(episode.activity)
-            return bool(lane.active and failure and failure.resolved)
-        return lane.active
+            failure = session.failures.get(episode.activity)
+            return bool(session.active and failure and failure.resolved)
+        return session.active

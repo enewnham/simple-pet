@@ -19,6 +19,9 @@ class HookTextFields(TypedDict, total=False):
     goal: str
     progress: str
     repo: str
+    repository: str
+    branch: str
+    pull_request: str
     tool_name: str
     sentiment_text: str
     outcome: str
@@ -95,7 +98,7 @@ class RandomSource(Protocol):
 
 
 @dataclass(frozen=True)
-class SentimentSnapshot:
+class UserSentiment:
     compound: float
     seconds_ago: float
 
@@ -147,6 +150,9 @@ class HookEvent:
     manual: bool | None = None
     owner: ProcessIdentity | None = None
     exit_code: int | None = None
+    repository: str | None = None
+    branch: str | None = None
+    pull_request: str | None = None
 
     @property
     def source(self) -> str:
@@ -179,6 +185,12 @@ class HookEvent:
             packet["progress"] = self.progress
         if self.repo is not None:
             packet["repo"] = self.repo
+        if self.repository is not None:
+            packet["repository"] = self.repository
+        if self.branch is not None:
+            packet["branch"] = self.branch
+        if self.pull_request is not None:
+            packet["pull_request"] = self.pull_request
         if self.tool_name is not None:
             packet["tool_name"] = self.tool_name
         if self.sentiment_text is not None:
@@ -198,11 +210,11 @@ class HookEvent:
 
 if TYPE_CHECKING:
     from .episodes import Episode
-    from .work.views import WorkSubject, WorkView
+    from .work.views import WorkStory, WorkSubject
 
 
 @dataclass(frozen=True)
-class ToolSnapshot:
+class ActiveTool:
     call: str
     tool: str
     activity: str
@@ -220,15 +232,15 @@ class FailureSnapshot:
 
 
 @dataclass(frozen=True)
-class SessionSnapshot:
+class SessionContext:
     id: str
     changed_at: float
     parent: str | None
     goal: str
     repo: str
     phase: str
-    first_prompt: str
-    session_context: str
+    initial_request: str
+    summary: str
     recent_requests: tuple[str, ...]
     generation: int
     request_count: int
@@ -243,12 +255,12 @@ class SessionSnapshot:
     activity_uncertain: bool
     waiting_for_input: bool
     waiting_seconds: float | None
-    active_tools: tuple[ToolSnapshot, ...]
+    active_tools: tuple[ActiveTool, ...]
     progress: str
     failure: FailureSnapshot | None
     outcome: str | None
-    user_sentiment: SentimentSnapshot | None = None
-    connected_work: WorkView | None = None
+    user_sentiment: UserSentiment | None = None
+    connected_work: WorkStory | None = None
 
     @property
     def input_wait_seconds(self) -> float:
@@ -257,16 +269,16 @@ class SessionSnapshot:
 
 
 @dataclass(frozen=True)
-class SessionsSnapshot:
+class SwarmActivity:
     activity: str
-    sessions: tuple[SessionSnapshot, ...]
+    sessions: tuple[SessionContext, ...]
     convergence: tuple[ConvergenceItem, ...] | None = None
 
 
 @dataclass(frozen=True)
-class WorkSnapshot:
+class PetContext:
     activity: str
-    sessions: tuple[SessionSnapshot, ...]
+    sessions: tuple[SessionContext, ...]
     sleeping: bool
     trigger: Trigger | None = None
     work: tuple[WorkSubject, ...] = ()

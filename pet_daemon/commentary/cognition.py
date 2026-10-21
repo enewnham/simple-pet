@@ -9,10 +9,10 @@ from anthropic.types import TextBlockParam
 
 from ..attention import AttentionSelection
 from ..config import Config
-from ..runtime import SessionSnapshot, WorkSnapshot
+from ..runtime import PetContext, SessionContext
 from ..storage import Memory
 from ..telemetry import event, trace
-from .context import Context, PreparedCommentary
+from .context import PreparedCommentary, PromptBuilder
 from .contracts import JSONSchema, ModelRequest, TextSchema
 from .model import ModelClient
 from .repetition import RepeatMatch, repeat_match
@@ -24,7 +24,7 @@ log = logging.getLogger("pet-daemon")
 @dataclass(frozen=True)
 class SummaryEvidence:
     recent_requests: tuple[str, ...]
-    session_context: str
+    summary: str
     progress: str
     outcome: str | None
     turn_active: bool
@@ -34,16 +34,16 @@ class SummaryEvidence:
 @dataclass(frozen=True)
 class SummaryVersion:
     generation: int
-    first_prompt: str
+    initial_request: str
     evidence: SummaryEvidence | None
 
 
 @dataclass(frozen=True)
-class ObservationResult:
+class CommentaryResult:
     speak: str | None
-    session_context: str | None
-    context_session: str | None
-    context_version: SummaryVersion | None
+    summary: str | None
+    summary_session: str | None
+    summary_version: SummaryVersion | None
     prepared: PreparedCommentary
 
 
@@ -60,9 +60,9 @@ class Cognition:
         self.config = config
         self.clock = clock
         self.memory = memory
-        self.context = Context(config, lambda: self.clock())
+        self.prompts = PromptBuilder(config, lambda: self.clock())
 
-    def summary_request(self, focus: SessionSnapshot) -> ModelRequest:
+    def summary_request(self, focus: SessionContext) -> ModelRequest:
         return summary_request(
             self.config, self.memory, self.clock, self.request, focus
         )
@@ -109,7 +109,7 @@ class Cognition:
             },
         }
 
-    def should_summarize(self, focus: SessionSnapshot | None, reason: str) -> bool:
+    def should_summarize(self, focus: SessionContext | None, reason: str) -> bool:
         if not focus:
             return False
         if self.config.summarize_first_request_only:
@@ -120,11 +120,11 @@ class Cognition:
             )
         return reason in self.config.summarize_on
 
-    def summary_version(self, focus: SessionSnapshot | None) -> SummaryVersion | None:
+    def summary_version(self, focus: SessionContext | None) -> SummaryVersion | None:
         if not focus:
             return None
         if self.config.summarize_first_request_only:
-            return SummaryVersion(focus.generation, focus.first_prompt, None)
+            return SummaryVersion(focus.generation, focus.initial_request, None)
         reports = self.memory.recent(
             limit=3,
             session=focus.id,
@@ -138,10 +138,10 @@ class Cognition:
         )
         return SummaryVersion(
             focus.generation,
-            focus.first_prompt,
+            focus.initial_request,
             SummaryEvidence(
                 tuple(focus.recent_requests),
-                focus.session_context,
+                focus.summary,
                 focus.progress,
                 focus.outcome,
                 focus.turn_active,
@@ -149,25 +149,25 @@ class Cognition:
             ),
         )
 
-    async def summarize(self, focus: SessionSnapshot) -> str | None:
+    async def summarize(self, focus: SessionContext) -> str | None:
         request = self.summary_request(focus)
         result = await self.complete(request, "summary")
-        if set(result) != {"session_context"}:
-            raise ValueError("Invalid session context")
-        context = result["session_context"]
-        if context is not None and not isinstance(context, str):
-            raise ValueError("Invalid session context")
-        return context
+        if set(result) != {"summary"}:
+            raise ValueError("Invalid session summary")
+        summary = result["summary"]
+        if summary is not None and not isinstance(summary, str):
+            raise ValueError("Invalid session summary")
+        return summary
 
     async def complete(self, request: ModelRequest, reason: str) -> dict[str, object]:
         return await self.client.complete(request, reason)
 
-    async def observe(
+    async def generate_commentary(
         self,
-        snapshot: WorkSnapshot,
+        snapshot: PetContext,
         selection: AttentionSelection,
-        refresh: Callable[[], WorkSnapshot] | None = None,
-    ) -> ObservationResult:
+        refresh: Callable[[], PetContext] | None = None,
+    ) -> CommentaryResult:
         reason = selection.reason
         explicit = selection.context is not None or reason in (
             "check_in",
@@ -176,8 +176,8 @@ class Cognition:
             "care",
         )
         focus = selection.focus_session
-        context_version = self.summary_version(focus)
-        prepared = self.context.prepare(snapshot, selection, self.request, explicit)
+        summary_version = self.summary_version(focus)
+        prepared = self.prompts.prepare(snapshot, selection, self.request, explicit)
         summary = None
         if focus is not None and self.should_summarize(focus, reason):
             raw_result, summary = await asyncio.gather(
@@ -210,14 +210,14 @@ class Cognition:
             current = refresh() if refresh else snapshot
             refreshed = selection.refresh(current)
             if not selection.supported(current):
-                return ObservationResult(
+                return CommentaryResult(
                     None,
                     summary,
                     focus.id if focus else None,
-                    context_version,
+                    summary_version,
                     prepared,
                 )
-            retry = self.context.prepare(
+            retry = self.prompts.prepare(
                 current, refreshed, self.request, explicit, retry=True
             )
             try:
@@ -244,13 +244,13 @@ class Cognition:
             reason=reason,
             speaks=speech is not None,
             summary_updated=summary is not None,
-            decision={"speak": speech, "session_context": summary},
+            decision={"speak": speech, "summary": summary},
         )
-        return ObservationResult(
+        return CommentaryResult(
             speech,
             summary,
             focus.id if focus else None,
-            context_version,
+            summary_version,
             prepared,
         )
 

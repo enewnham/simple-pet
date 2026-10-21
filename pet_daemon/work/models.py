@@ -4,7 +4,13 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .observations import GitObservation, PullRequest
+    from .observations import (
+        BranchObservation,
+        CheckoutObservation,
+        GitObservation,
+        PullRequest,
+        PullRequestObservation,
+    )
 
 
 @dataclass(frozen=True)
@@ -23,29 +29,13 @@ class RelatedLink:
 
 
 @dataclass(frozen=True)
-class ArtifactDescriptor:
+class ArtifactReference:
     kind: str
     ref: str
     repository: str = ""
     revision: str | None = None
     checkout: str | None = None
     title: str | None = None
-
-
-@dataclass(frozen=True, kw_only=True)
-class Artifact(ArtifactDescriptor):
-    id: str
-    version: int = 1
-
-    def descriptor(self) -> ArtifactDescriptor:
-        return ArtifactDescriptor(
-            self.kind,
-            self.ref,
-            self.repository,
-            self.revision,
-            self.checkout,
-            self.title,
-        )
 
 
 @dataclass(frozen=True)
@@ -124,68 +114,57 @@ class EvidenceRecord:
     kind: str
     payload: EvidencePayload
     observed_at: float | None = None
+    context: ReportContext | None = None
 
 
 @dataclass(frozen=True)
-class ArtifactAccount:
-    artifact: ArtifactDescriptor
-    evidence: tuple[EvidenceRecord, ...]
+class ReportContext:
+    checkout: str = ""
+    repository: str = ""
+    branch: str = ""
+    pull_request: str = ""
+    references: tuple[ArtifactReference, ...] = ()
+    # Capture the next branch resolution when the report has no PR.
+    branch_resolution: int = 0
 
 
 @dataclass(frozen=True)
-class WorkAccount:
-    intent: str
-    revision: str
-    requests: tuple[EvidenceRecord, ...]
-    activity: tuple[EvidenceRecord, ...]
-    artifacts: tuple[ArtifactAccount, ...]
-
-
-@dataclass
-class WorkItem:
-    id: str
-    intent: str
-    status: str
-    changed_at: float
-
-
-@dataclass
-class Evidence:
-    id: int
-    work_id: str
-    artifact_id: str
-    source: str
-    kind: str
-    payload: EvidencePayload
-    timestamp: float
+class SessionReport:
+    payload: IntentEvidence | ProgressEvidence | ExecutionEvidence
+    context: ReportContext
+    observed_at: float
 
     def record(self) -> EvidenceRecord:
-        return EvidenceRecord(self.source, self.kind, self.payload, self.timestamp)
+        source = "user" if isinstance(self.payload, IntentEvidence) else "harness"
+        kind = (
+            "intent"
+            if isinstance(self.payload, IntentEvidence)
+            else "progress"
+            if isinstance(self.payload, ProgressEvidence)
+            else "execution"
+        )
+        return EvidenceRecord(
+            source, kind, self.payload, self.observed_at, self.context
+        )
+
+
+@dataclass(frozen=True)
+class SessionRecord:
+    id: str
+    goal: str = ""
+    parent: str | None = None
+    location: str = ""
+    location_at: float = 0
+    reports: tuple[SessionReport, ...] = ()
+    execution: SessionReport | None = None
+    changed_at: float = 0
+    aliases: tuple[str, ...] = ()
 
 
 @dataclass
-class WorkState:
-    next_evidence_id: int = 1
-    items: dict[str, WorkItem] = field(default_factory=dict)
-    sessions: dict[str, str] = field(default_factory=dict)
-    memberships: set[tuple[str, str]] = field(default_factory=set)
+class WorkFacts:
     aliases: dict[str, str] = field(default_factory=dict)
-    artifacts: dict[str, Artifact] = field(default_factory=dict)
-    links: set[tuple[str, str]] = field(default_factory=set)
-    evidence: list[Evidence] = field(default_factory=list)
-
-    def current(self, session: str) -> WorkItem | None:
-        identifier = self.sessions.get(session)
-        return self.items.get(identifier) if identifier is not None else None
-
-    def latest(self, work_id: str, artifact_id: str) -> dict[tuple[str, str], Evidence]:
-        records = {}
-        for record in self.evidence:
-            if record.work_id == work_id and record.artifact_id == artifact_id:
-                records[record.source, record.kind] = record
-        return records
-
-    def linked_work(self, artifact_id: str) -> set[str]:
-        return {
-            work_id for work_id, linked_id in self.links if linked_id == artifact_id
-        }
+    sessions: dict[str, SessionRecord] = field(default_factory=dict)
+    checkouts: dict[str, CheckoutObservation] = field(default_factory=dict)
+    branches: dict[tuple[str, str], BranchObservation] = field(default_factory=dict)
+    pull_requests: dict[str, PullRequestObservation] = field(default_factory=dict)

@@ -3,19 +3,18 @@ from pathlib import Path
 from typing import TypedDict, Unpack
 
 from pet_daemon.runtime import (
+    ActiveTool,
     FailureSnapshot,
+    PetContext,
     ProcessIdentity,
-    SentimentSnapshot,
-    SessionSnapshot,
-    SessionsSnapshot,
-    ToolSnapshot,
+    SessionContext,
+    SwarmActivity,
     Trigger,
-    WorkSnapshot,
+    UserSentiment,
 )
 from pet_daemon.sessions import Sessions
+from pet_daemon.storage import Memory
 from pet_daemon.work import WorkSubject
-from pet_daemon.work.models import RelatedLink
-from pet_daemon.work.observations import GitObservation
 
 
 class SubprocessOptions(TypedDict, total=False):
@@ -67,41 +66,6 @@ class BehaviorOptions(TypedDict, total=False):
     gaze_deadzone: float
 
 
-class PullRequestOptions(TypedDict, total=False):
-    url: str
-    state: str
-    merged_at: str | None
-    is_draft: bool | None
-    head: str
-    head_repository: str
-    head_branch: str
-    repository: str
-    title: str
-    body: str
-    base_branch: str
-    base_head: str
-    related_links: tuple[RelatedLink, ...]
-    related_links_error: str | None
-
-
-class ObservationOptions(TypedDict, total=False):
-    subject: str
-    worktree: str
-    branch: str
-    sessions: tuple[str, ...]
-    local: GitObservation | None
-    current: bool
-    revision: int
-    changed_at: float
-    local_checked_at: float
-    github_checked_at: float
-    github_attempted_at: float
-    local_error: str | None
-    github_error: str | None
-    repository: str
-    source: str
-
-
 class SessionOptions(TypedDict, total=False):
     id: str
     changed_at: float
@@ -109,8 +73,8 @@ class SessionOptions(TypedDict, total=False):
     goal: str
     repo: str
     phase: str
-    first_prompt: str
-    session_context: str
+    initial_request: str
+    summary: str
     recent_requests: tuple[str, ...]
     generation: int
     request_count: int
@@ -125,35 +89,51 @@ class SessionOptions(TypedDict, total=False):
     activity_uncertain: bool
     waiting_for_input: bool
     waiting_seconds: float | None
-    active_tools: tuple[ToolSnapshot, ...]
+    active_tools: tuple[ActiveTool, ...]
     progress: str
     failure: FailureSnapshot | None
     outcome: str | None
-    user_sentiment: SentimentSnapshot
+    user_sentiment: UserSentiment
 
 
-def session_snapshot(**values: Unpack[SessionOptions]) -> SessionSnapshot:
+def session_snapshot(**values: Unpack[SessionOptions]) -> SessionContext:
     identity = values.get("id", "cli:fixture")
     harness, name = identity.split(":", 1)
     sessions = Sessions(lambda: 1000)
     sessions.handle({"event": "session_start", "harness": harness, "session": name})
     if values.get("waiting_for_input"):
         sessions.handle({"event": "waiting", "harness": harness, "session": name})
-    snapshot = sessions.snapshot().sessions[0]
+    snapshot = sessions.activity_view().sessions[0]
     return replace(snapshot, **values)
 
 
-def sessions_snapshot(*sessions: SessionSnapshot) -> SessionsSnapshot:
-    return SessionsSnapshot(activity="idle", sessions=sessions)
+def sessions_snapshot(*sessions: SessionContext) -> SwarmActivity:
+    return SwarmActivity(activity="idle", sessions=sessions)
 
 
 def capture_snapshot(
-    snapshot: SessionsSnapshot,
+    snapshot: SwarmActivity,
     *,
     work: tuple[WorkSubject, ...] = (),
+    memory: Memory | None = None,
     trigger: Trigger | None = None,
-) -> WorkSnapshot:
-    return WorkSnapshot(
+) -> PetContext:
+    if memory is not None:
+        members = []
+        for session in snapshot.sessions:
+            context = memory.context(session.id)
+            if context:
+                session = replace(
+                    session,
+                    initial_request=context.initial_request,
+                    summary=context.summary,
+                    recent_requests=tuple(context.recent_requests),
+                    request_count=context.request_count,
+                    first_summary_attempted=context.first_summary_attempted,
+                )
+            members.append(session)
+        snapshot = replace(snapshot, sessions=tuple(members))
+    return PetContext(
         activity=snapshot.activity,
         sessions=snapshot.sessions,
         sleeping=False,

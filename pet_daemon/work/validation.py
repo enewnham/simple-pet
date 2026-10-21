@@ -3,7 +3,7 @@ import re
 from dataclasses import replace
 from urllib.parse import urlsplit
 
-from .models import ArtifactDescriptor
+from .models import ArtifactReference
 
 KINDS = {"branch", "pull_request", "document", "ticket", "patch"}
 
@@ -37,7 +37,7 @@ def text(value: object, name: str, *, optional: bool = False) -> str:
     return value.strip()
 
 
-def descriptor(value: ArtifactDescriptor) -> ArtifactDescriptor:
+def normalize_reference(value: ArtifactReference) -> ArtifactReference:
     if value.kind not in KINDS:
         raise ValueError("unsupported artifact kind")
     result = replace(

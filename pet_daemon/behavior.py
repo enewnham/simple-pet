@@ -567,10 +567,10 @@ class Behavior:
             active=sessions.engaged,
             working=sessions.working,
             investigating=any(
-                lane.working and lane.phase == "investigating"
-                for lane in sessions.lanes.values()
+                session.working and session.phase == "investigating"
+                for session in sessions.by_id.values()
             ),
-            waiting=any(lane.waiting for lane in sessions.lanes.values()),
+            waiting=any(session.waiting for session in sessions.by_id.values()),
             interacting=status.speech,
             pointer_recent=now - self.pointer_moved < self.config.gaze_reset_seconds,
             can_roam=(

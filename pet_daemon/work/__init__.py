@@ -1,4 +1,4 @@
-from .service import WorkService
-from .views import WorkSubject, WorkView, build_work
+from .ingest import WorkIngestion
+from .views import WorkStory, WorkSubject
 
-__all__ = ["WorkService", "WorkSubject", "WorkView", "build_work"]
+__all__ = ["WorkIngestion", "WorkStory", "WorkSubject"]

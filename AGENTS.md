@@ -16,28 +16,37 @@ checks. [Makefile](Makefile) defines the check and build commands.
 - **Application flow:** [pet_daemon/daemon.py](pet_daemon/daemon.py) owns sockets,
   process startup, shutdown, and wiring. [pet_daemon/application.py](pet_daemon/application.py)
   coordinates observation ingestion, collection targets, model tasks, and delivery outcomes.
-  [pet_daemon/events.py](pet_daemon/events.py) applies runtime events and reactions.
+  [pet_daemon/agent_activity.py](pet_daemon/agent_activity.py) coordinates accepted hooks,
+  activity reactions, and commentary triggers.
   [pet_daemon/attention.py](pet_daemon/attention.py) owns request timing, subject selection,
   fairness, and consideration history. [pet_daemon/delivery.py](pet_daemon/delivery.py)
   owns message IDs, renderer acknowledgment, and bounded retries.
 - **Activity and animation:** [pet_daemon/sessions.py](pet_daemon/sessions.py)
-  tracks turns, tool calls, and ownership. [pet_daemon/processes.py](pet_daemon/processes.py)
+  tracks turns, tool calls, and runtime presence. [pet_daemon/processes.py](pet_daemon/processes.py)
   verifies process identities and liveness. [pet_daemon/behavior.py](pet_daemon/behavior.py)
   controls movement, gestures, and naps.
   [pet_daemon/sentiment.py](pet_daemon/sentiment.py) scores user prose with VADER using the
-  [bundled lexicon](pet_daemon/data/README.md). The event coordinator selects sentiment reactions and cooldowns.
-- **Work and evidence:** [pet_daemon/work/](pet_daemon/work/) defines typed work,
-  artifacts, relationships, evidence, and pure association rules.
-  Its views expose intent, agent-reported progress, outcomes, and next steps.
-  [pet_daemon/sources/](pet_daemon/sources/) collects hook, Git, and GitHub observations.
+  [bundled lexicon](pet_daemon/data/README.md). The activity coordinator selects sentiment reactions and cooldowns.
+- **Work and evidence:** [pet_daemon/work/](pet_daemon/work/) defines typed agent sessions,
+  report contexts, checkout facts, and explicit PR, stack, and ticket links.
+  Runtime session transitions supply accepted facts to [pet_daemon/work/ingest.py](pet_daemon/work/ingest.py).
+  [pet_daemon/work/views.py](pet_daemon/work/views.py) joins stored sessions, reports,
+  and repository observations into shared work stories with distinct session contributions.
+  Report references can resolve later without
+  using a checkout's later state to reinterpret the report.
+  [pet_daemon/sources/](pet_daemon/sources/) collects hook, Git, and GitHub observations
+  without assigning work to sessions or creating PR tasks.
   Runtime reactions remain in [pet_daemon/episodes.py](pet_daemon/episodes.py).
 - **Commentary and storage:** [pet_daemon/commentary/context.py](pet_daemon/commentary/context.py)
-  projects one attention selection and bounds its model context.
+  builds bounded commentary prompts and captures their supporting facts.
   [pet_daemon/commentary/cognition.py](pet_daemon/commentary/cognition.py) runs model requests,
   summaries, and repetition checks against that selection.
   [pet_daemon/commentary/model.py](pet_daemon/commentary/model.py) adapts Anthropic responses.
   [pet_daemon/storage/](pet_daemon/storage/) owns SQLite persistence, transactions, and migrations.
-  Accepted speech, message outcomes, and captured-subject consideration commit together.
+  Session metadata, report context, and request history commit together.
+  Reports retain their observed references; current checkout state remains separate. Accepted speech,
+  message outcomes, and captured-subject consideration commit together.
+  Older local schemas reset. Newer schemas are rejected before writes.
   The local [similarity helper](Sources/PetSpeechSimilarity/main.swift) checks repeated speech.
 - **Renderer:** [Sources/PetCore/](Sources/PetCore/) defines events and socket
   handling. [Sources/PetOverlay/](Sources/PetOverlay/) contains the AppKit app and view.
@@ -50,7 +59,8 @@ checks. [Makefile](Makefile) defines the check and build commands.
 
 [Tests/](Tests/) contains Python unit and runtime checks alongside Swift core,
 overlay, and asset checks. Start with `test_application.py` for a complete provider-to-acceptance example,
-`test_architecture.py` for dependency boundaries, `test_work.py` for the domain,
+`test_architecture.py` for dependency boundaries, `test_work.py` for report attribution and observed associations,
+`test_connected_work.py` for parent and subagent work across checkout layouts,
 `test_work_runtime.py` for the intent-to-display path, or `test_runtime.py` for activity behavior
 or the test named after the module you are changing. See the README's development
 checks for automated checks, renderer builds, and desktop verification.
