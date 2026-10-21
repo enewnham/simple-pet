@@ -134,7 +134,7 @@ async def observe(
         "headRepository,headRepositoryOwner,headRefName,title,body,baseRefName,baseRefOid"
     )
     if number is not None or url:
-        args = ["gh", "pr", "story", url or str(number), "--json", fields]
+        args = ["gh", "pr", "view", url or str(number), "--json", fields]
         if not url and repository and not repository.startswith("local:"):
             args.extend(("--repo", repository))
         data = json.loads(await run(*args, cwd=path))
@@ -143,9 +143,7 @@ async def observe(
     if not repository or repository.startswith("local:"):
         raise RuntimeError("GitHub repository identity is unavailable")
     metadata = json.loads(
-        await run(
-            "gh", "repo", "story", repository, "--json", "isFork,parent", cwd=path
-        )
+        await run("gh", "repo", "view", repository, "--json", "isFork,parent", cwd=path)
     )
     query_repository = repository
     if metadata.get("isFork"):

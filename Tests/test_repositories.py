@@ -70,13 +70,15 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("GitHub unavailable")
             if args[1] == "api" and "/stacks?pull_request=" in args[2]:
                 return json.dumps(self.stacks)
-            if args[1:3] == ("repo", "story"):
+            if args[1:3] == ("repo", "view"):
                 return json.dumps({"isFork": False, "parent": None})
-            return json.dumps(
-                (self.candidates if self.candidates is not None else [self.pr])
-                if args[2] == "list"
-                else self.related_prs.get(args[3], self.pr)
-            )
+            if args[1:3] == ("pr", "list"):
+                return json.dumps(
+                    self.candidates if self.candidates is not None else [self.pr]
+                )
+            if args[1:3] == ("pr", "view"):
+                return json.dumps(self.related_prs.get(args[3], self.pr))
+            raise AssertionError(f"Unsupported GitHub command: {args}")
         return await git.command(*args, **kwargs)
 
     async def refresh(self) -> None:
@@ -553,7 +555,7 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
 
         async def forked(*args: str, **kwargs: Unpack[CommandOptions]) -> str:
             calls.append(args)
-            if args[0:3] == ("gh", "repo", "story"):
+            if args[0:3] == ("gh", "repo", "view"):
                 return json.dumps(
                     {
                         "isFork": True,
@@ -567,6 +569,17 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         )
         assert observed is not None
         self.assertEqual(observed.head_repository, "example.test/fork-owner/repo")
+        self.assertIn(
+            (
+                "gh",
+                "repo",
+                "view",
+                "example.test/fork-owner/repo",
+                "--json",
+                "isFork,parent",
+            ),
+            calls,
+        )
         listed = next(args for args in calls if args[1:3] == ("pr", "list"))
         self.assertEqual(listed[listed.index("--repo") + 1], "example.test/team/repo")
 
@@ -576,8 +589,16 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.pr["body"] = (
             "Parser changes. See https://example.test/team/repo/pull/42 for a related discussion."
         )
-        observed = await github.observe(None, "", run=self.command, url=self.pr["url"])
+        calls = []
+
+        async def lookup(*args: str, **kwargs: Unpack[CommandOptions]) -> str:
+            calls.append(args)
+            return await self.command(*args, **kwargs)
+
+        observed = await github.observe(None, "", run=lookup, url=self.pr["url"])
         assert observed is not None
+        self.assertEqual(calls[0][:4], ("gh", "pr", "view", self.pr["url"]))
+        self.assertIn("--json", calls[0])
         self.assertEqual(
             (observed.title, observed.body), (self.pr["title"], self.pr["body"])
         )
