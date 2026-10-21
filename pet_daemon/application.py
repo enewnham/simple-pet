@@ -9,14 +9,11 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
-from .agent_activity import ActivityCoordinator
 from .attention import Attention, AttentionSelection
-from .behavior import Behavior
+from .behavior.controller import Behavior
 from .commentary import Cognition, CommentaryResult, CommentarySupport
 from .config import Config
 from .delivery import DeliveryOutcome, SpeechDelivery, SpeechMessage
-from .episodes import Episodes
-from .processes import ProcessTracker
 from .runtime import (
     EpisodeTrigger,
     HookEvent,
@@ -25,7 +22,10 @@ from .runtime import (
     RandomSource,
     Trigger,
 )
-from .sessions import Sessions
+from .sessions.coordinator import ActivityCoordinator
+from .sessions.episodes import Episodes
+from .sessions.processes import ProcessTracker
+from .sessions.tracking import Sessions
 from .storage import Memory
 from .telemetry import event, observation, trace
 from .work.history import EventContext, project_event

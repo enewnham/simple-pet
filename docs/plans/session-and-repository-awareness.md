@@ -98,14 +98,14 @@ It does not establish the quality of unsimulated model prose or desktop visual b
 ## Code layout and verification
 
 - `application.py` ingests observations, reconciles collection targets, and coordinates commentary.
-- `agent_activity.py` coordinates accepted hooks, activity reactions, and commentary triggers.
+- `sessions/coordinator.py` coordinates accepted hooks, activity reactions, and commentary triggers.
 - `sources/` collects hook, Git, PR, and stack observations.
 - `work/` connects facts and derives opportunities and shared work views.
 - `attention.py` selects subjects. `commentary/context.py` projects their meaningful facts.
 - `commentary/cognition.py` requests commentary for the supplied selection.
 - `storage/` persists work, selection history, and atomic message acceptance.
 - `delivery.py` owns renderer acknowledgment and runtime retries.
-- `sessions.py` owns execution. `episodes.py` retains separate reaction bookkeeping.
+- `sessions/tracking.py` owns execution. `sessions/episodes.py` retains separate reaction bookkeeping.
 
 Schema version 7 preserves version 4/5/6 history and records attention history and message
 outcomes. Speech history, message acceptance, and captured-version surfacing commit in one

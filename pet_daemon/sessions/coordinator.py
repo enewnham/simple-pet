@@ -1,11 +1,10 @@
 from collections.abc import Callable
 from dataclasses import asdict
 
-from .behavior import Behavior
-from .config import Config
-from .episodes import Episode, Episodes
-from .runtime import EpisodeTrigger, HookEvent, RandomSource, Trigger
-from .sentiment import (
+from ..behavior.controller import Behavior
+from ..config import Config
+from ..runtime import EpisodeTrigger, HookEvent, RandomSource, Trigger
+from ..sentiment import (
     COOLDOWN_SECONDS,
     DUPLICATE_SECONDS,
     NEGATIVE_THRESHOLD,
@@ -13,8 +12,9 @@ from .sentiment import (
     analyzer,
     sentiment_score,
 )
-from .sessions import AgentSession, Sessions, SessionUpdate
-from .telemetry import trace, verbose
+from ..telemetry import trace, verbose
+from .episodes import Episode, Episodes
+from .tracking import AgentSession, Sessions, SessionUpdate
 
 
 class ActivityCoordinator:

@@ -1,9 +1,9 @@
 import unittest
 from typing import Unpack
 
-from pet_daemon.episodes import Episode, Episodes
 from pet_daemon.runtime import HookPacket, HookTextFields
-from pet_daemon.sessions import Sessions
+from pet_daemon.sessions.episodes import Episode, Episodes
+from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources.hooks import normalize_hook
 from Tests.fixtures import require
 

@@ -6,7 +6,7 @@ from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import patch
 
-from pet_daemon.sessions import Sessions
+from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources.hooks import HookEvent, normalize_hook
 from pet_daemon.storage import Memory
 from pet_daemon.storage.memory import (

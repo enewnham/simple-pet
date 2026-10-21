@@ -5,7 +5,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from pet_daemon.runtime import ConvergenceItem, SwarmActivity
-from pet_daemon.sessions import Sessions, SessionUpdate
+from pet_daemon.sessions.tracking import Sessions, SessionUpdate
 from pet_daemon.storage import Memory
 from pet_daemon.work.models import ExecutionEvidence
 from Tests.fixtures import capture_snapshot, require

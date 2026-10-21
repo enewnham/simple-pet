@@ -3,8 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from pet_daemon.behavior.sprites import Clip, Pack
 from pet_daemon.runtime import Point
-from pet_daemon.sprites import Clip, Pack
 
 
 class SpriteTests(unittest.TestCase):

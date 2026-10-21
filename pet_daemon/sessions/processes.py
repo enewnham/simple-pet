@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Literal
 
-from .runtime import ProcessIdentity
+from ..runtime import ProcessIdentity
 
 type ProcessRow = tuple[ProcessIdentity, int, str, str]
 type ProcessStatus = Literal["unknown", "exited", "alive", "replaced"]

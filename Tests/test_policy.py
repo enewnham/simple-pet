@@ -3,7 +3,7 @@ import unittest
 from collections.abc import Callable
 from dataclasses import replace
 
-from pet_daemon.policy import Candidate, Observation, Policy
+from pet_daemon.behavior.policy import Candidate, Observation, Policy
 
 
 class PolicyTests(unittest.TestCase):

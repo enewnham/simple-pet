@@ -11,8 +11,8 @@ from collections.abc import Mapping
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from pet_daemon.processes import discover_owner
 from pet_daemon.prompts import select_prompt
+from pet_daemon.sessions.processes import discover_owner
 
 MAX_DATAGRAM_BYTES = 1999
 EXCERPT_FIELDS = ("progress", "goal", "tool", "context", "sentiment_text")

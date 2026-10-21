@@ -16,16 +16,16 @@ from anthropic import AsyncAnthropic
 
 from .application import Application
 from .attention import Attention
-from .behavior import Behavior
+from .behavior.controller import Behavior
+from .behavior.sprites import Pack
 from .commentary import AnthropicModelClient, Cognition
 from .config import Config
-from .episodes import Episodes
-from .processes import ProcessTracker
 from .runtime import RandomSource
-from .sessions import Sessions
+from .sessions.episodes import Episodes
+from .sessions.processes import ProcessTracker
+from .sessions.tracking import Sessions
 from .sources import RepositoryTracker
 from .sources.hooks import normalize_hook
-from .sprites import Pack
 from .storage import Memory
 from .telemetry import event, trace, verbose
 

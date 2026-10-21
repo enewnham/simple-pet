@@ -5,7 +5,6 @@ from pathlib import Path
 
 from pet_daemon.attention import Attention
 from pet_daemon.config import Config
-from pet_daemon.episodes import Episode
 from pet_daemon.runtime import (
     CareTrigger,
     EpisodeTrigger,
@@ -14,6 +13,7 @@ from pet_daemon.runtime import (
     SessionContext,
     SessionTrigger,
 )
+from pet_daemon.sessions.episodes import Episode
 from pet_daemon.storage.memory import HistoryRecord
 from pet_daemon.work import WorkStory, WorkSubject
 from Tests.fixtures import (

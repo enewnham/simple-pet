@@ -209,7 +209,7 @@ class HookEvent:
 
 
 if TYPE_CHECKING:
-    from .episodes import Episode
+    from .sessions.episodes import Episode
     from .work.views import WorkStory, WorkSubject
 
 

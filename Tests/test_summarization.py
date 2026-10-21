@@ -11,7 +11,7 @@ from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.commentary.summarization import SummaryPayload
 from pet_daemon.config import Config
 from pet_daemon.prompts import bounded, select_prompt
-from pet_daemon.sessions import Sessions
+from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources.hooks import HookEvent
 from pet_daemon.storage import Memory
 from pet_daemon.work.history import project_event

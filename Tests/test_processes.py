@@ -5,14 +5,14 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from pet_daemon.processes import (
+from pet_daemon.sessions.processes import (
     ProcessIdentity,
     ProcessTracker,
     discover_owner,
     probe,
     process_identity,
 )
-from pet_daemon.sessions import Sessions, SessionUpdate
+from pet_daemon.sessions.tracking import Sessions, SessionUpdate
 
 
 class ProcessTests(unittest.IsolatedAsyncioTestCase):
@@ -86,7 +86,7 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         with patch(
-            "pet_daemon.processes.subprocess.run",
+            "pet_daemon.sessions.processes.subprocess.run",
             side_effect=subprocess.TimeoutExpired("ps", 2),
         ):
             results = await ProcessTracker().refresh(sessions.process_owners())
@@ -106,7 +106,7 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
             10: row(10, 1, "/bin/zsh"),
         }
         with (
-            patch("pet_daemon.processes._processes", return_value=rows),
+            patch("pet_daemon.sessions.processes._processes", return_value=rows),
             patch.dict(os.environ, {}, clear=True),
         ):
             self.assertEqual(discover_owner("claude", pid=30), rows[20][0])
@@ -122,7 +122,7 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
             30: (ProcessIdentity(30, "hook-start"), 20, "S", "python hook"),
             20: (owner, 1, "S", "bash examples/pet-run"),
         }
-        with patch("pet_daemon.processes._processes", return_value=rows):
+        with patch("pet_daemon.sessions.processes._processes", return_value=rows):
             with patch.dict(
                 os.environ, {"PET_OWNER_PID": "20", "PET_OWNER_STARTED": owner.started}
             ):

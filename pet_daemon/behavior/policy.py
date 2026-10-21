@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from .runtime import RandomSource
+from ..runtime import RandomSource
 
 
 @dataclass(frozen=True)

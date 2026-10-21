@@ -13,7 +13,7 @@ from pet_daemon.commentary.context import CommentaryPayload, PreparedCommentary
 from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.config import Config
 from pet_daemon.runtime import CareTrigger, HookEvent, PetContext
-from pet_daemon.sessions import Sessions
+from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.storage import Memory
 from pet_daemon.work import WorkSubject
 from pet_daemon.work.history import project_event

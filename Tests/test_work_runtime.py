@@ -161,11 +161,11 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         if args[0] != "gh":
             return await command(*args, **kwargs)
         self.github_commands.append(args)
-        if args[:3] == ("gh", "repo", "story"):
+        if args[:3] == ("gh", "repo", "view"):
             return json.dumps({"isFork": False})
         if args[:3] == ("gh", "pr", "list"):
             return json.dumps([self.pr])
-        if args[:3] == ("gh", "pr", "story"):
+        if args[:3] == ("gh", "pr", "view"):
             return json.dumps(self.related_prs.get(args[3], self.pr))
         if args[:2] == ("gh", "api") and "/stacks?" in args[2]:
             return json.dumps(self.stack_entries)

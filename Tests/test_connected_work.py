@@ -7,7 +7,7 @@ from pet_daemon.attention import Attention
 from pet_daemon.commentary.presentation import work_record
 from pet_daemon.config import Config
 from pet_daemon.runtime import HookEvent
-from pet_daemon.sessions import Sessions
+from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.storage import Memory
 from pet_daemon.work import WorkSubject
 from pet_daemon.work.models import RelatedLink

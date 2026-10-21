@@ -11,15 +11,15 @@ import anthropic
 import httpx
 
 from pet_daemon.attention import Attention
+from pet_daemon.behavior.sprites import Pack
 from pet_daemon.commentary.cognition import Cognition, CommentaryResult
 from pet_daemon.commentary.context import INSTRUCTIONS
 from pet_daemon.commentary.model import AnthropicModelClient
 from pet_daemon.commentary.summarization import SUMMARY_INSTRUCTIONS
 from pet_daemon.config import Config
 from pet_daemon.runtime import CareTrigger, PetContext, SessionTrigger
-from pet_daemon.sessions import Sessions
+from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources.hooks import HookEvent
-from pet_daemon.sprites import Pack
 from pet_daemon.storage import Memory
 from pet_daemon.telemetry import observation
 from pet_daemon.types import JSONValue

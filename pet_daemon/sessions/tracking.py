@@ -6,11 +6,9 @@ from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from . import telemetry
-from .activity import activity
-from .processes import ProcessStatus
-from .prompts import select_prompt
-from .runtime import (
+from .. import telemetry
+from ..prompts import select_prompt
+from ..runtime import (
     ActiveTool,
     ConvergenceItem,
     FailureSnapshot,
@@ -19,11 +17,13 @@ from .runtime import (
     SwarmActivity,
     UserSentiment,
 )
-from .work.models import ExecutionEvidence, IntentEvidence, ProgressEvidence
-from .work.observations import SessionObservation
+from ..work.models import ExecutionEvidence, IntentEvidence, ProgressEvidence
+from ..work.observations import SessionObservation
+from .activity import activity
+from .processes import ProcessStatus
 
 if TYPE_CHECKING:
-    from .runtime import HookEvent
+    from ..runtime import HookEvent
 
 SENTIMENT_CONTEXT_SECONDS = 300
 
@@ -447,7 +447,7 @@ class Sessions:
         )
 
     def handle(self, event: object) -> SessionUpdate | None:
-        from .sources.hooks import normalize_hook
+        from ..sources.hooks import normalize_hook
 
         hook = normalize_hook(event)
         if hook is None:

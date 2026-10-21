@@ -15,6 +15,7 @@ from typing import Unpack
 import httpx
 from anthropic import AsyncAnthropic
 
+from pet_daemon.behavior.sprites import Pack
 from pet_daemon.commentary.context import SITUATIONS, CommentaryPayload
 from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.config import Config
@@ -28,7 +29,6 @@ from pet_daemon.runtime import (
 )
 from pet_daemon.sources import RepositoryTracker
 from pet_daemon.sources.git import CommandOptions
-from pet_daemon.sprites import Pack
 from pet_daemon.work.observations import BranchObservation, PullRequestObservation
 from Tests.fixtures import require
 
@@ -697,7 +697,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         async def boundary(*args: str, **kwargs: Unpack[CommandOptions]) -> str:
             if args[:3] == ("gh", "api", "user"):
                 return "elliot"
-            if args[:3] == ("gh", "repo", "story"):
+            if args[:3] == ("gh", "repo", "view"):
                 return json.dumps({"isFork": False})
             if args[0] == "gh":
                 return json.dumps(
@@ -743,7 +743,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_exited_owner_leaves_the_reported_work_and_pr_context_available(
         self,
     ) -> None:
-        from pet_daemon.processes import process_identity
+        from pet_daemon.sessions.processes import process_identity
 
         await self.repository_fixture()
         await self.connect_repository_work()

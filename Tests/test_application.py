@@ -11,18 +11,18 @@ from pathlib import Path
 
 from pet_daemon.application import Application
 from pet_daemon.attention import Attention, AttentionSelection
-from pet_daemon.behavior import Behavior
+from pet_daemon.behavior.controller import Behavior
+from pet_daemon.behavior.sprites import Pack
 from pet_daemon.commentary import Cognition
 from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.config import Config
 from pet_daemon.delivery import DeliveryOutcome, SpeechPacket
-from pet_daemon.episodes import Episodes
-from pet_daemon.processes import ProcessTracker
 from pet_daemon.runtime import HookEvent, OverlayPacket
-from pet_daemon.sessions import Sessions
+from pet_daemon.sessions.episodes import Episodes
+from pet_daemon.sessions.processes import ProcessTracker
+from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources import RepositoryTracker
 from pet_daemon.sources.hooks import normalize_hook
-from pet_daemon.sprites import Pack
 from pet_daemon.storage import Memory
 from pet_daemon.work import WorkStory
 from pet_daemon.work.models import RelatedLink

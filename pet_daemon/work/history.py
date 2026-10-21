@@ -4,8 +4,8 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ..activity import activity, result_summary
 from ..prompts import bounded
+from ..sessions.activity import activity, result_summary
 
 if TYPE_CHECKING:
     from ..runtime import HookEvent

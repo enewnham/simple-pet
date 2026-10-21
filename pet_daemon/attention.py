@@ -4,7 +4,6 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 
 from .config import Config
-from .episodes import Episode
 from .runtime import (
     CareTrigger,
     EpisodeTrigger,
@@ -15,6 +14,7 @@ from .runtime import (
     SubjectTrigger,
     Trigger,
 )
+from .sessions.episodes import Episode
 from .storage.memory import HistoryRecord
 from .telemetry import trace
 from .work import WorkSubject

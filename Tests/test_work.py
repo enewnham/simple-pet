@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Unpack
 
 from pet_daemon.runtime import HookEvent, HookTextFields
-from pet_daemon.sessions import Sessions
+from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.storage.memory import Memory
 from pet_daemon.storage.migrations import SCHEMA_VERSION, migrate
 from pet_daemon.work.history import project_event

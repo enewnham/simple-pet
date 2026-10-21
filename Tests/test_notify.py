@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from pet_daemon.runtime import ProcessPacket
-from pet_daemon.sessions import Sessions
+from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources.hooks import normalize_hook
 
 ROOT = Path(__file__).resolve().parents[1]

@@ -9,11 +9,11 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TypeVar, Unpack
 
-from pet_daemon.behavior import Behavior
+from pet_daemon.behavior.controller import Behavior
+from pet_daemon.behavior.sprites import Clip, Pack
 from pet_daemon.config import BehaviorConfig
 from pet_daemon.runtime import AnimationPacket, MotionPacket, OverlayPacket
-from pet_daemon.sessions import Sessions
-from pet_daemon.sprites import Clip, Pack
+from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.types import JSONObject
 from Tests.fixtures import BehaviorOptions, require
 

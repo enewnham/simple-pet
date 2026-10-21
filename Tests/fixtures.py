@@ -12,7 +12,7 @@ from pet_daemon.runtime import (
     Trigger,
     UserSentiment,
 )
-from pet_daemon.sessions import Sessions
+from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.storage import Memory
 from pet_daemon.work import WorkSubject
 

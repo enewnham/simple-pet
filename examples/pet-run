@@ -13,7 +13,7 @@ export PET_OWNER_PID="$$"
 PET_OWNER_STARTED="$(python3 - "$pet_root" "$$" <<'PY_OWNER'
 import sys
 sys.path.insert(0, sys.argv[1])
-from pet_daemon.processes import process_identity
+from pet_daemon.sessions.processes import process_identity
 identity = process_identity(int(sys.argv[2]))
 print(identity.started if identity else "")
 PY_OWNER

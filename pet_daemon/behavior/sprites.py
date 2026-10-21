@@ -2,8 +2,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import positive
-from .runtime import Point
+from ..config import positive
+from ..runtime import Point
 
 
 @dataclass(frozen=True)

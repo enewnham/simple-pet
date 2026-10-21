@@ -3,13 +3,13 @@ from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from typing import TypeGuard
 
-from .config import BehaviorConfig
+from ..config import BehaviorConfig
+from ..runtime import OverlayPacket, Point, RandomSource
+from ..sessions.tracking import Sessions
+from ..telemetry import event, trace, verbose
 from .execution import Action, Execution
 from .policy import ANIMATION_ROLES, REACTIONS, Candidate, Observation, Policy
-from .runtime import OverlayPacket, Point, RandomSource
-from .sessions import Sessions
 from .sprites import Clip, Pack
-from .telemetry import event, trace, verbose
 
 
 def finite_number(value: object) -> TypeGuard[float]:
