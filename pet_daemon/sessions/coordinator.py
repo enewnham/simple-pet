@@ -64,6 +64,8 @@ class ActivityCoordinator:
             key = result.session
             session = self.sessions.by_id[key]
             for reaction in self.reactions.handle(packet, result, self.sessions):
+                if session.parent and reaction.kind != "waiting":
+                    continue
                 if not sleeping:
                     self.behavior.react(reaction.kind, self.sessions, key)
                 self.queue_reaction(reaction, packet)

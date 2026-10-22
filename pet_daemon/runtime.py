@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NotRequired, Protocol, TypedDict
+from typing import TYPE_CHECKING, Literal, NotRequired, Protocol, TypedDict
 
 from .domain import Activity, CareKind, ExecutionOutcome, PetState, ProcessStatus
+
+type WaitingKind = Literal["permission", "question"]
 
 
 class ProcessPacket(TypedDict):
@@ -13,6 +15,7 @@ class ProcessPacket(TypedDict):
 
 
 class HookTextFields(TypedDict, total=False):
+    waiting_kind: WaitingKind
     parent: str
     parent_call: str
     call: str
@@ -155,6 +158,7 @@ class HookEvent:
     repository: str | None = None
     branch: str | None = None
     pull_request: str | None = None
+    waiting_kind: WaitingKind | None = None
 
     @property
     def source(self) -> str:
@@ -173,6 +177,8 @@ class HookEvent:
         }
         if self.parent is not None:
             packet["parent"] = self.parent
+        if self.waiting_kind is not None:
+            packet["waiting_kind"] = self.waiting_kind
         if self.parent_call is not None:
             packet["parent_call"] = self.parent_call
         if self.call is not None:
@@ -263,6 +269,9 @@ class SessionContext:
     outcome: ExecutionOutcome | None
     user_sentiment: UserSentiment | None = None
     connected_work: WorkStory | None = None
+    waiting_kind: WaitingKind | None = None
+    waiting_tool: str | None = None
+    waiting_prompt: str | None = None
 
     @property
     def input_wait_seconds(self) -> float:

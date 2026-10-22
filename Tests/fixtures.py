@@ -12,6 +12,7 @@ from pet_daemon.runtime import (
     SwarmActivity,
     Trigger,
     UserSentiment,
+    WaitingKind,
 )
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.storage import Memory
@@ -90,6 +91,9 @@ class SessionOptions(TypedDict, total=False):
     activity_uncertain: bool
     waiting_for_input: bool
     waiting_seconds: float | None
+    waiting_kind: WaitingKind | None
+    waiting_tool: str | None
+    waiting_prompt: str | None
     active_tools: tuple[ActiveTool, ...]
     progress: str
     failure: FailureSnapshot | None

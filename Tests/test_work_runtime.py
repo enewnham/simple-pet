@@ -256,6 +256,10 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "count",
                 "timestamp",
                 "changed_at",
+                "observed_at",
+                "artifacts",
+                "activity",
+                "summary",
                 "version",
                 "delivery_id",
             }
@@ -324,7 +328,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             if "codex:persistence" in subject.sessions
         )
 
-    async def test_native_agent_report_and_connected_pr_reach_accepted_commentary(
+    async def test_native_agent_report_reaches_commentary_without_publication_details(
         self,
     ) -> None:
         work_id = await self.native_work()
@@ -332,8 +336,13 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         speech = await self.packet(lambda packet: "delivery_id" in packet)
         payload = json.loads(self.requests[-1]["messages"][-1]["content"])
         self.assertIn("next I will document restart behavior", json.dumps(payload))
-        self.assertIn("Persist coding session context", json.dumps(payload))
-        self.assertIn("draft", json.dumps(payload).lower())
+        self.assertEqual(
+            payload["current_work"]["request"],
+            "Preserve coding session context across daemon restarts",
+        )
+        self.assertNotIn("Persist coding session context", json.dumps(payload))
+        self.assertNotIn("draft", json.dumps(payload).lower())
+        self.assert_human_context(payload)
         self.assertEqual(self.daemon.application.memory.speech(), [])
         await self.accept(speech)
         outcome = require(
@@ -403,7 +412,8 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.schedule_routine()
         await self.accept(await self.packet(lambda packet: "delivery_id" in packet))
         self.assertEqual(len(self.requests), 2)
-        self.assertIn("MERGED", json.dumps(self.requests[-1]))
+        self.assertNotIn("MERGED", json.dumps(self.requests[-1]))
+        self.assertIn("update the examples", json.dumps(self.requests[-1]["messages"]))
 
     async def test_superseded_report_discards_pending_commentary(self) -> None:
         await self.native_work()

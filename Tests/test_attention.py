@@ -23,6 +23,7 @@ from pet_daemon.runtime import (
 from pet_daemon.sessions.reactions import SessionReaction
 from pet_daemon.storage.memory import HistoryRecord
 from pet_daemon.work import WorkStory, WorkSubject
+from pet_daemon.work.views import SessionContribution
 from Tests.fixtures import (
     capture_snapshot,
     require,
@@ -63,6 +64,132 @@ class AttentionTests(unittest.TestCase):
             chosen.append(selected.id)
             self.attention.scheduled(selected.id)
         self.assertEqual(chosen, ["cli:newer", "cli:older", "cli:newer", "cli:older"])
+
+    def connected_snapshot(self, *sessions: SessionContext) -> PetContext:
+        root, *children = sessions
+        subject = WorkSubject(
+            root.id,
+            WorkSubjectKind.WORK,
+            max(session.changed_at for session in sessions),
+            "one",
+            WorkStory(
+                root.id,
+                "Complete the request",
+                "one",
+                sessions=tuple(SessionContribution(child.goal) for child in children),
+            ),
+            tuple(session.id for session in sessions),
+        )
+        return capture_snapshot(sessions_snapshot(*sessions), work=(subject,))
+
+    def test_routine_focuses_the_root_with_descendant_activity_and_reports(
+        self,
+    ) -> None:
+        snapshot = self.connected_snapshot(
+            session_snapshot(id="cli:root", quiet_seconds=60),
+            session_snapshot(
+                id="cli:child", parent="cli:root", turn_active=True, goal="Review code"
+            ),
+            session_snapshot(
+                id="cli:nested", parent="cli:child", turn_active=True, goal="Run tests"
+            ),
+        )
+        selected = self.attention.select(snapshot)
+        self.assertEqual(require(selected.focus_session).id, "cli:root")
+        self.assertFalse(require(selected.focus_session).turn_active)
+        self.assertEqual(
+            {session.id for session in selected.context_sessions},
+            {"cli:child", "cli:nested"},
+        )
+        self.assertEqual(
+            [item.scope for item in require(selected.subject).story.sessions],
+            ["Review code", "Run tests"],
+        )
+        self.assertTrue(selected.supported(snapshot))
+
+    def test_click_follows_active_descendants_with_a_finished_root(self) -> None:
+        snapshot = self.connected_snapshot(
+            session_snapshot(id="cli:root", outcome=ExecutionOutcome.SUCCESS),
+            session_snapshot(id="cli:child", parent="cli:root", turn_active=True),
+            session_snapshot(id="cli:nested", parent="cli:child", turn_active=True),
+        )
+        selected = self.attention.select(snapshot, SpeechReason.CLICK)
+        self.assertEqual(require(selected.focus_session).id, "cli:root")
+        self.assertEqual(selected.situation, "click_working")
+        self.assertFalse(require(selected.focus_session).turn_active)
+        self.assertEqual(
+            require(selected.focus_session).outcome, ExecutionOutcome.SUCCESS
+        )
+        self.assertTrue(selected.supported(snapshot))
+        finished = replace(
+            snapshot,
+            sessions=tuple(
+                replace(session, turn_active=False) for session in snapshot.sessions
+            ),
+        )
+        self.assertFalse(selected.supported(finished))
+        self.assertEqual(
+            self.attention.select(finished, SpeechReason.CLICK).situation, "click_idle"
+        )
+
+    def test_click_focuses_the_oldest_waiting_descendant(self) -> None:
+        snapshot = self.connected_snapshot(
+            session_snapshot(id="cli:root", turn_active=True),
+            session_snapshot(
+                id="cli:child",
+                parent="cli:root",
+                waiting_for_input=True,
+                waiting_seconds=30,
+            ),
+            session_snapshot(
+                id="cli:nested",
+                parent="cli:child",
+                waiting_for_input=True,
+                waiting_seconds=5,
+            ),
+        )
+        self.attention.scheduled("cli:child")
+        selected = self.attention.select(snapshot, SpeechReason.CLICK)
+        self.assertEqual(require(selected.focus_session).id, "cli:child")
+        self.assertEqual(selected.situation, "click_waiting")
+        self.assertTrue(selected.supported(snapshot))
+        targeted = replace(snapshot, trigger=SessionTrigger("cli:nested"))
+        selected = self.attention.select(targeted, SpeechReason.CHECK_IN)
+        self.assertEqual(require(selected.focus_session).id, "cli:nested")
+        self.assertEqual(selected.situation, "check_in_waiting")
+
+    def test_check_in_retains_descendant_context_for_an_eligible_root(self) -> None:
+        snapshot = self.connected_snapshot(
+            session_snapshot(id="cli:root", turn_active=True),
+            session_snapshot(
+                id="cli:child",
+                parent="cli:root",
+                waiting_for_input=True,
+                waiting_seconds=30,
+            ),
+        )
+        selected = self.attention.select(
+            snapshot, SpeechReason.CHECK_IN, eligible=("cli:root",)
+        )
+        self.assertEqual(require(selected.focus_session).id, "cli:root")
+        self.assertEqual(
+            [session.id for session in selected.context_sessions], ["cli:child"]
+        )
+
+    def test_an_unavailable_parent_does_not_promote_child_activity_to_focus(
+        self,
+    ) -> None:
+        child = session_snapshot(id="cli:child", parent="cli:missing", turn_active=True)
+        snapshot = capture_snapshot(sessions_snapshot(child))
+        self.assertIsNone(self.attention.select(snapshot).focus_session)
+        self.assertEqual(
+            self.attention.select(snapshot, SpeechReason.CLICK).situation, "click_idle"
+        )
+        waiting = replace(child, waiting_for_input=True, waiting_seconds=10)
+        snapshot = replace(snapshot, sessions=(waiting,))
+        self.assertEqual(
+            require(self.attention.select(snapshot).focus_session).id, "cli:child"
+        )
 
     def test_explicit_input_precedes_active_work(self) -> None:
         waiting = session_snapshot(

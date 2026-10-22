@@ -16,6 +16,7 @@ from ..runtime import (
     SessionContext,
     SwarmActivity,
     UserSentiment,
+    WaitingKind,
 )
 from ..work.models import ExecutionEvidence, IntentEvidence, ProgressEvidence
 from ..work.observations import SessionObservation
@@ -87,6 +88,9 @@ class AgentSession:
     waiting: bool = False
     waiting_call: str | None = None
     waiting_since: float | None = None
+    waiting_kind: WaitingKind | None = None
+    waiting_tool: str | None = None
+    waiting_prompt: str | None = None
     last_check_in: float | None = None
     owner: ProcessIdentity | None = None
     presence: ProcessStatus = ProcessStatus.UNKNOWN
@@ -254,6 +258,9 @@ class Sessions:
                         session.waiting = True
                         session.waiting_call = other.waiting_call
                         session.waiting_since = other.waiting_since
+                        session.waiting_kind = other.waiting_kind
+                        session.waiting_tool = other.waiting_tool
+                        session.waiting_prompt = other.waiting_prompt
                         session.last_check_in = other.last_check_in
                     if adopt_waiting or other.last_seen > session.last_seen:
                         if other.phase:
@@ -352,6 +359,9 @@ class Sessions:
         session.waiting = False
         session.waiting_call = None
         session.waiting_since = None
+        session.waiting_kind = None
+        session.waiting_tool = None
+        session.waiting_prompt = None
         session.last_check_in = None
         self.members.add(key)
         log.info(
@@ -405,6 +415,9 @@ class Sessions:
         session.waiting = False
         session.waiting_call = None
         session.waiting_since = None
+        session.waiting_kind = None
+        session.waiting_tool = None
+        session.waiting_prompt = None
 
     def _ignored(
         self,
@@ -673,6 +686,9 @@ class Sessions:
                     session.waiting_since = now
                 session.waiting = True
                 session.waiting_call = event.call
+                session.waiting_kind = event.waiting_kind
+                session.waiting_tool = event.tool
+                session.waiting_prompt = event.progress
                 session.last_tool = (
                     event.tool if event.tool is not None else session.last_tool
                 )
@@ -680,6 +696,9 @@ class Sessions:
             session.waiting = False
             session.waiting_call = None
             session.waiting_since = None
+            session.waiting_kind = None
+            session.waiting_tool = None
+            session.waiting_prompt = None
         if session.waiting and (
             waiting_since is None or waiting_call != session.waiting_call
         ):
@@ -947,6 +966,9 @@ class Sessions:
                     waiting_seconds=None
                     if session.waiting_since is None
                     else round(now - session.waiting_since),
+                    waiting_kind=session.waiting_kind,
+                    waiting_tool=session.waiting_tool,
+                    waiting_prompt=session.waiting_prompt,
                     active_tools=tuple(
                         ActiveTool(
                             call=call_id,

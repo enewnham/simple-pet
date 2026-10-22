@@ -13,15 +13,19 @@ from pet_daemon.commentary.context import CommentaryPayload, PreparedCommentary
 from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.config import Config
 from pet_daemon.domain import (
+    Activity,
     ArtifactKind,
     CareKind,
+    EvidenceKind,
+    EvidenceSource,
     ExecutionOutcome,
     ModelPurpose,
     ProcessStatus,
     PullRequestState,
     SpeechReason,
+    SpeechSituation,
 )
-from pet_daemon.runtime import CareTrigger, HookEvent, PetContext
+from pet_daemon.runtime import ActiveTool, CareTrigger, HookEvent, PetContext
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.storage import Memory
 from pet_daemon.work import WorkSubject
@@ -33,7 +37,14 @@ from pet_daemon.work.observations import (
     PullRequest,
     PullRequestObservation,
 )
-from pet_daemon.work.views import ArtifactContext
+from pet_daemon.work.views import (
+    ArtifactContext,
+    EvidenceView,
+    ExecutionView,
+    IntentView,
+    ProgressView,
+    SessionContribution,
+)
 from Tests.fixtures import (
     SessionOptions,
     capture_snapshot,
@@ -109,18 +120,24 @@ class ContextTests(unittest.TestCase):
         self.config.prompt_target_bytes = 1
         before = deepcopy(self.snapshot)
         prepared = self.prepare()
-        focus = self.payload(prepared)["focus_session"]
-        assert focus is not None
-        self.assertEqual(focus["recent_requests"], ["Keep the public API stable"])
-        self.assertEqual(focus["summary"], "Implement the parser.")
-        self.assertEqual(focus["progress"], "Checking parser compatibility")
+        payload = self.payload(prepared)
+        self.assertEqual(
+            payload["current_work"]["request"], "Keep the public API stable"
+        )
+        self.assertEqual(
+            payload["current_moment"]["reported_progress"],
+            "Checking parser compatibility",
+        )
+        self.assertNotIn("earlier_context", payload)
         self.assertEqual(self.snapshot, before)
 
     def test_available_budget_keeps_requests_in_chronological_order(self) -> None:
-        focus = self.payload(self.prepare())["focus_session"]
-        assert focus is not None
+        payload = self.payload(self.prepare())
         self.assertEqual(
-            focus["recent_requests"], list(self.snapshot.sessions[0].recent_requests)
+            payload["current_work"]["request"], "Keep the public API stable"
+        )
+        self.assertEqual(
+            payload["earlier_context"], [{"request": "Explore parsing options"}]
         )
 
     def test_manifest_ignores_an_omitted_session_changing(self) -> None:
@@ -135,7 +152,6 @@ class ContextTests(unittest.TestCase):
             ),
         )
         prepared = self.prepare()
-        self.assertEqual(prepared.support.session_ids, ("cli:parser",))
         self.update_session(1, progress="Renderer completed", turn_active=False)
         self.assertTrue(prepared.support.valid(self.current_snapshot()))
 
@@ -174,9 +190,8 @@ class ContextTests(unittest.TestCase):
         self.work = self.memory.connected_work(self.snapshot)
         prepared = self.prepare()
         payload = self.payload(prepared)
-        self.assertIsNone(payload["focus_session"])
         self.assertEqual(
-            payload["focus_work"]["intent"], "Preserve parser compatibility"
+            payload["current_work"]["request"], "Preserve parser compatibility"
         )
         self.assertTrue(prepared.support.valid(self.current_snapshot()))
 
@@ -195,8 +210,15 @@ class ContextTests(unittest.TestCase):
     ) -> None:
         prepared = self.prepare(context="Inspect the parser result")
         payload = self.payload(prepared)
-        self.assertEqual(payload["context"], "Inspect the parser result")
-        self.assertIsNone(payload["focus_session"])
+        self.assertEqual(
+            payload,
+            {
+                "current_moment": {
+                    "kind": "explicit_context",
+                    "text": "Inspect the parser result",
+                }
+            },
+        )
         self.assertNotIn(
             "Inspect the parser result", json.dumps(prepared.request["system"])
         )
@@ -265,7 +287,7 @@ class ContextTests(unittest.TestCase):
         self.assertNotIn('"checkout"', encoded)
         self.assertNotIn('"/parser"', encoded)
         self.assertNotIn("cli:parser", encoded)
-        self.assertIn("https://example.test/team/parser/pull/42", encoded)
+        self.assertNotIn("https://example.test/team/parser/pull/42", encoded)
 
     def test_head_metadata_does_not_invalidate_the_agent_story(self) -> None:
         self.output()
@@ -273,13 +295,15 @@ class ContextTests(unittest.TestCase):
         self.output(head="two")
         self.assertTrue(prepared.support.valid(self.current_snapshot()))
 
-    def test_supplied_pull_request_state_invalidates_changed_context(self) -> None:
+    def test_omitted_pull_request_state_does_not_invalidate_commentary(self) -> None:
         self.output()
         prepared = self.prepare()
         self.output(state=PullRequestState.MERGED)
-        self.assertFalse(prepared.support.valid(self.current_snapshot()))
+        self.assertTrue(prepared.support.valid(self.current_snapshot()))
 
-    def test_exact_pull_request_refresh_supplies_one_current_state(self) -> None:
+    def test_pull_request_refresh_keeps_artifact_metadata_out_of_commentary(
+        self,
+    ) -> None:
         self.output()
         pr = PullRequest(
             42,
@@ -291,7 +315,7 @@ class ContextTests(unittest.TestCase):
         self.memory.work.observe(PullRequestObservation(pr.url, pr, 1001))
         self.work = self.memory.connected_work(self.snapshot)
         encoded = json.dumps(self.payload(self.prepare()))
-        self.assertIn(PullRequestState.MERGED, encoded)
+        self.assertNotIn(PullRequestState.MERGED, encoded)
         self.assertNotIn("OPEN", encoded)
 
     def test_new_artifact_context_does_not_invalidate_captured_story(self) -> None:
@@ -324,10 +348,11 @@ class ContextTests(unittest.TestCase):
         self.output()
         self.update_session(connected_work=self.work[0].story)
         payload = self.payload(self.prepare())
-        self.assertIn("focus_work", payload)
-        focus = payload["focus_session"]
-        assert focus is not None
-        self.assertNotIn("connected_work", focus)
+        self.assertEqual(
+            payload["current_work"]["request"], "Make session tracking survive restarts"
+        )
+        self.assertNotIn("focus_work", payload)
+        self.assertNotIn("focus_session", payload)
 
     def test_resumed_work_invalidates_a_quiet_care_remark(self) -> None:
         self.snapshot = sessions_snapshot()
@@ -356,3 +381,313 @@ class ContextTests(unittest.TestCase):
         prepared = self.prepare()
         self.update_session(summary="The parser preserves its public API.")
         self.assertTrue(prepared.support.valid(self.current_snapshot()))
+
+    def test_commentary_omits_cached_summaries_empty_fields_and_artifacts(self) -> None:
+        self.output()
+        self.update_session(
+            summary="No implementation results have been reported yet.",
+            progress="",
+            recent_requests=(),
+        )
+        payload = self.payload(self.prepare())
+        self.assertEqual(set(payload), {"current_work", "current_moment"})
+        encoded = json.dumps(payload)
+        for excluded in (
+            "summary",
+            "observed_at",
+            "artifacts",
+            "branch",
+            "other_sessions",
+            "No implementation results",
+        ):
+            self.assertNotIn(excluded, encoded)
+        self.assertNotIn(': ""', encoded)
+        self.assertNotIn("null", encoded)
+        self.assertNotIn("[]", encoded)
+
+    def test_earlier_reports_do_not_describe_the_current_request(self) -> None:
+        self.output()
+        self.work = tuple(
+            replace(
+                subject,
+                story=replace(
+                    subject.story,
+                    requests=(
+                        EvidenceView(
+                            EvidenceSource.USER,
+                            EvidenceKind.INTENT,
+                            IntentView("Build a log explorer"),
+                            900,
+                        ),
+                    ),
+                    activity=(
+                        EvidenceView(
+                            EvidenceSource.HARNESS,
+                            EvidenceKind.PROGRESS,
+                            ProgressView("Finished simplifying log labels"),
+                            800,
+                        ),
+                    ),
+                    sessions=(
+                        SessionContribution(
+                            "Audit tests",
+                            requests=(
+                                EvidenceView(
+                                    EvidenceSource.HARNESS,
+                                    EvidenceKind.INTENT,
+                                    IntentView("Audit tests"),
+                                    750,
+                                ),
+                            ),
+                            activity=(
+                                EvidenceView(
+                                    EvidenceSource.HARNESS,
+                                    EvidenceKind.PROGRESS,
+                                    ProgressView("Found two redundant assertions"),
+                                    850,
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            for subject in self.work
+        )
+        payload = self.payload(self.prepare())
+        self.assertEqual(payload["current_work"]["request"], "Build a log explorer")
+        self.assertNotIn("reported_progress", payload["current_moment"])
+        self.assertEqual(
+            payload["earlier_context"],
+            [
+                {
+                    "reported_progress": "Finished simplifying log labels",
+                    "age": "3 minutes ago",
+                },
+                {
+                    "reported_progress": "Found two redundant assertions",
+                    "age": "2 minutes ago",
+                    "scope": "Audit tests",
+                },
+            ],
+        )
+        self.assertNotIn("observed_at", json.dumps(payload))
+
+    def test_waiting_reports_only_the_current_input_request(self) -> None:
+        self.update_session(
+            waiting_for_input=True,
+            waiting_seconds=5,
+            waiting_kind="question",
+            waiting_prompt="Which examples should I use?",
+            progress="Finished an older task",
+        )
+        moment = self.payload(self.prepare())["current_moment"]
+        self.assertEqual(moment["kind"], "input_requested")
+        self.assertEqual(moment["reported_progress"], "Which examples should I use?")
+        self.update_session(
+            waiting_kind="permission",
+            waiting_prompt=None,
+            waiting_tool="Run the local browser check",
+        )
+        moment = self.payload(self.prepare())["current_moment"]
+        self.assertEqual(moment["kind"], "permission_request")
+        self.assertEqual(moment["tool"], "Run the local browser check")
+        self.assertNotIn("reported_progress", moment)
+
+    def test_running_check_in_rejects_a_replacement_call_with_the_same_command(
+        self,
+    ) -> None:
+        self.update_session(
+            active_tools=(ActiveTool("first", "Run tests", Activity.TESTING, 180),)
+        )
+        snapshot = self.current_snapshot()
+        selection = replace(
+            self.attention.select(snapshot, SpeechReason.ROUTINE),
+            situation=SpeechSituation.CHECK_IN_RUNNING,
+        )
+        prepared = self.cognition.prompts.prepare(
+            snapshot, selection, self.cognition.request
+        )
+        self.update_session(
+            active_tools=(ActiveTool("second", "Run tests", Activity.TESTING, 10),)
+        )
+        self.assertFalse(prepared.support.valid(self.current_snapshot()))
+
+    def test_child_report_keeps_the_assignment_observed_before_its_result(self) -> None:
+        self.output()
+        report = EvidenceView(
+            EvidenceSource.HARNESS,
+            EvidenceKind.PROGRESS,
+            ProgressView("Found two redundant assertions"),
+            850,
+        )
+        earlier_assignment = EvidenceView(
+            EvidenceSource.HARNESS, EvidenceKind.INTENT, IntentView("Audit tests"), 800
+        )
+        current_assignment = EvidenceView(
+            EvidenceSource.HARNESS,
+            EvidenceKind.INTENT,
+            IntentView("Check the explorer website"),
+            900,
+        )
+        child = SessionContribution(
+            "Check the explorer website",
+            requests=(earlier_assignment, current_assignment),
+            activity=(report,),
+        )
+        self.work = tuple(
+            replace(subject, story=replace(subject.story, sessions=(child,)))
+            for subject in self.work
+        )
+        payload = self.payload(self.prepare())
+        self.assertEqual(payload["earlier_context"][-1]["scope"], "Audit tests")
+        child_without_earlier_assignment = replace(
+            child, requests=(current_assignment,)
+        )
+        self.work = tuple(
+            replace(
+                subject,
+                story=replace(
+                    subject.story, sessions=(child_without_earlier_assignment,)
+                ),
+            )
+            for subject in self.work
+        )
+        payload = self.payload(self.prepare())
+        self.assertEqual(payload["earlier_context"][-1]["scope"], "child assignment")
+
+    def test_cancelled_routine_work_preserves_the_terminal_outcome(self) -> None:
+        self.update_session(
+            turn_active=False,
+            outcome=ExecutionOutcome.CANCELLED,
+            progress="Started checking parser behavior",
+        )
+        moment = self.payload(self.prepare())["current_moment"]
+        self.assertEqual(moment["kind"], "work_update")
+        self.assertEqual(moment["state"], "quiet")
+        self.assertEqual(moment["outcome"], "cancelled")
+
+    def test_running_check_in_omits_an_unknown_tool_name(self) -> None:
+        self.update_session(
+            active_tools=(ActiveTool("first", "", Activity.COMMAND, 180),)
+        )
+        snapshot = self.current_snapshot()
+        selection = replace(
+            self.attention.select(snapshot, SpeechReason.ROUTINE),
+            situation=SpeechSituation.CHECK_IN_RUNNING,
+        )
+        prepared = self.cognition.prompts.prepare(
+            snapshot, selection, self.cognition.request
+        )
+        moment = self.payload(prepared)["current_moment"]
+        self.assertNotIn("tool", moment)
+        self.assertEqual(moment["elapsed"], "3 minutes")
+
+    def test_historical_reports_preserve_terminal_outcomes_without_duplicates(
+        self,
+    ) -> None:
+        self.output()
+        progress = EvidenceView(
+            EvidenceSource.HARNESS,
+            EvidenceKind.PROGRESS,
+            ProgressView("Checked parser compatibility"),
+            800,
+        )
+        ended = EvidenceView(
+            EvidenceSource.HARNESS,
+            EvidenceKind.EXECUTION,
+            ExecutionView(
+                "turn ended", "Checked parser compatibility", ExecutionOutcome.CANCELLED
+            ),
+            800,
+        )
+        request = EvidenceView(
+            EvidenceSource.USER,
+            EvidenceKind.INTENT,
+            IntentView("Build a log explorer"),
+            900,
+        )
+        self.work = tuple(
+            replace(
+                subject,
+                story=replace(
+                    subject.story,
+                    requests=(request,),
+                    activity=(progress, ended),
+                    sessions=(
+                        SessionContribution("Audit tests", activity=(ended, progress)),
+                    ),
+                ),
+            )
+            for subject in self.work
+        )
+        earlier = self.payload(self.prepare())["earlier_context"]
+        self.assertEqual(len(earlier), 2)
+        self.assertEqual(earlier[0]["outcome"], "cancelled")
+        self.assertEqual(earlier[1]["outcome"], "cancelled")
+        self.assertEqual(earlier[1]["scope"], "child assignment")
+
+    def test_followup_keeps_its_prior_request_ahead_of_optional_child_reports(
+        self,
+    ) -> None:
+        self.output()
+        original_request = EvidenceView(
+            EvidenceSource.USER,
+            EvidenceKind.INTENT,
+            IntentView("Build a log explorer"),
+            700,
+        )
+        followup = EvidenceView(
+            EvidenceSource.USER, EvidenceKind.INTENT, IntentView("proceed"), 900
+        )
+        children = tuple(
+            SessionContribution(
+                f"Assignment {index}",
+                activity=(
+                    EvidenceView(
+                        EvidenceSource.HARNESS,
+                        EvidenceKind.PROGRESS,
+                        ProgressView(
+                            f"Report {index}: " + "Checked parser behavior. " * 8
+                        ),
+                        950,
+                    ),
+                ),
+            )
+            for index in range(6)
+        )
+        self.work = tuple(
+            replace(
+                subject,
+                story=replace(
+                    subject.story,
+                    requests=(original_request, followup),
+                    sessions=children,
+                ),
+            )
+            for subject in self.work
+        )
+        prepared = self.prepare()
+        payload = self.payload(prepared)
+        self.assertEqual(payload["current_work"]["request"], "proceed")
+        self.assertEqual(len(payload["earlier_context"]), 6)
+        self.assertEqual(
+            payload["earlier_context"][0]["request"], "Build a log explorer"
+        )
+        self.assertEqual(
+            payload["earlier_context"][1]["reported_progress"],
+            "Report 1: " + "Checked parser behavior. " * 7 + "Checked parser behavior.",
+        )
+        self.assertEqual(
+            payload["earlier_context"][-1]["reported_progress"],
+            "Report 5: " + "Checked parser behavior. " * 7 + "Checked parser behavior.",
+        )
+        one_request_payload = deepcopy(payload)
+        one_request_payload["earlier_context"] = payload["earlier_context"][:1]
+        one_request = self.cognition.request(
+            one_request_payload, prepared.request["system"]
+        )
+        self.config.prompt_target_bytes = (
+            len(json.dumps(one_request, ensure_ascii=False).encode("utf-8")) + 1
+        )
+        limited = self.payload(self.prepare())
+        self.assertEqual(limited["earlier_context"], payload["earlier_context"][:1])

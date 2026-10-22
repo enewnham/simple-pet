@@ -100,6 +100,14 @@ class AttentionSelection:
                 members.add(current.subject.id)
             if current.focus_session.id not in members:
                 return False
+        if self.situation == SpeechSituation.CLICK_WORKING:
+            return any(
+                session.turn_active and not session.activity_uncertain
+                for session in (
+                    *((current.focus_session,) if current.focus_session else ()),
+                    *current.context_sessions,
+                )
+            )
         return True
 
     def refresh(self, snapshot: PetContext) -> "AttentionSelection":
@@ -247,13 +255,16 @@ class Attention:
             candidates = []
             for item in subjects:
                 sessions = _sessions(item, snapshot)
+                eligible_sessions = sessions
                 if eligible is not None:
-                    sessions = [
+                    eligible_sessions = [
                         session for session in sessions if session.id in eligible
                     ]
-                    if not sessions and item.id not in eligible:
+                    if not eligible_sessions and item.id not in eligible:
                         continue
-                tier = min((_session_tier(session) for session in sessions), default=5)
+                tier = min(
+                    (_session_tier(session) for session in eligible_sessions), default=5
+                )
                 candidates.append((item, sessions, tier))
             targeted = [
                 item
@@ -285,20 +296,32 @@ class Attention:
                         item[0].id,
                     ),
                 )
-                if target_session:
-                    focus = next(
-                        (
-                            session
-                            for session in sessions
-                            if session.id == target_session
-                        ),
-                        None,
-                    )
-                if focus is None and sessions:
+                preferred = [
+                    session
+                    for session in sessions
+                    if session.id == target_session
+                    and (session.parent is None or session.waiting_for_input)
+                ]
+                if not preferred and not target_session:
+                    preferred = [
+                        session
+                        for session in sessions
+                        if session.waiting_for_input
+                        and (eligible is None or session.id in eligible)
+                    ]
+                if not preferred:
+                    preferred = [
+                        session for session in sessions if session.id == subject.id
+                    ]
+                if preferred:
                     focus = min(
-                        sessions,
+                        preferred,
                         key=lambda session: (
                             _session_tier(session),
+                            -session.input_wait_seconds
+                            if reason == SpeechReason.CLICK
+                            and session.waiting_for_input
+                            else 0,
                             self.selections.get(session.id, -1),
                             -session.input_wait_seconds
                             if session.waiting_for_input
@@ -322,7 +345,8 @@ class Attention:
                 sessions = [
                     session
                     for session in snapshot.sessions
-                    if eligible is None or session.id in eligible
+                    if (eligible is None or session.id in eligible)
+                    and (session.parent is None or session.waiting_for_input)
                 ]
                 preferred = (
                     [session for session in sessions if session.id == target_session]
@@ -352,7 +376,7 @@ class Attention:
             if reason == SpeechReason.CLICK and not any(
                 session.waiting_for_input
                 or (session.turn_active and not session.activity_uncertain)
-                for session in ((focus,) if focus else ())
+                for session in ((focus, *others) if focus else ())
             ):
                 subject, focus, others = None, None, ()
         situation: SpeechSituation

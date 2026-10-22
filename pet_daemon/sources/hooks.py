@@ -60,6 +60,11 @@ def normalize_hook(packet: object) -> HookEvent | None:
         name in packet and not isinstance(packet[name], str) for name in TEXT_FIELDS
     ):
         return None
+    if "waiting_kind" in packet and packet["waiting_kind"] not in (
+        "permission",
+        "question",
+    ):
+        return None
     aliases = packet.get("aliases", [])
     if not isinstance(aliases, list) or not all(
         isinstance(alias, str) and alias for alias in aliases
@@ -99,4 +104,5 @@ def normalize_hook(packet: object) -> HookEvent | None:
         manual=bool(packet["manual"]) if "manual" in packet else None,
         owner=ProcessIdentity.parse(packet.get("owner")),
         exit_code=code if type(code) is int else None,
+        waiting_kind=validated.get("waiting_kind"),
     )

@@ -349,9 +349,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             snapshot, SpeechReason.PROMPT
         )
         payload = self.daemon.application.cognition.prompts.prompt(snapshot, selection)
-        self.assertLessEqual(
-            require(require(payload["focus_session"])["user_sentiment"])["compound"],
-            -0.45,
+        self.assertEqual(
+            payload["current_work"]["request"],
+            "This is terrible. Stop making this worse.",
         )
 
         self.daemon.receive(encoded)
@@ -609,8 +609,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.comment(SpeechReason.EXPLICIT, "Look at the parser")
         payload = json.loads(self.requests[-1]["messages"][-1]["content"])
         self.assertNotIn("repetition", payload)
-        self.assertIsNone(payload["focus_session"])
-        self.assertEqual(payload["context"], "Look at the parser")
+        self.assertEqual(
+            payload["current_moment"],
+            {"kind": "explicit_context", "text": "Look at the parser"},
+        )
 
     async def test_clear_speech_discards_pending_remark_and_preserves_session_summary(
         self,
@@ -784,20 +786,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.daemon.application.sessions.by_id["cli:one"].presence, "exited"
         )
         self.assertFalse(self.daemon.application.sessions.by_id["cli:one"].active)
-        self.assertFalse(payload["focus_session"]["turn_active"])
-        self.assertEqual(payload["focus_session"]["presence"], "exited")
-        self.assertNotIn("connected_work", payload["focus_session"])
-        self.assertEqual(payload["other_sessions"], [])
-        work = payload["focus_work"]
-        self.assertEqual(work["intent"], "Improve parser persistence")
+        self.assertEqual(payload["current_moment"]["state"], "quiet")
         self.assertEqual(
-            next(item for item in work["artifacts"] if item["kind"] == "pull_request")[
-                "title"
-            ],
-            "Persist parser sessions",
+            payload["current_work"]["request"], "Improve parser persistence"
         )
+        self.assertNotIn("Persist parser sessions", json.dumps(payload))
 
-    async def test_pull_request_merge_discards_commentary_generated_for_pending_work(
+    async def test_omitted_pull_request_changes_preserve_work_commentary(
         self,
     ) -> None:
         await self.repository_fixture()
@@ -830,9 +825,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 for item in self.repositories.snapshot()
             )
         )
-        self.assertEqual(self.daemon.application.memory.speech(), [])
-        self.assertFalse(
-            any(packet.get("text") == self.speech for packet in await self.drain())
+        packet = await self.packet(lambda packet: "text" in packet)
+        self.assertEqual(
+            [record.text for record in self.daemon.application.memory.speech()],
+            [packet["text"]],
         )
 
     async def finish_observation_after_other_session_changes(self) -> CommentaryPayload:
@@ -864,7 +860,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_omitted_session_changes_preserve_focused_commentary(self) -> None:
         self.config.prompt_target_bytes = 1
         payload = await self.finish_observation_after_other_session_changes()
-        self.assertEqual(payload["other_sessions"], [])
+        self.assertNotIn("other_sessions", payload)
         self.assertEqual(
             [row.text for row in self.daemon.application.memory.speech()],
             [self.speech],
@@ -875,7 +871,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unrelated_work_stays_outside_focused_commentary(self) -> None:
         payload = await self.finish_observation_after_other_session_changes()
-        self.assertEqual(payload["other_sessions"], [])
+        self.assertNotIn("other_sessions", payload)
         self.assertNotIn("Review the renderer", json.dumps(payload))
         self.assertEqual(
             [row.text for row in self.daemon.application.memory.speech()],
@@ -951,8 +947,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.packet(lambda packet: packet.get("state") == "idle")
         await self.comment(SpeechReason.ROUTINE)
         payload = json.loads(self.requests[-1]["messages"][-1]["content"])
-        self.assertIsNone(payload["focus_session"])
-        self.assertEqual(payload["focus_work"]["intent"], "Improve parser persistence")
+        self.assertEqual(
+            payload["current_work"]["request"], "Improve parser persistence"
+        )
 
     async def test_repository_changes_without_agent_intent_do_not_create_commentary(
         self,
@@ -998,7 +995,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             key for key in self.daemon.application.sessions.by_id if key not in checked
         )
         payload = json.loads(self.requests[-1]["messages"][-1]["content"])
-        self.assertEqual(payload["focus_session"]["active_tools"][0]["tool"], "pytest")
+        self.assertEqual(payload["current_moment"]["tool"], "pytest")
         self.release.set()
         await self.wait_for(lambda: len(self.requests) == 2)
         payload = json.loads(self.requests[-1]["messages"][-1]["content"])
@@ -1221,9 +1218,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(speech["text"], self.speech)
         snapshot = json.loads(self.requests[0]["messages"][-1]["content"])
         self.assertEqual(request_reason(self.requests[-1]), "prompt")
-        self.assertEqual(
-            snapshot["focus_session"]["recent_requests"][-1], "Run local checks"
-        )
+        self.assertEqual(snapshot["current_work"]["request"], "Run local checks")
 
     async def test_click_requests_fresh_speech_without_waiting_for_routine_timer(
         self,
@@ -1264,7 +1259,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(speech["text"], self.speech)
         snapshot = json.loads(self.requests[-1]["messages"][-1]["content"])
         self.assertEqual(request_reason(self.requests[-1]), "click")
-        self.assertFalse(snapshot["sleeping"])
+        self.assertNotIn("sleeping", snapshot["current_moment"])
 
     async def test_prompt_wakes_a_nap_before_tool_work_starts(self) -> None:
         self.use_clock()
@@ -1378,7 +1373,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.requests), 2)
         self.assertEqual(
             [
-                json.loads(body["messages"][-1]["content"])["focus_session"]["progress"]
+                json.loads(body["messages"][-1]["content"])["current_moment"][
+                    "reported_progress"
+                ]
                 for body in self.requests
             ],
             ["Choose a strategy", "Choose a target"],
@@ -1411,8 +1408,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.requests), 2)
         self.assertEqual(len(self.daemon.application.cognition.memory.speech()), 1)
         self.assertEqual(
-            json.loads(self.requests[-1]["messages"][-1]["content"])["focus_session"][
-                "progress"
+            json.loads(self.requests[-1]["messages"][-1]["content"])["current_moment"][
+                "reported_progress"
             ],
             "Choose a target",
         )
@@ -1618,9 +1615,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.summary_requests), 2)
         payload = json.loads(self.summary_requests[-1]["messages"][0]["content"])
         self.assertEqual(
-            payload["recent_requests"][-1], "Investigate the parser timeout"
+            payload["current_work"]["request"], "Investigate the parser timeout"
         )
-        self.assertEqual(payload["historical_summary"], self.summary)
+        self.assertNotIn(self.summary, json.dumps(payload))
+        self.assertIn("Refactor the parser", json.dumps(payload["earlier_context"]))
         await self.comment(SpeechReason.COMPLETION)
         self.assertEqual(len(self.summary_requests), 2)
         self.assertEqual(len(self.requests), 3)
@@ -1665,8 +1663,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(lambda: self.daemon.application.task is None)
         self.assertEqual(len(self.summary_requests), 1)
         payload = json.loads(self.summary_requests[0]["messages"][0]["content"])
-        self.assertEqual(payload["initial_intent"], initial)
-        self.assertEqual(set(payload), {"initial_intent"})
+        self.assertEqual(payload["current_work"]["request"], initial)
+        self.assertEqual(set(payload), {"current_work"})
         self.assertNotIn("progress", payload)
         self.assertNotIn("historical_summary", payload)
         saved = require(self.daemon.application.cognition.memory.context("cli:one"))
@@ -1705,7 +1703,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(lambda: self.daemon.application.task is None)
         self.assertEqual(len(self.summary_requests), 2)
         payload = json.loads(self.summary_requests[-1]["messages"][0]["content"])
-        self.assertEqual(payload["initial_intent"], "Review hooks")
+        self.assertEqual(payload["current_work"]["request"], "Review hooks")
 
     async def test_silent_summary_informs_later_session_commentary(self) -> None:
         self.use_clock()
@@ -1734,10 +1732,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.speech = "The parser still needs validation."
         await self.comment(SpeechReason.EXPLICIT, "Check the parser")
         await self.packet(lambda packet: "text" in packet)
-        session = json.loads(self.requests[-1]["messages"][0]["content"])[
-            "focus_session"
-        ]
-        self.assertIsNone(session)
+        payload = json.loads(self.requests[-1]["messages"][0]["content"])
+        self.assertNotIn("current_work", payload)
         self.assertEqual(
             require(self.daemon.application.memory.context("cli:one")).summary,
             "Parser refactor awaits validation.",
@@ -1745,10 +1741,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.speech = "The parser context guides compatibility checks."
         await self.comment(SpeechReason.ROUTINE)
         await self.packet(lambda packet: "text" in packet)
-        session = json.loads(self.requests[-1]["messages"][0]["content"])[
-            "focus_session"
-        ]
-        self.assertEqual(session["summary"], "Parser refactor awaits validation.")
+        payload = json.loads(self.requests[-1]["messages"][0]["content"])
+        self.assertEqual(payload["current_work"]["request"], "Refactor the parser")
+        self.assertNotIn("Parser refactor awaits validation.", json.dumps(payload))
         self.assertEqual(len(self.requests), 3)
 
     async def test_first_request_summary_restores_bookkeeping_from_a_session_alias(
@@ -1801,8 +1796,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(lambda: self.daemon.application.task is None)
         self.assertEqual(len(self.summary_requests), 1)
         payload = json.loads(self.summary_requests[0]["messages"][0]["content"])
-        self.assertEqual(payload["initial_intent"], "Refactor the parser")
-        self.assertEqual(set(payload), {"initial_intent"})
+        self.assertEqual(payload["current_work"]["request"], "Refactor the parser")
+        self.assertEqual(set(payload), {"current_work"})
         self.assertNotIn("Keep its API unchanged", json.dumps(payload))
 
     async def test_subagent_inherited_context_does_not_consume_its_first_request_summary(
@@ -1813,15 +1808,30 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.packet(lambda packet: packet.get("text") == self.speech)
         await self.wait_for(lambda: self.daemon.application.task is None)
         self.event("subagent_start", session="child", parent="one")
+        await self.wait_for(
+            lambda: "cli:child" in self.daemon.application.sessions.by_id
+        )
+        self.assertEqual(len(self.requests), 1)
+        self.event("waiting", session="child", call="inherited-question")
         await self.packet(lambda packet: packet.get("text") == self.speech)
         await self.wait_for(lambda: self.daemon.application.task is None)
+        await self.comment(SpeechReason.PROMPT, trigger=SessionTrigger("cli:child"))
+        await self.packet(lambda packet: packet.get("text") == self.speech)
         self.assertEqual(len(self.summary_requests), 1)
         self.event("intent", session="child", goal="Inspect parser edge cases")
+        await self.wait_for(
+            lambda: not self.daemon.application.sessions.by_id["cli:child"].waiting
+        )
+        self.event("waiting", session="child", call="parser-question")
         await self.packet(lambda packet: packet.get("text") == self.speech)
         await self.wait_for(lambda: self.daemon.application.task is None)
+        await self.comment(SpeechReason.PROMPT, trigger=SessionTrigger("cli:child"))
+        await self.packet(lambda packet: packet.get("text") == self.speech)
         self.assertEqual(len(self.summary_requests), 2)
         payload = json.loads(self.summary_requests[-1]["messages"][0]["content"])
-        self.assertEqual(payload["initial_intent"], "Inspect parser edge cases")
+        self.assertEqual(
+            payload["current_work"]["request"], "Inspect parser edge cases"
+        )
         self.assertNotIn("Refactor the parser", json.dumps(payload))
 
     async def test_interleaved_work_keeps_separate_summaries_and_commentary(
@@ -1843,10 +1853,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(lambda: self.daemon.application.task is None)
         commentary = json.loads(self.requests[-1]["messages"][0]["content"])
         self.assertEqual(
-            commentary["focus_session"]["recent_requests"],
-            ["Review Python hooks for redundant handling"],
+            commentary["current_work"]["request"],
+            "Review Python hooks for redundant handling",
         )
-        self.assertEqual(commentary["other_sessions"], [])
+        self.assertNotIn("other_sessions", commentary)
         self.assertNotIn("Refactor the parser", json.dumps(commentary))
         for request, excluded in zip(self.summary_requests, ("Python hooks", "parser")):
             self.assertNotIn(excluded, request["messages"][0]["content"])
@@ -1864,11 +1874,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(lambda: self.daemon.application.task is None)
         commentary = json.loads(self.requests[-1]["messages"][0]["content"])
         self.assertEqual(
-            commentary["focus_session"]["recent_requests"],
-            ["Review Python hooks for redundant handling"],
+            commentary["current_work"]["request"],
+            "Review Python hooks for redundant handling",
         )
-        self.assertFalse(commentary["convergence"])
-        self.assertEqual(commentary["other_sessions"], [])
+        self.assertNotIn("convergence", commentary)
+        self.assertNotIn("other_sessions", commentary)
         self.assertTrue(self.daemon.application.sessions.by_id["cli:parser"].active)
         summary_count = len(self.summary_requests)
         await self.comment(SpeechReason.ROUTINE)
@@ -1908,9 +1918,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.requests), 2)
         payload = json.loads(self.requests[-1]["messages"][0]["content"])
         self.assertEqual(request_reason(self.requests[-1]), "prompt")
-        self.assertNotIn("initial_request", payload["focus_session"])
         self.assertEqual(
-            payload["focus_session"]["recent_requests"], ["Explain the counter limits"]
+            payload["current_work"]["request"], "Explain the counter limits"
         )
 
     async def test_followup_during_observation_refuses_stale_summary(self) -> None:
@@ -2051,11 +2060,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(lane.calls)
         payload = json.loads(self.requests[-1]["messages"][-1]["content"])
-        work = payload["focus_work"]
-        self.assertEqual(work["intent"], "Continue parser validation")
         self.assertEqual(
-            [request["text"] for request in work["requests"]],
-            ["Refactor the parser", "Continue parser validation"],
+            payload["current_work"]["request"], "Continue parser validation"
+        )
+        self.assertIn(
+            "Refactor the parser",
+            [item.get("request") for item in payload["earlier_context"]],
         )
 
     async def test_routine_observations_require_a_change_in_work(self) -> None:
@@ -2203,8 +2213,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             goal="Inspect parser",
             repo="/repo/parser",
         )
-        await self.packet(lambda packet: "text" in packet)
-        await self.wait_for(lambda: self.daemon.application.task is None)
+        await self.wait_for(
+            lambda: "claude:child" in self.daemon.application.sessions.by_id
+        )
         self.event(
             "tool_start",
             session="main",
@@ -2237,9 +2248,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: self.daemon.application.sessions.by_id["claude:child"].finished
         )
-        self.now += 2
-        await self.packet(lambda packet: "text" in packet)
-        self.assertEqual(request_reason(self.requests[-1]), "failure")
+        self.assertEqual(self.requests, [])
+        self.assertIsNone(self.daemon.application.attention.pending)
         failures = [
             row
             for row in self.daemon.application.cognition.memory.recent(limit=10)
@@ -2280,9 +2290,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 ]
             ),
         )
-        failure = json.loads(body["messages"][0]["content"])["focus_session"]["failure"]
-        self.assertEqual(failure["activity"], "testing")
-        self.assertEqual(failure["count"], 1)
+        moment = json.loads(body["messages"][0]["content"])["current_moment"]
+        self.assertEqual(moment, {"kind": "failed_call", "operation": "testing"})
 
     async def test_failed_renderer_delivery_is_absent_from_memory(self) -> None:
         Path(self.config.overlay_socket).unlink()
@@ -2308,13 +2317,15 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         speech = await self.packet(lambda packet: "text" in packet, timeout=2)
         snapshot = json.loads(self.requests[0]["messages"][-1]["content"])
         self.assertEqual(request_reason(self.requests[-1]), "completion")
-        self.assertEqual(snapshot["focus_session"]["outcome"], "success")
-        self.assertEqual(snapshot["focus_session"]["progress"], "Checks passed")
+        self.assertEqual(snapshot["current_moment"]["outcome"], "success")
+        self.assertEqual(
+            snapshot["current_moment"]["reported_progress"], "Checks passed"
+        )
         self.assertNotIn("activity", snapshot)
         self.assertEqual(speech["text"], self.speech)
         self.assertEqual(self.daemon.application.agent_activity.activity(), "working")
 
-    async def test_superseded_tool_activity_discards_pending_commentary(self) -> None:
+    async def test_unmentioned_tool_changes_preserve_work_commentary(self) -> None:
         self.slow = True
         self.event("tool_start", harness="codex", call="checks", tool="pytest")
         await self.packet(lambda packet: packet.get("state") == "working")
@@ -2327,8 +2338,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.release.set()
         await task
-        self.assertEqual(self.daemon.application.memory.speech(), [])
-        self.assertFalse(any(packet.get("text") for packet in await self.drain()))
+        self.assertEqual(
+            [record.text for record in self.daemon.application.memory.speech()],
+            [self.speech],
+        )
+        self.assertTrue(any(packet.get("text") for packet in await self.drain()))
 
     async def test_check_in_uses_each_tasks_quiet_time_and_repeats_after_the_interval(
         self,
@@ -2356,13 +2370,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(speech["text"], self.speech)
         snapshot = json.loads(self.requests[0]["messages"][-1]["content"])
         self.assertEqual(request_reason(self.requests[-1]), "check_in")
-        self.assertEqual(snapshot["focus_session"]["active_tools"][0]["tool"], "pytest")
+        self.assertEqual(snapshot["current_moment"]["tool"], "pytest")
         self.assertIsNotNone(
             self.daemon.application.sessions.by_id["codex:one"].last_check_in
         )
-        self.assertEqual(snapshot["other_sessions"], [])
+        self.assertNotIn("other_sessions", snapshot)
         self.assertTrue(self.daemon.application.sessions.by_id["cursor:two"].active)
-        self.assertEqual(snapshot["focus_session"]["quiet_for"], "5 minutes")
+        self.assertEqual(snapshot["current_moment"]["elapsed"], "5 minutes")
         self.now += 299
         self.event(
             "progress", session="two", harness="cursor", progress="Build continuing"
@@ -2372,7 +2386,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.now += 1
         await self.packet(lambda packet: "text" in packet)
         snapshot = json.loads(self.requests[1]["messages"][-1]["content"])
-        self.assertEqual(snapshot["focus_session"]["active_tools"][0]["tool"], "pytest")
+        self.assertEqual(snapshot["current_moment"]["tool"], "pytest")
 
     async def test_failed_check_in_waits_the_interval_before_retrying(self) -> None:
         self.use_clock()
@@ -2408,7 +2422,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.entered.wait(), 1)
         snapshot = json.loads(self.requests[0]["messages"][-1]["content"])
         self.assertEqual(request_reason(self.requests[0]), "check_in")
-        self.assertTrue(snapshot["focus_session"]["waiting_for_input"])
+        self.assertEqual(snapshot["current_moment"]["kind"], "waiting")
         self.event("progress", harness="claude", progress="Investigating the strategy")
         await self.wait_for(
             lambda: not self.daemon.application.sessions.by_id["claude:one"].waiting
@@ -2448,9 +2462,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.entered.wait(), 1)
         snapshot = json.loads(self.requests[0]["messages"][-1]["content"])
         self.assertEqual(request_reason(self.requests[-1]), "check_in")
-        self.assertTrue(snapshot["focus_session"]["waiting_for_input"])
+        self.assertEqual(snapshot["current_moment"]["kind"], "waiting")
         self.assertNotIn("activity", snapshot)
-        self.assertEqual(snapshot["focus_session"]["waiting_for"], "5 minutes")
+        self.assertEqual(snapshot["current_moment"]["elapsed"], "5 minutes")
         self.assertEqual(self.daemon.application.agent_activity.activity(), "working")
         self.now += 1
         self.event(
@@ -2506,8 +2520,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(snapshot.waiting_for_input)
         self.assertEqual(snapshot.waiting_seconds, 0)
         self.assertEqual(
-            json.loads(self.requests[-1]["messages"][-1]["content"])["focus_session"][
-                "progress"
+            json.loads(self.requests[-1]["messages"][-1]["content"])["current_moment"][
+                "reported_progress"
             ],
             "Choose a target",
         )
@@ -2684,7 +2698,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(hasattr(require(lane.failure), "detail"))
         await self.comment(SpeechReason.FAILURE)
         snapshot = json.loads(self.requests[-1]["messages"][-1]["content"])
-        self.assertEqual(snapshot["focus_session"]["failure"]["activity"], "command")
+        self.assertEqual(
+            snapshot["current_moment"], {"kind": "failed_call", "operation": "command"}
+        )
         self.assertNotIn("Exit code", json.dumps(snapshot))
 
     async def test_live_listener_is_preserved_and_owned_socket_cleans_up(self) -> None:

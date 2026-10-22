@@ -41,6 +41,7 @@ class ReceivedPacket(TypedDict, total=False):
     pull_request: str
     tool_name: str
     sentiment_text: str
+    waiting_kind: str
     outcome: str
     manual: bool
     owner: ProcessPacket
@@ -375,6 +376,140 @@ class NotifyTests(unittest.TestCase):
             )
             self.assertNotIn("turn", packet)
 
+    def test_child_turns_and_tools_stay_separate_from_the_parent(self) -> None:
+        for harness in ("claude", "codex"):
+            with self.subTest(harness=harness):
+                sessions = Sessions(time.monotonic)
+                for agent in ("", "first", "second"):
+                    identity = {"session_id": "parent"}
+                    if agent:
+                        identity["agent_id"] = agent
+                    self.run_hook(
+                        harness,
+                        "UserPromptSubmit",
+                        {**identity, "turn_id": agent or "parent", "prompt": "Inspect"},
+                    )
+                    self.assertIsNotNone(sessions.handle(self.receive()))
+                for event in ("PreToolUse", "PostToolUse"):
+                    for agent in ("first", "", "second"):
+                        name = agent or "parent"
+                        self.run_hook(
+                            harness,
+                            event,
+                            {
+                                "session_id": "parent",
+                                "agent_id": agent,
+                                "turn_id": name,
+                                "tool_use_id": name + "-call",
+                                "tool_name": "Bash",
+                            },
+                        )
+                        self.assertIsNotNone(sessions.handle(self.receive()))
+                    for name in ("parent", "first", "second"):
+                        session = sessions.by_id[f"{harness}:{name}"]
+                        self.assertEqual(session.turn, name)
+                        self.assertEqual(
+                            set(session.calls),
+                            {name + "-call"} if event == "PreToolUse" else set(),
+                        )
+                        self.assertEqual(
+                            session.parent,
+                            None if name == "parent" else f"{harness}:parent",
+                        )
+                self.run_hook(
+                    harness,
+                    "PreToolUse",
+                    {
+                        "session_id": "parent",
+                        "agent_id": "first",
+                        "turn_id": "stale-turn",
+                        "tool_use_id": "stale-call",
+                    },
+                )
+                self.assertIsNone(sessions.handle(self.receive()))
+                self.assertEqual(sessions.by_id[f"{harness}:first"].turn, "first")
+                self.assertFalse(sessions.by_id[f"{harness}:first"].calls)
+
+    def test_child_prompts_do_not_score_sentiment_and_input_requests_stay_child_scoped(
+        self,
+    ) -> None:
+        for harness in ("claude", "codex"):
+            with self.subTest(harness=harness):
+                identity = {"session_id": "parent", "agent_id": "child"}
+                self.run_hook(
+                    harness,
+                    "UserPromptSubmit",
+                    {**identity, "prompt": "This is terrible. Inspect the parser."},
+                )
+                packet = self.receive()
+                self.assertEqual(
+                    (packet["session"], packet["parent"]), ("child", "parent")
+                )
+                self.assertNotIn("sentiment_text", packet)
+                self.run_hook(
+                    harness,
+                    "PreToolUse",
+                    {
+                        **identity,
+                        "tool_name": "request_user_input",
+                        "tool_use_id": "ask",
+                    },
+                )
+                packet = self.receive()
+                self.assertEqual(
+                    (
+                        packet["session"],
+                        packet["parent"],
+                        packet["event"],
+                        packet["call"],
+                    ),
+                    ("child", "parent", "waiting", "ask"),
+                )
+                self.assertEqual(packet["waiting_kind"], "question")
+
+    def test_permission_waits_keep_their_command_separate_from_user_questions(
+        self,
+    ) -> None:
+        sessions = Sessions(time.monotonic)
+        for event, tool, expected in (
+            ("PermissionRequest", "Bash", "permission"),
+            ("PreToolUse", "request_user_input", "question"),
+        ):
+            with self.subTest(event=event):
+                self.run_hook(
+                    "codex",
+                    event,
+                    {
+                        "session_id": "worker",
+                        "tool_name": tool,
+                        "tool_input": {
+                            "command": "python check.py",
+                            "questions": [{"question": "Which strategy should I use?"}],
+                        },
+                    },
+                )
+                packet = self.receive()
+                self.assertEqual(packet["waiting_kind"], expected)
+                self.assertIsNotNone(sessions.handle(packet))
+                snapshot = sessions.activity_view().sessions[0]
+                self.assertEqual(snapshot.waiting_kind, expected)
+                self.assertEqual(snapshot.waiting_tool, "python check.py")
+                self.assertEqual(
+                    snapshot.waiting_prompt,
+                    "Which strategy should I use?" if expected == "question" else None,
+                )
+                self.assertTrue(snapshot.waiting_for_input)
+                self.assertIsNotNone(
+                    sessions.handle(
+                        {"harness": "codex", "session": "worker", "event": "progress"}
+                    )
+                )
+                resumed = sessions.activity_view().sessions[0]
+                self.assertFalse(resumed.waiting_for_input)
+                self.assertIsNone(resumed.waiting_kind)
+                self.assertIsNone(resumed.waiting_tool)
+                self.assertIsNone(resumed.waiting_prompt)
+
     def test_hook_preserves_explicit_report_references(self) -> None:
         result = self.run_hook(
             "codex",
@@ -517,9 +652,10 @@ class NotifyTests(unittest.TestCase):
         self.assertNotIn("Widget", json.dumps(packet))
 
     def test_cursor_subagent_aliases_link_child_tools(self) -> None:
+        sessions = Sessions(time.monotonic)
         self.run_hook(
             "cursor",
-            "subagentStop",
+            "subagentStart",
             {
                 "conversation_id": "parent",
                 "subagent_id": "agent",
@@ -532,6 +668,7 @@ class NotifyTests(unittest.TestCase):
         self.assertEqual(packet["parent"], "parent")
         self.assertEqual(packet["aliases"], ["agent", "child"])
         self.assertEqual(packet["parent_call"], "spawn-call")
+        self.assertIsNotNone(sessions.handle(packet))
         self.run_hook(
             "cursor",
             "preToolUse",
@@ -548,6 +685,22 @@ class NotifyTests(unittest.TestCase):
             (packet["session"], packet["turn"], packet["call"], packet["parent_call"]),
             ("child", "generation", "nested-call", "spawn-call"),
         )
+        self.assertIsNotNone(sessions.handle(packet))
+        self.run_hook(
+            "cursor",
+            "postToolUse",
+            {
+                "conversation_id": "agent",
+                "generation_id": "generation",
+                "tool_use_id": "nested-call",
+            },
+        )
+        self.assertIsNotNone(sessions.handle(self.receive()))
+        self.assertEqual(set(sessions.by_id), {"cursor:child"})
+        child = sessions.by_id["cursor:child"]
+        self.assertEqual(child.parent, "cursor:parent")
+        self.assertEqual(child.turn, "generation")
+        self.assertFalse(child.calls)
 
     def test_cursor_tool_output_and_subagent_summary_update_context(self) -> None:
         self.run_hook(

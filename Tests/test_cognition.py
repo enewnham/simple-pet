@@ -244,14 +244,12 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(schema["required"], ["speak"])
         self.assertFalse(schema["additionalProperties"])
         snapshot = json.loads(body["messages"][-1]["content"])
-        self.assertEqual(
-            snapshot["focus_session"]["recent_requests"][-1], "Refactor batch inserts"
-        )
+        self.assertEqual(snapshot["current_work"]["request"], "Refactor batch inserts")
         self.assertNotIn("pet", snapshot)
 
     async def test_sends_only_the_instruction_for_the_current_reason(self) -> None:
         directions = {
-            SpeechReason.PROMPT: "Briefly acknowledge the latest request and what we are starting. Express intent using the supplied goal and decisions.",
+            SpeechReason.PROMPT: "Briefly acknowledge the latest request and what we are starting. Express intent using current_work.",
             SpeechReason.ROUTINE: "React briefly to the change in activity or progress.",
             SpeechReason.COMPLETION: "React briefly to how this agent turn ended. Use its reported result without claiming the intended work is complete.",
             SpeechReason.FAILURE: "React briefly to the observed failed call. Do not infer a current obstacle or invent a diagnosis.",
@@ -316,9 +314,8 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         body = self.requests[-1][1]
         self.assertNotIn(text, json.dumps(body["system"]))
         payload = json.loads(body["messages"][0]["content"])
-        self.assertEqual(payload["context"], text)
-        self.assertIsNone(payload["focus_session"])
-        self.assertEqual(payload["other_sessions"], [])
+        self.assertEqual(payload["current_moment"]["text"], text)
+        self.assertNotIn("current_work", payload)
         self.assertNotIn("focus_opportunity", payload)
 
     async def test_click_greets_only_when_all_sessions_are_inactive(self) -> None:
@@ -360,12 +357,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                     "<request>\n" + direction + "\n</request>",
                 )
         payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
-        self.assertTrue(
-            any(
-                session["turn_active"]
-                for session in [payload["focus_session"], *payload["other_sessions"]]
-            )
-        )
+        self.assertEqual(payload["current_moment"]["state"], "working")
 
     async def test_click_keeps_active_work_instruction_when_sessions_are_omitted(
         self,
@@ -395,9 +387,8 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         await self.generate_for_context(snapshot, SpeechReason.CLICK)
         body = self.requests[-1][1]
         payload = json.loads(body["messages"][0]["content"])
-        self.assertTrue(payload["focus_session"]["turn_active"])
-        self.assertEqual(payload["other_sessions"], [])
-        self.assertGreater(payload["omitted_sessions"]["active"], 0)
+        self.assertEqual(payload["current_moment"]["state"], "working")
+        self.assertNotIn("other_sessions", payload)
         self.assertEqual(
             body["system"][1]["text"],
             "<request>\nBriefly acknowledge the developer while our work continues.\n</request>",
@@ -421,6 +412,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 "session": "parallel-3",
                 "event": "waiting",
                 "progress": "Choose eager or lazy parsing",
+                "waiting_kind": "question",
             }
         )
         self.clock.advance(30)
@@ -438,19 +430,20 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         result = await self.generate_for_context(snapshot, SpeechReason.CLICK)
         body = self.requests[-1][1]
         payload = json.loads(body["messages"][0]["content"])
-        self.assertNotIn("id", payload["focus_session"])
+        self.assertNotIn("id", payload["current_work"])
         self.assertEqual(
-            payload["focus_session"]["progress"], "Choose eager or lazy parsing"
+            payload["current_moment"]["reported_progress"],
+            "Choose eager or lazy parsing",
         )
-        self.assertTrue(payload["other_sessions"][0]["waiting_for_input"])
-        self.assertEqual(payload["omitted_sessions"]["total"], 2)
+        self.assertEqual(payload["current_moment"]["kind"], "input_requested")
+        self.assertNotIn("other_sessions", payload)
         self.assertEqual(result.summary_session, "codex:parallel-3")
         direction = body["system"][1]["text"]
         self.assertIn(
-            "Describe the needed input only when its progress or requests supply it",
+            "Describe the input or permission only when provided",
             direction,
         )
-        self.assertIn("without inventing a question", direction)
+        self.assertIn("Do not assume the developer must intervene", direction)
         self.assertNotIn("while our work continues", direction)
         for reason in (
             SpeechReason.PROMPT,
@@ -463,9 +456,9 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                     snapshot,
                     self.attention.select(snapshot, reason),
                 )
-                assert selected["focus_session"] is not None
+                assert selected["current_work"] is not None
                 self.assertEqual(
-                    selected["focus_session"]["recent_requests"][-1],
+                    selected["current_work"]["request"],
                     "Refactor batch inserts",
                 )
 
@@ -479,10 +472,10 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         await self.generate_commentary(SpeechReason.CLICK)
         body = self.requests[-1][1]
         payload = json.loads(body["messages"][0]["content"])
-        self.assertTrue(payload["focus_session"]["waiting_for_input"])
-        self.assertFalse(payload["focus_session"]["progress"])
+        self.assertEqual(payload["current_moment"]["kind"], "waiting")
+        self.assertNotIn("reported_progress", payload["current_moment"])
         self.assertIn(
-            "Otherwise say the work is waiting for input without inventing a question",
+            "Do not assume the developer must intervene",
             body["system"][1]["text"],
         )
 
@@ -534,7 +527,10 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 "running",
                 "Give a brief remark about the running call and its elapsed time.",
             ),
-            ("waiting", "Give a brief remark about the wait for developer input."),
+            (
+                "waiting",
+                "Give a brief remark about the supplied wait without inventing a question or who must answer.",
+            ),
         ]
         for state, direction in cases:
             with self.subTest(state=state):
@@ -579,7 +575,9 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.speak, speech)
         self.assertEqual(self.cognition.memory.speech(), [])
         snapshot = json.loads(self.requests[-1][1]["messages"][-1]["content"])
-        self.assertEqual(snapshot["context"], "The compiler complained again")
+        self.assertEqual(
+            snapshot["current_moment"]["text"], "The compiler complained again"
+        )
 
     async def test_each_request_contains_one_current_observation_and_no_generated_history(
         self,
@@ -604,7 +602,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.responses.append(({"speak": "The parser is progressing."}, "end_turn"))
         await self.generate_commentary(SpeechReason.ROUTINE, "🐈" * 100000)
         content = self.requests[-1][1]["messages"][0]["content"]
-        self.assertEqual(json.loads(content)["context"], "🐈" * 2000)
+        self.assertEqual(json.loads(content)["current_moment"]["text"], "🐈" * 2000)
         self.assertNotIn("reason", json.loads(content))
 
     async def test_concurrent_work_keeps_triggering_session_and_active_tool_durations(
@@ -633,20 +631,16 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.clock.now += 120
         snapshot = self.snapshot()
         snapshot = replace(snapshot, trigger=SessionTrigger("codex:worker-7"))
-        await self.generate_for_context(snapshot, SpeechReason.FAILURE)
+        self.responses.append(({"speak": "The checks are still running."}, "end_turn"))
+        await self.generate_for_context(snapshot, SpeechReason.CHECK_IN)
         payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
-        self.assertEqual(payload["focus_session"]["recent_requests"][-1], "Goal 7")
-        self.assertLessEqual(len(payload["other_sessions"]), 2)
-        self.assertGreaterEqual(payload["omitted_sessions"]["active"], 5)
+        self.assertEqual(payload["current_work"]["request"], "Goal 7")
+        self.assertNotIn("other_sessions", payload)
         self.assertNotIn("trigger", payload)
-        target = payload["focus_session"]
-        self.assertEqual(len(target["active_tools"]), 3)
-        self.assertEqual(target["other_active_tools"], 2)
-        self.assertTrue(
-            all(tool["running_for"] == "2 minutes" for tool in target["active_tools"])
-        )
+        self.assertEqual(payload["current_moment"]["tool"], "pytest")
+        self.assertEqual(payload["current_moment"]["elapsed"], "2 minutes")
 
-    async def test_completed_sessions_keep_results_without_full_request_history(
+    async def test_unrelated_completed_work_stays_out_of_commentary(
         self,
     ) -> None:
         self.handle(
@@ -667,12 +661,8 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.generate_commentary()
         payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
-        completed = payload["other_sessions"][0]
-        self.assertIn("Document the renderer", json.dumps(completed))
-        self.assertEqual(completed["progress"], "Renderer docs verified")
-        self.assertEqual(completed["outcome"], "success")
-        self.assertEqual(completed["summary"], "")
-        self.assertNotIn("initial_request", completed)
+        self.assertNotIn("Renderer docs verified", json.dumps(payload))
+        self.assertEqual(payload["current_work"]["request"], "Refactor batch inserts")
 
     async def test_small_target_keeps_triggering_request_without_unrelated_memory(
         self,
@@ -704,9 +694,9 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         await self.generate_for_context(snapshot, SpeechReason.FAILURE)
         body = self.requests[-1][1]
         payload = json.loads(body["messages"][0]["content"])
-        self.assertIn("猫", payload["focus_session"]["recent_requests"][-1])
+        self.assertIn("猫", payload["current_work"]["request"])
         self.assertNotIn("trigger", payload)
-        self.assertLess(len(payload["memory"]["recent_events"]), 5)
+        self.assertNotIn("memory", payload)
 
     async def test_session_commentary_omits_historical_facts_and_separates_recent_speech(
         self,
@@ -741,13 +731,9 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         snapshot = replace(snapshot, trigger=SessionTrigger("claude:worker"))
         await self.generate_for_context(snapshot, SpeechReason.FAILURE)
         payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
-        memory = payload["memory"]
+        self.assertNotIn("memory", payload)
         self.assertNotIn("repetition", payload)
-        self.assertNotIn("Visible remark", json.dumps(memory))
         self.assertNotIn("Unrelated billing project", json.dumps(payload))
-        self.assertEqual(memory["recent_events"], [])
-        self.assertNotIn("recalled_events", memory)
-        self.assertNotIn("project_context", memory)
         self.assertNotIn("Visible remark", json.dumps(payload))
         self.assertEqual(
             [row.text for row in self.cognition.memory.speech()],
@@ -844,7 +830,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 self.responses.append(({"speak": "A little stretch."}, "end_turn"))
                 await self.generate_for_context(snapshot, reason)
                 payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
-                self.assertEqual(set(payload), {"activity", "sleeping", "time"})
+                self.assertEqual(payload, {"current_moment": {"kind": "quiet_time"}})
                 self.assertNotIn("Old checklist", json.dumps(payload))
                 self.assertNotIn("Old task report", json.dumps(payload))
                 self.assertNotIn("A recent spoken line", json.dumps(payload))
@@ -903,23 +889,14 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.summary = "Parser validation awaits the next checks."
         result = await self.generate_for_context(snapshot, SpeechReason.PROMPT)
         payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
-        self.assertEqual(
-            payload["focus_session"]["recent_requests"][-1], "Validate parser behavior"
-        )
+        self.assertEqual(payload["current_work"]["request"], "Validate parser behavior")
         self.assertEqual(result.summary_session, "codex:focus")
         self.assertEqual(result.summary, self.summary)
         summary = json.loads(self.summary_requests[-1][1]["messages"][0]["content"])
-        self.assertEqual(summary["initial_intent"], "Validate parser behavior")
+        self.assertEqual(summary["current_work"]["request"], "Validate parser behavior")
         self.assertNotIn("Refactor batch inserts", json.dumps(summary))
         self.assertEqual(
-            set(summary),
-            {
-                "initial_intent",
-                "recent_requests",
-                "historical_summary",
-                "current_report",
-                "reported_results",
-            },
+            summary, {"current_work": {"request": "Validate parser behavior"}}
         )
         self.assertEqual(
             self.summary_requests[-1][1]["system"],
@@ -1133,9 +1110,10 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             for _, body in self.observation_requests
         ]
         self.assertEqual(
-            first["focus_session"]["progress"], "The parser checks are running"
+            first["current_moment"]["reported_progress"],
+            "The parser checks are running",
         )
-        self.assertEqual(retry["focus_session"]["progress"], fresh)
+        self.assertEqual(retry["current_moment"]["reported_progress"], fresh)
         self.assertNotIn(history, json.dumps(retry))
         self.assertEqual(result.speak, fresh)
         self.assertEqual(result.summary_version, before)
@@ -1178,9 +1156,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         )
         payload = json.loads(self.observation_requests[-1][1]["messages"][0]["content"])
         self.assertEqual(result.summary_session, "claude:worker")
-        self.assertEqual(
-            payload["focus_session"]["recent_requests"], ["Refactor batch inserts"]
-        )
+        self.assertEqual(payload["current_work"]["request"], "Refactor batch inserts")
         self.assertNotIn("Choose a layout", json.dumps(payload))
 
     async def test_rejects_invalid_results_without_recording_speech(self) -> None:

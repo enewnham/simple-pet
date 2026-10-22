@@ -261,9 +261,9 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(daemon.application.sessions.working)
                     self.assertTrue(
                         any(
-                            json.loads(request["messages"][-1]["content"]).get(
-                                "context"
-                            )
+                            json.loads(request["messages"][-1]["content"])
+                            .get("current_moment", {})
+                            .get("text")
                             == "Observe these parallel parser tasks"
                             for request in requests
                         )

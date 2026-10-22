@@ -118,9 +118,7 @@ def update(
     else:
         session = string(payload.get("session_id"))
         agent = string(payload.get("agent_id"))
-        if agent and (
-            harness == "claude" or normalized in ("subagent_start", "subagent_done")
-        ):
+        if agent:
             parent, session = session, agent
     if not session:
         return None
@@ -173,6 +171,25 @@ def update(
         result["goal"] = string(payload.get("task"))
     if normalized == "tool_start" and tool_name in INPUT_TOOLS:
         result["event"] = "waiting"
+        result["waiting_kind"] = "question"
+        questions = tool_input.get("questions")
+        if isinstance(questions, list):
+            question_text = excerpt(
+                " ".join(
+                    string(question.get("question"), question.get("title"))
+                    for question in questions
+                    if isinstance(question, dict)
+                )
+            )
+            if question_text:
+                result["progress"] = question_text
+    elif event == "PermissionRequest" or (
+        event == "Notification"
+        and payload.get("notification_type") == "permission_prompt"
+    ):
+        result["waiting_kind"] = "permission"
+    elif normalized == "waiting":
+        result["waiting_kind"] = "question"
     response = payload.get("tool_response")
     if harness == "cursor":
         output = payload.get("tool_output")

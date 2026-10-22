@@ -615,7 +615,8 @@ class Application:
         check_in = tuple(
             key
             for key in self.sessions.check_in_due(self.config.idle_message_seconds)
-            if not self.sessions.by_id[key].waiting
+            if not self.sessions.by_id[key].parent
+            and not self.sessions.by_id[key].waiting
         )
         request = self.attention.request(
             snapshot,

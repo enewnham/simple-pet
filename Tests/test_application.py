@@ -43,6 +43,7 @@ from pet_daemon.work.observations import (
     PullRequest,
     RepositoryObservation,
 )
+from pet_daemon.work.views import AssociationView, ProgressView
 from Tests.fixtures import require
 
 
@@ -238,6 +239,96 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
+    async def test_child_lifecycle_retains_reports_without_interrupting_the_root(
+        self,
+    ) -> None:
+        self.packets.clear()
+        for event in (
+            HookEvent(
+                "codex",
+                "examples",
+                "subagent_start",
+                parent="parser",
+                goal="Document quoted-field examples",
+            ),
+            HookEvent("codex", "examples", "tool_start", call="check", tool="pytest"),
+            HookEvent("codex", "examples", "tool_error", call="check"),
+            HookEvent("codex", "examples", "tool_start", call="retry", tool="pytest"),
+            HookEvent("codex", "examples", "tool_done", call="retry"),
+            HookEvent(
+                "codex",
+                "examples",
+                "subagent_done",
+                progress="Documented escaped delimiter examples.",
+            ),
+        ):
+            self.provider.publish(event)
+            self.assertIsNone(self.attention.pending)
+        self.assertFalse(any("animation" in packet for packet in self.packets))
+        self.assertEqual(self.app.agent_activity.activity(), "working")
+        self.assertTrue(self.app.sessions.by_id["codex:parser"].active)
+        child = self.app.sessions.by_id["codex:examples"]
+        self.assertTrue(child.finished)
+        self.assertEqual(child.outcome, ExecutionOutcome.SUCCESS)
+        reports = self.memory.recent(session="codex:examples", limit=10)
+        self.assertTrue(any(row.event_type == "subagent_done" for row in reports))
+        _, selection = await self.submit_commentary()
+        self.assertEqual(require(selection.focus_session).id, "codex:parser")
+        payload = json.loads(self.model.requests[-1][0]["messages"][0]["content"])
+        self.assertIn("Documented escaped delimiter examples.", json.dumps(payload))
+
+    async def test_child_input_request_receives_attention_within_the_root_work(
+        self,
+    ) -> None:
+        self.provider.publish(
+            HookEvent("codex", "examples", "subagent_start", parent="parser")
+        )
+        self.provider.publish(
+            HookEvent(
+                "codex",
+                "examples",
+                "waiting",
+                call="question",
+                progress="Which quoted-field examples should I document?",
+            )
+        )
+        self.app.tick()
+        await require(self.app.task)
+        self.assertEqual(self.model.requests[-1][1], SpeechReason.CHECK_IN)
+        payload = json.loads(self.model.requests[-1][0]["messages"][0]["content"])
+        self.assertEqual(payload["current_moment"]["kind"], "waiting")
+        self.assertEqual(
+            payload["current_moment"]["reported_progress"],
+            "Which quoted-field examples should I document?",
+        )
+        self.assertEqual(
+            payload["current_work"]["request"], "Improve quoted-field parsing"
+        )
+
+    async def test_quiet_children_do_not_create_independent_timed_check_ins(
+        self,
+    ) -> None:
+        self.config.idle_message_seconds = 5
+        self.attention.next_observation = self.now + 3600
+        for child in ("examples", "escapes"):
+            self.provider.publish(
+                HookEvent("codex", child, "subagent_start", parent="parser")
+            )
+        self.now += 6
+        self.report("Reviewing the delegated findings.")
+        self.app.tick()
+        self.assertIsNone(self.app.task)
+        self.assertEqual(self.model.requests, [])
+        self.now += 6
+        self.app.tick()
+        await require(self.app.task)
+        self.assertEqual(self.model.requests[-1][1], SpeechReason.CHECK_IN)
+        self.assertEqual(
+            self.app.sessions.by_id["codex:parser"].last_check_in, self.now
+        )
+        for child in ("examples", "escapes"):
+            self.assertIsNone(self.app.sessions.by_id[f"codex:{child}"].last_check_in)
+
     async def test_failed_intent_write_keeps_the_original_story_after_the_next_report(
         self,
     ) -> None:
@@ -259,10 +350,11 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.report("Quoted fields preserve escaped delimiters.")
         await self.submit_commentary()
         payload = json.loads(self.model.requests[-1][0]["messages"][0]["content"])
-        work = payload["focus_work"]
-        self.assertEqual(work["intent"], "Improve quoted-field parsing")
-        self.assertIn("Quoted fields preserve escaped delimiters.", json.dumps(work))
-        self.assertNotIn(failed_intent, json.dumps(work))
+        self.assertEqual(
+            payload["current_work"]["request"], "Improve quoted-field parsing"
+        )
+        self.assertIn("Quoted fields preserve escaped delimiters.", json.dumps(payload))
+        self.assertNotIn(failed_intent, json.dumps(payload))
 
     async def test_late_pr_resolution_keeps_a_report_on_its_work_after_branch_reuse(
         self,
@@ -305,16 +397,19 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.provider.publish(
             replace(self.observation, pr=unrelated_pr, checked_at=self.now)
         )
-        await self.submit_commentary()
+        _, selection = await self.submit_commentary()
         payload = json.loads(self.model.requests[-1][0]["messages"][0]["content"])
-        work = payload["focus_work"]
+        work = require(selection.subject).story
         report = next(
             report
-            for report in work["activity"]
-            if report.get("reported_progress") == "The parser changes are ready."
+            for report in work.activity
+            if isinstance(report.details, ProgressView)
+            and report.details.reported_progress == "The parser changes are ready."
         )
-        self.assertEqual(report["context"]["pull_request"], reported_pr.url)
-        artifacts = {artifact["ref"] for artifact in work["artifacts"]}
+        self.assertEqual(require(report.context).pull_request, reported_pr.url)
+        self.assertNotIn(reported_pr.url, json.dumps(payload))
+        self.assertNotIn(unrelated_pr.url, json.dumps(payload))
+        artifacts = {artifact.ref for artifact in work.artifacts}
         self.assertIn(reported_pr.url, artifacts)
         self.assertNotIn(unrelated_pr.url, artifacts)
 
@@ -322,15 +417,15 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         self.report("Tests pass")
-        packet, _ = await self.submit_commentary()
-        first_payload = json.loads(self.model.requests[-1][0]["messages"][0]["content"])
+        packet, first_selection = await self.submit_commentary()
         first_report = next(
             report
-            for report in first_payload["focus_work"]["activity"]
-            if report.get("reported_progress") == "Tests pass"
+            for report in require(first_selection.subject).story.activity
+            if isinstance(report.details, ProgressView)
+            and report.details.reported_progress == "Tests pass"
         )
         self.assertEqual(
-            first_report["context"]["pull_request"],
+            require(first_report.context).pull_request,
             require(self.observation.pr).url,
         )
         self.accept(packet)
@@ -363,15 +458,18 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         selection = self.attention.select(snapshot, request.reason)
         self.model.text = "The quoted-field examples pass their validation."
         await self.app.comment(request.reason, snapshot=snapshot, selection=selection)
-        payload = json.loads(self.model.requests[-1][0]["messages"][0]["content"])
         latest_report = next(
             report
-            for report in payload["focus_work"]["activity"]
-            if report.get("reported_progress") == "Tests pass"
+            for report in require(selection.subject).story.activity
+            if isinstance(report.details, ProgressView)
+            and report.details.reported_progress == "Tests pass"
         )
         self.assertEqual(
-            latest_report["context"],
-            {"branch": next_pr.head_branch, "pull_request": next_pr.url},
+            (
+                require(latest_report.context).branch,
+                require(latest_report.context).pull_request,
+            ),
+            (next_pr.head_branch, next_pr.url),
         )
 
     async def test_repeated_progress_about_the_same_work_keeps_automatic_speech_quiet(
@@ -466,21 +564,30 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(subjects[0].sessions, ("codex:examples", "codex:parser"))
         self.assertIsInstance(subjects[0].story, WorkStory)
         self.assertEqual(subjects[0].story.intent, "Improve quoted-field parsing")
+        artifact_titles = {artifact.title for artifact in subjects[0].story.artifacts}
+        self.assertIn(parent_pr.title, artifact_titles)
+        self.assertIn(child_pr.title, artifact_titles)
+        self.assertTrue(
+            any(
+                isinstance(evidence.details, AssociationView)
+                and "stack" in evidence.details.association
+                for artifact in subjects[0].story.artifacts
+                for evidence in artifact.evidence
+            )
+        )
         packet, selection = await self.submit_commentary()
         payload = json.loads(self.model.requests[0][0]["messages"][0]["content"])
-        work = payload["focus_work"]
-        self.assertIn(parent_report, json.dumps(work["activity"]))
-        self.assertNotIn(child_report, json.dumps(work["activity"]))
-        child_session = next(
-            session
-            for session in work["sessions"]
-            if session["scope"] == "Document quoted-field examples"
+        self.assertIn(parent_report, json.dumps(payload["current_moment"]))
+        self.assertNotIn(child_report, json.dumps(payload["current_moment"]))
+        child_context = next(
+            item
+            for item in payload["earlier_context"]
+            if item.get("scope") == "Document quoted-field examples"
         )
-        self.assertIn(child_report, json.dumps(child_session["activity"]))
-        self.assertNotIn(parent_report, json.dumps(child_session["activity"]))
-        self.assertIn("Handle quoted fields", json.dumps(work))
-        self.assertIn("Document escaped delimiter examples", json.dumps(work))
-        self.assertIn("stack", json.dumps(work).lower())
+        self.assertIn(child_report, json.dumps(child_context))
+        self.assertNotIn(parent_report, json.dumps(child_context))
+        self.assertNotIn("artifacts", json.dumps(payload))
+        self.assertNotIn(child_pr.url, json.dumps(payload))
         self.assertEqual(self.memory.speech(), [])
         self.assertTrue(self.attention.is_new(require(selection.subject)))
         self.assertTrue(self.app.delivery.has_pending())
