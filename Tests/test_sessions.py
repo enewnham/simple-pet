@@ -298,6 +298,71 @@ class SessionsTests(unittest.TestCase):
                 self.event("tool_error", session=session, call="file")
                 self.assertEqual(require(lane.failure).activity, expected)
 
+    def test_command_mutations_set_editing_activity_and_failure(self) -> None:
+        commands = (
+            "sed -i '' 's/old/new/' build/tests.txt",
+            "sed --in-place=.bak 's/old/new/' source.txt",
+            "perl -pi -e 's/old/new/' source.txt",
+            "printf hello | tee source.txt",
+            "cp template.txt source.txt",
+            "cd /repo && mv source.txt target.txt",
+            "pwd\ntouch source.txt",
+            "/bin/rm source.txt",
+            "mkdir generated",
+            "dd if=template.txt of=source.txt",
+            "printf hello > source.txt",
+            "cat <<'EOF' >> source.txt\nhello\nEOF",
+            'python -c \'Path("source.txt").write_text("hello")\'',
+            'node -e \'fs.writeFileSync("source.txt", "hello")\'',
+            'ruby -e \'File.binwrite("source.txt", "hello")\'',
+            'php -r \'file_put_contents("source.txt", "hello");\'',
+            'python -c \'open("source.txt", "w").close()\'',
+            'python -c \'Path("source.txt").write_text("truncated',
+            "sed -i 'truncated",
+        )
+        for index, command in enumerate(commands):
+            with self.subTest(command=command):
+                session = f"mutation-{index}"
+                self.event(
+                    "tool_start",
+                    session=session,
+                    call="shell",
+                    tool=command,
+                    tool_name="exec_command",
+                )
+                lane = self.sessions.by_id[f"claude:{session}"]
+                self.assertEqual(lane.phase, "editing")
+                self.event("tool_error", session=session, call="shell")
+                self.assertEqual(require(lane.failure).activity, "editing")
+
+    def test_commands_without_mutation_signals_keep_their_activity(self) -> None:
+        commands = (
+            ("sed -n '1,20p' source.txt", "command"),
+            ("perl -e 'print 1'", "command"),
+            ('printf ">"', "command"),
+            ("echo cp source.txt target.txt", "command"),
+            ("cat scripts/rewrite.py", "command"),
+            ("python migrate.py", "command"),
+            ("node migrate.js", "command"),
+            ("python migrate.py 2>&1", "command"),
+            ("pytest 2>&1", "testing"),
+            ("cargo test", "testing"),
+            ("make build", "building"),
+        )
+        for index, (command, expected) in enumerate(commands):
+            with self.subTest(command=command):
+                session = f"command-{index}"
+                self.event(
+                    "tool_start",
+                    session=session,
+                    call="shell",
+                    tool=command,
+                    tool_name="exec_command",
+                )
+                self.assertEqual(
+                    self.sessions.by_id[f"claude:{session}"].phase, expected
+                )
+
     def test_terminal_failure_closes_pending_calls_without_diagnostic_progress(
         self,
     ) -> None:

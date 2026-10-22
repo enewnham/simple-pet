@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 
-from ..runtime import HookEvent
+from ..runtime import HookEvent, SessionActivity
 from .tracking import AgentSession, Sessions, SessionUpdate
 
 
@@ -9,7 +9,7 @@ class Episode:
     kind: str
     session: str
     generation: int
-    activity: str
+    activity: SessionActivity
     serial: int
 
 
@@ -21,9 +21,9 @@ class EpisodeState:
     waiting: bool = False
     waiting_serial: int = 0
     waiting_identity: tuple[str | None, float | None] | None = None
-    trouble: set[str] = field(default_factory=set)
-    unresolved: set[str] = field(default_factory=set)
-    category_serials: dict[str, int] = field(default_factory=dict)
+    trouble: set[SessionActivity] = field(default_factory=set)
+    unresolved: set[SessionActivity] = field(default_factory=set)
+    category_serials: dict[SessionActivity, int] = field(default_factory=dict)
     terminal: bool = False
     investigating: bool = False
 
@@ -85,7 +85,7 @@ class Episodes:
         )
         emitted = []
 
-        def add(kind: str, activity: str = result.activity) -> None:
+        def add(kind: str, activity: SessionActivity = result.activity) -> None:
             self.serial += 1
             emitted.append(
                 Episode(kind, key, session.generation, activity, self.serial)

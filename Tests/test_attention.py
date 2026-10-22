@@ -141,7 +141,7 @@ class AttentionTests(unittest.TestCase):
                         kind="waiting",
                         session="cli:parser",
                         generation=1,
-                        activity="input",
+                        activity="command",
                         serial=1,
                     )
                 ),

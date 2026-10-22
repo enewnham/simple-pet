@@ -4,7 +4,7 @@ import logging
 import time
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from .. import telemetry
 from ..prompts import select_prompt
@@ -13,8 +13,10 @@ from ..runtime import (
     ConvergenceItem,
     FailureSnapshot,
     ProcessIdentity,
+    SessionActivity,
     SessionContext,
     SwarmActivity,
+    ToolActivity,
     UserSentiment,
 )
 from ..work.models import ExecutionEvidence, IntentEvidence, ProgressEvidence
@@ -31,7 +33,7 @@ SENTIMENT_CONTEXT_SECONDS = 300
 @dataclass
 class Failure:
     tool: str
-    activity: str
+    activity: SessionActivity
     at: float
     count: int
     resolved: bool
@@ -44,7 +46,7 @@ class SessionUpdate:
     failure: bool
     convergence: bool
     session: str
-    activity: str
+    activity: SessionActivity
     observation: SessionObservation
 
 
@@ -52,7 +54,7 @@ class SessionUpdate:
 class Call:
     tool: str
     started: float
-    activity: str = "command"
+    activity: ToolActivity = "command"
 
 
 @dataclass
@@ -70,11 +72,11 @@ class AgentSession:
     sentiment_seen: float = float("-inf")
     sentiment_identity: tuple[str | None, str] | None = None
     repo: str = ""
-    phase: str = ""
+    phase: ToolActivity | Literal[""] = ""
     last_tool: str = ""
     progress: str = ""
     failure: Failure | None = None
-    failures: dict[str, Failure] = field(default_factory=dict)
+    failures: dict[SessionActivity, Failure] = field(default_factory=dict)
     calls: dict[str, Call] = field(default_factory=dict)
     active: bool = False
     finished: bool = False
@@ -156,7 +158,11 @@ class Sessions:
         )
 
     def _failure(
-        self, session: AgentSession, category: str, now: float, tool: str = ""
+        self,
+        session: AgentSession,
+        category: SessionActivity,
+        now: float,
+        tool: str = "",
     ) -> Failure:
         previous = session.failures.get(category)
         count = previous.count + 1 if previous and not previous.resolved else 1
@@ -249,7 +255,8 @@ class Sessions:
                         session.waiting_since = other.waiting_since
                         session.last_check_in = other.last_check_in
                     if adopt_waiting or other.last_seen > session.last_seen:
-                        session.phase = other.phase or session.phase
+                        if other.phase:
+                            session.phase = other.phase
                         session.last_tool = other.last_tool or session.last_tool
                         session.progress = other.progress or session.progress
                     if other.last_seen > session.last_seen:

@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NotRequired, Protocol, TypedDict
+from typing import TYPE_CHECKING, Literal, NotRequired, Protocol, TypedDict
+
+type ToolActivity = Literal[
+    "investigating", "editing", "testing", "building", "checking", "command"
+]
+type SessionActivity = ToolActivity | Literal["harness"]
 
 
 class ProcessPacket(TypedDict):
@@ -217,13 +222,13 @@ if TYPE_CHECKING:
 class ActiveTool:
     call: str
     tool: str
-    activity: str
+    activity: ToolActivity
     duration_seconds: float
 
 
 @dataclass(frozen=True)
 class FailureSnapshot:
-    activity: str
+    activity: SessionActivity
     count: int
     goal: str
     resolved: bool
@@ -238,7 +243,7 @@ class SessionContext:
     parent: str | None
     goal: str
     repo: str
-    phase: str
+    phase: ToolActivity | Literal[""]
     initial_request: str
     summary: str
     recent_requests: tuple[str, ...]
