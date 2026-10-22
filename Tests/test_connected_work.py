@@ -6,6 +6,13 @@ from pathlib import Path
 from pet_daemon.attention import Attention
 from pet_daemon.commentary.presentation import work_record
 from pet_daemon.config import Config
+from pet_daemon.domain import (
+    ArtifactKind,
+    EvidenceSource,
+    ExecutionOutcome,
+    LinkRelationship,
+    PullRequestState,
+)
 from pet_daemon.runtime import HookEvent
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.storage import Memory
@@ -53,7 +60,7 @@ class ConnectedWorkTests(unittest.TestCase):
             PullRequest(
                 number,
                 f"https://{REPOSITORY}/pull/{number}",
-                "OPEN",
+                PullRequestState.OPEN,
                 None,
                 head=f"head-{branch}",
                 head_repository=REPOSITORY,
@@ -62,10 +69,10 @@ class ConnectedWorkTests(unittest.TestCase):
                 title=title,
                 related_links=tuple(
                     RelatedLink(
-                        "pull_request",
+                        ArtifactKind.PULL_REQUEST,
                         f"https://{REPOSITORY}/pull/{other_number}",
-                        "stack_entry",
-                        "github_stack",
+                        LinkRelationship.STACK_ENTRY,
+                        EvidenceSource.GITHUB_STACK,
                         stack=6,
                         position=position,
                     )
@@ -277,7 +284,7 @@ class ConnectedWorkTests(unittest.TestCase):
                 "child",
                 "turn_done",
                 progress="The restart example is ready.",
-                outcome="success",
+                outcome=ExecutionOutcome.SUCCESS,
             ),
         ):
             sessions.handle(event.packet())

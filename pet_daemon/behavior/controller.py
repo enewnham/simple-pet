@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from typing import TypeGuard
 
 from ..config import BehaviorConfig
+from ..domain import ActionKind, Activity, CareKind, ExecutionPhase, PetState
 from ..runtime import OverlayPacket, Point, RandomSource
 from ..sessions.tracking import Sessions
 from ..telemetry import event, trace, verbose
@@ -74,7 +75,7 @@ class Behavior:
         self.policy = Policy()
         self.execution = Execution()
         self.status: RendererStatus | None = None
-        self.state: str | None = None
+        self.state: PetState | None = None
         self.clip: str | None = None
         self.command = 0
         self.inactive_since: float | None = None
@@ -89,8 +90,8 @@ class Behavior:
         self.observation: Observation | None = None
         self.next_care: float | None = None
         self.next_care_speech: float | None = None
-        self.care_remark: str | None = None
-        self.care_choices: list[tuple[str, str, str]] = []
+        self.care_remark: CareKind | None = None
+        self.care_choices: list[tuple[CareKind, str, str]] = []
 
     def satisfy(self) -> None:
         self.next_care = self.clock() + self.rng.uniform(*self.config.care_interval)
@@ -107,14 +108,16 @@ class Behavior:
         assert self.next_care_speech is not None
         if self.clock() < self.next_care or self._blocked():
             return False
-        choices = [
-            ("exercise", "celebrate", "jumping"),
-            ("attention", "greeting", "waving"),
-            ("consternation", "error", "failed"),
+        choices: list[tuple[CareKind, str, str]] = [
+            (CareKind.EXERCISE, "celebrate", "jumping"),
+            (CareKind.ATTENTION, "greeting", "waving"),
+            (CareKind.CONSTERNATION, "error", "failed"),
         ]
         available = [item for item in choices if self.pack.role(item[1])]
         if sessions.engaged:
-            available = [item for item in available if item[0] == "consternation"]
+            available = [
+                item for item in available if item[0] == CareKind.CONSTERNATION
+            ]
         self.next_care = self.clock() + self.rng.uniform(*self.config.care_interval)
         if not available:
             return False
@@ -125,13 +128,13 @@ class Behavior:
                 self.care_choices = [
                     item
                     for item in available
-                    for _ in range(1 if item[0] == "consternation" else 2)
+                    for _ in range(1 if item[0] == CareKind.CONSTERNATION else 2)
                 ]
             selected = self.rng.choice(self.care_choices)
             self.care_choices.remove(selected)
             kind, role, preferred = selected
         clip = self._resolve_clip(role, preferred, "idle")
-        self._play(clip, "care", "reaction", REACTION_SECONDS)
+        self._play(clip, "care", ActionKind.REACTION, REACTION_SECONDS)
         if not sessions.engaged and self.clock() >= self.next_care_speech:
             self.care_remark = kind
             self.next_care_speech = self.clock() + self.rng.uniform(
@@ -177,7 +180,7 @@ class Behavior:
             )
 
     def stop_movement(self) -> None:
-        if self.execution.action and self.execution.action.kind == "walk":
+        if self.execution.action and self.execution.action.kind == ActionKind.WALK:
             self._interrupt("interaction")
         self.emit({"stop_motion": True})
 
@@ -295,7 +298,9 @@ class Behavior:
         return True
 
     def completion(self, packet: Mapping[str, object]) -> None:
-        walking = self.execution.action and self.execution.action.kind == "walk"
+        walking = (
+            self.execution.action and self.execution.action.kind == ActionKind.WALK
+        )
         if self.execution.completion(
             packet, self.clock(), self.rng.uniform(*self._pause())
         ):
@@ -328,7 +333,7 @@ class Behavior:
         self,
         clip: Clip,
         name: str,
-        kind: str,
+        kind: ActionKind,
         seconds: float,
         session: str | None = None,
     ) -> None:
@@ -349,7 +354,7 @@ class Behavior:
                 "animation": {"id": clip.id, "repeats": repeats, "command_id": command},
             }
         )
-        if kind in ("error", "success", "reaction"):
+        if kind in (ActionKind.ERROR, ActionKind.SUCCESS, ActionKind.REACTION):
             event(
                 "behavior.reaction",
                 reaction=name,
@@ -475,7 +480,12 @@ class Behavior:
         self.last_movement = self.clock()
         self.execution.start(
             Action(
-                "roam", command, "motion", self.clock() + seconds + 1, clip.role, "walk"
+                "roam",
+                command,
+                "motion",
+                self.clock() + seconds + 1,
+                clip.role,
+                ActionKind.WALK,
             )
         )
         self.clip = clip.id
@@ -520,7 +530,7 @@ class Behavior:
             return self._gaze_clip() is not None
         return True
 
-    def tick(self, state: str, sessions: Sessions) -> None:
+    def tick(self, state: PetState, sessions: Sessions) -> None:
         if not self.status:
             return
         now = self.clock()
@@ -539,7 +549,7 @@ class Behavior:
             self.resume()
         elif self.suspension:
             return
-        starting = state == "working" and self.state in (None, "idle")
+        starting = state == PetState.WORKING and self.state in (None, PetState.IDLE)
         if state != self.state:
             self.state = state
             event("behavior.state_changed", state=state)
@@ -556,7 +566,7 @@ class Behavior:
                 self.inactive_since = now
                 self.next_nap = now + self.rng.uniform(*self.config.nap_interval)
             self.clear_since = None
-            if self.execution.action and self.execution.action.kind == "walk":
+            if self.execution.action and self.execution.action.kind == ActionKind.WALK:
                 self._interrupt("interaction")
         elif self.clear_since is None:
             self.clear_since = now
@@ -567,7 +577,7 @@ class Behavior:
             active=sessions.engaged,
             working=sessions.working,
             investigating=any(
-                session.working and session.phase == "investigating"
+                session.working and session.phase == Activity.INVESTIGATING
                 for session in sessions.by_id.values()
             ),
             waiting=any(session.waiting for session in sessions.by_id.values()),
@@ -621,7 +631,7 @@ class Behavior:
                         None,
                         now + self.config.gaze_reset_seconds,
                         "gaze",
-                        "rest",
+                        ActionKind.REST,
                     )
                 )
             else:
@@ -631,12 +641,12 @@ class Behavior:
             if current and current.event is not None:
                 self.clip = None
             self._rest()
-        if self.execution.phase == "settling":
+        if self.execution.phase == ExecutionPhase.SETTLING:
             self._rest()
             return
-        if self.execution.phase != "idle":
+        if self.execution.phase != ExecutionPhase.IDLE:
             return
-        if state != "error" and self._care(sessions):
+        if state != PetState.ERROR and self._care(sessions):
             return
         candidate = self.policy.select(
             self.observation, self.execution.last_completed, self.rng, self._available
@@ -649,7 +659,9 @@ class Behavior:
             self.emit({"sleeping": True, "stop_motion": True})
             self._rest()
             self.execution.start(
-                Action("nap", self.command, None, self.nap_until, "rest", "nap")
+                Action(
+                    "nap", self.command, None, self.nap_until, "rest", ActionKind.NAP
+                )
             )
             return
         if candidate.name == "focus":
@@ -663,13 +675,20 @@ class Behavior:
                 self._rest()
                 duration = self.rng.uniform(*self._pause())
                 self.execution.start(
-                    Action("focus", self.command, None, now + duration, "rest", "rest")
+                    Action(
+                        "focus",
+                        self.command,
+                        None,
+                        now + duration,
+                        "rest",
+                        ActionKind.REST,
+                    )
                 )
             else:
                 self._play(
                     clip,
                     "focus",
-                    "focus",
+                    ActionKind.FOCUS,
                     self.rng.uniform(*self.config.work_burst_seconds),
                 )
             return
@@ -681,5 +700,12 @@ class Behavior:
             else self.rng.uniform(*self._pause())
         )
         self.execution.start(
-            Action(candidate.name, self.command, None, now + duration, "rest", "rest")
+            Action(
+                candidate.name,
+                self.command,
+                None,
+                now + duration,
+                "rest",
+                ActionKind.REST,
+            )
         )

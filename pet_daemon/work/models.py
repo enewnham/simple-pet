@@ -1,7 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
+
+from ..domain import (
+    ArtifactKind,
+    EvidenceKind,
+    EvidenceSource,
+    ExecutionOutcome,
+    LinkRelationship,
+    PullRequestState,
+)
 
 if TYPE_CHECKING:
     from .observations import (
@@ -15,13 +24,13 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class RelatedLink:
-    kind: str
+    kind: ArtifactKind
     ref: str
-    relationship: str
-    source: str
+    relationship: LinkRelationship
+    source: EvidenceSource
     stack: int | None = None
     position: int | None = None
-    state: str | None = None
+    state: PullRequestState | None = None
     is_draft: bool | None = None
     head: str = ""
     head_branch: str = ""
@@ -30,7 +39,7 @@ class RelatedLink:
 
 @dataclass(frozen=True)
 class ArtifactReference:
-    kind: str
+    kind: ArtifactKind
     ref: str
     repository: str = ""
     revision: str | None = None
@@ -40,56 +49,83 @@ class ArtifactReference:
 
 @dataclass(frozen=True)
 class IntentEvidence:
+    source: ClassVar[EvidenceSource] = EvidenceSource.USER
+    kind: ClassVar[EvidenceKind] = EvidenceKind.INTENT
+
     session: str
     text: str
 
 
 @dataclass(frozen=True)
 class ProgressEvidence:
+    source: ClassVar[EvidenceSource] = EvidenceSource.HARNESS
+    kind: ClassVar[EvidenceKind] = EvidenceKind.PROGRESS
+
     session: str
     text: str
 
 
 @dataclass(frozen=True)
 class ExecutionEvidence:
+    source: ClassVar[EvidenceSource] = EvidenceSource.HARNESS
+    kind: ClassVar[EvidenceKind] = EvidenceKind.EXECUTION
+
     session: str
     event: str
-    outcome: str | None
+    outcome: ExecutionOutcome | None
     tool_name: str | None
     progress: str | None
 
 
 @dataclass(frozen=True)
 class CheckoutAssociation:
+    source: ClassVar[EvidenceSource] = EvidenceSource.HARNESS
+    kind: ClassVar[EvidenceKind] = EvidenceKind.RELATIONSHIP
+
     checkout: str
     branch: str
 
 
 @dataclass(frozen=True)
 class PullRequestAssociation:
+    source: ClassVar[EvidenceSource] = EvidenceSource.GITHUB
+    kind: ClassVar[EvidenceKind] = EvidenceKind.RELATIONSHIP
+
     checkout: str
     branch: str
 
 
 @dataclass(frozen=True)
 class ReferenceAssociation:
+    kind: ClassVar[EvidenceKind] = EvidenceKind.RELATIONSHIP
+
     ref: str
+    source: EvidenceSource
 
 
 @dataclass(frozen=True)
 class StackAssociation:
+    source: ClassVar[EvidenceSource] = EvidenceSource.GITHUB_STACK
+    kind: ClassVar[EvidenceKind] = EvidenceKind.RELATIONSHIP
+
     link: RelatedLink
     from_ref: str
 
 
 @dataclass(frozen=True)
 class GitHubEvidence:
+    source: ClassVar[EvidenceSource] = EvidenceSource.GITHUB
+    kind: ClassVar[EvidenceKind] = EvidenceKind.OBSERVATION
+
     pr: PullRequest | None
     repository: str
 
 
 @dataclass(frozen=True)
 class AvailabilityEvidence:
+    source: ClassVar[EvidenceSource] = EvidenceSource.OBSERVER
+    kind: ClassVar[EvidenceKind] = EvidenceKind.AVAILABILITY
+
     local_error: str | None
     github_error: str | None
 
@@ -110,11 +146,17 @@ type EvidencePayload = (
 
 @dataclass(frozen=True)
 class EvidenceRecord:
-    source: str
-    kind: str
     payload: EvidencePayload
     observed_at: float | None = None
     context: ReportContext | None = None
+
+    @property
+    def source(self) -> EvidenceSource:
+        return self.payload.source
+
+    @property
+    def kind(self) -> EvidenceKind:
+        return self.payload.kind
 
 
 @dataclass(frozen=True)
@@ -135,17 +177,7 @@ class SessionReport:
     observed_at: float
 
     def record(self) -> EvidenceRecord:
-        source = "user" if isinstance(self.payload, IntentEvidence) else "harness"
-        kind = (
-            "intent"
-            if isinstance(self.payload, IntentEvidence)
-            else "progress"
-            if isinstance(self.payload, ProgressEvidence)
-            else "execution"
-        )
-        return EvidenceRecord(
-            source, kind, self.payload, self.observed_at, self.context
-        )
+        return EvidenceRecord(self.payload, self.observed_at, self.context)
 
 
 @dataclass(frozen=True)

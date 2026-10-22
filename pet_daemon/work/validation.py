@@ -3,9 +3,8 @@ import re
 from dataclasses import replace
 from urllib.parse import urlsplit
 
+from ..domain import ArtifactKind
 from .models import ArtifactReference
-
-KINDS = {"branch", "pull_request", "document", "ticket", "patch"}
 
 
 def canonical(value: object) -> str:
@@ -38,10 +37,9 @@ def text(value: object, name: str, *, optional: bool = False) -> str:
 
 
 def normalize_reference(value: ArtifactReference) -> ArtifactReference:
-    if value.kind not in KINDS:
-        raise ValueError("unsupported artifact kind")
     result = replace(
         value,
+        kind=ArtifactKind(value.kind),
         ref=text(value.ref, "artifact.ref"),
         repository=text(value.repository, "artifact.repository")
         if value.repository
@@ -59,13 +57,13 @@ def normalize_reference(value: ArtifactReference) -> ArtifactReference:
             "artifact.checkout must be a filesystem path without NUL characters"
         )
     result = replace(result, repository=repository_identity(result.repository))
-    if result.kind == "branch" and not result.repository:
+    if result.kind == ArtifactKind.BRANCH and not result.repository:
         raise ValueError("branch artifacts require repository")
-    if result.kind == "pull_request" and not re.match(
+    if result.kind == ArtifactKind.PULL_REQUEST and not re.match(
         r"https?://[^/]+/[^/]+/[^/]+/pull/\d+/?$", result.ref
     ):
         raise ValueError("pull_request.ref must be a pull request URL")
-    if result.kind == "pull_request":
+    if result.kind == ArtifactKind.PULL_REQUEST:
         ref = result.ref.rstrip("/")
         parsed = urlsplit(ref)
         result = replace(

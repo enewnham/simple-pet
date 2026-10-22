@@ -3,14 +3,15 @@ import sqlite3
 import time
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from ..domain import DeliveryStatus, SpeechReason
 from ..prompts import select_prompt
 from ..runtime import SwarmActivity
 from ..telemetry import verbose
 from ..work import WorkIngestion
-from ..work.history import RecallQuery, SessionDetail, SessionEntry
+from ..work.history import HistoryDetails, RecallQuery, SessionEntry
 from ..work.models import IntentEvidence
 from ..work.observations import (
     RepositoryObservation,
@@ -37,7 +38,7 @@ class EventRecord:
     working_directory: str
     repository: str
     event_type: str
-    details: list[SessionDetail]
+    details: HistoryDetails
     goal: str
     timestamp: float
 
@@ -62,9 +63,9 @@ class ContextRecord:
 @dataclass(frozen=True)
 class MessageOutcome:
     message_id: str
-    outcome: str
+    outcome: DeliveryStatus
     text: str
-    reason: str
+    reason: SpeechReason
     subject_id: str | None
     revision: str | None
     timestamp: float
@@ -73,7 +74,7 @@ class MessageOutcome:
 @dataclass(frozen=True)
 class SpeechRecord:
     text: str
-    reason: str
+    reason: SpeechReason
     timestamp: float
 
 
@@ -148,7 +149,7 @@ class Memory:
         self,
         message_id: str,
         text: str,
-        reason: str,
+        reason: SpeechReason,
         subject_id: str | None = None,
         revision: str | None = None,
         last_selected: float = 0,
@@ -159,7 +160,7 @@ class Memory:
                 "SELECT outcome FROM message_outcomes WHERE pet=? AND message_id=?",
                 (self.pet, message_id),
             ).fetchone()
-            if previous and previous["outcome"] == "accepted":
+            if previous and previous["outcome"] == DeliveryStatus.ACCEPTED:
                 return False
             timestamp = self.clock()
             self.db.execute(
@@ -171,7 +172,7 @@ class Memory:
                 (
                     self.pet,
                     message_id,
-                    "accepted",
+                    DeliveryStatus.ACCEPTED,
                     text,
                     reason,
                     subject_id,
@@ -193,7 +194,7 @@ class Memory:
     def record_delivery_failure(
         self,
         message_id: str,
-        reason: str,
+        reason: SpeechReason,
         text: str = "",
         subject_id: str | None = None,
         revision: str | None = None,
@@ -208,7 +209,7 @@ class Memory:
                 (
                     self.pet,
                     message_id,
-                    "failed",
+                    DeliveryStatus.FAILED,
                     text,
                     reason,
                     subject_id,
@@ -234,9 +235,9 @@ class Memory:
         return (
             MessageOutcome(
                 message_id=row["message_id"],
-                outcome=row["outcome"],
+                outcome=DeliveryStatus(row["outcome"]),
                 text=row["text"],
-                reason=row["reason"],
+                reason=SpeechReason(row["reason"]),
                 subject_id=row["subject_id"],
                 revision=row["revision"],
                 timestamp=row["timestamp"],
@@ -283,7 +284,7 @@ class Memory:
     def record_event(self, record: SessionEntry | None) -> int | None:
         if record is None:
             return None
-        details = json.dumps(record.details, ensure_ascii=False)
+        details = json.dumps(asdict(record.details), ensure_ascii=False)
         if record.event_type in {"progress", "waiting", "session_start"}:
             previous = self.db.execute(
                 "SELECT event_type,details FROM events WHERE pet=? AND session=? AND working_directory=? ORDER BY id DESC LIMIT 1",
@@ -373,7 +374,7 @@ class Memory:
                 working_directory=row["working_directory"],
                 repository=row["repository"],
                 event_type=row["event_type"],
-                details=json.loads(row["details"]),
+                details=HistoryDetails.from_data(json.loads(row["details"])),
                 goal=row["goal"],
                 timestamp=row["timestamp"],
             )
@@ -399,7 +400,7 @@ class Memory:
                 working_directory=row["working_directory"],
                 repository=row["repository"],
                 event_type=row["event_type"],
-                details=json.loads(row["details"]),
+                details=HistoryDetails.from_data(json.loads(row["details"])),
                 goal=row["goal"],
                 timestamp=row["timestamp"],
             )
@@ -504,7 +505,7 @@ class Memory:
             )
         self.prune()
 
-    def record_speech(self, text: str, reason: str) -> None:
+    def record_speech(self, text: str, reason: SpeechReason) -> None:
         with self.transaction():
             self.db.execute(
                 "INSERT INTO speech(pet,text,reason,timestamp) VALUES (?,?,?,?)",
@@ -533,7 +534,9 @@ class Memory:
         ).fetchall()
         return [
             SpeechRecord(
-                text=row["text"], reason=row["reason"], timestamp=row["timestamp"]
+                text=row["text"],
+                reason=SpeechReason(row["reason"]),
+                timestamp=row["timestamp"],
             )
             for row in reversed(rows)
         ]

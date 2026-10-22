@@ -3,6 +3,7 @@ from dataclasses import replace
 from typing import Required, TypedDict
 from urllib.parse import urlsplit
 
+from ..domain import ArtifactKind, EvidenceSource, LinkRelationship, PullRequestState
 from ..work.models import RelatedLink
 from ..work.observations import PullRequest
 from .git import CommandPath, RunCommand, canonical_repository, command
@@ -51,7 +52,7 @@ def _pull_request(data: GitHubPullRequest) -> PullRequest:
     return PullRequest(
         number=data["number"],
         url=data["url"],
-        state=data["state"],
+        state=PullRequestState(data["state"]),
         merged_at=data.get("mergedAt"),
         is_draft=data.get("isDraft"),
         head=data.get("headRefOid") or "",
@@ -93,13 +94,17 @@ async def _stack_links(
         for position, item in enumerate(stack["pull_requests"], 1):
             if item["number"] == pr.number:
                 continue
-            state = "MERGED" if item.get("merged_at") else item["state"].upper()
+            state = (
+                PullRequestState.MERGED
+                if item.get("merged_at")
+                else PullRequestState(item["state"].upper())
+            )
             links.append(
                 RelatedLink(
-                    kind="pull_request",
+                    kind=ArtifactKind.PULL_REQUEST,
                     ref=f"https://{pr.repository}/pull/{item['number']}",
-                    relationship="stack_entry",
-                    source="github_stack",
+                    relationship=LinkRelationship.STACK_ENTRY,
+                    source=EvidenceSource.GITHUB_STACK,
                     stack=stack["number"],
                     position=position,
                     state=state,

@@ -15,6 +15,7 @@ from anthropic import AsyncAnthropic
 from pet_daemon.commentary.context import SITUATIONS
 from pet_daemon.config import Config
 from pet_daemon.daemon import Daemon
+from pet_daemon.domain import SpeechSituation
 from pet_daemon.types import JSONObject
 from Tests.fixtures import require
 
@@ -59,7 +60,9 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                     "summary"
                 ]
                 explicit = (
-                    not summary and SITUATIONS["explicit"] in body["system"][-1]["text"]
+                    not summary
+                    and SITUATIONS[SpeechSituation.EXPLICIT]
+                    in body["system"][-1]["text"]
                 )
                 if explicit:
                     entered.set()

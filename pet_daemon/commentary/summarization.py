@@ -1,12 +1,12 @@
 import json
 from collections.abc import Callable
+from dataclasses import asdict
 from typing import Literal, NotRequired, TypedDict
 
 from ..config import Config
 from ..prompts import bounded, select_prompt
 from ..runtime import SessionContext
 from ..storage import Memory
-from ..work.history import SessionDetail
 from .contracts import ModelRequest, RequestFactory
 
 SUMMARY_INSTRUCTIONS = """
@@ -41,7 +41,7 @@ def report_age(seconds: float) -> str | None:
 
 class Report(TypedDict):
     age: str | None
-    report: list[SessionDetail]
+    report: dict[str, str | None]
 
 
 class SummaryPayload(TypedDict):
@@ -92,7 +92,7 @@ def summary_request(
                 "reported_results",
                 {
                     "age": report_age(clock() - row.timestamp),
-                    "report": row.details,
+                    "report": asdict(row.details),
                 },
             )
             for row in reversed(rows)

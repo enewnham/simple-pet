@@ -17,6 +17,16 @@ from pet_daemon.commentary import Cognition
 from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.config import Config
 from pet_daemon.delivery import DeliveryOutcome, SpeechPacket
+from pet_daemon.domain import (
+    ArtifactKind,
+    DeliveryStatus,
+    EvidenceSource,
+    ExecutionOutcome,
+    LinkRelationship,
+    ModelPurpose,
+    PullRequestState,
+    SpeechReason,
+)
 from pet_daemon.runtime import HookEvent, OverlayPacket
 from pet_daemon.sessions.processes import ProcessTracker
 from pet_daemon.sessions.reactions import SessionReactions
@@ -68,7 +78,9 @@ class FixtureModel:
             "The parser preserves escaped delimiters inside quoted fields."
         )
 
-    async def complete(self, request: ModelRequest, reason: str) -> dict[str, object]:
+    async def complete(
+        self, request: ModelRequest, reason: SpeechReason | ModelPurpose
+    ) -> dict[str, object]:
         self.requests.append((request, reason))
         return {"speak": self.text}
 
@@ -179,7 +191,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             PullRequest(
                 23,
                 "https://example.test/team/parser/pull/23",
-                "OPEN",
+                PullRequestState.OPEN,
                 None,
                 head="head-one",
                 head_repository="example.test/team/parser",
@@ -203,8 +215,10 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
 
     async def submit_commentary(self) -> tuple[SpeechPacket, AttentionSelection]:
         snapshot = self.app.context()
-        selection = self.attention.select(snapshot, "routine")
-        await self.app.comment("routine", snapshot=snapshot, selection=selection)
+        selection = self.attention.select(snapshot, SpeechReason.ROUTINE)
+        await self.app.comment(
+            SpeechReason.ROUTINE, snapshot=snapshot, selection=selection
+        )
         packet = next(
             packet for packet in reversed(self.packets) if "delivery_id" in packet
         )
@@ -260,7 +274,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 "codex",
                 "parser",
                 "turn_done",
-                outcome="success",
+                outcome=ExecutionOutcome.SUCCESS,
                 progress="The parser changes are ready.",
             )
         )
@@ -384,10 +398,10 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             title="Document escaped delimiter examples",
             related_links=(
                 RelatedLink(
-                    "pull_request",
+                    ArtifactKind.PULL_REQUEST,
                     parent_pr.url,
-                    "stack_entry",
-                    "github_stack",
+                    LinkRelationship.STACK_ENTRY,
+                    EvidenceSource.GITHUB_STACK,
                     stack=4,
                     position=1,
                 ),
@@ -400,10 +414,10 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                     parent_pr,
                     related_links=(
                         RelatedLink(
-                            "pull_request",
+                            ArtifactKind.PULL_REQUEST,
                             child_pr.url,
-                            "stack_entry",
-                            "github_stack",
+                            LinkRelationship.STACK_ENTRY,
+                            EvidenceSource.GITHUB_STACK,
                             stack=4,
                             position=2,
                         ),
@@ -528,7 +542,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.provider.publish(
             HookEvent("codex", "other", "intent", goal="Document the renderer")
         )
-        self.app.queue("prompt")
+        self.app.queue(SpeechReason.PROMPT)
         self.attention.next_observation = self.now
         self.now += 1
         self.app.tick()
@@ -561,7 +575,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_silence_and_exhausted_delivery_persist_consideration(self) -> None:
         self.model.text = None
-        await self.app.comment("routine")
+        await self.app.comment(SpeechReason.ROUTINE)
         restored = Attention(
             self.config,
             self.clock,
@@ -606,7 +620,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         message = self.app.delivery.deliveries[packet["delivery_id"]].message
         self.app.clear_memory()
         self.accept(packet)
-        self.app.delivery_outcome(DeliveryOutcome(message, "accepted"))
+        self.app.delivery_outcome(DeliveryOutcome(message, DeliveryStatus.ACCEPTED))
         self.assertIsNone(self.memory.message_outcome(packet["delivery_id"]))
         self.assertEqual(self.memory.speech(), [])
         self.assertEqual(self.app.context().work, ())
@@ -682,7 +696,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(branch.last_success_at, self.observation.checked_at)
 
     async def test_failed_reset_preserves_history_and_sessions(self) -> None:
-        self.memory.record_speech("Earlier parser observation", "routine")
+        self.memory.record_speech("Earlier parser observation", SpeechReason.ROUTINE)
         work = self.app.context().work
         sessions = self.app.sessions
         self.memory.db.execute(

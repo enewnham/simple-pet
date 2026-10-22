@@ -6,6 +6,7 @@ from contextlib import AbstractContextManager
 from dataclasses import replace
 from typing import Protocol
 
+from ..domain import ArtifactKind
 from .association import decide_observation, report_context
 from .models import ArtifactReference, ExecutionEvidence, ReportContext, SessionReport
 from .observations import (
@@ -50,7 +51,7 @@ class WorkIngestion:
     ) -> ReportContext:
         if pull_request:
             pull_request = normalize_reference(
-                ArtifactReference("pull_request", pull_request)
+                ArtifactReference(ArtifactKind.PULL_REQUEST, pull_request)
             ).ref
         checkout = (
             self.repository.get_checkout(location, enclosing=True) if location else None
@@ -65,7 +66,12 @@ class WorkIngestion:
         )
         context = report_context(location, checkout, observed, prose)
         explicit = next(
-            (item.ref for item in context.references if item.kind == "pull_request"), ""
+            (
+                item.ref
+                for item in context.references
+                if item.kind == ArtifactKind.PULL_REQUEST
+            ),
+            "",
         )
         resolved_pr = pull_request or explicit or context.pull_request
         return replace(

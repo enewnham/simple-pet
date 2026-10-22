@@ -1,7 +1,8 @@
 from dataclasses import dataclass, field
 from typing import Literal, assert_never
 
-from ..runtime import HookEvent, SessionActivity
+from ..domain import Activity, ExecutionOutcome
+from ..runtime import HookEvent
 from .tracking import AgentSession, Sessions, SessionUpdate
 
 type ReactionKind = Literal[
@@ -21,7 +22,7 @@ class SessionReaction:
     kind: ReactionKind
     session: str
     generation: int
-    activity: SessionActivity
+    activity: Activity
     serial: int
 
 
@@ -33,9 +34,9 @@ class ReactionState:
     waiting: bool = False
     waiting_serial: int = 0
     waiting_identity: tuple[str | None, float | None] | None = None
-    trouble: set[SessionActivity] = field(default_factory=set)
-    unresolved: set[SessionActivity] = field(default_factory=set)
-    category_serials: dict[SessionActivity, int] = field(default_factory=dict)
+    trouble: set[Activity] = field(default_factory=set)
+    unresolved: set[Activity] = field(default_factory=set)
+    category_serials: dict[Activity, int] = field(default_factory=dict)
     terminal: bool = False
     investigating: bool = False
 
@@ -103,9 +104,7 @@ class SessionReactions:
         )
         emitted = []
 
-        def add(
-            kind: ReactionKind, activity: SessionActivity = result.activity
-        ) -> None:
+        def add(kind: ReactionKind, activity: Activity = result.activity) -> None:
             self.serial += 1
             emitted.append(
                 SessionReaction(kind, key, session.generation, activity, self.serial)
@@ -153,9 +152,9 @@ class SessionReactions:
             state.terminal = True
             add(
                 "failure"
-                if session.outcome == "error"
+                if session.outcome == ExecutionOutcome.ERROR
                 else "cancelled"
-                if session.outcome == "cancelled"
+                if session.outcome == ExecutionOutcome.CANCELLED
                 else "success"
             )
         elif result.failure:
@@ -165,9 +164,9 @@ class SessionReactions:
                 add("trouble")
             elif result.activity not in state.trouble:
                 add("investigation")
-        elif session.phase == "investigating" and not state.investigating:
+        elif session.phase == Activity.INVESTIGATING and not state.investigating:
             add("investigation")
-        state.investigating = session.phase == "investigating"
+        state.investigating = session.phase == Activity.INVESTIGATING
         return emitted
 
     def relevant(self, reaction: SessionReaction, sessions: Sessions) -> bool:
@@ -194,10 +193,12 @@ class SessionReactions:
                 and failure.generation == session.generation
             )
         if kind == "failure":
-            return session.finished and session.outcome == "error"
+            return session.finished and session.outcome == ExecutionOutcome.ERROR
         if kind in ("success", "cancelled"):
             return session.finished and session.outcome == (
-                "success" if kind == "success" else "cancelled"
+                ExecutionOutcome.SUCCESS
+                if kind == "success"
+                else ExecutionOutcome.CANCELLED
             )
         if kind == "recovery":
             failure = session.failures.get(reaction.activity)

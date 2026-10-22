@@ -5,12 +5,11 @@ import subprocess
 import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Literal
 
+from ..domain import ProcessStatus
 from ..runtime import ProcessIdentity
 
 type ProcessRow = tuple[ProcessIdentity, int, str, str]
-type ProcessStatus = Literal["unknown", "exited", "alive", "replaced"]
 
 
 def _parse_process(line: str) -> ProcessRow | None:
@@ -105,10 +104,10 @@ def probe(identity: ProcessIdentity) -> ProcessStatus:
     try:
         row = _processes(identity.pid).get(identity.pid)
     except (OSError, subprocess.SubprocessError):
-        return "unknown"
+        return ProcessStatus.UNKNOWN
     if row is None or "Z" in row[2]:
-        return "exited"
-    return "alive" if row[0] == identity else "replaced"
+        return ProcessStatus.EXITED
+    return ProcessStatus.ALIVE if row[0] == identity else ProcessStatus.REPLACED
 
 
 class ProcessTracker:

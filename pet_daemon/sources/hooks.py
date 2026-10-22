@@ -1,6 +1,7 @@
 from collections.abc import Mapping
 from typing import cast
 
+from ..domain import ExecutionOutcome
 from ..runtime import HookEvent, HookTextFields, ProcessIdentity
 
 EVENTS = frozenset(
@@ -64,12 +65,14 @@ def normalize_hook(packet: object) -> HookEvent | None:
         isinstance(alias, str) and alias for alias in aliases
     ):
         return None
-    if "outcome" in packet and packet["outcome"] not in (
-        "success",
-        "error",
-        "cancelled",
-    ):
-        return None
+    outcome = None
+    if "outcome" in packet:
+        try:
+            outcome = ExecutionOutcome(packet["outcome"])
+        except (ValueError, TypeError):
+            return None
+        if outcome == ExecutionOutcome.STALE:
+            return None
     if "\0" in packet.get("repo", ""):
         return None
     validated = cast(HookTextFields, packet)
@@ -92,7 +95,7 @@ def normalize_hook(packet: object) -> HookEvent | None:
         pull_request=validated.get("pull_request"),
         tool_name=validated.get("tool_name"),
         sentiment_text=validated.get("sentiment_text"),
-        outcome=validated.get("outcome"),
+        outcome=outcome,
         manual=bool(packet["manual"]) if "manual" in packet else None,
         owner=ProcessIdentity.parse(packet.get("owner")),
         exit_code=code if type(code) is int else None,

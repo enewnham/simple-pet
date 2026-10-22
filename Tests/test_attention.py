@@ -5,6 +5,13 @@ from pathlib import Path
 
 from pet_daemon.attention import Attention
 from pet_daemon.config import Config
+from pet_daemon.domain import (
+    Activity,
+    CareKind,
+    ExecutionOutcome,
+    SpeechReason,
+    WorkSubjectKind,
+)
 from pet_daemon.runtime import (
     CareTrigger,
     FailureSnapshot,
@@ -35,7 +42,7 @@ class AttentionTests(unittest.TestCase):
         subjects = tuple(
             WorkSubject(
                 session.id,
-                "session",
+                WorkSubjectKind.SESSION,
                 session.changed_at,
                 "one",
                 WorkStory(session.id, "", "one"),
@@ -72,14 +79,14 @@ class AttentionTests(unittest.TestCase):
             session_snapshot(
                 id="cli:failed",
                 failure=FailureSnapshot(
-                    activity="testing",
+                    activity=Activity.TESTING,
                     count=1,
                     goal="",
                     current_turn=True,
                     resolved=False,
                     seconds_ago=0,
                 ),
-                outcome="error",
+                outcome=ExecutionOutcome.ERROR,
                 changed_at=20,
             ),
             session_snapshot(id="cli:active", turn_active=True, changed_at=1),
@@ -88,10 +95,10 @@ class AttentionTests(unittest.TestCase):
 
     def test_event_target_keeps_its_focus_and_direction(self) -> None:
         snapshot = self.snapshot(
-            session_snapshot(id="cli:finished", outcome="success"),
+            session_snapshot(id="cli:finished", outcome=ExecutionOutcome.SUCCESS),
         )
         snapshot = replace(snapshot, trigger=SessionTrigger("cli:finished"))
-        selected = self.attention.select(snapshot, "completion")
+        selected = self.attention.select(snapshot, SpeechReason.COMPLETION)
         self.assertEqual(require(selected.focus_session).id, "cli:finished")
         self.assertEqual(selected.situation, "completion")
 
@@ -101,9 +108,10 @@ class AttentionTests(unittest.TestCase):
         self.assertIsNone(explicit.subject)
         self.assertIsNone(explicit.focus_session)
         self.assertEqual(explicit.situation, "explicit")
-        snapshot = replace(snapshot, trigger=CareTrigger("exercise"))
+        snapshot = replace(snapshot, trigger=CareTrigger(CareKind.EXERCISE))
         self.assertEqual(
-            self.attention.select(snapshot, "care").situation, "care_exercise"
+            self.attention.select(snapshot, SpeechReason.CARE).situation,
+            "care_exercise",
         )
 
     def test_click_prioritizes_the_oldest_explicit_input_wait(self) -> None:
@@ -118,37 +126,39 @@ class AttentionTests(unittest.TestCase):
                 id="cli:old", waiting_for_input=True, waiting_seconds=30, changed_at=10
             ),
         )
-        selected = self.attention.select(snapshot, "click")
+        selected = self.attention.select(snapshot, SpeechReason.CLICK)
         self.assertEqual(require(selected.focus_session).id, "cli:old")
         self.assertEqual(selected.situation, "click_waiting")
 
     def test_pending_failure_survives_a_lower_priority_prompt(self) -> None:
-        self.attention.queue("failure", SessionTrigger("cli:failed"))
-        self.attention.queue("prompt", SessionTrigger("cli:working"), failed=True)
+        self.attention.queue(SpeechReason.FAILURE, SessionTrigger("cli:failed"))
+        self.attention.queue(
+            SpeechReason.PROMPT, SessionTrigger("cli:working"), failed=True
+        )
         self.assertEqual(
             self.attention.pending, ("failure", 1, SessionTrigger("cli:failed"))
         )
 
     def test_cooldown_preserves_waiting_and_user_requests(self) -> None:
         self.attention.scheduled()
-        self.assertFalse(self.attention.allowed("routine"))
-        self.assertTrue(self.attention.allowed("click"))
+        self.assertFalse(self.attention.allowed(SpeechReason.ROUTINE))
+        self.assertTrue(self.attention.allowed(SpeechReason.CLICK))
         self.assertTrue(
             self.attention.allowed(
-                "check_in",
+                SpeechReason.CHECK_IN,
                 ReactionTrigger(
                     SessionReaction(
                         kind="waiting",
                         session="cli:parser",
                         generation=1,
-                        activity="command",
+                        activity=Activity.COMMAND,
                         serial=1,
                     )
                 ),
             )
         )
         self.now = self.config.behavior.automatic_speech_cooldown_seconds
-        self.assertTrue(self.attention.allowed("routine"))
+        self.assertTrue(self.attention.allowed(SpeechReason.ROUTINE))
 
     def test_considered_subjects_stay_quiet_after_restoring_history(self) -> None:
         snapshot = self.snapshot(session_snapshot(id="cli:parser", turn_active=True))
@@ -171,7 +181,7 @@ class AttentionTests(unittest.TestCase):
     def test_request_precedence_keeps_manual_and_click_ahead_of_due_events(
         self,
     ) -> None:
-        self.attention.queue("prompt")
+        self.attention.queue(SpeechReason.PROMPT)
         snapshot = self.snapshot(session_snapshot(id="cli:active", turn_active=True))
         self.assertEqual(
             require(
@@ -197,10 +207,12 @@ class AttentionTests(unittest.TestCase):
         snapshot = self.snapshot(session_snapshot(id="cli:parser", turn_active=True))
         snapshot = replace(snapshot, sleeping=True)
         self.now = 60
-        self.attention.queue("prompt", SessionTrigger("cli:parser"))
+        self.attention.queue(SpeechReason.PROMPT, SessionTrigger("cli:parser"))
         pending = self.attention.pending
         self.assertIsNone(
-            self.attention.request(snapshot, check_in=("cli:parser",), care="exercise")
+            self.attention.request(
+                snapshot, check_in=("cli:parser",), care=CareKind.EXERCISE
+            )
         )
         self.assertEqual(self.attention.pending, pending)
         self.assertEqual(
@@ -232,14 +244,14 @@ class AttentionTests(unittest.TestCase):
     def test_pending_delivery_preserves_every_automatic_request(self) -> None:
         snapshot = self.snapshot(session_snapshot(id="cli:parser", turn_active=True))
         self.now = 60
-        self.attention.queue("prompt", SessionTrigger("cli:parser"))
+        self.attention.queue(SpeechReason.PROMPT, SessionTrigger("cli:parser"))
         pending = self.attention.pending
         next_observation = self.attention.next_observation
         self.assertIsNone(
             self.attention.request(
                 snapshot,
                 check_in=("cli:parser",),
-                care="exercise",
+                care=CareKind.EXERCISE,
                 delivery_pending=True,
             )
         )
@@ -270,8 +282,8 @@ class AttentionTests(unittest.TestCase):
         self.assertEqual(require(self.attention.request(snapshot)).reason, "routine")
         idle = self.snapshot()
         self.assertIsNone(
-            self.attention.request(idle, care="exercise", delivery_pending=True)
+            self.attention.request(idle, care=CareKind.EXERCISE, delivery_pending=True)
         )
         self.assertEqual(
-            require(self.attention.request(idle, care="exercise")).reason, "care"
+            require(self.attention.request(idle, care=CareKind.EXERCISE)).reason, "care"
         )

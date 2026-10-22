@@ -2,7 +2,7 @@ import json
 import tempfile
 import unittest
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import TypedDict, Unpack
 
@@ -10,6 +10,7 @@ from pet_daemon.commentary.cognition import Cognition
 from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.commentary.summarization import SummaryPayload
 from pet_daemon.config import Config
+from pet_daemon.domain import ExecutionOutcome
 from pet_daemon.prompts import bounded, select_prompt
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources.hooks import HookEvent
@@ -19,7 +20,7 @@ from Tests.fixtures import capture_snapshot, require, session_snapshot
 
 
 class EventOptions(TypedDict, total=False):
-    outcome: str
+    outcome: ExecutionOutcome
     progress: str
 
 
@@ -48,7 +49,7 @@ class SummarizationTests(unittest.TestCase):
             recent_requests=("Implement parser",),
             summary="Parser work remains pending.",
             progress="Parser implemented and tests passed",
-            outcome="success",
+            outcome=ExecutionOutcome.SUCCESS,
             turn_active=False,
         )
 
@@ -73,7 +74,7 @@ class SummarizationTests(unittest.TestCase):
     def test_initial_checklist_and_later_completion_keep_their_provenance(self) -> None:
         self.event(
             "turn_done",
-            outcome="success",
+            outcome=ExecutionOutcome.SUCCESS,
             progress="Parser implemented and tests passed",
         )
         request = self.summary_request()
@@ -81,13 +82,12 @@ class SummarizationTests(unittest.TestCase):
         self.assertIn("[ ] Implement parser", payload["initial_intent"])
         self.assertEqual(payload["historical_summary"], "Parser work remains pending.")
         self.assertEqual(payload["current_report"]["outcome"], "success")
-        self.assertIn(
-            {"kind": "progress", "text": "Parser implemented and tests passed"},
-            payload["reported_results"][0]["report"],
+        self.assertEqual(
+            payload["reported_results"][0]["report"]["progress"],
+            "Parser implemented and tests passed",
         )
-        self.assertIn(
-            {"kind": "reported_outcome", "text": "success"},
-            payload["reported_results"][0]["report"],
+        self.assertEqual(
+            payload["reported_results"][0]["report"]["reported_outcome"], "success"
         )
         self.assertEqual(
             payload["reported_results"][0]["age"], "less than a minute ago"
@@ -103,13 +103,15 @@ class SummarizationTests(unittest.TestCase):
     def test_next_request_retains_its_session_completion_after_later_tools(
         self,
     ) -> None:
-        self.event("turn_done", outcome="success", progress="Parser delivered")
+        self.event(
+            "turn_done", outcome=ExecutionOutcome.SUCCESS, progress="Parser delivered"
+        )
         for index in range(10):
             self.event("progress", progress=f"Follow-up inspection {index}")
         self.event(
             "turn_done",
             session="other",
-            outcome="success",
+            outcome=ExecutionOutcome.SUCCESS,
             progress="Unrelated migration delivered",
         )
         self.focus = replace(
@@ -120,9 +122,8 @@ class SummarizationTests(unittest.TestCase):
         )
         payload = self.payload()
         self.assertEqual(len(payload["reported_results"]), 1)
-        self.assertIn(
-            {"kind": "progress", "text": "Parser delivered"},
-            payload["reported_results"][0]["report"],
+        self.assertEqual(
+            payload["reported_results"][0]["report"]["progress"], "Parser delivered"
         )
         self.assertNotIn("Unrelated migration", json.dumps(payload))
         self.assertEqual(
@@ -132,7 +133,9 @@ class SummarizationTests(unittest.TestCase):
 
     def test_first_request_only_excludes_followups_history_and_results(self) -> None:
         self.config.summarize_first_request_only = True
-        self.event("turn_done", outcome="success", progress="Parser delivered")
+        self.event(
+            "turn_done", outcome=ExecutionOutcome.SUCCESS, progress="Parser delivered"
+        )
         payload = self.payload()
         self.assertEqual(payload, {"initial_intent": self.focus.initial_request})
 
@@ -149,7 +152,7 @@ class SummarizationTests(unittest.TestCase):
                         "codex",
                         outcome,
                         "turn_done",
-                        outcome=outcome,
+                        outcome=ExecutionOutcome(outcome),
                         progress=progress,
                     ),
                     HookEvent("codex", outcome, "intent", goal="Review parser"),
@@ -170,12 +173,8 @@ class SummarizationTests(unittest.TestCase):
                 )
                 reports = payload["reported_results"]
                 self.assertEqual(len(reports), 1)
-                self.assertIn(
-                    {"kind": "reported_outcome", "text": outcome}, reports[0]["report"]
-                )
-                self.assertIn(
-                    {"kind": "progress", "text": progress}, reports[0]["report"]
-                )
+                self.assertEqual(reports[0]["report"]["reported_outcome"], outcome)
+                self.assertEqual(reports[0]["report"]["progress"], progress)
 
     def test_missing_results_preserve_an_unknown_outcome(self) -> None:
         self.focus = replace(self.focus, progress="", outcome=None, turn_active=True)
@@ -196,7 +195,7 @@ class SummarizationTests(unittest.TestCase):
         )
         self.event(
             "turn_done",
-            outcome="success",
+            outcome=ExecutionOutcome.SUCCESS,
             progress="Parser delivered after verification",
         )
         request = self.summary_request()
@@ -222,9 +221,15 @@ class SummarizationTests(unittest.TestCase):
     def test_whole_latest_report_can_cross_target_before_other_context_is_added(
         self,
     ) -> None:
-        self.event("turn_done", outcome="success", progress="Earlier parser result")
         self.event(
-            "turn_done", outcome="success", progress="Latest parser verification " * 20
+            "turn_done",
+            outcome=ExecutionOutcome.SUCCESS,
+            progress="Earlier parser result",
+        )
+        self.event(
+            "turn_done",
+            outcome=ExecutionOutcome.SUCCESS,
+            progress="Latest parser verification " * 20,
         )
         self.config.prompt_target_bytes = 1
         essential = self.summary_request()
@@ -243,7 +248,7 @@ class SummarizationTests(unittest.TestCase):
         )[0]
         self.assertEqual(
             payload["reported_results"][0]["report"],
-            row.details,
+            asdict(row.details),
         )
         self.assertEqual(payload["historical_summary"], "")
 

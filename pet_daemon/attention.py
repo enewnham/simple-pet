@@ -4,6 +4,13 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 
 from .config import Config
+from .domain import (
+    CareKind,
+    ExecutionOutcome,
+    SpeechReason,
+    SpeechSituation,
+    WorkSubjectKind,
+)
 from .runtime import (
     CareTrigger,
     PetContext,
@@ -22,7 +29,7 @@ from .work import WorkSubject
 
 @dataclass(frozen=True)
 class AttentionRequest:
-    reason: str
+    reason: SpeechReason
     context: str | None = None
     ttl: float | None = None
     trigger: Trigger | None = None
@@ -32,7 +39,7 @@ class AttentionRequest:
 @dataclass(frozen=True)
 class SelectionSupport:
     subject_revision: str | None = None
-    session_transition: tuple[int, bool, bool, str | None] | tuple[()] = ()
+    session_transition: tuple[int, bool, bool, ExecutionOutcome | None] | tuple[()] = ()
 
     @classmethod
     def capture(
@@ -58,8 +65,8 @@ class AttentionSelection:
     subject: WorkSubject | None
     focus_session: SessionContext | None
     context_sessions: tuple[SessionContext, ...]
-    reason: str
-    situation: str
+    reason: SpeechReason
+    situation: SpeechSituation
     context: str | None = None
     supporting_facts: SelectionSupport = SelectionSupport()
 
@@ -87,7 +94,7 @@ class AttentionSelection:
                 return False
         if current.subject is not None and current.focus_session is not None:
             members = set(current.subject.sessions)
-            if current.subject.kind == "session":
+            if current.subject.kind == WorkSubjectKind.SESSION:
                 members.add(current.subject.id)
             if current.focus_session.id not in members:
                 return False
@@ -113,7 +120,7 @@ class AttentionSelection:
 
 def _sessions(subject: WorkSubject, snapshot: PetContext) -> list[SessionContext]:
     identifiers = set(subject.sessions)
-    if subject.kind == "session":
+    if subject.kind == WorkSubjectKind.SESSION:
         identifiers.add(subject.id)
     return [session for session in snapshot.sessions if session.id in identifiers]
 
@@ -147,7 +154,7 @@ class Attention:
         self.config = config
         self.clock = clock
         self.rng = rng
-        self.pending: tuple[str, float, Trigger | None] | None = None
+        self.pending: tuple[SpeechReason, float, Trigger | None] | None = None
         self.last_attempt = float("-inf")
         self.next_observation = clock() + rng.uniform(*config.observation_seconds)
         self.selections: dict[str, float] = {}
@@ -167,18 +174,22 @@ class Attention:
         self.sequence = 0
 
     def queue(
-        self, reason: str, trigger: Trigger | None = None, failed: bool = False
+        self, reason: SpeechReason, trigger: Trigger | None = None, failed: bool = False
     ) -> None:
         now = self.clock()
-        if reason == "failure":
+        if reason == SpeechReason.FAILURE:
             self.pending = (reason, now + 1, trigger)
         elif (
-            reason == "check_in"
+            reason == SpeechReason.CHECK_IN
             or not self.pending
-            or self.pending[0] != "failure"
+            or self.pending[0] != SpeechReason.FAILURE
             or not failed
         ):
-            delay = {"prompt": 0, "completion": 1, "check_in": 0}[reason]
+            delay = {
+                SpeechReason.PROMPT: 0,
+                SpeechReason.COMPLETION: 1,
+                SpeechReason.CHECK_IN: 0,
+            }[reason]
             self.pending = (reason, now + delay, trigger)
         trace(
             "observation.queued",
@@ -210,7 +221,7 @@ class Attention:
     def select(
         self,
         snapshot: PetContext,
-        reason: str = "routine",
+        reason: SpeechReason = SpeechReason.ROUTINE,
         context: str | None = None,
         eligible: Collection[str] | None = None,
     ) -> AttentionSelection:
@@ -218,15 +229,18 @@ class Attention:
         subject = None
         focus = None
         others: tuple[SessionContext, ...] = ()
-        if context is None and reason not in ("explicit", "care"):
-            target_session = _target_session(trigger) if reason != "click" else None
+        if context is None and reason not in (SpeechReason.EXPLICIT, SpeechReason.CARE):
+            target_session = (
+                _target_session(trigger) if reason != SpeechReason.CLICK else None
+            )
             target_subject = (
                 trigger.subject_id if isinstance(trigger, SubjectTrigger) else None
             )
             subjects = [
                 subject
                 for subject in snapshot.work
-                if reason != "routine" or self.routine_eligible(subject, snapshot)
+                if reason != SpeechReason.ROUTINE
+                or self.routine_eligible(subject, snapshot)
             ]
             candidates = []
             for item in subjects:
@@ -264,7 +278,7 @@ class Attention:
                             ),
                             default=0,
                         )
-                        if reason == "click" and item[2] == 0
+                        if reason == SpeechReason.CLICK and item[2] == 0
                         else -item[0].changed_at,
                         item[0].id,
                     ),
@@ -333,34 +347,46 @@ class Attention:
                             key=lambda session: (_session_tier(session), session.id),
                         )
                     )
-            if reason == "click" and not any(
+            if reason == SpeechReason.CLICK and not any(
                 session.waiting_for_input
                 or (session.turn_active and not session.activity_uncertain)
                 for session in ((focus,) if focus else ())
             ):
                 subject, focus, others = None, None, ()
-        situation = reason
+        situation: SpeechSituation
         if context is not None:
-            situation = "explicit"
-        elif reason == "click":
+            situation = SpeechSituation.EXPLICIT
+        elif reason == SpeechReason.CLICK:
             situation = (
-                "click_waiting"
+                SpeechSituation.CLICK_WAITING
                 if focus and focus.waiting_for_input
-                else "click_working"
+                else SpeechSituation.CLICK_WORKING
                 if focus
-                else "click_idle"
+                else SpeechSituation.CLICK_IDLE
             )
-        elif reason == "care":
+        elif reason == SpeechReason.CARE:
             assert isinstance(trigger, CareTrigger)
-            situation = "care_" + trigger.care
-        elif reason == "check_in":
+            situation = {
+                CareKind.EXERCISE: SpeechSituation.CARE_EXERCISE,
+                CareKind.ATTENTION: SpeechSituation.CARE_ATTENTION,
+                CareKind.CONSTERNATION: SpeechSituation.CARE_CONSTERNATION,
+            }[trigger.care]
+        elif reason == SpeechReason.CHECK_IN:
             situation = (
-                "check_in_waiting"
+                SpeechSituation.CHECK_IN_WAITING
                 if focus and focus.waiting_for_input
-                else "check_in_running"
+                else SpeechSituation.CHECK_IN_RUNNING
                 if focus and focus.active_tools
-                else "check_in_quiet"
+                else SpeechSituation.CHECK_IN_QUIET
             )
+        else:
+            situation = {
+                SpeechReason.PROMPT: SpeechSituation.PROMPT,
+                SpeechReason.COMPLETION: SpeechSituation.COMPLETION,
+                SpeechReason.FAILURE: SpeechSituation.FAILURE,
+                SpeechReason.ROUTINE: SpeechSituation.ROUTINE,
+                SpeechReason.EXPLICIT: SpeechSituation.EXPLICIT,
+            }[reason]
         return AttentionSelection(
             subject,
             deepcopy(focus),
@@ -378,15 +404,15 @@ class Attention:
         check_in: Collection[str] = (),
         manual: tuple[str, float | None] | None = None,
         clicked: bool = False,
-        care: str | None = None,
+        care: CareKind | None = None,
         reaction_relevant: Callable[[SessionReaction], bool] = lambda trigger: True,
         delivery_pending: bool = False,
     ) -> AttentionRequest | None:
         now = self.clock()
         if manual is not None:
-            return AttentionRequest("explicit", manual[0], manual[1])
+            return AttentionRequest(SpeechReason.EXPLICIT, manual[0], manual[1])
         if clicked:
-            return AttentionRequest("click")
+            return AttentionRequest(SpeechReason.CLICK)
         if delivery_pending or snapshot.sleeping:
             return None
         if self.pending and now >= self.pending[1]:
@@ -397,7 +423,7 @@ class Attention:
             ):
                 return AttentionRequest(reason, trigger=trigger)
         if check_in:
-            return AttentionRequest("check_in", eligible=frozenset(check_in))
+            return AttentionRequest(SpeechReason.CHECK_IN, eligible=frozenset(check_in))
         if now >= self.next_observation:
             self.next_observation = now + self.rng.uniform(
                 *self.config.observation_seconds
@@ -405,11 +431,11 @@ class Attention:
             if any(
                 self.routine_eligible(subject, snapshot) for subject in snapshot.work
             ):
-                return AttentionRequest("routine")
+                return AttentionRequest(SpeechReason.ROUTINE)
         if care is not None and not any(
             session.turn_active for session in snapshot.sessions
         ):
-            return AttentionRequest("care", trigger=CareTrigger(care))
+            return AttentionRequest(SpeechReason.CARE, trigger=CareTrigger(care))
         return None
 
     def restore(self, history: Mapping[str, HistoryRecord]) -> None:
@@ -438,9 +464,9 @@ class Attention:
         self.selections[subject_id] = self.sequence
         trace("attention.selected", session=subject_id)
 
-    def allowed(self, reason: str, trigger: Trigger | None = None) -> bool:
+    def allowed(self, reason: SpeechReason, trigger: Trigger | None = None) -> bool:
         if (
-            reason in ("click", "explicit")
+            reason in (SpeechReason.CLICK, SpeechReason.EXPLICIT)
             or isinstance(trigger, ReactionTrigger)
             and trigger.reaction.kind == "waiting"
         ):

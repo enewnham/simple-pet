@@ -2,6 +2,13 @@ from __future__ import annotations
 
 from typing import NotRequired, TypedDict
 
+from ..domain import (
+    ArtifactKind,
+    EvidenceKind,
+    EvidenceSource,
+    ExecutionOutcome,
+    PullRequestState,
+)
 from ..work.models import ReportContext
 from ..work.views import (
     AssociationView,
@@ -20,7 +27,7 @@ from ..work.views import (
 class PullRequestRecord(TypedDict):
     url: str
     title: str
-    state: str
+    state: PullRequestState
     is_draft: bool | None
 
 
@@ -34,7 +41,7 @@ class EvidenceFields(TypedDict, total=False):
     pull_request_found: bool
     execution: str
     reported_progress: str
-    reported_execution_outcome: str
+    reported_execution_outcome: ExecutionOutcome
     uncertainty: tuple[str, ...]
     text: str
     association: str
@@ -43,7 +50,7 @@ class EvidenceFields(TypedDict, total=False):
 
 
 class ReferenceRecord(TypedDict):
-    kind: str
+    kind: ArtifactKind
     ref: str
 
 
@@ -55,13 +62,13 @@ class ReportContextRecord(TypedDict, total=False):
 
 
 class PresentedEvidence(EvidenceFields):
-    source: str
-    kind: str
+    source: EvidenceSource
+    kind: EvidenceKind
     observed_at: NotRequired[float]
 
 
 class PresentedArtifact(TypedDict):
-    kind: str
+    kind: ArtifactKind
     ref: str
     title: NotRequired[str]
     evidence: tuple[PresentedEvidence, ...]

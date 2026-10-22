@@ -2,12 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, NotRequired, Protocol, TypedDict
+from typing import TYPE_CHECKING, NotRequired, Protocol, TypedDict
 
-type ToolActivity = Literal[
-    "investigating", "editing", "testing", "building", "checking", "command"
-]
-type SessionActivity = ToolActivity | Literal["harness"]
+from .domain import Activity, CareKind, ExecutionOutcome, PetState, ProcessStatus
 
 
 class ProcessPacket(TypedDict):
@@ -64,7 +61,7 @@ class OverlayPacket(TypedDict, total=False):
     motion: MotionPacket
     stop_motion: bool
     sleeping: bool
-    state: str
+    state: PetState
 
 
 @dataclass(frozen=True)
@@ -90,7 +87,7 @@ class ReactionTrigger:
 
 @dataclass(frozen=True)
 class CareTrigger:
-    care: str
+    care: CareKind
 
 
 type Trigger = SessionTrigger | SubjectTrigger | ReactionTrigger | CareTrigger
@@ -111,7 +108,7 @@ class UserSentiment:
 @dataclass(frozen=True)
 class ConvergenceItem:
     id: str
-    outcome: str | None
+    outcome: ExecutionOutcome | None
 
 
 @dataclass(frozen=True)
@@ -151,7 +148,7 @@ class HookEvent:
     repo: str | None = None
     tool_name: str | None = None
     sentiment_text: str | None = None
-    outcome: str | None = None
+    outcome: ExecutionOutcome | None = None
     manual: bool | None = None
     owner: ProcessIdentity | None = None
     exit_code: int | None = None
@@ -222,13 +219,13 @@ if TYPE_CHECKING:
 class ActiveTool:
     call: str
     tool: str
-    activity: ToolActivity
+    activity: Activity
     duration_seconds: float
 
 
 @dataclass(frozen=True)
 class FailureSnapshot:
-    activity: SessionActivity
+    activity: Activity
     count: int
     goal: str
     resolved: bool
@@ -243,7 +240,7 @@ class SessionContext:
     parent: str | None
     goal: str
     repo: str
-    phase: ToolActivity | Literal[""]
+    phase: Activity | None
     initial_request: str
     summary: str
     recent_requests: tuple[str, ...]
@@ -254,7 +251,7 @@ class SessionContext:
     quiet_seconds: float
     turn_active: bool
     last_tool: str
-    presence: str
+    presence: ProcessStatus
     owner: ProcessIdentity | None
     owner_last_alive_seconds: float | None
     activity_uncertain: bool
@@ -263,7 +260,7 @@ class SessionContext:
     active_tools: tuple[ActiveTool, ...]
     progress: str
     failure: FailureSnapshot | None
-    outcome: str | None
+    outcome: ExecutionOutcome | None
     user_sentiment: UserSentiment | None = None
     connected_work: WorkStory | None = None
 
@@ -275,14 +272,14 @@ class SessionContext:
 
 @dataclass(frozen=True)
 class SwarmActivity:
-    activity: str
+    activity: PetState
     sessions: tuple[SessionContext, ...]
     convergence: tuple[ConvergenceItem, ...] | None = None
 
 
 @dataclass(frozen=True)
 class PetContext:
-    activity: str
+    activity: PetState
     sessions: tuple[SessionContext, ...]
     sleeping: bool
     trigger: Trigger | None = None

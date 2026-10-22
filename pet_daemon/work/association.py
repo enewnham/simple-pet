@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from urllib.parse import urlsplit, urlunsplit
 
+from ..domain import ArtifactKind
 from .models import ArtifactReference, ReportContext
 from .observations import (
     BranchObservation,
@@ -21,7 +22,7 @@ def references(prose: str) -> tuple[ArtifactReference, ...]:
         parsed = urlsplit(matched.rstrip(".,;:!?)]}"))
         path = parsed.path.rstrip("/")
         if re.fullmatch(r"/[^/]+/[^/]+/pull/\d+", path):
-            kind = "pull_request"
+            kind = ArtifactKind.PULL_REQUEST
         elif (
             parsed.hostname == "linear.app"
             and re.search(r"/issue/[^/]+", path)
@@ -29,7 +30,7 @@ def references(prose: str) -> tuple[ArtifactReference, ...]:
             and re.fullmatch(r"/[^/]+/[^/]+/issues/\d+", path)
             or re.fullmatch(r"/browse/[A-Z][A-Z0-9]+-\d+", path)
         ):
-            kind = "ticket"
+            kind = ArtifactKind.TICKET
         else:
             continue
         ref = urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, "", ""))

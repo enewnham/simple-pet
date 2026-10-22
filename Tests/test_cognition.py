@@ -17,6 +17,7 @@ from pet_daemon.commentary.context import INSTRUCTIONS
 from pet_daemon.commentary.model import AnthropicModelClient
 from pet_daemon.commentary.summarization import SUMMARY_INSTRUCTIONS
 from pet_daemon.config import Config
+from pet_daemon.domain import CareKind, ExecutionOutcome, PetState, SpeechReason
 from pet_daemon.runtime import CareTrigger, PetContext, SessionTrigger
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources.hooks import HookEvent
@@ -183,14 +184,14 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         return capture_snapshot(self.sessions.activity_view(), memory=self.memory)
 
     async def generate_commentary(
-        self, reason: str = "routine", context: str | None = None
+        self, reason: SpeechReason = SpeechReason.ROUTINE, context: str | None = None
     ) -> CommentaryResult:
         return await self.generate_for_context(self.snapshot(), reason, context)
 
     async def generate_for_context(
         self,
         snapshot: PetContext,
-        reason: str,
+        reason: SpeechReason,
         context: str | None = None,
         refresh: Callable[[], PetContext] | None = None,
     ) -> CommentaryResult:
@@ -250,11 +251,11 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sends_only_the_instruction_for_the_current_reason(self) -> None:
         directions = {
-            "prompt": "Briefly acknowledge the latest request and what we are starting. Express intent using the supplied goal and decisions.",
-            "routine": "React briefly to the change in activity or progress.",
-            "completion": "React briefly to how this agent turn ended. Use its reported result without claiming the intended work is complete.",
-            "failure": "React briefly to the observed failed call. Do not infer a current obstacle or invent a diagnosis.",
-            "explicit": "Give a brief reaction to the supplied context, grounded in its facts.",
+            SpeechReason.PROMPT: "Briefly acknowledge the latest request and what we are starting. Express intent using the supplied goal and decisions.",
+            SpeechReason.ROUTINE: "React briefly to the change in activity or progress.",
+            SpeechReason.COMPLETION: "React briefly to how this agent turn ended. Use its reported result without claiming the intended work is complete.",
+            SpeechReason.FAILURE: "React briefly to the observed failed call. Do not infer a current obstacle or invent a diagnosis.",
+            SpeechReason.EXPLICIT: "Give a brief reaction to the supplied context, grounded in its facts.",
         }
         for reason, direction in directions.items():
             with self.subTest(reason=reason):
@@ -300,7 +301,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
                 self.handle({"harness": "claude", "session": "worker", "event": event})
-                await self.generate_commentary("completion")
+                await self.generate_commentary(SpeechReason.COMPLETION)
                 system = self.requests[-1][1]["system"][1]["text"]
                 self.assertIn(direction, system)
                 self.assertNotIn("React briefly to the unresolved failure.", system)
@@ -311,7 +312,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             {"harness": "claude", "session": "worker", "event": "intent", "goal": text}
         )
         self.responses.append(({"speak": "I see the request."}, "end_turn"))
-        await self.generate_commentary("explicit", text)
+        await self.generate_commentary(SpeechReason.EXPLICIT, text)
         body = self.requests[-1][1]
         self.assertNotIn(text, json.dumps(body["system"]))
         payload = json.loads(body["messages"][0]["content"])
@@ -326,7 +327,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         cases: list[tuple[PetContext, str]] = [
             (snapshot, "Briefly acknowledge the developer while our work continues."),
             (
-                PetContext("idle", (), False),
+                PetContext(PetState.IDLE, (), False),
                 "Give the developer a casual greeting.",
             ),
         ]
@@ -353,7 +354,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         for state, direction in cases:
             with self.subTest(direction=direction, sessions=len(state.sessions)):
                 self.responses.append(({"speak": "Hello there."}, "end_turn"))
-                await self.generate_for_context(state, "click")
+                await self.generate_for_context(state, SpeechReason.CLICK)
                 self.assertEqual(
                     self.requests[-1][1]["system"][1]["text"],
                     "<request>\n" + direction + "\n</request>",
@@ -391,7 +392,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.config.prompt_target_bytes = 1
         self.config.persona += " Curious and patient." * 145
         self.responses.append(({"speak": "I am still on it."}, "end_turn"))
-        await self.generate_for_context(snapshot, "click")
+        await self.generate_for_context(snapshot, SpeechReason.CLICK)
         body = self.requests[-1][1]
         payload = json.loads(body["messages"][0]["content"])
         self.assertTrue(payload["focus_session"]["turn_active"])
@@ -434,7 +435,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 "end_turn",
             )
         )
-        result = await self.generate_for_context(snapshot, "click")
+        result = await self.generate_for_context(snapshot, SpeechReason.CLICK)
         body = self.requests[-1][1]
         payload = json.loads(body["messages"][0]["content"])
         self.assertNotIn("id", payload["focus_session"])
@@ -451,7 +452,12 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("without inventing a question", direction)
         self.assertNotIn("while our work continues", direction)
-        for reason in ("prompt", "completion", "check_in", "failure"):
+        for reason in (
+            SpeechReason.PROMPT,
+            SpeechReason.COMPLETION,
+            SpeechReason.CHECK_IN,
+            SpeechReason.FAILURE,
+        ):
             with self.subTest(reason=reason):
                 selected = self.cognition.prompts.prompt(
                     snapshot,
@@ -470,7 +476,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.responses.append(
             ({"speak": "The batch insert work is waiting for your input."}, "end_turn")
         )
-        await self.generate_commentary("click")
+        await self.generate_commentary(SpeechReason.CLICK)
         body = self.requests[-1][1]
         payload = json.loads(body["messages"][0]["content"])
         self.assertTrue(payload["focus_session"]["waiting_for_input"])
@@ -482,16 +488,16 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_care_speech_matches_the_activity_and_requires_a_line(self) -> None:
         directions = {
-            "exercise": "stretch break",
-            "attention": "casual greeting",
-            "consternation": "quiet stretch",
+            CareKind.EXERCISE: "stretch break",
+            CareKind.ATTENTION: "casual greeting",
+            CareKind.CONSTERNATION: "quiet stretch",
         }
         for care, direction in directions.items():
             with self.subTest(care=care):
                 snapshot = self.snapshot()
                 snapshot = replace(snapshot, trigger=CareTrigger(care))
                 self.responses.append(({"speak": "A little stretch."}, "end_turn"))
-                await self.generate_for_context(snapshot, "care")
+                await self.generate_for_context(snapshot, SpeechReason.CARE)
                 body = self.requests[-1][1]
                 payload = json.loads(body["messages"][0]["content"])
                 self.assertNotIn("trigger", payload)
@@ -516,7 +522,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 for speech in (None, " "):
                     self.responses.append(({"speak": speech}, "end_turn"))
                     with self.assertRaises(ValueError):
-                        await self.generate_for_context(snapshot, "care")
+                        await self.generate_for_context(snapshot, SpeechReason.CARE)
 
     async def test_check_in_selects_input_wait_running_call_or_quiet_work(self) -> None:
         cases = [
@@ -553,7 +559,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                         }
                     )
                 self.responses.append(({"speak": "I am waiting here."}, "end_turn"))
-                await self.generate_commentary("check_in")
+                await self.generate_commentary(SpeechReason.CHECK_IN)
                 self.assertEqual(
                     self.requests[-1][1]["system"][1]["text"],
                     "<request>\n" + direction + "\n</request>",
@@ -565,7 +571,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         speech = "The compiler has produced an unusually elaborate complaint. " * 20
         self.responses.append(({"speak": speech}, "end_turn"))
         result = await self.generate_commentary(
-            "explicit", "The compiler complained again"
+            SpeechReason.EXPLICIT, "The compiler complained again"
         )
         schema = self.requests[-1][1]["output_config"]["format"]["schema"]
         self.assertEqual(schema["properties"]["speak"]["type"], "string")
@@ -580,7 +586,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         self.responses.append(({"speak": "Undelivered remark"}, "end_turn"))
         await self.generate_commentary()
-        await self.generate_commentary("routine")
+        await self.generate_commentary(SpeechReason.ROUTINE)
         messages = self.requests[-1][1]["messages"]
         self.assertEqual([message["role"] for message in messages], ["user"])
         self.assertNotIn("Private interpretation", json.dumps(messages))
@@ -597,7 +603,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         self.responses.append(({"speak": "The parser is progressing."}, "end_turn"))
-        await self.generate_commentary("routine", "🐈" * 100000)
+        await self.generate_commentary(SpeechReason.ROUTINE, "🐈" * 100000)
         content = self.requests[-1][1]["messages"][0]["content"]
         self.assertEqual(json.loads(content)["context"], "🐈" * 2000)
         self.assertNotIn("reason", json.loads(content))
@@ -628,7 +634,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.clock.now += 120
         snapshot = self.snapshot()
         snapshot = replace(snapshot, trigger=SessionTrigger("codex:worker-7"))
-        await self.generate_for_context(snapshot, "failure")
+        await self.generate_for_context(snapshot, SpeechReason.FAILURE)
         payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
         self.assertEqual(payload["focus_session"]["recent_requests"][-1], "Goal 7")
         self.assertLessEqual(len(payload["other_sessions"]), 2)
@@ -693,10 +699,10 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
             )
-            self.cognition.memory.record_speech("猫" * 480, "routine")
+            self.cognition.memory.record_speech("猫" * 480, SpeechReason.ROUTINE)
         snapshot = self.snapshot()
         snapshot = replace(snapshot, trigger=SessionTrigger("codex:worker-7"))
-        await self.generate_for_context(snapshot, "failure")
+        await self.generate_for_context(snapshot, SpeechReason.FAILURE)
         body = self.requests[-1][1]
         payload = json.loads(body["messages"][0]["content"])
         self.assertIn("猫", payload["focus_session"]["recent_requests"][-1])
@@ -718,7 +724,9 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
             )
-            self.cognition.memory.record_speech(f"Visible remark {index}", "routine")
+            self.cognition.memory.record_speech(
+                f"Visible remark {index}", SpeechReason.ROUTINE
+            )
         self.cognition.memory.record_event(
             build_session_entry(
                 HookEvent(
@@ -732,7 +740,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         )
         snapshot = self.snapshot()
         snapshot = replace(snapshot, trigger=SessionTrigger("claude:worker"))
-        await self.generate_for_context(snapshot, "failure")
+        await self.generate_for_context(snapshot, SpeechReason.FAILURE)
         payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
         memory = payload["memory"]
         self.assertNotIn("repetition", payload)
@@ -761,7 +769,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.clock.advance(125)
         self.responses.append(({"speak": "The checks are still running."}, "end_turn"))
-        await self.generate_commentary("check_in")
+        await self.generate_commentary(SpeechReason.CHECK_IN)
         body = self.requests[-1][1]
         payload = json.loads(body["messages"][0]["content"])
         forbidden = {
@@ -827,11 +835,13 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
         )
-        self.cognition.memory.record_speech("A recent spoken line", "routine")
-        for reason in ("click", "care"):
+        self.cognition.memory.record_speech(
+            "A recent spoken line", SpeechReason.ROUTINE
+        )
+        for reason in (SpeechReason.CLICK, SpeechReason.CARE):
             with self.subTest(reason=reason):
                 snapshot = self.snapshot()
-                snapshot = replace(snapshot, trigger=CareTrigger("exercise"))
+                snapshot = replace(snapshot, trigger=CareTrigger(CareKind.EXERCISE))
                 self.responses.append(({"speak": "A little stretch."}, "end_turn"))
                 await self.generate_for_context(snapshot, reason)
                 payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
@@ -844,21 +854,21 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         self.config.summarize_on = [
-            "completion",
-            "routine",
-            "failure",
-            "check_in",
-            "click",
-            "explicit",
+            SpeechReason.COMPLETION,
+            SpeechReason.ROUTINE,
+            SpeechReason.FAILURE,
+            SpeechReason.CHECK_IN,
+            SpeechReason.CLICK,
+            SpeechReason.EXPLICIT,
         ]
-        for reason in ("prompt", *self.config.summarize_on):
+        for reason in (SpeechReason.PROMPT, *self.config.summarize_on):
             with self.subTest(reason=reason):
                 self.responses.append(({"speak": "Working on the parser."}, "end_turn"))
                 await self.generate_for_context(self.snapshot(), reason)
         self.assertEqual(len(self.summary_requests), 5)
         self.assertEqual(len(self.observation_requests), 7)
         self.config.summarize_on = []
-        await self.generate_for_context(self.snapshot(), "prompt")
+        await self.generate_for_context(self.snapshot(), SpeechReason.PROMPT)
         self.assertEqual(len(self.summary_requests), 5)
         self.assertEqual(len(self.observation_requests), 8)
 
@@ -876,7 +886,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                     + f"Fix parser issue {index}.",
                 }
             )
-        await self.generate_for_context(self.snapshot(), "prompt")
+        await self.generate_for_context(self.snapshot(), SpeechReason.PROMPT)
         for _, body in (self.observation_requests[-1], self.summary_requests[-1]):
             self.assertIn("Fix parser issue 3", body["messages"][0]["content"])
 
@@ -892,7 +902,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         snapshot = self.snapshot()
         snapshot = replace(snapshot, trigger=SessionTrigger("codex:focus"))
         self.summary = "Parser validation awaits the next checks."
-        result = await self.generate_for_context(snapshot, "prompt")
+        result = await self.generate_for_context(snapshot, SpeechReason.PROMPT)
         payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
         self.assertEqual(
             payload["focus_session"]["recent_requests"][-1], "Validate parser behavior"
@@ -954,7 +964,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                         harness="claude",
                         session="worker",
                         event="turn_done",
-                        outcome="success",
+                        outcome=ExecutionOutcome.SUCCESS,
                         progress="An earlier report was recovered",
                     )
                 )
@@ -962,7 +972,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             return {"speak": None}, "end_turn"
 
         self.responses.append(report_arrives)
-        result = await self.generate_for_context(snapshot, "prompt")
+        result = await self.generate_for_context(snapshot, SpeechReason.PROMPT)
         self.assertEqual(result.summary_version, before)
         self.assertNotEqual(
             result.summary_version,
@@ -973,17 +983,17 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         history = "The parser still needs its edge cases checked."
-        self.cognition.memory.record_speech(history, "routine")
+        self.cognition.memory.record_speech(history, SpeechReason.ROUTINE)
         self.summary = "The parser review includes edge cases."
         self.responses.extend(
             [({"speak": history}, "end_turn"), ({"speak": history}, "end_turn")]
         )
         with observation() as usage:
-            result = await self.generate_commentary("prompt")
-        self.assertEqual(usage["prompt"].input_tokens, 200)
-        self.assertEqual(usage["prompt"].output_tokens, 40)
+            result = await self.generate_commentary(SpeechReason.PROMPT)
+        self.assertEqual(usage[SpeechReason.PROMPT].input_tokens, 200)
+        self.assertEqual(usage[SpeechReason.PROMPT].output_tokens, 40)
         self.assertEqual(usage["summary"].input_tokens, 100)
-        self.assertEqual(usage["prompt"].cache_read_tokens, 20)
+        self.assertEqual(usage[SpeechReason.PROMPT].cache_read_tokens, 20)
         self.assertEqual(usage["summary"].cache_read_tokens, 0)
         self.assertEqual(usage["summary"].cache_write_tokens, 0)
         self.assertIsNone(result.speak)
@@ -1003,11 +1013,11 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         history = "Hello, I am here with you."
-        self.cognition.memory.record_speech(history, "click")
+        self.cognition.memory.record_speech(history, SpeechReason.CLICK)
         self.responses.extend(
             [({"speak": history}, "end_turn"), ({"speak": history}, "end_turn")]
         )
-        result = await self.generate_commentary("explicit", "Say hello")
+        result = await self.generate_commentary(SpeechReason.EXPLICIT, "Say hello")
         self.assertEqual(result.speak, history)
         self.assertEqual(len(self.observation_requests), 2)
         self.assertEqual(self.summary_requests, [])
@@ -1017,16 +1027,16 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_expired_and_cleared_history_do_not_cause_a_retry(self) -> None:
         history = "The parser still needs its edge cases checked."
-        self.cognition.memory.record_speech(history, "routine")
+        self.cognition.memory.record_speech(history, SpeechReason.ROUTINE)
         self.clock.advance(self.config.speech_history_seconds)
         self.responses.append(({"speak": history}, "end_turn"))
-        result = await self.generate_commentary("routine")
+        result = await self.generate_commentary(SpeechReason.ROUTINE)
         self.assertEqual(result.speak, history)
         self.assertEqual(len(self.observation_requests), 1)
-        self.cognition.memory.record_speech(history, "routine")
+        self.cognition.memory.record_speech(history, SpeechReason.ROUTINE)
         self.cognition.memory.clear_speech()
         self.responses.append(({"speak": history}, "end_turn"))
-        result = await self.generate_commentary("routine")
+        result = await self.generate_commentary(SpeechReason.ROUTINE)
         self.assertEqual(result.speak, history)
         self.assertEqual(len(self.observation_requests), 2)
 
@@ -1034,11 +1044,11 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         history = "Hello, I am here with you."
-        self.cognition.memory.record_speech(history, "click")
+        self.cognition.memory.record_speech(history, SpeechReason.CLICK)
         self.responses.extend(
             [({"speak": history}, "end_turn"), ({"speak": None}, "end_turn")]
         )
-        result = await self.generate_commentary("explicit", "Say hello")
+        result = await self.generate_commentary(SpeechReason.EXPLICIT, "Say hello")
         self.assertEqual(result.speak, history)
         self.assertEqual(len(self.observation_requests), 2)
 
@@ -1046,17 +1056,17 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         history = "The parser still needs its edge cases checked."
-        self.cognition.memory.record_speech(history, "routine")
+        self.cognition.memory.record_speech(history, SpeechReason.ROUTINE)
         self.summary = "The parser review includes edge cases."
         self.responses.extend(
             [({"speak": history}, "end_turn"), ({"speak": 5}, "end_turn")]
         )
         with observation() as usage:
-            result = await self.generate_commentary("prompt")
-        self.assertEqual(usage["prompt"].input_tokens, 200)
-        self.assertEqual(usage["prompt"].output_tokens, 40)
+            result = await self.generate_commentary(SpeechReason.PROMPT)
+        self.assertEqual(usage[SpeechReason.PROMPT].input_tokens, 200)
+        self.assertEqual(usage[SpeechReason.PROMPT].output_tokens, 40)
         self.assertEqual(usage["summary"].input_tokens, 100)
-        self.assertEqual(usage["prompt"].cache_read_tokens, 20)
+        self.assertEqual(usage[SpeechReason.PROMPT].cache_read_tokens, 20)
         self.assertEqual(usage["summary"].cache_read_tokens, 0)
         self.assertEqual(usage["summary"].cache_write_tokens, 0)
         self.assertIsNone(result.speak)
@@ -1069,7 +1079,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         history = "The parser checks report 2 failures."
         fresh = "The parser checks report 3 failures."
-        self.cognition.memory.record_speech(history, "routine")
+        self.cognition.memory.record_speech(history, SpeechReason.ROUTINE)
         self.handle(
             {
                 "harness": "claude",
@@ -1081,7 +1091,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.responses.extend(
             [({"speak": history}, "end_turn"), ({"speak": fresh}, "end_turn")]
         )
-        result = await self.generate_commentary("routine")
+        result = await self.generate_commentary(SpeechReason.ROUTINE)
         self.assertEqual(result.speak, fresh)
         self.assertEqual(len(self.observation_requests), 2)
         self.assertNotIn(history, json.dumps(self.observation_requests[-1][1]))
@@ -1092,7 +1102,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         history = "The parser checks report 2 failures."
         fresh = "The parser checks report 3 failures."
-        self.cognition.memory.record_speech(history, "routine")
+        self.cognition.memory.record_speech(history, SpeechReason.ROUTINE)
         self.handle(
             {
                 "harness": "claude",
@@ -1117,7 +1127,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
 
         self.responses.extend([first_reply, ({"speak": fresh}, "end_turn")])
         result = await self.generate_for_context(
-            snapshot, "routine", refresh=lambda: self.snapshot()
+            snapshot, SpeechReason.ROUTINE, refresh=lambda: self.snapshot()
         )
         first, retry = [
             json.loads(body["messages"][0]["content"])
@@ -1139,7 +1149,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         history = "The parser checks are running."
-        self.cognition.memory.record_speech(history, "routine")
+        self.cognition.memory.record_speech(history, SpeechReason.ROUTINE)
         snapshot = self.snapshot()
 
         def first_reply() -> tuple[dict[str, object], str]:
@@ -1165,7 +1175,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             [first_reply, ({"speak": "I am checking the batch inserts."}, "end_turn")]
         )
         result = await self.generate_for_context(
-            snapshot, "routine", refresh=lambda: self.snapshot()
+            snapshot, SpeechReason.ROUTINE, refresh=lambda: self.snapshot()
         )
         payload = json.loads(self.observation_requests[-1][1]["messages"][0]["content"])
         self.assertEqual(result.summary_session, "claude:worker")
@@ -1189,11 +1199,11 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 await self.generate_commentary()
             self.assertEqual(self.cognition.memory.speech(), [])
         for reason, context in (
-            ("explicit", None),
-            ("explicit", "Please speak"),
-            ("check_in", None),
-            ("click", None),
-            ("routine", "Please speak"),
+            (SpeechReason.EXPLICIT, None),
+            (SpeechReason.EXPLICIT, "Please speak"),
+            (SpeechReason.CHECK_IN, None),
+            (SpeechReason.CLICK, None),
+            (SpeechReason.ROUTINE, "Please speak"),
         ):
             with self.subTest(reason=reason, context=context):
                 self.responses.append(({"speak": None}, "end_turn"))

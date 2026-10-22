@@ -6,6 +6,7 @@ from typing import Protocol
 
 from anthropic import AsyncAnthropic
 
+from ..domain import ModelPurpose, SpeechReason
 from ..telemetry import UsageTokens, event, request_usage, verbose
 from .context import encoded_size
 from .contracts import ModelRequest
@@ -13,7 +14,7 @@ from .contracts import ModelRequest
 
 class ModelClient(Protocol):
     async def complete(
-        self, request: ModelRequest, reason: str
+        self, request: ModelRequest, reason: SpeechReason | ModelPurpose
     ) -> dict[str, object]: ...
 
 
@@ -21,7 +22,9 @@ class AnthropicModelClient:
     def __init__(self, client: AsyncAnthropic) -> None:
         self.client = client
 
-    async def complete(self, request: ModelRequest, reason: str) -> dict[str, object]:
+    async def complete(
+        self, request: ModelRequest, reason: SpeechReason | ModelPurpose
+    ) -> dict[str, object]:
         verbose(
             "observation.request",
             reason=reason,
@@ -78,7 +81,7 @@ class AnthropicModelClient:
         result = json.loads(content)
         if not isinstance(result, dict):
             raise ValueError("Observation requires an object")  # noqa: TRY004 - Report malformed JSON values through the validation contract.
-        if reason == "summary":
+        if reason == ModelPurpose.SUMMARY:
             event(
                 "observation.summary",
                 duration_seconds=round(time.monotonic() - started, 3),

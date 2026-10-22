@@ -1,8 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, TypedDict
+from typing import ClassVar, Literal, TypedDict
 
+from ..domain import (
+    ArtifactKind,
+    CollectionKind,
+    EvidenceKind,
+    EvidenceSource,
+    LinkRelationship,
+    PullRequestState,
+)
 from .models import ExecutionEvidence, IntentEvidence, ProgressEvidence, RelatedLink
 from .wire import PullRequestData, RelatedLinkData
 
@@ -21,6 +29,9 @@ class SessionObservation:
 
 @dataclass(frozen=True)
 class GitObservation:
+    source: ClassVar[EvidenceSource] = EvidenceSource.GIT
+    kind: ClassVar[EvidenceKind] = EvidenceKind.OBSERVATION
+
     worktree: str
     branch: str
     head: str
@@ -63,7 +74,7 @@ class GitObservation:
 class PullRequest:
     number: int
     url: str
-    state: str
+    state: PullRequestState
     merged_at: str | None
     is_draft: bool | None = None
     head: str = ""
@@ -100,7 +111,7 @@ class PullRequest:
 
     @property
     def pending(self) -> bool:
-        return self.state == "OPEN"
+        return self.state == PullRequestState.OPEN
 
 
 @dataclass(frozen=True)
@@ -174,7 +185,7 @@ type RepositoryObservation = (
 
 @dataclass(frozen=True)
 class RepositoryTarget:
-    kind: str
+    kind: CollectionKind
     ref: str
     repository: str = ""
     checkout: str = ""
@@ -282,13 +293,13 @@ def related_link_data(link: RelatedLink) -> RelatedLinkData:
 
 def related_link_from_data(link: RelatedLinkData) -> RelatedLink:
     return RelatedLink(
-        kind=link["kind"],
+        kind=ArtifactKind(link["kind"]),
         ref=link["ref"],
-        relationship=link["relationship"],
-        source=link["source"],
+        relationship=LinkRelationship(link["relationship"]),
+        source=EvidenceSource(link["source"]),
         stack=link["stack"],
         position=link["position"],
-        state=link["state"],
+        state=PullRequestState(link["state"]) if link["state"] else None,
         is_draft=link["is_draft"],
         head=link["head"],
         head_branch=link["head_branch"],
@@ -300,7 +311,7 @@ def pull_request_from_data(pr: PullRequestData) -> PullRequest:
     return PullRequest(
         number=pr["number"],
         url=pr["url"],
-        state=pr["state"],
+        state=PullRequestState(pr["state"]),
         merged_at=pr["merged_at"],
         is_draft=pr["is_draft"],
         head=pr["head"],

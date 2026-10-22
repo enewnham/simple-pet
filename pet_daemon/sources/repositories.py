@@ -4,6 +4,7 @@ from collections.abc import Callable, Coroutine, Iterable
 from pathlib import Path
 
 from .. import telemetry
+from ..domain import CollectionKind
 from ..work.observations import (
     BranchObservation,
     CheckoutObservation,
@@ -15,15 +16,15 @@ from ..work.observations import (
 from . import git, github
 from .git import RunCommand
 
-type CollectionKey = tuple[str, str]
+type CollectionKey = tuple[CollectionKind, str]
 
 
 def _key(item: RepositoryObservation) -> CollectionKey:
     if isinstance(item, CheckoutObservation):
-        return "checkout", item.worktree
+        return CollectionKind.CHECKOUT, item.worktree
     if isinstance(item, BranchObservation):
-        return "branch", f"{item.repository}:{item.branch}"
-    return "pull_request", item.ref
+        return CollectionKind.BRANCH, f"{item.repository}:{item.branch}"
+    return CollectionKind.PULL_REQUEST, item.ref
 
 
 class RepositoryTracker:
@@ -62,7 +63,7 @@ class RepositoryTracker:
         self.roots: dict[str, str] = {}
         targets = tuple(targets)
         for target in targets:
-            if target.kind != "checkout":
+            if target.kind != CollectionKind.CHECKOUT:
                 continue
             path = str(Path(target.ref).resolve())
             enclosing = [
@@ -91,50 +92,53 @@ class RepositoryTracker:
         self.missing.discard(supplied)
         if refresh or root not in self.paths:
             self.paths[root] = 0
-            self._invalidate(("checkout", root))
+            self._invalidate((CollectionKind.CHECKOUT, root))
 
     def reconcile_targets(self, targets: Iterable[RepositoryTarget]) -> None:
         desired = {}
         paths = set()
         for target in targets:
-            if target.kind == "checkout":
+            if target.kind == CollectionKind.CHECKOUT:
                 supplied = str(Path(target.ref).resolve())
                 root = self.roots.get(supplied, supplied)
                 if root not in self.missing:
                     paths.add(root)
-                desired[("checkout", root)] = target
-            elif target.kind == "branch" and target.ref:
+                desired[(CollectionKind.CHECKOUT, root)] = target
+            elif target.kind == CollectionKind.BRANCH and target.ref:
                 repository = git.canonical_repository(target.repository)
                 if repository:
-                    desired[("branch", f"{repository}:{target.ref}")] = (
+                    desired[(CollectionKind.BRANCH, f"{repository}:{target.ref}")] = (
                         RepositoryTarget(
-                            "branch",
+                            CollectionKind.BRANCH,
                             target.ref,
                             repository,
                             include_links=target.include_links,
                         )
                     )
-            elif target.kind == "pull_request":
+            elif target.kind == CollectionKind.PULL_REQUEST:
                 _, number = github.pull_request_identity(target.ref)
                 if number is not None:
-                    desired[("pull_request", target.ref)] = target
+                    desired[(CollectionKind.PULL_REQUEST, target.ref)] = target
         for path in self.paths.keys() - paths:
-            self._invalidate(("checkout", path))
+            self._invalidate((CollectionKind.CHECKOUT, path))
         self.paths = {path: self.paths.get(path, 0) for path in paths}
         self.targets = desired
         self._sync_subscriptions()
 
     def _sync_subscriptions(self) -> None:
         desired = {
-            key: target for key, target in self.targets.items() if key[0] != "checkout"
+            key: target
+            for key, target in self.targets.items()
+            if key[0] != CollectionKind.CHECKOUT
         }
         for path in self.paths:
             local = self.locals.get(path)
             if not local or not local.branch:
                 continue
-            key = "branch", f"{local.repository}:{local.branch}"
+            key = CollectionKind.BRANCH, f"{local.repository}:{local.branch}"
             desired.setdefault(
-                key, RepositoryTarget("branch", local.branch, local.repository)
+                key,
+                RepositoryTarget(CollectionKind.BRANCH, local.branch, local.repository),
             )
         for key, target in self.subscriptions.items():
             if desired.get(key) != target:
@@ -190,7 +194,7 @@ class RepositoryTracker:
             return
         now = self.clock()
         for path, checked in list(self.paths.items()):
-            key = "checkout", path
+            key = CollectionKind.CHECKOUT, path
             if key not in self.tasks and (
                 not checked or now - checked >= self.local_interval
             ):
@@ -221,13 +225,13 @@ class RepositoryTracker:
             and version == self.versions.get(key, 0)
             and (
                 key[1] in self.paths
-                if key[0] == "checkout"
+                if key[0] == CollectionKind.CHECKOUT
                 else key in self.subscriptions
             )
         )
 
     async def _local(self, path: str, sequence: int, version: int, epoch: int) -> None:
-        key = "checkout", path
+        key = CollectionKind.CHECKOUT, path
         checked_at = self.clock()
         try:
             async with self.limit:
@@ -265,10 +269,12 @@ class RepositoryTracker:
             async with self.limit:
                 pr = await github.observe(
                     None,
-                    target.ref if target.kind == "branch" else "",
+                    target.ref if target.kind == CollectionKind.BRANCH else "",
                     run=self.run,
                     repository=target.repository,
-                    url=target.ref if target.kind == "pull_request" else "",
+                    url=target.ref
+                    if target.kind == CollectionKind.PULL_REQUEST
+                    else "",
                     include_links=target.include_links,
                 )
         except (
@@ -290,7 +296,7 @@ class RepositoryTracker:
             return
         item = (
             BranchObservation(target.repository, target.ref, pr, checked_at, error)
-            if target.kind == "branch"
+            if target.kind == CollectionKind.BRANCH
             else PullRequestObservation(target.ref, pr, checked_at, error)
         )
         self._save(item)

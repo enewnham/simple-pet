@@ -5,8 +5,15 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Unpack
 
+from pet_daemon.domain import (
+    ArtifactKind,
+    EvidenceSource,
+    LinkRelationship,
+    PullRequestState,
+)
 from pet_daemon.runtime import HookEvent, HookTextFields
 from pet_daemon.sessions.tracking import Sessions
+from pet_daemon.sources.hooks import normalize_hook
 from pet_daemon.storage.memory import Memory
 from pet_daemon.storage.migrations import SCHEMA_VERSION, migrate
 from pet_daemon.work.history import build_session_entry
@@ -44,10 +51,25 @@ class WorkTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def event(
-        self, event: str, session: str = "codex:one", **fields: Unpack[HookTextFields]
+        self,
+        event: str,
+        session: str = "codex:one",
+        *,
+        aliases: tuple[str, ...] = (),
+        **fields: Unpack[HookTextFields],
     ) -> None:
         harness, name = session.split(":", 1)
-        hook = HookEvent(harness, name, event, **fields)
+        hook = require(
+            normalize_hook(
+                {
+                    "harness": harness,
+                    "session": name,
+                    "event": event,
+                    "aliases": list(aliases),
+                    **fields,
+                }
+            )
+        )
         result = self.sessions.apply(hook)
         if result is not None:
             with self.memory.transaction():
@@ -67,7 +89,7 @@ class WorkTests(unittest.TestCase):
         return PullRequest(
             number,
             f"https://github.com/team/project/pull/{number}",
-            "OPEN",
+            PullRequestState.OPEN,
             None,
             True,
             "head",
@@ -193,10 +215,7 @@ class WorkTests(unittest.TestCase):
         self.assertEqual(reports, [ProgressView("Second parser report")])
         self.assertTrue(
             any(
-                {detail["kind"]: detail["text"] for detail in record.details}.get(
-                    "progress"
-                )
-                == "First parser report"
+                record.details.progress == "First parser report"
                 for record in self.memory.recent()
             )
         )
@@ -288,7 +307,9 @@ class WorkTests(unittest.TestCase):
         self.store.observe(replace(self.branch(7), checked_at=self.now - 1))
         self.store.observe(
             PullRequestObservation(
-                self.pr(8).url, replace(self.pr(8), state="MERGED"), self.now + 1
+                self.pr(8).url,
+                replace(self.pr(8), state=PullRequestState.MERGED),
+                self.now + 1,
             )
         )
         self.store.observe(PullRequestObservation(self.pr(8).url, self.pr(8), self.now))
@@ -610,7 +631,10 @@ class WorkTests(unittest.TestCase):
         self,
     ) -> None:
         link = RelatedLink(
-            "pull_request", self.pr(8).url, "stack_entry", "github_stack"
+            ArtifactKind.PULL_REQUEST,
+            self.pr(8).url,
+            LinkRelationship.STACK_ENTRY,
+            EvidenceSource.GITHUB_STACK,
         )
         first = replace(self.pr(), related_links=(link,))
         self.store.observe(PullRequestObservation(first.url, first, self.now))
@@ -618,7 +642,7 @@ class WorkTests(unittest.TestCase):
         self.now += 1
         failed = replace(
             first,
-            state="MERGED",
+            state=PullRequestState.MERGED,
             related_links=(),
             related_links_error="stack lookup unavailable",
         )

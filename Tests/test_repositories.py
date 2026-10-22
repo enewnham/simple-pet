@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Never, Unpack
 from unittest.mock import patch
 
+from pet_daemon.domain import (
+    CollectionKind,
+)
 from pet_daemon.sources import RepositoryTarget, RepositoryTracker, git, github
 from pet_daemon.sources.git import CommandOptions
 from pet_daemon.sources.github import GitHubPullRequest
@@ -189,7 +192,11 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_successful_empty_lookup_clears_branch_match(self) -> None:
         self.tracker.reconcile_targets(
-            (RepositoryTarget("branch", "feature", "example.test/team/repo"),)
+            (
+                RepositoryTarget(
+                    CollectionKind.BRANCH, "feature", "example.test/team/repo"
+                ),
+            )
         )
         await self.refresh()
         self.assertIsNotNone(self.branch().pr)
@@ -201,7 +208,11 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_branch_lookup_emits_uncertainty(self) -> None:
         self.tracker.reconcile_targets(
-            (RepositoryTarget("branch", "feature", "example.test/team/repo"),)
+            (
+                RepositoryTarget(
+                    CollectionKind.BRANCH, "feature", "example.test/team/repo"
+                ),
+            )
         )
         await self.refresh()
         previous = self.branch()
@@ -219,7 +230,11 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
             {**self.pr, "number": 2, "state": "CLOSED"},
         ]
         self.tracker.reconcile_targets(
-            (RepositoryTarget("branch", "feature", "example.test/team/repo"),)
+            (
+                RepositoryTarget(
+                    CollectionKind.BRANCH, "feature", "example.test/team/repo"
+                ),
+            )
         )
         await self.refresh()
         self.assertIsNone(self.branch().pr)
@@ -236,8 +251,8 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         targets = (
-            RepositoryTarget("checkout", str(self.path)),
-            RepositoryTarget("pull_request", self.pr["url"]),
+            RepositoryTarget(CollectionKind.CHECKOUT, str(self.path)),
+            RepositoryTarget(CollectionKind.PULL_REQUEST, self.pr["url"]),
         )
         self.tracker.reconcile_targets(targets)
         await self.refresh()
@@ -261,7 +276,7 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_missing_checkout_requires_a_fresh_track_request(self) -> None:
-        target = RepositoryTarget("checkout", str(self.path))
+        target = RepositoryTarget(CollectionKind.CHECKOUT, str(self.path))
         self.tracker.reconcile_targets((target,))
         await self.refresh()
         moved = self.path.parent / "moved"
@@ -309,7 +324,7 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
             lambda: self.now,
             run=self.command,
             checkpoints=checkpoints,
-            targets=(RepositoryTarget("checkout", str(nested)),),
+            targets=(RepositoryTarget(CollectionKind.CHECKOUT, str(nested)),),
         )
         await self.refresh()
         local = self.checkout().local
@@ -346,7 +361,7 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
             lambda: self.now,
             run=self.command,
             checkpoints=checkpoints,
-            targets=(RepositoryTarget("checkout", str(nested)),),
+            targets=(RepositoryTarget(CollectionKind.CHECKOUT, str(nested)),),
         )
         await self.refresh()
         self.assertFalse(self.checkout().available)
@@ -357,7 +372,7 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(self.tracker.paths), {str(self.path)})
 
     async def test_targets_and_observations_restore_without_checkout(self) -> None:
-        target = RepositoryTarget("pull_request", self.pr["url"])
+        target = RepositoryTarget(CollectionKind.PULL_REQUEST, self.pr["url"])
         self.tracker.reconcile_targets((target,))
         await self.refresh()
         checkpoint = self.tracker.snapshot()
@@ -383,7 +398,7 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.tracker.paths, {})
 
     async def test_retiring_targets_cancels_and_discards_late_callbacks(self) -> None:
-        target = RepositoryTarget("pull_request", self.pr["url"])
+        target = RepositoryTarget(CollectionKind.PULL_REQUEST, self.pr["url"])
         self.tracker.reconcile_targets((target,))
         entered, released = asyncio.Event(), asyncio.Event()
 
@@ -409,7 +424,7 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.emitted), 1)
 
     async def test_pause_discards_late_results_and_resume_refreshes(self) -> None:
-        target = RepositoryTarget("pull_request", self.pr["url"])
+        target = RepositoryTarget(CollectionKind.PULL_REQUEST, self.pr["url"])
         self.tracker.reconcile_targets((target,))
         await self.refresh()
         previous = self.tracker.snapshot()

@@ -10,6 +10,14 @@ from anthropic.types import CacheControlEphemeralParam, TextBlockParam
 
 from ..attention import AttentionSelection
 from ..config import Config
+from ..domain import (
+    ExecutionOutcome,
+    PetState,
+    ProcessStatus,
+    SpeechReason,
+    SpeechSituation,
+    WorkSubjectKind,
+)
 from ..prompts import bounded, select_prompt
 from ..runtime import PetContext, SessionContext
 from ..types import JSONObject
@@ -68,22 +76,29 @@ describe evidence freshness. Presence does not prove activity. activity_uncertai
 quiet work without running calls. sleeping establishes whether you are napping.
 </observations>
 """.strip()
-SITUATIONS = {
-    "prompt": "Briefly acknowledge the latest request and what we are starting. Express intent using the supplied goal and decisions.",
-    "routine": "React briefly to the change in activity or progress.",
-    "completion": "React briefly to how this agent turn ended. Use its reported result without claiming the intended work is complete.",
-    "failure": "React briefly to the observed failed call. Do not infer a current obstacle or invent a diagnosis.",
-    "explicit": "Give a brief reaction to the supplied context, grounded in its facts.",
-    "click_waiting": "Identify the work waiting longest for developer input. Describe the needed input only when its progress or requests supply it. Otherwise say the work is waiting for input without inventing a question.",
-    "click_working": "Briefly acknowledge the developer while our work continues.",
-    "click_idle": "Give the developer a casual greeting.",
-    "care_exercise": "Give a brief spoken aside about taking a stretch break during quiet time.",
-    "care_attention": "Give a brief casual greeting during quiet time.",
-    "care_consternation": "Give a brief aside about a quiet stretch. The consternation animation expresses a passing mood and does not establish an agent failure. Keep it self-contained without asking for work, attention, or a reply.",
-    "check_in_waiting": "Give a brief remark about the wait for developer input.",
-    "check_in_running": "Give a brief remark about the running call and its elapsed time.",
-    "check_in_quiet": "Give a brief remark about the quiet time during this work. Do not imply that help is needed.",
+SITUATIONS: dict[SpeechSituation, str] = {
+    SpeechSituation.PROMPT: "Briefly acknowledge the latest request and what we are starting. Express intent using the supplied goal and decisions.",
+    SpeechSituation.ROUTINE: "React briefly to the change in activity or progress.",
+    SpeechSituation.COMPLETION: "React briefly to how this agent turn ended. Use its reported result without claiming the intended work is complete.",
+    SpeechSituation.FAILURE: "React briefly to the observed failed call. Do not infer a current obstacle or invent a diagnosis.",
+    SpeechSituation.EXPLICIT: "Give a brief reaction to the supplied context, grounded in its facts.",
+    SpeechSituation.CLICK_WAITING: "Identify the work waiting longest for developer input. Describe the needed input only when its progress or requests supply it. Otherwise say the work is waiting for input without inventing a question.",
+    SpeechSituation.CLICK_WORKING: "Briefly acknowledge the developer while our work continues.",
+    SpeechSituation.CLICK_IDLE: "Give the developer a casual greeting.",
+    SpeechSituation.CARE_EXERCISE: "Give a brief spoken aside about taking a stretch break during quiet time.",
+    SpeechSituation.CARE_ATTENTION: "Give a brief casual greeting during quiet time.",
+    SpeechSituation.CARE_CONSTERNATION: "Give a brief aside about a quiet stretch. The consternation animation expresses a passing mood and does not establish an agent failure. Keep it self-contained without asking for work, attention, or a reply.",
+    SpeechSituation.CHECK_IN_WAITING: "Give a brief remark about the wait for developer input.",
+    SpeechSituation.CHECK_IN_RUNNING: "Give a brief remark about the running call and its elapsed time.",
+    SpeechSituation.CHECK_IN_QUIET: "Give a brief remark about the quiet time during this work. Do not imply that help is needed.",
 }
+CARE_SITUATIONS = frozenset(
+    {
+        SpeechSituation.CARE_EXERCISE,
+        SpeechSituation.CARE_ATTENTION,
+        SpeechSituation.CARE_CONSTERNATION,
+    }
+)
 RETRY_INSTRUCTIONS = """
 Keep the configured persona. Look beyond the most obvious status update and choose
 another supported detail or a different reaction.
@@ -103,9 +118,9 @@ class SentimentData(TypedDict):
 class SessionRecord(TypedDict, total=False):
     turn_active: bool
     waiting_for_input: bool
-    outcome: str | None
+    outcome: ExecutionOutcome | None
     activity_uncertain: bool
-    presence: str
+    presence: ProcessStatus
     project: str
     summary: str
     recent_requests: list[str]
@@ -126,7 +141,7 @@ class OmittedSessions(TypedDict):
 
 
 class CommentaryPayload(TypedDict, total=False):
-    activity: str
+    activity: PetState
     sleeping: bool
     time: str
     context: str | None
@@ -265,7 +280,7 @@ def session_record(session: SessionContext) -> SessionRecord:
     record["failure"] = None
     if failure and failure.current_turn and not failure.resolved:
         record["failure"] = {
-            "activity": bounded(failure.activity, 120),
+            "activity": failure.activity,
             "count": failure.count,
             "age": duration(failure.seconds_ago),
         }
@@ -291,7 +306,10 @@ def project_payload(
         "sleeping": snapshot.sleeping,
         "time": datetime.fromtimestamp(timestamp).astimezone().strftime("%A %H:%M"),
     }
-    if selection.situation.startswith("care_") or selection.situation == "click_idle":
+    if (
+        selection.situation in CARE_SITUATIONS
+        or selection.situation == SpeechSituation.CLICK_IDLE
+    ):
         return payload
     payload.pop("activity")
     payload.update(
@@ -302,12 +320,12 @@ def project_payload(
         convergence=False,
         memory={"recent_events": []},
     )
-    if selection.context is not None or selection.reason == "explicit":
+    if selection.context is not None or selection.reason == SpeechReason.EXPLICIT:
         return payload
     focus = selection.focus_session
     if selection.subject is not None:
         payload["focus_work"] = work_record(selection.subject.story)
-    if selection.reason == "prompt":
+    if selection.reason == SpeechReason.PROMPT:
         if focus:
             payload["focus_session"] = {
                 "project": bounded(Path(focus.repo or "").name, 120),
@@ -330,7 +348,7 @@ def project_payload(
     focus_record = session_record(focus) if focus else None
     if selection.subject is not None and focus_record:
         focus_record.pop("connected_work", None)
-    if selection.reason == "failure" and focus_record:
+    if selection.reason == SpeechReason.FAILURE and focus_record:
         focus_record.pop("progress", None)
     other_records = [session_record(session) for session in others[:2]]
     if selection.subject is not None:
@@ -363,11 +381,11 @@ class CommentarySupport:
         ) + tuple(session.id for session in self.selection.context_sessions[:count])
 
     def valid(self, snapshot: PetContext) -> bool:
-        if self.selection.situation.startswith("care_"):
+        if self.selection.situation in CARE_SITUATIONS:
             return snapshot.sleeping == self.payload["sleeping"] and not any(
                 session.turn_active for session in snapshot.sessions
             )
-        if self.selection.situation == "click_idle":
+        if self.selection.situation == SpeechSituation.CLICK_IDLE:
             return not any(
                 session.waiting_for_input
                 or session.turn_active
@@ -389,7 +407,7 @@ class CommentarySupport:
             return False
         if refreshed.subject is not None:
             members = set(refreshed.subject.sessions)
-            if refreshed.subject.kind == "session":
+            if refreshed.subject.kind == WorkSubjectKind.SESSION:
                 members.add(refreshed.subject.id)
             if not set(self.session_ids) <= members:
                 return False
@@ -443,13 +461,13 @@ class PromptBuilder:
 
     def situation(self, selection: AttentionSelection) -> str:
         direction = SITUATIONS[selection.situation]
-        if selection.situation == "completion":
+        if selection.situation == SpeechSituation.COMPLETION:
             outcome = (
                 selection.focus_session.outcome if selection.focus_session else None
             )
-            if outcome == "cancelled":
+            if outcome == ExecutionOutcome.CANCELLED:
                 direction += " Acknowledge the cancellation without claiming success."
-            elif outcome == "error":
+            elif outcome == ExecutionOutcome.ERROR:
                 direction += (
                     " Acknowledge the unsuccessful result without claiming success."
                 )

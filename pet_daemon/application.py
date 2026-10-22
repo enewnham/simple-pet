@@ -14,6 +14,7 @@ from .behavior.controller import Behavior
 from .commentary import Cognition, CommentaryResult, CommentarySupport
 from .config import Config
 from .delivery import DeliveryOutcome, SpeechDelivery, SpeechMessage
+from .domain import DeliveryStatus, SpeechReason
 from .runtime import (
     HookEvent,
     OverlayPacket,
@@ -84,7 +85,7 @@ class Application:
         self.checkout_target = checkout_target
         self.reconcile_work = reconcile_work
         self.task: asyncio.Task[None] | None = None
-        self.reason: str | None = None
+        self.reason: SpeechReason | None = None
         self.revision = 0
         self.history_epoch = 0
         self.suspended = False
@@ -176,7 +177,7 @@ class Application:
         self.manual = (context, ttl)
         trace("speech.requested", context=context, ttl=ttl)
 
-    def queue(self, reason: str, trigger: Trigger | None = None) -> None:
+    def queue(self, reason: SpeechReason, trigger: Trigger | None = None) -> None:
         self.attention.queue(reason, trigger, self.sessions.failed)
 
     def context(self, trigger: Trigger | None = None) -> PetContext:
@@ -333,7 +334,7 @@ class Application:
         self.behavior.satisfy()
         self.behavior.wake("click")
         self.behavior.react("click", self.sessions)
-        if self.task and self.reason == "click" and not self.task.done():
+        if self.task and self.reason == SpeechReason.CLICK and not self.task.done():
             return
         self.preempt()
         self.clicked = True
@@ -341,7 +342,7 @@ class Application:
 
     async def comment(
         self,
-        reason: str,
+        reason: SpeechReason,
         context: str | None = None,
         ttl: float | None = None,
         trigger: Trigger | None = None,
@@ -535,7 +536,7 @@ class Application:
             if current
             else None
         )
-        if outcome.status == "accepted":
+        if outcome.status == DeliveryStatus.ACCEPTED:
             self.memory.record_acceptance(
                 message.message_id,
                 message.text,
@@ -547,7 +548,7 @@ class Application:
             )
             self.last_speech = (message.text, self.clock())
             self.attention.last_attempt = self.clock()
-        elif outcome.status == "failed":
+        elif outcome.status == DeliveryStatus.FAILED:
             try:
                 self.memory.record_delivery_failure(
                     message.message_id,
@@ -619,11 +620,11 @@ class Application:
         )
         if request is None:
             return
-        if request.reason == "explicit":
+        if request.reason == SpeechReason.EXPLICIT:
             self.manual = None
-        elif request.reason == "click":
+        elif request.reason == SpeechReason.CLICK:
             self.clicked = False
-        elif request.reason == "care":
+        elif request.reason == SpeechReason.CARE:
             self.behavior.care_remark = None
         if not self.attention.allowed(request.reason, request.trigger):
             return
@@ -631,7 +632,7 @@ class Application:
         selection = self.attention.select(
             snapshot, request.reason, request.context, request.eligible
         )
-        if request.reason == "check_in" and selection.focus_session:
+        if request.reason == SpeechReason.CHECK_IN and selection.focus_session:
             self.sessions.by_id[selection.focus_session.id].last_check_in = now
         self.attention.scheduled(selection.id)
         self.persist_attention(selection.id)

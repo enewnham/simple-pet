@@ -8,6 +8,7 @@ from pet_daemon.delivery import (
     SpeechMessage,
     SpeechPacket,
 )
+from pet_daemon.domain import SpeechReason
 
 
 class DeliveryTests(unittest.TestCase):
@@ -25,7 +26,7 @@ class DeliveryTests(unittest.TestCase):
         self.message = SpeechMessage(
             "The parser preserves quoted fields.",
             10,
-            "routine",
+            SpeechReason.ROUTINE,
             "selection",
             "work",
             "one",

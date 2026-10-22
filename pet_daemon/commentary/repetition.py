@@ -9,6 +9,7 @@ from functools import lru_cache
 import objc
 from NaturalLanguage import NLEmbedding, NLLanguageEnglish  # ty: ignore[unresolved-import]
 
+from ..domain import RepeatMethod
 from ..telemetry import event
 
 SEMANTIC_THRESHOLD = 0.9
@@ -127,7 +128,7 @@ GRAMMAR = {
 class RepeatMatch:
     index: int
     similarity: float
-    method: str
+    method: RepeatMethod
 
 
 def normalized(text: str) -> str:
@@ -197,7 +198,7 @@ def semantic_match(
                     scored.append((score, index))
             if scored:
                 score, index = max(scored)
-                return RepeatMatch(index, score, "semantic")
+                return RepeatMatch(index, score, RepeatMethod.SEMANTIC)
         except objc.error:  # ty: ignore[unresolved-attribute]
             unavailable("query_failed")
     return None
@@ -217,7 +218,7 @@ async def repeat_match(
     ]
     for index, previous in candidates:
         if value == normalized(previous):
-            return RepeatMatch(index, 1.0, "exact")
+            return RepeatMatch(index, 1.0, RepeatMethod.EXACT)
     content = content_tokens(text)
     eligible = []
     for index, previous in candidates:

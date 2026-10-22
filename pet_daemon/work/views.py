@@ -3,6 +3,16 @@ from __future__ import annotations
 import hashlib
 from dataclasses import asdict, dataclass, replace
 
+from ..domain import (
+    ArtifactKind,
+    CollectionKind,
+    EvidenceKind,
+    EvidenceSource,
+    ExecutionOutcome,
+    LinkRelationship,
+    PullRequestState,
+    WorkSubjectKind,
+)
 from ..runtime import SessionContext, SwarmActivity
 from .association import TERMINAL_EVENTS, enclosing_checkout, references, report_context
 from .models import (
@@ -31,7 +41,7 @@ from .validation import canonical, normalize_reference, repository_identity
 class PresentedPullRequest:
     url: str
     title: str
-    state: str
+    state: PullRequestState
     is_draft: bool | None
 
 
@@ -58,7 +68,7 @@ class MissingPullRequestView:
 class ExecutionView:
     execution: str
     reported_progress: str | None
-    reported_execution_outcome: str | None
+    reported_execution_outcome: ExecutionOutcome | None
 
 
 @dataclass(frozen=True)
@@ -96,8 +106,8 @@ type EvidenceDetails = (
 
 @dataclass(frozen=True)
 class EvidenceView:
-    source: str
-    kind: str
+    source: EvidenceSource
+    kind: EvidenceKind
     details: EvidenceDetails
     observed_at: float | None = None
     context: ReportContext | None = None
@@ -105,7 +115,7 @@ class EvidenceView:
 
 @dataclass(frozen=True)
 class ArtifactContext:
-    kind: str
+    kind: ArtifactKind
     ref: str
     title: str = ""
     repository: str = ""
@@ -135,7 +145,7 @@ class WorkStory:
 @dataclass(frozen=True)
 class WorkSubject:
     id: str
-    kind: str
+    kind: WorkSubjectKind
     changed_at: float
     revision: str
     story: WorkStory
@@ -146,7 +156,7 @@ def project_evidence(record: EvidenceRecord) -> EvidenceView | None:
     source, kind, payload = record.source, record.kind, record.payload
     details: EvidenceDetails
     match payload:
-        case GitObservation() if source == "git" and kind == "observation":
+        case GitObservation():
             details = GitEvidenceView(
                 payload.repository
                 if not payload.repository.startswith("local:")
@@ -161,7 +171,7 @@ def project_evidence(record: EvidenceRecord) -> EvidenceView | None:
                 bool(payload.conflicts),
                 bool(payload.behind),
             )
-        case GitHubEvidence() if source == "github" and kind == "observation":
+        case GitHubEvidence():
             pr = payload.pr
             if pr:
                 details = PullRequestEvidenceView(
@@ -169,11 +179,7 @@ def project_evidence(record: EvidenceRecord) -> EvidenceView | None:
                 )
             else:
                 details = MissingPullRequestView()
-        case ExecutionEvidence() if (
-            source == "harness"
-            and kind == "execution"
-            and not payload.event.startswith("tool_")
-        ):
+        case ExecutionEvidence() if not payload.event.startswith("tool_"):
             ended = payload.event in {
                 "turn_done",
                 "turn_error",
@@ -193,7 +199,7 @@ def project_evidence(record: EvidenceRecord) -> EvidenceView | None:
                 " ".join(payload.progress.split())[:800] if payload.progress else None,
                 payload.outcome if ended and payload.outcome else None,
             )
-        case AvailabilityEvidence() if source == "observer" and kind == "availability":
+        case AvailabilityEvidence():
             unavailable = tuple(
                 name
                 for name, error in (
@@ -207,19 +213,19 @@ def project_evidence(record: EvidenceRecord) -> EvidenceView | None:
             details = AvailabilityView(
                 tuple(f"{name} observation unavailable" for name in unavailable)
             )
-        case IntentEvidence() if source == "user" and kind == "intent":
+        case IntentEvidence():
             details = IntentView(" ".join(payload.text.split())[:1000])
-        case ProgressEvidence() if source == "harness" and kind == "progress":
+        case ProgressEvidence():
             details = ProgressView(" ".join(payload.text.split())[:800])
-        case CheckoutAssociation() if kind == "relationship" and source == "harness":
+        case CheckoutAssociation():
             details = AssociationView("The agent session used this checkout.")
-        case PullRequestAssociation() if kind == "relationship" and source == "github":
+        case PullRequestAssociation():
             details = AssociationView("The pull request matches the observed branch.")
-        case ReferenceAssociation() if kind == "relationship":
+        case ReferenceAssociation():
             details = AssociationView(
                 "The reported text explicitly references this URL."
             )
-        case StackAssociation() if kind == "relationship" and source == "github_stack":
+        case StackAssociation():
             details = AssociationView("The pull requests share an observed stack.")
         case _:
             return None
@@ -322,7 +328,7 @@ def session_work(state: WorkFacts, agent: SessionRecord) -> WorkStory:
         pr = observed.pr if observed else None
         value = normalize_reference(
             ArtifactReference(
-                "pull_request",
+                ArtifactKind.PULL_REQUEST,
                 ref,
                 revision=pr.head or None if pr else None,
                 title=pr.title or None if pr else None,
@@ -333,17 +339,12 @@ def session_work(state: WorkFacts, agent: SessionRecord) -> WorkStory:
             if observed.last_success_at is not None:
                 records += (
                     EvidenceRecord(
-                        "github",
-                        "observation",
-                        GitHubEvidence(pr, value.repository),
-                        observed.last_success_at,
+                        GitHubEvidence(pr, value.repository), observed.last_success_at
                     ),
                 )
             if observed.error or pr and pr.related_links_error:
                 records += (
                     EvidenceRecord(
-                        "observer",
-                        "availability",
                         AvailabilityEvidence(
                             None,
                             observed.error or (pr.related_links_error if pr else None),
@@ -355,25 +356,26 @@ def session_work(state: WorkFacts, agent: SessionRecord) -> WorkStory:
         if not pr:
             return
         for explicit in references(pr.title + "\n" + pr.body):
-            if explicit.kind == "ticket":
+            if explicit.kind == ArtifactKind.TICKET:
                 add(
                     explicit,
                     (
                         EvidenceRecord(
-                            "pr_reference",
-                            "relationship",
-                            ReferenceAssociation(explicit.ref),
+                            ReferenceAssociation(
+                                explicit.ref, EvidenceSource.PR_REFERENCE
+                            )
                         ),
                     ),
                 )
         if stack:
             for link in pr.related_links:
-                if link.kind == "pull_request" and link.relationship == "stack_entry":
+                if (
+                    link.kind == ArtifactKind.PULL_REQUEST
+                    and link.relationship == LinkRelationship.STACK_ENTRY
+                ):
                     add_pr(
                         link.ref,
                         EvidenceRecord(
-                            "github_stack",
-                            "relationship",
                             StackAssociation(link, ref),
                             observed.last_success_at if observed else None,
                         ),
@@ -384,19 +386,11 @@ def session_work(state: WorkFacts, agent: SessionRecord) -> WorkStory:
         context = resolve_context(state, context)
         if context.repository and context.branch:
             records = (
-                EvidenceRecord(
-                    "harness",
-                    "relationship",
-                    CheckoutAssociation(context.checkout, context.branch),
-                ),
+                EvidenceRecord(CheckoutAssociation(context.checkout, context.branch)),
             )
             checkout = state.checkouts.get(context.checkout) if current else None
             if checkout and checkout.local:
-                records += (
-                    EvidenceRecord(
-                        "git", "observation", checkout.local, checkout.last_success_at
-                    ),
-                )
+                records += (EvidenceRecord(checkout.local, checkout.last_success_at),)
             branch = state.branches.get((context.repository, context.branch))
             if (
                 branch
@@ -406,17 +400,12 @@ def session_work(state: WorkFacts, agent: SessionRecord) -> WorkStory:
             ):
                 records += (
                     EvidenceRecord(
-                        "github",
-                        "observation",
-                        GitHubEvidence(None, context.repository),
-                        branch.last_success_at,
+                        GitHubEvidence(None, context.repository), branch.last_success_at
                     ),
                 )
             if checkout and (checkout.error or not checkout.available):
                 records += (
                     EvidenceRecord(
-                        "observer",
-                        "availability",
                         AvailabilityEvidence(
                             checkout.error or "Checkout unavailable", None
                         ),
@@ -426,15 +415,12 @@ def session_work(state: WorkFacts, agent: SessionRecord) -> WorkStory:
             if branch and branch.error:
                 records += (
                     EvidenceRecord(
-                        "observer",
-                        "availability",
-                        AvailabilityEvidence(None, branch.error),
-                        branch.checked_at,
+                        AvailabilityEvidence(None, branch.error), branch.checked_at
                     ),
                 )
             add(
                 ArtifactReference(
-                    "branch",
+                    ArtifactKind.BRANCH,
                     context.branch,
                     context.repository,
                     revision=checkout.local.head or None
@@ -449,18 +435,16 @@ def session_work(state: WorkFacts, agent: SessionRecord) -> WorkStory:
                 add_pr(
                     ref,
                     EvidenceRecord(
-                        "github",
-                        "relationship",
-                        PullRequestAssociation(context.checkout, context.branch),
+                        PullRequestAssociation(context.checkout, context.branch)
                     ),
                 )
         elif context.pull_request:
             add_pr(context.pull_request)
         for explicit in context.references:
             relationship = EvidenceRecord(
-                "agent_reference", "relationship", ReferenceAssociation(explicit.ref)
+                ReferenceAssociation(explicit.ref, EvidenceSource.AGENT_REFERENCE)
             )
-            if explicit.kind == "pull_request":
+            if explicit.kind == ArtifactKind.PULL_REQUEST:
                 add_pr(explicit.ref, relationship)
             else:
                 add(explicit, (relationship,))
@@ -499,7 +483,9 @@ def session_work(state: WorkFacts, agent: SessionRecord) -> WorkStory:
 
 def collection_targets(state: WorkFacts) -> tuple[RepositoryTarget, ...]:
     targets = {
-        ("checkout", agent.location, ""): RepositoryTarget("checkout", agent.location)
+        ("checkout", agent.location, ""): RepositoryTarget(
+            CollectionKind.CHECKOUT, agent.location
+        )
         for agent in state.sessions.values()
         if agent.location
     }
@@ -511,13 +497,17 @@ def collection_targets(state: WorkFacts) -> tuple[RepositoryTarget, ...]:
             context = resolve_context(state, report.context)
             if context.repository and context.branch and not context.pull_request:
                 targets["branch", context.branch, context.repository] = (
-                    RepositoryTarget("branch", context.branch, context.repository)
+                    RepositoryTarget(
+                        CollectionKind.BRANCH, context.branch, context.repository
+                    )
                 )
     for agent in state.sessions.values():
         for artifact in session_work(state, agent).artifacts:
-            if artifact.kind == "pull_request":
+            if artifact.kind == ArtifactKind.PULL_REQUEST:
                 targets[artifact.kind, artifact.ref, artifact.repository] = (
-                    RepositoryTarget(artifact.kind, artifact.ref, artifact.repository)
+                    RepositoryTarget(
+                        CollectionKind.PULL_REQUEST, artifact.ref, artifact.repository
+                    )
                 )
     return tuple(targets[key] for key in sorted(targets))
 
@@ -631,7 +621,7 @@ def connected_work(
         subjects.append(
             WorkSubject(
                 root,
-                "work" if stories else "session",
+                WorkSubjectKind.WORK if stories else WorkSubjectKind.SESSION,
                 changed_at,
                 revision,
                 story,

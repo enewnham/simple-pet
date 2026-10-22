@@ -3,6 +3,7 @@ from dataclasses import asdict
 
 from ..behavior.controller import Behavior
 from ..config import Config
+from ..domain import PetState, SpeechReason
 from ..runtime import HookEvent, RandomSource, ReactionTrigger, Trigger
 from ..sentiment import (
     COOLDOWN_SECONDS,
@@ -25,7 +26,7 @@ class ActivityCoordinator:
         sessions: Sessions,
         reactions: SessionReactions,
         behavior: Behavior,
-        queue: Callable[[str, Trigger | None], None],
+        queue: Callable[[SpeechReason, Trigger | None], None],
         clock: Callable[[], float],
         rng: RandomSource,
     ) -> None:
@@ -46,13 +47,13 @@ class ActivityCoordinator:
         self.error_until = 0
         self.sentiment_after = float("-inf")
 
-    def activity(self) -> str:
+    def activity(self) -> PetState:
         return (
-            "error"
+            PetState.ERROR
             if self.clock() < self.error_until
-            else "working"
+            else PetState.WORKING
             if self.sessions.working
-            else "idle"
+            else PetState.IDLE
         )
 
     def handle(self, packet: HookEvent, sleeping: bool = False) -> SessionUpdate | None:
@@ -80,13 +81,13 @@ class ActivityCoordinator:
         trigger = ReactionTrigger(reaction)
         if reaction.kind in ("trouble", "failure"):
             self.error_until = self.clock() + self.config.behavior.error_seconds
-            self.queue("failure", trigger)
+            self.queue(SpeechReason.FAILURE, trigger)
         elif reaction.kind == "start" and hook.event in ("intent", "subagent_start"):
-            self.queue("prompt", trigger)
+            self.queue(SpeechReason.PROMPT, trigger)
         elif reaction.kind == "waiting":
-            self.queue("check_in", trigger)
+            self.queue(SpeechReason.CHECK_IN, trigger)
         elif reaction.kind in ("success", "cancelled", "recovery"):
-            self.queue("completion", trigger)
+            self.queue(SpeechReason.COMPLETION, trigger)
 
     def react_to_sentiment(
         self, packet: HookEvent, key: str, session: AgentSession, sleeping: bool

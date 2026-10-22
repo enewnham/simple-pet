@@ -12,6 +12,7 @@ from typing import TypeVar, Unpack
 from pet_daemon.behavior.controller import Behavior
 from pet_daemon.behavior.sprites import Clip, Pack
 from pet_daemon.config import BehaviorConfig
+from pet_daemon.domain import PetState
 from pet_daemon.runtime import AnimationPacket, MotionPacket, OverlayPacket
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.types import JSONObject
@@ -168,14 +169,16 @@ class BehaviorTests(unittest.TestCase):
         self.finish()
         self.assertTrue(self.sessions.clean_convergence)
 
-    def advance(self, behavior: Behavior, seconds: int, state: str = "idle") -> None:
+    def advance(
+        self, behavior: Behavior, seconds: int, state: PetState = PetState.IDLE
+    ) -> None:
         for _ in range(seconds):
             self.clock.advance(1)
             behavior.tick(state, self.sessions)
 
     def wait_for_walk(self, behavior: Behavior) -> MotionPacket:
         for _ in range(600):
-            behavior.tick("idle", self.sessions)
+            behavior.tick(PetState.IDLE, self.sessions)
             if behavior.pending and require(behavior.pending).kind == "walk":
                 return next(
                     packet["motion"]
@@ -227,7 +230,7 @@ class BehaviorTests(unittest.TestCase):
             care_interval=(10, 10),
         )
         self.start()
-        self.advance(behavior, 30, "working")
+        self.advance(behavior, 30, PetState.WORKING)
         self.assertFalse(
             any(a["id"] in ("jumping", "waving", "failed") for a in self.animations())
         )
@@ -316,12 +319,12 @@ class BehaviorTests(unittest.TestCase):
         self.assertTrue(behavior.react("success"))
         self.assertEqual(self.animations()[-1]["repeats"], 1)
         self.clock.advance(4)
-        behavior.tick("idle", self.sessions)
+        behavior.tick(PetState.IDLE, self.sessions)
         self.assertEqual(self.animations()[-1]["id"], "hop")
 
     def test_rest_only_pack_stays_still_and_uses_rest_for_reactions(self) -> None:
         behavior = self.make_behavior()
-        behavior.tick("idle", self.sessions)
+        behavior.tick(PetState.IDLE, self.sessions)
         self.advance(behavior, 600)
         self.assertFalse(any("motion" in packet for packet in self.output))
         self.assertEqual(
@@ -335,11 +338,11 @@ class BehaviorTests(unittest.TestCase):
     ) -> None:
         behavior = self.make_behavior([make_clip("busy", "work", frame_count=2, fps=2)])
         self.start()
-        behavior.tick("working", self.sessions)
+        behavior.tick(PetState.WORKING, self.sessions)
         command = self.animations()[-1]
         self.assertEqual(command["id"], "busy")
         self.clock.advance(1)
-        behavior.tick("working", self.sessions)
+        behavior.tick(PetState.WORKING, self.sessions)
         self.assertEqual(self.animations(), [command])
         behavior.completion(
             {
@@ -349,17 +352,17 @@ class BehaviorTests(unittest.TestCase):
             }
         )
         self.assertEqual(self.animations()[-1]["id"], "quiet-pose")
-        behavior.tick("working", self.sessions)
+        behavior.tick(PetState.WORKING, self.sessions)
         self.assertEqual(self.animations()[-1]["id"], "quiet-pose")
         self.clock.advance(1)
-        behavior.tick("working", self.sessions)
+        behavior.tick(PetState.WORKING, self.sessions)
         self.assertEqual(self.animations()[-1]["id"], "busy")
         self.assertTrue(self.sessions.active)
 
     def test_missing_animation_feedback_expires_after_whole_cycles(self) -> None:
         behavior = self.make_behavior([make_clip("busy", "work", frame_count=2, fps=2)])
         self.start()
-        behavior.tick("working", self.sessions)
+        behavior.tick(PetState.WORKING, self.sessions)
         start = self.animations()[-1]
         behavior.completion(
             {
@@ -369,12 +372,12 @@ class BehaviorTests(unittest.TestCase):
             }
         )
         self.clock.advance(1)
-        behavior.tick("working", self.sessions)
+        behavior.tick(PetState.WORKING, self.sessions)
         self.clock.advance(2.9)
-        behavior.tick("working", self.sessions)
+        behavior.tick(PetState.WORKING, self.sessions)
         self.assertEqual(self.animations()[-1]["id"], "busy")
         self.clock.advance(0.1)
-        behavior.tick("working", self.sessions)
+        behavior.tick(PetState.WORKING, self.sessions)
         self.assertEqual(self.animations()[-1]["id"], "quiet-pose")
 
     def test_work_burst_lasts_for_the_sampled_duration_in_whole_cycles(self) -> None:
@@ -383,7 +386,7 @@ class BehaviorTests(unittest.TestCase):
             work_burst_seconds=(12, 25),
         )
         self.start()
-        behavior.tick("working", self.sessions)
+        behavior.tick(PetState.WORKING, self.sessions)
         start = self.animations()[-1]
         behavior.completion(
             {
@@ -393,10 +396,10 @@ class BehaviorTests(unittest.TestCase):
             }
         )
         self.clock.advance(1)
-        behavior.tick("working", self.sessions)
+        behavior.tick(PetState.WORKING, self.sessions)
         burst = self.animations()[-1]
         self.assertEqual((burst["id"], burst["repeats"]), ("busy", 15))
-        self.advance(behavior, 11, "working")
+        self.advance(behavior, 11, PetState.WORKING)
         self.assertEqual(self.animations()[-1], burst)
 
     def test_work_burst_honors_the_pack_repeat_limit(self) -> None:
@@ -405,7 +408,7 @@ class BehaviorTests(unittest.TestCase):
             work_burst_seconds=(12, 25),
         )
         self.start()
-        behavior.tick("working", self.sessions)
+        behavior.tick(PetState.WORKING, self.sessions)
         start = self.animations()[-1]
         behavior.completion(
             {
@@ -415,7 +418,7 @@ class BehaviorTests(unittest.TestCase):
             }
         )
         self.clock.advance(1)
-        behavior.tick("working", self.sessions)
+        behavior.tick(PetState.WORKING, self.sessions)
         self.assertEqual(self.animations()[-1]["repeats"], 3)
 
     def test_long_work_walks_between_bursts_and_resumes_focus(self) -> None:
@@ -428,7 +431,7 @@ class BehaviorTests(unittest.TestCase):
         )
         self.start()
         for _ in range(600):
-            behavior.tick("working", self.sessions)
+            behavior.tick(PetState.WORKING, self.sessions)
             if behavior.pending and require(behavior.pending).kind == "walk":
                 break
             self.clock.advance(1)
@@ -442,7 +445,7 @@ class BehaviorTests(unittest.TestCase):
             {"event": "motion", "command_id": command, "result": "finished"}
         )
         self.clock.advance(1)
-        behavior.tick("working", self.sessions)
+        behavior.tick(PetState.WORKING, self.sessions)
         self.assertEqual(self.animations()[-1]["id"], "busy")
 
     def test_reactions_preempt_and_remain_visible_during_other_work(self) -> None:
@@ -462,7 +465,7 @@ class BehaviorTests(unittest.TestCase):
         behavior.react("recovery")
         self.assertEqual(self.animations()[-1]["id"], "hop")
         self.assertEqual(self.animations()[-1]["repeats"], 3)
-        behavior.tick("working", self.sessions)
+        behavior.tick(PetState.WORKING, self.sessions)
         self.assertEqual(self.animations()[-1]["id"], "hop")
         self.assertTrue(self.sessions.active)
 
@@ -478,7 +481,7 @@ class BehaviorTests(unittest.TestCase):
         assert animation["repeats"] is not None
         self.assertAlmostEqual(animation["repeats"] * 0.8, 3.2)
         self.clock.advance(3.2)
-        behavior.tick("idle", self.sessions)
+        behavior.tick(PetState.IDLE, self.sessions)
         assert behavior.pending is not None
         self.assertEqual(require(behavior.pending).command_id, animation["command_id"])
         self.assertEqual(self.animations()[-1]["id"], "hop")
@@ -530,12 +533,12 @@ class BehaviorTests(unittest.TestCase):
         animation = self.animations()[-1]
         self.assertEqual(animation["repeats"], 1)
         self.clock.advance(2.5)
-        behavior.tick("idle", self.sessions)
+        behavior.tick(PetState.IDLE, self.sessions)
         assert behavior.pending is not None
         self.assertEqual(require(behavior.pending).command_id, animation["command_id"])
         self.assertEqual(self.animations()[-1]["id"], "hop")
         self.clock.advance(2.5)
-        behavior.tick("idle", self.sessions)
+        behavior.tick(PetState.IDLE, self.sessions)
         self.assertEqual(self.animations()[-1]["id"], "hop")
         behavior.completion(
             {
@@ -601,10 +604,10 @@ class BehaviorTests(unittest.TestCase):
         )
         motion = self.wait_for_walk(behavior)
         self.clock.advance(motion["seconds"] + 0.9)
-        behavior.tick("idle", self.sessions)
+        behavior.tick(PetState.IDLE, self.sessions)
         self.assertIsNotNone(behavior.pending)
         self.clock.advance(0.1)
-        behavior.tick("idle", self.sessions)
+        behavior.tick(PetState.IDLE, self.sessions)
         self.assertIsNone(behavior.pending)
         self.assertEqual(self.animations()[-1]["id"], "quiet-pose")
 
@@ -650,7 +653,7 @@ class BehaviorTests(unittest.TestCase):
         self.assertEqual(motion["x"], 260)
         self.assertEqual(self.animations()[-1]["id"], "east")
         behavior.renderer_status(self.status(dragging=True, x=390, y=235))
-        behavior.tick("idle", self.sessions)
+        behavior.tick(PetState.IDLE, self.sessions)
         behavior.renderer_status(self.status(x=390, y=235))
         motion = self.wait_for_walk(behavior)
         self.assertEqual(motion["x"], 400)
@@ -683,7 +686,7 @@ class BehaviorTests(unittest.TestCase):
                 "tool": "Read file",
             }
         )
-        behavior.tick("working", self.sessions)
+        behavior.tick(PetState.WORKING, self.sessions)
         start = self.animations()[-1]
         behavior.completion(
             {
@@ -693,7 +696,7 @@ class BehaviorTests(unittest.TestCase):
             }
         )
         self.clock.advance(1)
-        behavior.tick("working", self.sessions)
+        behavior.tick(PetState.WORKING, self.sessions)
         self.assertEqual(self.animations()[-1]["id"], "review")
         assert behavior.pending is not None
         self.assertEqual(require(behavior.pending).kind, "focus")
@@ -711,7 +714,7 @@ class BehaviorTests(unittest.TestCase):
                 )
                 motion = self.wait_for_walk(behavior)
                 behavior.renderer_status(self.status(**blocked))
-                behavior.tick("idle", self.sessions)
+                behavior.tick(PetState.IDLE, self.sessions)
                 self.assertIsNone(behavior.pending)
                 self.assertIn({"stop_motion": True}, self.output)
                 behavior.completion(
@@ -722,7 +725,7 @@ class BehaviorTests(unittest.TestCase):
                     }
                 )
                 behavior.renderer_status(self.status())
-                behavior.tick("idle", self.sessions)
+                behavior.tick(PetState.IDLE, self.sessions)
                 self.advance(behavior, 2)
                 self.assertFalse(
                     behavior.pending and require(behavior.pending).kind == "walk"
@@ -731,18 +734,18 @@ class BehaviorTests(unittest.TestCase):
     def test_computer_sleep_suspends_actions_until_resume(self) -> None:
         behavior = self.make_behavior([make_clip("busy", "work")])
         self.start()
-        behavior.tick("working", self.sessions)
+        behavior.tick(PetState.WORKING, self.sessions)
         behavior.suspend("computer_sleep")
-        self.advance(behavior, 600, "working")
+        self.advance(behavior, 600, PetState.WORKING)
         self.assertIsNone(behavior.pending)
         self.assertEqual(self.animations()[-1]["id"], "quiet-pose")
         behavior.resume()
-        behavior.tick("working", self.sessions)
+        behavior.tick(PetState.WORKING, self.sessions)
         self.assertEqual(self.animations()[-1]["id"], "busy")
 
     def test_idle_pet_stays_quiet_when_care_is_disabled(self) -> None:
         behavior = self.make_behavior([make_clip("hello", "greeting")], care=False)
-        behavior.tick("idle", self.sessions)
+        behavior.tick(PetState.IDLE, self.sessions)
         self.advance(behavior, 600)
         self.assertEqual(
             {command["id"] for command in self.animations()}, {"quiet-pose"}
@@ -757,7 +760,7 @@ class BehaviorTests(unittest.TestCase):
             nap_interval=(1, 1),
             nap_seconds=(20, 20),
         )
-        behavior.tick("idle", self.sessions)
+        behavior.tick(PetState.IDLE, self.sessions)
         self.advance(behavior, 119)
         self.assertFalse(behavior.sleeping)
         self.advance(behavior, 121)
@@ -766,7 +769,7 @@ class BehaviorTests(unittest.TestCase):
 
     def wait_for_nap(self, behavior: Behavior) -> None:
         for _ in range(300):
-            behavior.tick("idle", self.sessions)
+            behavior.tick(PetState.IDLE, self.sessions)
             if behavior.sleeping:
                 return
             self.clock.advance(1)
@@ -780,10 +783,10 @@ class BehaviorTests(unittest.TestCase):
         )
         self.wait_for_nap(behavior)
         self.clock.advance(19)
-        behavior.tick("idle", self.sessions)
+        behavior.tick(PetState.IDLE, self.sessions)
         self.assertTrue(behavior.sleeping)
         self.clock.advance(1)
-        behavior.tick("idle", self.sessions)
+        behavior.tick(PetState.IDLE, self.sessions)
         self.assertFalse(behavior.sleeping)
         self.advance(behavior, 119)
         self.assertFalse(behavior.sleeping)
@@ -820,7 +823,7 @@ class BehaviorTests(unittest.TestCase):
         self.assertFalse(self.sessions.working)
         self.assertTrue(behavior.sleeping)
         self.sessions.handle({"harness": "cli", "session": "one", "event": "progress"})
-        behavior.tick("working", self.sessions)
+        behavior.tick(PetState.WORKING, self.sessions)
         self.assertFalse(behavior.sleeping)
 
     def test_finished_failed_turn_can_settle_and_nap(self) -> None:
@@ -850,7 +853,8 @@ class BehaviorTests(unittest.TestCase):
                 else:
                     behavior.renderer_status(self.status(**interaction))
                 behavior.tick(
-                    "working" if interaction is None else "idle", self.sessions
+                    PetState.WORKING if interaction is None else PetState.IDLE,
+                    self.sessions,
                 )
                 self.assertFalse(behavior.sleeping)
                 self.assertIn({"sleeping": False}, self.output)
@@ -858,30 +862,30 @@ class BehaviorTests(unittest.TestCase):
     def test_pointer_gaze_updates_at_rest_and_preserves_a_work_cycle(self) -> None:
         behavior = self.make_behavior([make_clip("busy", "work")], gaze=True)
         behavior.renderer_status(self.status(pointer={"x": 200, "y": 1000}))
-        behavior.tick("idle", self.sessions)
+        behavior.tick(PetState.IDLE, self.sessions)
         self.assertEqual(self.animations()[-1]["id"], "look-0")
         behavior.renderer_status(self.status(pointer={"x": 1000, "y": 152}))
-        behavior.tick("idle", self.sessions)
+        behavior.tick(PetState.IDLE, self.sessions)
         self.assertEqual(self.animations()[-1]["id"], "look-4")
         self.advance(behavior, 4)
         self.assertEqual(self.animations()[-1]["id"], "quiet-pose")
         self.start()
-        behavior.tick("working", self.sessions)
-        self.advance(behavior, 3, "working")
+        behavior.tick(PetState.WORKING, self.sessions)
+        self.advance(behavior, 3, PetState.WORKING)
         command = self.animations()[-1]
         self.assertEqual(command["id"], "busy")
         behavior.renderer_status(self.status(pointer={"x": 200, "y": 1000}))
-        behavior.tick("working", self.sessions)
+        behavior.tick(PetState.WORKING, self.sessions)
         self.assertEqual(self.animations()[-1], command)
 
     def test_interaction_restarts_the_two_minute_quiet_period(self) -> None:
         behavior = self.make_behavior(naps=True, nap_interval=(1, 1))
-        behavior.tick("idle", self.sessions)
+        behavior.tick(PetState.IDLE, self.sessions)
         self.advance(behavior, 119)
         behavior.renderer_status(self.status(speech=True))
-        behavior.tick("idle", self.sessions)
+        behavior.tick(PetState.IDLE, self.sessions)
         behavior.renderer_status(self.status())
-        behavior.tick("idle", self.sessions)
+        behavior.tick(PetState.IDLE, self.sessions)
         self.advance(behavior, 119)
         self.assertFalse(behavior.sleeping)
 
@@ -891,14 +895,14 @@ class BehaviorTests(unittest.TestCase):
                 behavior = self.make_behavior(
                     naps=True, roaming=False, nap_interval=(1, 1)
                 )
-                behavior.tick("idle", self.sessions)
+                behavior.tick(PetState.IDLE, self.sessions)
                 self.clock.advance(10)
                 behavior.renderer_status(self.status(**{interaction: True}))
-                behavior.tick("idle", self.sessions)
+                behavior.tick(PetState.IDLE, self.sessions)
                 self.clock.advance(250)
-                behavior.tick("idle", self.sessions)
+                behavior.tick(PetState.IDLE, self.sessions)
                 behavior.renderer_status(self.status())
-                behavior.tick("idle", self.sessions)
+                behavior.tick(PetState.IDLE, self.sessions)
                 self.assertFalse(behavior.sleeping)
                 self.advance(behavior, 119)
                 self.assertFalse(behavior.sleeping)
@@ -907,7 +911,7 @@ class BehaviorTests(unittest.TestCase):
 
     def test_click_restarts_quiet_time_without_an_available_wave(self) -> None:
         behavior = self.make_behavior(naps=True, roaming=False, nap_interval=(1, 1))
-        behavior.tick("idle", self.sessions)
+        behavior.tick(PetState.IDLE, self.sessions)
         self.advance(behavior, 119)
         behavior.react("click", self.sessions)
         self.advance(behavior, 119)
@@ -920,9 +924,9 @@ class BehaviorTests(unittest.TestCase):
             [make_clip("running", "work"), make_clip("waiting", "attention")],
             idle_pause=(60, 60),
         )
-        behavior.tick("idle", self.sessions)
+        behavior.tick(PetState.IDLE, self.sessions)
         self.start()
-        behavior.tick("working", self.sessions)
+        behavior.tick(PetState.WORKING, self.sessions)
         self.assertEqual(self.animations()[-1]["id"], "running")
         self.assertTrue(self.sessions.working)
 
@@ -931,7 +935,7 @@ class BehaviorTests(unittest.TestCase):
             [make_clip("review", "attention"), make_clip("waiting", "attention")]
         )
         self.start()
-        behavior.tick("working", self.sessions)
+        behavior.tick(PetState.WORKING, self.sessions)
         start = self.animations()[-1]
         behavior.completion(
             {
@@ -941,7 +945,7 @@ class BehaviorTests(unittest.TestCase):
             }
         )
         self.clock.advance(1)
-        behavior.tick("working", self.sessions)
+        behavior.tick(PetState.WORKING, self.sessions)
         self.assertEqual(self.animations()[-1]["id"], "review")
         assert behavior.pending is not None
         self.assertEqual(require(behavior.pending).kind, "focus")
@@ -981,11 +985,11 @@ class BehaviorTests(unittest.TestCase):
         behavior = self.make_behavior(
             [make_clip("waiting", "attention")], idle_pause=(60, 60)
         )
-        behavior.tick("idle", self.sessions)
+        behavior.tick(PetState.IDLE, self.sessions)
         self.start()
-        behavior.tick("working", self.sessions)
+        behavior.tick(PetState.WORKING, self.sessions)
         self.assertEqual(self.animations()[-1]["id"], "quiet-pose")
-        self.advance(behavior, 10, "working")
+        self.advance(behavior, 10, PetState.WORKING)
         self.assertEqual({clip["id"] for clip in self.animations()}, {"quiet-pose"})
 
     def test_low_priority_reactions_preserve_a_prominent_outcome(self) -> None:

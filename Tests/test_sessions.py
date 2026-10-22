@@ -4,6 +4,7 @@ import unittest
 from dataclasses import asdict
 from pathlib import Path
 
+from pet_daemon.domain import Activity, ExecutionOutcome, PetState
 from pet_daemon.runtime import ConvergenceItem, SwarmActivity
 from pet_daemon.sessions.tracking import Sessions, SessionUpdate
 from pet_daemon.storage import Memory
@@ -45,6 +46,16 @@ class SessionsTests(unittest.TestCase):
                 self.memory.observe_session_context(result.observation)
         return result
 
+    def test_hook_values_become_domain_members(self) -> None:
+        self.event("intent", goal="Check the parser")
+        session = self.sessions.by_id["claude:main"]
+        self.assertIsNone(session.phase)
+        self.event("tool_start", call="checks", tool="pytest")
+        self.assertIs(session.phase, Activity.TESTING)
+        self.event("tool_done", call="checks")
+        self.event("turn_done", outcome="success")
+        self.assertIs(session.outcome, ExecutionOutcome.SUCCESS)
+
     def test_malformed_events_leave_session_state_unchanged(self) -> None:
         self.event("intent", goal="Keep this request", aliases=["alternate"])
         before = self.sessions.activity_view()
@@ -62,6 +73,7 @@ class SessionsTests(unittest.TestCase):
             {"event": "turn_done", "outcome": []},
             {"outcome": ["bad"]},
             {"outcome": "bogus"},
+            {"outcome": "stale"},
             {"repo": "/tmp/bad\0path"},
         ):
             with self.subTest(invalid=invalid):
@@ -82,7 +94,7 @@ class SessionsTests(unittest.TestCase):
         self.event(
             "intent", goal="Preserve parser behavior", repo="/parser", turn="current"
         )
-        before = self.memory.connected_work(SwarmActivity("idle", ()))
+        before = self.memory.connected_work(SwarmActivity(PetState.IDLE, ()))
         context = self.memory.context("claude:main")
         result = self.event(
             "tool_done",
@@ -93,7 +105,9 @@ class SessionsTests(unittest.TestCase):
             turn="current",
         )
         self.assertIsNone(result)
-        self.assertEqual(self.memory.connected_work(SwarmActivity("idle", ())), before)
+        self.assertEqual(
+            self.memory.connected_work(SwarmActivity(PetState.IDLE, ())), before
+        )
         self.assertEqual(self.memory.context("claude:main"), context)
 
     def test_terminal_observation_uses_the_outcome_of_the_accepted_turn(self) -> None:
@@ -152,8 +166,8 @@ class SessionsTests(unittest.TestCase):
         self.assertEqual(
             self.sessions.convergence,
             (
-                ConvergenceItem(id="claude:one", outcome="success"),
-                ConvergenceItem(id="codex:two", outcome="success"),
+                ConvergenceItem(id="claude:one", outcome=ExecutionOutcome.SUCCESS),
+                ConvergenceItem(id="codex:two", outcome=ExecutionOutcome.SUCCESS),
             ),
         )
 

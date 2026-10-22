@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, TypedDict
+from typing import TYPE_CHECKING
 
+from ..domain import Activity, ExecutionOutcome
 from ..prompts import bounded
 from ..sessions.activity import activity
 from .validation import repository_identity
@@ -12,9 +13,20 @@ if TYPE_CHECKING:
     from ..runtime import HookEvent
 
 
-class SessionDetail(TypedDict):
-    kind: Literal["reported_outcome", "activity", "progress"]
-    text: str
+@dataclass(frozen=True)
+class HistoryDetails:
+    reported_outcome: ExecutionOutcome | None = None
+    activity: Activity | None = None
+    progress: str | None = None
+
+    @classmethod
+    def from_data(cls, data: dict[str, str | None]) -> HistoryDetails:
+        outcome, activity = data["reported_outcome"], data["activity"]
+        return cls(
+            ExecutionOutcome(outcome) if outcome is not None else None,
+            Activity(activity) if activity is not None else None,
+            data["progress"],
+        )
 
 
 HISTORY_SEARCH_STOP_WORDS = {
@@ -34,7 +46,7 @@ class SessionEntry:
     working_directory: str
     repository: str
     event_type: str
-    details: list[SessionDetail]
+    details: HistoryDetails
     goal: str
     explicit_goal: str
 
@@ -52,8 +64,8 @@ class SessionContext:
     working_directory: str
     goal: str
     last_tool: str
-    outcome: str | None
-    activity: str
+    outcome: ExecutionOutcome | None
+    activity: Activity | None
 
 
 def build_session_entry(
@@ -84,20 +96,16 @@ def build_session_entry(
         context.outcome if terminal and context and context.outcome else event.outcome
     )
     if kind == "turn_error":
-        outcome = "error"
-    details: list[SessionDetail] = []
-    if outcome:
-        details.append({"kind": "reported_outcome", "text": outcome})
-        if not terminal:
-            tool = bounded(event.tool or (context.last_tool if context else None), 160)
-            category = (
-                context.activity
-                if context and context.activity
-                else activity(tool, event.tool_name or "")
-            )
-            details.append({"kind": "activity", "text": category})
-    if progress:
-        details.append({"kind": "progress", "text": progress})
+        outcome = ExecutionOutcome.ERROR
+    category = None
+    if outcome and not terminal:
+        tool = bounded(event.tool or (context.last_tool if context else None), 160)
+        category = (
+            context.activity
+            if context and context.activity
+            else activity(tool, event.tool_name or "")
+        )
+    details = HistoryDetails(outcome, category, progress or None)
     return SessionEntry(
         session=session_id,
         working_directory=working_directory,

@@ -9,6 +9,7 @@ from anthropic.types import TextBlockParam
 
 from ..attention import AttentionSelection
 from ..config import Config
+from ..domain import ExecutionOutcome, ModelPurpose, SpeechReason
 from ..runtime import PetContext, SessionContext
 from ..storage import Memory
 from ..telemetry import event, trace
@@ -26,7 +27,7 @@ class SummaryEvidence:
     recent_requests: tuple[str, ...]
     summary: str
     progress: str
-    outcome: str | None
+    outcome: ExecutionOutcome | None
     turn_active: bool
     report_ids: tuple[int, ...]
 
@@ -109,12 +110,14 @@ class Cognition:
             },
         }
 
-    def should_summarize(self, focus: SessionContext | None, reason: str) -> bool:
+    def should_summarize(
+        self, focus: SessionContext | None, reason: SpeechReason
+    ) -> bool:
         if not focus:
             return False
         if self.config.summarize_first_request_only:
             return (
-                reason == "prompt"
+                reason == SpeechReason.PROMPT
                 and focus.request_count > 0
                 and not focus.first_summary_attempted
             )
@@ -151,7 +154,7 @@ class Cognition:
 
     async def summarize(self, focus: SessionContext) -> str | None:
         request = self.summary_request(focus)
-        result = await self.complete(request, "summary")
+        result = await self.complete(request, ModelPurpose.SUMMARY)
         if set(result) != {"summary"}:
             raise ValueError("Invalid session summary")
         summary = result["summary"]
@@ -159,7 +162,9 @@ class Cognition:
             raise ValueError("Invalid session summary")
         return summary
 
-    async def complete(self, request: ModelRequest, reason: str) -> dict[str, object]:
+    async def complete(
+        self, request: ModelRequest, reason: SpeechReason | ModelPurpose
+    ) -> dict[str, object]:
         return await self.client.complete(request, reason)
 
     async def generate_commentary(
@@ -170,10 +175,10 @@ class Cognition:
     ) -> CommentaryResult:
         reason = selection.reason
         explicit = selection.context is not None or reason in (
-            "check_in",
-            "click",
-            "explicit",
-            "care",
+            SpeechReason.CHECK_IN,
+            SpeechReason.CLICK,
+            SpeechReason.EXPLICIT,
+            SpeechReason.CARE,
         )
         focus = selection.focus_session
         summary_version = self.summary_version(focus)
@@ -205,7 +210,10 @@ class Cognition:
                 method=match.method,
                 similarity=round(match.similarity, 3),
             )
-            manual = selection.context is not None or reason in ("click", "explicit")
+            manual = selection.context is not None or reason in (
+                SpeechReason.CLICK,
+                SpeechReason.EXPLICIT,
+            )
             initial = speech
             current = refresh() if refresh else snapshot
             refreshed = selection.refresh(current)

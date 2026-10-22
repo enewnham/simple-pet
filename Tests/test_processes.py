@@ -5,6 +5,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
+from pet_daemon.domain import ProcessStatus
 from pet_daemon.sessions.processes import (
     ProcessIdentity,
     ProcessTracker,
@@ -153,7 +154,7 @@ class FreshnessTests(unittest.TestCase):
         owner = process_identity(os.getpid())
         assert owner is not None
         self.event("intent", owner=owner.packet())
-        self.sessions.apply_process_status({owner: "alive"})
+        self.sessions.apply_process_status({owner: ProcessStatus.ALIVE})
         self.now += 300
         self.assertFalse(self.sessions.working)
         self.assertFalse(self.sessions.engaged)
@@ -192,7 +193,7 @@ class FreshnessTests(unittest.TestCase):
             }
         )
         self.assertEqual(self.sessions.by_id["claude:child"].owner, owner)
-        self.sessions.apply_process_status({owner: "exited"})
+        self.sessions.apply_process_status({owner: ProcessStatus.EXITED})
         self.assertFalse(self.sessions.active)
         self.assertFalse(self.sessions.clean_convergence)
 

@@ -12,6 +12,15 @@ from pet_daemon.commentary import Cognition
 from pet_daemon.commentary.context import CommentaryPayload, PreparedCommentary
 from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.config import Config
+from pet_daemon.domain import (
+    ArtifactKind,
+    CareKind,
+    ExecutionOutcome,
+    ModelPurpose,
+    ProcessStatus,
+    PullRequestState,
+    SpeechReason,
+)
 from pet_daemon.runtime import CareTrigger, HookEvent, PetContext
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.storage import Memory
@@ -34,7 +43,9 @@ from Tests.fixtures import (
 
 
 class NoRequestsModel:
-    async def complete(self, request: ModelRequest, reason: str) -> dict[str, object]:
+    async def complete(
+        self, request: ModelRequest, reason: SpeechReason | ModelPurpose
+    ) -> dict[str, object]:
         raise AssertionError("PromptBuilder preparation must not request model output")
 
 
@@ -84,7 +95,7 @@ class ContextTests(unittest.TestCase):
         return capture_snapshot(self.snapshot, work=self.work)
 
     def prepare(
-        self, reason: str = "routine", context: str | None = None
+        self, reason: SpeechReason = SpeechReason.ROUTINE, context: str | None = None
     ) -> PreparedCommentary:
         selection = self.attention.select(self.current_snapshot(), reason, context)
         return self.cognition.prompts.prepare(
@@ -150,9 +161,9 @@ class ContextTests(unittest.TestCase):
         self.assertTrue(prepared.support.valid(self.current_snapshot()))
 
     def test_process_presence_metadata_does_not_supersede_ongoing_work(self) -> None:
-        self.update_session(presence="unknown")
+        self.update_session(presence=ProcessStatus.UNKNOWN)
         prepared = self.prepare()
-        self.update_session(presence="alive")
+        self.update_session(presence=ProcessStatus.ALIVE)
         self.assertTrue(prepared.support.valid(self.current_snapshot()))
 
     def test_quiet_connected_work_keeps_its_intent_without_a_live_session(self) -> None:
@@ -171,12 +182,12 @@ class ContextTests(unittest.TestCase):
 
     def test_manifest_rejects_a_superseded_runtime_transition(self) -> None:
         prepared = self.prepare()
-        self.update_session(turn_active=False, outcome="success")
+        self.update_session(turn_active=False, outcome=ExecutionOutcome.SUCCESS)
         self.assertFalse(prepared.support.valid(self.current_snapshot()))
 
     def test_quiet_greeting_remains_valid_without_session_context(self) -> None:
         self.snapshot = replace(self.snapshot, sessions=())
-        prepared = self.prepare("click")
+        prepared = self.prepare(SpeechReason.CLICK)
         self.assertTrue(prepared.support.valid(self.current_snapshot()))
 
     def test_explicit_context_stays_in_data_and_keeps_work_out_of_the_prompt(
@@ -194,7 +205,7 @@ class ContextTests(unittest.TestCase):
         self,
         *,
         head: str = "one",
-        state: str = "OPEN",
+        state: PullRequestState = PullRequestState.OPEN,
         is_draft: bool = True,
     ) -> None:
         if not self.memory.recent(session="cli:parser", event_types=("intent",)):
@@ -265,7 +276,7 @@ class ContextTests(unittest.TestCase):
     def test_supplied_pull_request_state_invalidates_changed_context(self) -> None:
         self.output()
         prepared = self.prepare()
-        self.output(state="MERGED")
+        self.output(state=PullRequestState.MERGED)
         self.assertFalse(prepared.support.valid(self.current_snapshot()))
 
     def test_exact_pull_request_refresh_supplies_one_current_state(self) -> None:
@@ -273,14 +284,14 @@ class ContextTests(unittest.TestCase):
         pr = PullRequest(
             42,
             "https://example.test/team/parser/pull/42",
-            "MERGED",
+            PullRequestState.MERGED,
             "2026-10-21T00:00:00Z",
             title="Persist coding session context",
         )
         self.memory.work.observe(PullRequestObservation(pr.url, pr, 1001))
         self.work = self.memory.connected_work(self.snapshot)
         encoded = json.dumps(self.payload(self.prepare()))
-        self.assertIn("MERGED", encoded)
+        self.assertIn(PullRequestState.MERGED, encoded)
         self.assertNotIn("OPEN", encoded)
 
     def test_new_artifact_context_does_not_invalidate_captured_story(self) -> None:
@@ -293,7 +304,9 @@ class ContextTests(unittest.TestCase):
                     subject.story,
                     artifacts=(
                         *subject.story.artifacts,
-                        ArtifactContext("ticket", "https://example.test/tickets/123"),
+                        ArtifactContext(
+                            ArtifactKind.TICKET, "https://example.test/tickets/123"
+                        ),
                     ),
                 ),
             )
@@ -318,8 +331,10 @@ class ContextTests(unittest.TestCase):
 
     def test_resumed_work_invalidates_a_quiet_care_remark(self) -> None:
         self.snapshot = sessions_snapshot()
-        snapshot = replace(self.current_snapshot(), trigger=CareTrigger("exercise"))
-        selection = self.attention.select(snapshot, "care")
+        snapshot = replace(
+            self.current_snapshot(), trigger=CareTrigger(CareKind.EXERCISE)
+        )
+        selection = self.attention.select(snapshot, SpeechReason.CARE)
         prepared = self.cognition.prompts.prepare(
             snapshot, selection, self.cognition.request
         )
@@ -331,7 +346,7 @@ class ContextTests(unittest.TestCase):
 
     def test_new_input_wait_invalidates_a_quiet_greeting(self) -> None:
         self.snapshot = sessions_snapshot()
-        prepared = self.prepare("click")
+        prepared = self.prepare(SpeechReason.CLICK)
         waiting = capture_snapshot(
             sessions_snapshot(session_snapshot(waiting_for_input=True))
         )

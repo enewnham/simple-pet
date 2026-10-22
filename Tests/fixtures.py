@@ -2,6 +2,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TypedDict, Unpack
 
+from pet_daemon.domain import Activity, ExecutionOutcome, PetState, ProcessStatus
 from pet_daemon.runtime import (
     ActiveTool,
     FailureSnapshot,
@@ -72,7 +73,7 @@ class SessionOptions(TypedDict, total=False):
     parent: str | None
     goal: str
     repo: str
-    phase: str
+    phase: Activity | None
     initial_request: str
     summary: str
     recent_requests: tuple[str, ...]
@@ -83,7 +84,7 @@ class SessionOptions(TypedDict, total=False):
     quiet_seconds: float
     turn_active: bool
     last_tool: str
-    presence: str
+    presence: ProcessStatus
     owner: ProcessIdentity | None
     owner_last_alive_seconds: float | None
     activity_uncertain: bool
@@ -92,7 +93,7 @@ class SessionOptions(TypedDict, total=False):
     active_tools: tuple[ActiveTool, ...]
     progress: str
     failure: FailureSnapshot | None
-    outcome: str | None
+    outcome: ExecutionOutcome | None
     user_sentiment: UserSentiment
 
 
@@ -108,7 +109,7 @@ def session_snapshot(**values: Unpack[SessionOptions]) -> SessionContext:
 
 
 def sessions_snapshot(*sessions: SessionContext) -> SwarmActivity:
-    return SwarmActivity(activity="idle", sessions=sessions)
+    return SwarmActivity(activity=PetState.IDLE, sessions=sessions)
 
 
 def capture_snapshot(

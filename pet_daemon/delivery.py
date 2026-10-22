@@ -6,6 +6,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypedDict
 
+from .domain import DeliveryStatus, SpeechReason
+
 if TYPE_CHECKING:
     from .application import MessageSupport
 
@@ -20,7 +22,7 @@ class SpeechPacket(TypedDict):
 class SpeechMessage:
     text: str
     ttl: float
-    reason: str
+    reason: SpeechReason
     selection_id: str
     subject_id: str | None = None
     revision: str | None = None
@@ -32,14 +34,14 @@ class SpeechMessage:
 @dataclass(frozen=True)
 class DeliveryOutcome:
     message: SpeechMessage
-    status: str
+    status: DeliveryStatus
 
 
 @dataclass
 class Attempt:
     message: SpeechMessage
     attempts: int = 0
-    status: str = "pending"
+    status: DeliveryStatus = DeliveryStatus.PENDING
     due: float = 0
     expires: float = 0
 
@@ -71,13 +73,14 @@ class SpeechDelivery:
 
     def has_pending(self) -> bool:
         return any(
-            delivery.status == "pending" for delivery in self.deliveries.values()
+            delivery.status == DeliveryStatus.PENDING
+            for delivery in self.deliveries.values()
         )
 
     def _send(self, delivery: Attempt) -> None:
         message = delivery.message
         if not self.valid(message):
-            delivery.status = "cancelled"
+            delivery.status = DeliveryStatus.CANCELLED
             return
         delivery.attempts += 1
         delivery.due = self.clock() + self.ack_timeout
@@ -103,27 +106,29 @@ class SpeechDelivery:
         if (
             delivery is None
             or not delivery.attempts
-            or delivery.status == "accepted"
+            or delivery.status == DeliveryStatus.ACCEPTED
             or self.clock() > delivery.expires
         ):
             return False
-        self.on_outcome(DeliveryOutcome(delivery.message, "accepted"))
-        delivery.status = "accepted"
+        self.on_outcome(DeliveryOutcome(delivery.message, DeliveryStatus.ACCEPTED))
+        delivery.status = DeliveryStatus.ACCEPTED
         return True
 
     def tick(self) -> None:
         now = self.clock()
         for identifier, delivery in tuple(self.deliveries.items()):
-            if delivery.status == "pending":
+            if delivery.status == DeliveryStatus.PENDING:
                 if not self.valid(delivery.message):
-                    delivery.status = "cancelled"
+                    delivery.status = DeliveryStatus.CANCELLED
                 elif now >= delivery.due:
                     if delivery.attempts < 2:
                         self._send(delivery)
                     else:
-                        self.on_outcome(DeliveryOutcome(delivery.message, "failed"))
-                        delivery.status = "failed"
-            if delivery.status != "pending" and now > delivery.expires:
+                        self.on_outcome(
+                            DeliveryOutcome(delivery.message, DeliveryStatus.FAILED)
+                        )
+                        delivery.status = DeliveryStatus.FAILED
+            if delivery.status != DeliveryStatus.PENDING and now > delivery.expires:
                 del self.deliveries[identifier]
 
     def clear(self) -> None:
@@ -131,8 +136,8 @@ class SpeechDelivery:
 
     def cancel_pending(self) -> None:
         for delivery in self.deliveries.values():
-            if delivery.status == "pending":
-                delivery.status = "cancelled"
+            if delivery.status == DeliveryStatus.PENDING:
+                delivery.status = DeliveryStatus.CANCELLED
 
     def close(self) -> None:
         self.clear()

@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from ..domain import ActionKind
 from ..runtime import RandomSource
 
 
@@ -38,7 +39,7 @@ class ReactionSpec:
     role: str
     preferred: str
     priority: int
-    kind: str = "reaction"
+    kind: ActionKind = ActionKind.REACTION
     fallback: str = "idle"
 
 
@@ -56,11 +57,11 @@ REACTIONS = {
     "start": ReactionSpec("attention", "review", 1, fallback="running"),
     "investigation": ReactionSpec("attention", "review", 1, fallback="running"),
     "waiting": ReactionSpec("attention", "waiting", 3, fallback="review"),
-    "trouble": ReactionSpec("error", "failed", 4, "error", "review"),
-    "failure": ReactionSpec("error", "failed", 4, "error", "review"),
+    "trouble": ReactionSpec("error", "failed", 4, ActionKind.ERROR, "review"),
+    "failure": ReactionSpec("error", "failed", 4, ActionKind.ERROR, "review"),
     "frustration": ReactionSpec("error", "failed", 2),
-    "recovery": ReactionSpec("celebrate", "jumping", 4, "success", "waving"),
-    "success": ReactionSpec("celebrate", "jumping", 4, "success", "waving"),
+    "recovery": ReactionSpec("celebrate", "jumping", 4, ActionKind.SUCCESS, "waving"),
+    "success": ReactionSpec("celebrate", "jumping", 4, ActionKind.SUCCESS, "waving"),
     "cancelled": ReactionSpec("attention", "review", 3, fallback="idle"),
     "click": ReactionSpec("greeting", "waving", 5, fallback="review"),
 }

@@ -4,25 +4,23 @@ import logging
 import time
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from .. import telemetry
+from ..domain import Activity, ExecutionOutcome, PetState, ProcessStatus
 from ..prompts import select_prompt
 from ..runtime import (
     ActiveTool,
     ConvergenceItem,
     FailureSnapshot,
     ProcessIdentity,
-    SessionActivity,
     SessionContext,
     SwarmActivity,
-    ToolActivity,
     UserSentiment,
 )
 from ..work.models import ExecutionEvidence, IntentEvidence, ProgressEvidence
 from ..work.observations import SessionObservation
 from .activity import activity
-from .processes import ProcessStatus
 
 if TYPE_CHECKING:
     from ..runtime import HookEvent
@@ -33,7 +31,7 @@ SENTIMENT_CONTEXT_SECONDS = 300
 @dataclass
 class Failure:
     tool: str
-    activity: SessionActivity
+    activity: Activity
     at: float
     count: int
     resolved: bool
@@ -46,7 +44,7 @@ class SessionUpdate:
     failure: bool
     convergence: bool
     session: str
-    activity: SessionActivity
+    activity: Activity
     observation: SessionObservation
 
 
@@ -54,7 +52,7 @@ class SessionUpdate:
 class Call:
     tool: str
     started: float
-    activity: ToolActivity = "command"
+    activity: Activity = Activity.COMMAND
 
 
 @dataclass
@@ -72,17 +70,17 @@ class AgentSession:
     sentiment_seen: float = float("-inf")
     sentiment_identity: tuple[str | None, str] | None = None
     repo: str = ""
-    phase: ToolActivity | Literal[""] = ""
+    phase: Activity | None = None
     last_tool: str = ""
     progress: str = ""
     failure: Failure | None = None
-    failures: dict[SessionActivity, Failure] = field(default_factory=dict)
+    failures: dict[Activity, Failure] = field(default_factory=dict)
     calls: dict[str, Call] = field(default_factory=dict)
     active: bool = False
     finished: bool = False
     turn: str | None = None
     generation: int = 0
-    outcome: str | None = None
+    outcome: ExecutionOutcome | None = None
     ended: float | None = None
     cancelled: bool = False
     waiting: bool = False
@@ -90,7 +88,7 @@ class AgentSession:
     waiting_since: float | None = None
     last_check_in: float | None = None
     owner: ProcessIdentity | None = None
-    presence: str = "unknown"
+    presence: ProcessStatus = ProcessStatus.UNKNOWN
     owner_checked: float | None = None
     owner_last_alive: float | None = None
     activity_uncertain: bool = False
@@ -160,7 +158,7 @@ class Sessions:
     def _failure(
         self,
         session: AgentSession,
-        category: SessionActivity,
+        category: Activity,
         now: float,
         tool: str = "",
     ) -> Failure:
@@ -183,7 +181,9 @@ class Sessions:
         return (
             self.convergence is not None
             and not self.active
-            and all(item.outcome == "success" for item in self.convergence)
+            and all(
+                item.outcome == ExecutionOutcome.SUCCESS for item in self.convergence
+            )
         )
 
     def _key(self, harness: str, identifier: str) -> str:
@@ -346,7 +346,7 @@ class Sessions:
         session.started = now
         session.calls.clear()
         session.last_tool = ""
-        session.phase = ""
+        session.phase = None
         session.progress = ""
         session.waiting = False
         session.waiting_call = None
@@ -367,7 +367,12 @@ class Sessions:
         )
 
     def _finish(
-        self, key: str, session: AgentSession, outcome: str, now: float, reason: str
+        self,
+        key: str,
+        session: AgentSession,
+        outcome: ExecutionOutcome,
+        now: float,
+        reason: str,
     ) -> None:
         telemetry.event(
             "session.turn_finished",
@@ -393,7 +398,7 @@ class Sessions:
         session.ended = now
         session.changed_at = time.time()
         session.outcome = outcome
-        if outcome == "cancelled":
+        if outcome == ExecutionOutcome.CANCELLED:
             for failure in session.failures.values():
                 failure.resolved = True
         session.waiting = False
@@ -488,7 +493,7 @@ class Sessions:
         owner = event.owner
         if owner and owner != session.owner:
             session.owner = owner
-            session.presence = "unknown"
+            session.presence = ProcessStatus.UNKNOWN
             session.owner_checked = None
             session.owner_last_alive = None
         waiting_since = session.waiting_since
@@ -500,7 +505,7 @@ class Sessions:
         if kind == "subagent_start" and session.active and session.intent_received:
             return self._ignored(event, "duplicate_subagent_start", key, session)
         failure = False
-        event_activity = session.phase or "command"
+        event_activity = session.phase or Activity.COMMAND
         if kind == "session_start":
             if session.finished:
                 session.finished = False
@@ -563,15 +568,15 @@ class Sessions:
             event_activity = call.activity
             session.progress = (
                 ""
-                if kind == "tool_error" or event.outcome == "error"
+                if kind == "tool_error" or event.outcome == ExecutionOutcome.ERROR
                 else (
                     event.progress if event.progress is not None else session.progress
                 )
             )
-            if kind == "tool_error" or event.outcome == "error":
+            if kind == "tool_error" or event.outcome == ExecutionOutcome.ERROR:
                 session.failure = self._failure(session, call.activity, now, call.tool)
                 failure = True
-            elif event.outcome == "cancelled":
+            elif event.outcome == ExecutionOutcome.CANCELLED:
                 session.cancelled = True
             elif call.activity in session.failures:
                 recovered = session.failures[call.activity]
@@ -586,11 +591,11 @@ class Sessions:
                 )
             if event.manual and not session.calls:
                 outcome = (
-                    "error"
+                    ExecutionOutcome.ERROR
                     if self._current_failure(session)
-                    else "cancelled"
+                    else ExecutionOutcome.CANCELLED
                     if session.cancelled
-                    else "success"
+                    else ExecutionOutcome.SUCCESS
                 )
                 self._finish(key, session, outcome, now, kind)
         elif kind in (
@@ -602,29 +607,35 @@ class Sessions:
         ):
             if session.finished and kind != "session_end":
                 return self._ignored(event, "finished_session", key, session)
-            outcome = event.outcome if event.outcome is not None else "success"
+            outcome = (
+                event.outcome if event.outcome is not None else ExecutionOutcome.SUCCESS
+            )
             duplicate_end = kind == "session_end" and session.finished
-            if (kind == "turn_error" or outcome == "error") and not duplicate_end:
-                outcome = "error"
+            if (
+                kind == "turn_error" or outcome == ExecutionOutcome.ERROR
+            ) and not duplicate_end:
+                outcome = ExecutionOutcome.ERROR
                 if kind == "turn_error" or not self._current_failure(session):
-                    session.failure = self._failure(session, "harness", now)
+                    session.failure = self._failure(session, Activity.HARNESS, now)
                 assert session.failure is not None
                 event_activity = session.failure.activity
                 failure = True
             elif kind in ("interrupt", "session_end"):
                 outcome = event.outcome or (
-                    "cancelled" if session.active else session.outcome or "cancelled"
+                    ExecutionOutcome.CANCELLED
+                    if session.active
+                    else session.outcome or ExecutionOutcome.CANCELLED
                 )
             elif self._current_failure(session):
-                outcome = "error"
+                outcome = ExecutionOutcome.ERROR
             elif session.cancelled:
-                outcome = "cancelled"
-            if outcome == "error" and session.failure:
+                outcome = ExecutionOutcome.CANCELLED
+            if outcome == ExecutionOutcome.ERROR and session.failure:
                 event_activity = session.failure.activity
             self._finish(key, session, outcome, now, kind)
             session.progress = (
                 ""
-                if outcome == "error"
+                if outcome == ExecutionOutcome.ERROR
                 else (
                     event.progress if event.progress is not None else session.progress
                 )
@@ -641,7 +652,11 @@ class Sessions:
                     child = self.by_id[child_key]
                     if child.active:
                         self._finish(
-                            child_key, child, "cancelled", now, f"parent_{kind}"
+                            child_key,
+                            child,
+                            ExecutionOutcome.CANCELLED,
+                            now,
+                            f"parent_{kind}",
                         )
         elif kind in ("progress", "waiting"):
             if session.finished:
@@ -758,7 +773,8 @@ class Sessions:
         return {
             session.owner
             for session in self.by_id.values()
-            if session.owner and session.presence not in ("exited", "replaced")
+            if session.owner
+            and session.presence not in (ProcessStatus.EXITED, ProcessStatus.REPLACED)
         }
 
     def apply_process_status(
@@ -771,22 +787,27 @@ class Sessions:
             if owner is None:
                 continue
             status = results.get(owner)
-            if status not in ("alive", "exited", "replaced", "unknown"):
+            if status is None:
                 continue
             session.presence = status
             session.owner_checked = now
-            if status == "alive":
+            if status == ProcessStatus.ALIVE:
                 session.owner_last_alive = now
-            if status in ("exited", "replaced") and session.active:
+            if (
+                status in (ProcessStatus.EXITED, ProcessStatus.REPLACED)
+                and session.active
+            ):
                 telemetry.event(
                     "session.owner_retired",
                     session=key,
                     owner=owner.packet(),
                     status=status,
                 )
-                self._finish(key, session, "stale", now, f"owner_{status}")
+                self._finish(
+                    key, session, ExecutionOutcome.STALE, now, f"owner_{status}"
+                )
                 retired.append(key)
-            elif status == "unknown":
+            elif status == ProcessStatus.UNKNOWN:
                 telemetry.trace(
                     "session.owner_unknown",
                     session=key,
@@ -823,7 +844,7 @@ class Sessions:
                         for call_id, call in session.calls.items()
                     ],
                 )
-                self._finish(key, session, "stale", now, "stale_timeout")
+                self._finish(key, session, ExecutionOutcome.STALE, now, "stale_timeout")
                 changed = True
         obsolete = {
             key
@@ -887,9 +908,9 @@ class Sessions:
             if keys is None or key in keys
         ]
         return SwarmActivity(
-            activity="working"
+            activity=PetState.WORKING
             if any(session.working for _, session in members)
-            else "idle",
+            else PetState.IDLE,
             sessions=tuple(
                 SessionContext(
                     id=key,

@@ -1,7 +1,7 @@
 import re
 import shlex
 
-from ..runtime import ToolActivity
+from ..domain import Activity
 
 
 def mutates_files(command: str) -> bool:
@@ -71,10 +71,10 @@ def mutates_files(command: str) -> bool:
     )
 
 
-def activity(tool: str, name: str = "") -> ToolActivity:
+def activity(tool: str, name: str = "") -> Activity:
     tool_name = (name or tool).lower().rsplit("__", 1)[-1].rsplit(".", 1)[-1]
     if tool_name in ("read", "read_file", "readfile", "grep", "find", "search", "glob"):
-        return "investigating"
+        return Activity.INVESTIGATING
     if tool_name in (
         "edit",
         "edit_file",
@@ -85,16 +85,16 @@ def activity(tool: str, name: str = "") -> ToolActivity:
         "apply_patch",
         "multiedit",
     ):
-        return "editing"
+        return Activity.EDITING
     if mutates_files(tool):
-        return "editing"
+        return Activity.EDITING
     text = (name + " " + tool).lower()
     if any(word in text for word in ("pytest", " test", "vitest", "jest", "unittest")):
-        return "testing"
+        return Activity.TESTING
     if "build" in text:
-        return "building"
+        return Activity.BUILDING
     if any(word in text for word in ("compile", "tsc", "lint", "typecheck", " check")):
-        return "checking"
+        return Activity.CHECKING
     if any(word in text for word in ("read", "grep", "find", "search", "glob")):
-        return "investigating"
-    return "command"
+        return Activity.INVESTIGATING
+    return Activity.COMMAND

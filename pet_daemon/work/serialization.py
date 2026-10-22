@@ -1,6 +1,7 @@
 from dataclasses import asdict
 from typing import TypedDict
 
+from ..domain import ArtifactKind, EvidenceKind, ExecutionOutcome
 from .models import (
     ArtifactReference,
     AvailabilityEvidence,
@@ -32,12 +33,21 @@ class StoredPayload(TypedDict, total=False):
     progress: str | None
 
 
+class StoredArtifactReference(TypedDict):
+    kind: str
+    ref: str
+    repository: str
+    revision: str | None
+    checkout: str | None
+    title: str | None
+
+
 class StoredContext(TypedDict):
     checkout: str
     repository: str
     branch: str
     pull_request: str
-    references: list[dict[str, str]]
+    references: list[StoredArtifactReference]
     branch_resolution: int
 
 
@@ -98,18 +108,20 @@ def payload_record(payload: EvidencePayload) -> dict[str, object]:
 
 
 def report_payload(
-    kind: str, data: StoredPayload
+    kind: EvidenceKind, data: StoredPayload
 ) -> IntentEvidence | ProgressEvidence | ExecutionEvidence:
     match kind:
-        case "intent":
+        case EvidenceKind.INTENT:
             return IntentEvidence(data["session"], data["text"])
-        case "progress":
+        case EvidenceKind.PROGRESS:
             return ProgressEvidence(data["session"], data["text"])
-        case "execution":
+        case EvidenceKind.EXECUTION:
             return ExecutionEvidence(
                 data["session"],
                 data["event"],
-                data["outcome"],
+                ExecutionOutcome(data["outcome"])
+                if data["outcome"] is not None
+                else None,
                 data["tool_name"],
                 data["progress"],
             )
@@ -133,13 +145,23 @@ def report_data(value: SessionReport) -> dict[str, object]:
 def report_from_data(value: StoredSessionReport) -> SessionReport:
     context = value["context"]
     return SessionReport(
-        report_payload(value["kind"], value["data"]),
+        report_payload(EvidenceKind(value["kind"]), value["data"]),
         ReportContext(
             context["checkout"],
             context["repository"],
             context["branch"],
             context["pull_request"],
-            tuple(ArtifactReference(**item) for item in context["references"]),
+            tuple(
+                ArtifactReference(
+                    kind=ArtifactKind(item["kind"]),
+                    ref=item["ref"],
+                    repository=item["repository"],
+                    revision=item.get("revision"),
+                    checkout=item.get("checkout"),
+                    title=item.get("title"),
+                )
+                for item in context["references"]
+            ),
             context["branch_resolution"],
         ),
         value["observed_at"],
