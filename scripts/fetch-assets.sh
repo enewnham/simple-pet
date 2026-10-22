@@ -76,5 +76,5 @@ fi
 source_dir="$(cd "$source_dir" && pwd)"
 commit="$(git -C "$source_dir" rev-parse HEAD 2>/dev/null || printf 'unknown')"
 
-swiftc -O -module-cache-path "$work_dir/module-cache" "$repo_root/scripts/import-assets.swift" -o "$work_dir/import-assets"
-"$work_dir/import-assets" "$source_dir" "$output_dir" "$pet" "$commit" "$source_origin"
+make -C "$repo_root" importer
+"$repo_root/.build/debug/AssetImporter" "$source_dir" "$output_dir" "$pet" "$commit" "$source_origin"

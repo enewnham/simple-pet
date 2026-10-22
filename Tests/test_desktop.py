@@ -35,7 +35,7 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
         ) as directory:
             config = Config(
                 pet_dir=selected.pet_dir,
-                overlay_binary=root / ".build/pet-overlay",
+                overlay_binary=root / ".build/debug/pet-overlay",
                 daemon_socket=directory + "/daemon.sock",
                 overlay_socket=directory + "/overlay.sock",
                 observation_seconds=(3600, 3600),

@@ -95,20 +95,6 @@ Run the checks in a logged-in macOS session:
 make check
 ```
 
-`make setup` installs runtime and development dependencies from `uv.lock`.
-`make check` includes Ruff linting, Ruff format verification, and ty type checking
-for all Python modules, tests, and Python scripts. Ruff extends its default rules
-with required function annotations. ty requires type arguments for generic types.
-Both tools infer the Python version from `pyproject.toml`.
-Run `make lint` for just these checks or `make format` to apply formatting.
-
-Use dataclasses and field access for internal records. Reuse SDK types at API
-boundaries. Keep `TypedDict` for JSON payloads and typed keyword arguments, and
-validate external data when decoding it into internal records. Use standard
-dataclass helpers and explicit JSON codecs for serialization.
-
-`make test` includes renderer checks. Checks use a fake API and make no paid model requests.
-
 ## License and attribution
 
 Simple Pet is a fork and rebuild of [OpenPets](https://github.com/OpenPetsHQ/openpets). Credit goes to the OpenPets authors for the original project and artwork.
