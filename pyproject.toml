@@ -3,7 +3,11 @@ name = "simple-pet"
 version = "0.1.0"
 description = "A native desktop pet with a local Haiku companion daemon"
 requires-python = ">=3.12"
-dependencies = ["anthropic>=0.79,<1", "nltk>=3.9.2,<4"]
+dependencies = [
+    "anthropic>=0.79,<1",
+    "nltk>=3.9.2,<4",
+    "pyobjc-framework-naturallanguage>=12.2.2,<13",
+]
 
 [tool.uv]
 package = false

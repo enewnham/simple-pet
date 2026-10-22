@@ -47,7 +47,7 @@ checks. [Makefile](Makefile) defines the check and build commands.
   Reports retain their observed references; current checkout state remains separate. Accepted speech,
   message outcomes, and captured-subject consideration commit together.
   Older local schemas reset. Newer schemas are rejected before writes.
-  The local [similarity helper](Sources/PetSpeechSimilarity/main.swift) checks repeated speech.
+  [Speech repetition checks](pet_daemon/commentary/repetition.py) use Apple's sentence embeddings through PyObjC.
 - **Renderer:** [Sources/PetCore/](Sources/PetCore/) defines events and socket
   handling. [Sources/PetOverlay/](Sources/PetOverlay/) contains the AppKit app and view.
 - **Configuration and sprites:** [pet_daemon/config.py](pet_daemon/config.py) and

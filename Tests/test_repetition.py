@@ -1,12 +1,13 @@
 import asyncio
-import json
-import os
-import subprocess
-import tempfile
+import math
+import threading
 import unittest
-from pathlib import Path
+from unittest.mock import patch
 
-from pet_daemon.commentary.repetition import SIMILARITY_BINARY, repeat_match
+import objc
+from NaturalLanguage import NLEmbedding, NLLanguageEnglish  # ty: ignore[unresolved-import]
+
+from pet_daemon.commentary.repetition import repeat_match, similarity
 
 
 class RepetitionTests(unittest.IsolatedAsyncioTestCase):
@@ -14,7 +15,6 @@ class RepetitionTests(unittest.IsolatedAsyncioTestCase):
         result = await repeat_match(
             "  THE parser checks passed! ",
             ["Other remark", "The parser checks passed."],
-            executable=Path("/missing-similarity-helper"),
         )
         assert result is not None
         self.assertEqual(
@@ -34,92 +34,177 @@ class RepetitionTests(unittest.IsolatedAsyncioTestCase):
             ("There are 15 staged edits.", "There are 15 unstaged edits."),
         ):
             with self.subTest(text=text):
-                result = await repeat_match(
-                    text,
-                    [previous],
-                    executable=Path("/missing-similarity-helper"),
-                    threshold=-1,
-                )
+                result = await repeat_match(text, [previous], threshold=-1)
                 self.assertIsNone(result)
 
-    async def test_absent_helper_preserves_commentary(self) -> None:
-        result = await repeat_match(
-            "The build failed again.",
-            ["The build failed."],
-            executable=Path("/missing-similarity-helper"),
-        )
+    async def test_unavailable_embedding_preserves_commentary(self) -> None:
+        with patch("pet_daemon.commentary.repetition.NLEmbedding") as embedding:
+            embedding.sentenceEmbeddingForLanguage_.return_value = None
+            result = await repeat_match(
+                "The build failed again.", ["The build failed."]
+            )
         self.assertIsNone(result)
 
-    async def test_unavailable_embedding_preserves_commentary(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            helper = Path(directory) / "unavailable"
-            helper.write_text(
-                '#!/bin/sh\nprintf \'{"available":false,"similarities":[null]}\'\n'
+    async def test_missing_vectors_preserve_commentary(self) -> None:
+        for vectors in ((None,), ([1.0, 0.0], None)):
+            with self.subTest(vectors=vectors):
+                with patch("pet_daemon.commentary.repetition.NLEmbedding") as embedding:
+                    model = embedding.sentenceEmbeddingForLanguage_.return_value
+                    model.vectorForString_.side_effect = vectors
+                    result = await repeat_match(
+                        "The build failed again.", ["The build failed."]
+                    )
+                self.assertIsNone(result)
+
+    async def test_framework_errors_preserve_commentary(self) -> None:
+        for operation in ("model", "vector"):
+            with self.subTest(operation=operation):
+                with patch("pet_daemon.commentary.repetition.NLEmbedding") as embedding:
+                    lookup = embedding.sentenceEmbeddingForLanguage_
+                    target = (
+                        lookup
+                        if operation == "model"
+                        else lookup.return_value.vectorForString_
+                    )
+                    target.side_effect = objc.error("Embedding lookup failed")  # ty: ignore[unresolved-attribute]
+                    result = await repeat_match(
+                        "The build failed again.", ["The build failed."]
+                    )
+                self.assertIsNone(result)
+
+    async def test_semantic_matches_select_the_highest_score_and_history_index(
+        self,
+    ) -> None:
+        with patch("pet_daemon.commentary.repetition.NLEmbedding") as embedding:
+            model = embedding.sentenceEmbeddingForLanguage_.return_value
+            model.vectorForString_.side_effect = (
+                [1.0, 0.0],
+                [0.95, math.sqrt(1 - 0.95**2)],
+                [1.0, 0.0],
             )
-            helper.chmod(0o755)
             result = await repeat_match(
-                "The build failed again.", ["The build failed."], executable=helper
+                "The build failed again.",
+                ["The tests passed.", "The build failed.", "The build still failed."],
             )
-            self.assertIsNone(result)
+        assert result is not None
+        self.assertEqual(
+            (result.index, result.similarity, result.method), (2, 1.0, "semantic")
+        )
 
-    async def test_timeout_stops_the_helper_and_preserves_commentary(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            helper = Path(directory) / "slow"
-            helper.write_text("#!/bin/sh\nexec sleep 30\n")
-            helper.chmod(0o755)
-            result = await asyncio.wait_for(
-                repeat_match(
-                    "The build failed again.",
-                    ["The build failed."],
-                    executable=helper,
-                    timeout=0.02,
-                ),
-                1,
+    async def test_scores_below_the_requested_threshold_preserve_commentary(
+        self,
+    ) -> None:
+        with patch("pet_daemon.commentary.repetition.NLEmbedding") as embedding:
+            model = embedding.sentenceEmbeddingForLanguage_.return_value
+            model.vectorForString_.side_effect = (
+                [1.0, 0.0],
+                [0.95, math.sqrt(1 - 0.95**2)],
             )
-            self.assertIsNone(result)
+            result = await repeat_match(
+                "The build failed again.", ["The build failed."], threshold=0.99
+            )
+        self.assertIsNone(result)
 
-    async def test_cancellation_reaps_the_native_process(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            helper = Path(directory) / "slow"
-            pid_file = Path(directory) / "pid"
-            helper.write_text(
-                f"#!/bin/sh\nprintf '%s' \"$$\" > '{pid_file}'\nexec sleep 30\n"
-            )
-            helper.chmod(0o755)
+    async def test_embedding_lookup_keeps_the_event_loop_responsive(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        def vector(text: str) -> list[float]:
+            entered.set()
+            if not release.wait(2):
+                raise TimeoutError("The test did not release the embedding lookup")
+            return [1.0, 0.0]
+
+        with patch("pet_daemon.commentary.repetition.NLEmbedding") as embedding:
+            model = embedding.sentenceEmbeddingForLanguage_.return_value
+            model.vectorForString_.side_effect = vector
             task = asyncio.create_task(
-                repeat_match(
-                    "The build failed again.", ["The build failed."], executable=helper
-                )
+                repeat_match("The build failed again.", ["The build failed."])
             )
+            try:
+                await asyncio.wait_for(self.wait_for_worker(entered), 1)
+                marker = asyncio.get_running_loop().create_future()
+                asyncio.get_running_loop().call_soon(marker.set_result, None)
+                await asyncio.wait_for(marker, 1)
+                self.assertFalse(task.done())
+            finally:
+                release.set()
+                result = await asyncio.wait_for(task, 1)
+        self.assertIsNotNone(result)
 
-            async def entered() -> None:
-                while not pid_file.exists():
-                    await asyncio.sleep(0.01)
+    async def test_caller_cancellation_propagates_during_embedding_lookup(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
 
-            await asyncio.wait_for(entered(), 1)
-            pid = int(pid_file.read_text())
-            task.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                await task
-            with self.assertRaises(ProcessLookupError):
-                os.kill(pid, 0)
+        def vector(text: str) -> list[float]:
+            entered.set()
+            try:
+                if not release.wait(2):
+                    raise TimeoutError("The test did not release the embedding lookup")
+                return [1.0, 0.0]
+            finally:
+                finished.set()
+
+        with patch("pet_daemon.commentary.repetition.NLEmbedding") as embedding:
+            model = embedding.sentenceEmbeddingForLanguage_.return_value
+            model.vectorForString_.side_effect = vector
+            task = asyncio.create_task(
+                repeat_match("The build failed again.", ["The build failed."])
+            )
+            try:
+                await asyncio.wait_for(self.wait_for_worker(entered), 1)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, 1)
+            finally:
+                release.set()
+                await asyncio.wait_for(self.wait_for_worker(finished), 1)
+                if not task.done():
+                    await asyncio.wait_for(task, 1)
+
+    @staticmethod
+    async def wait_for_worker(signal: threading.Event) -> None:
+        while not signal.is_set():
+            await asyncio.sleep(0.001)
+
+
+class SimilarityTests(unittest.TestCase):
+    def test_cosine_similarity_accounts_for_direction_and_magnitude(self) -> None:
+        for first, second, expected in (
+            ([1.0, 0.0], [3.0, 0.0], 1.0),
+            ([1.0, 0.0], [0.0, 1.0], 0.0),
+            ([1.0, 0.0], [-1.0, 0.0], -1.0),
+            ([1.0, 1.0], [1.0, 0.0], 1 / math.sqrt(2)),
+        ):
+            with self.subTest(first=first, second=second):
+                value = similarity(first, second)
+                assert value is not None
+                self.assertAlmostEqual(value, expected)
+
+    def test_invalid_vectors_have_no_similarity(self) -> None:
+        for first, second in (
+            ([], []),
+            ([1.0], [1.0, 2.0]),
+            ([0.0, 0.0], [1.0, 0.0]),
+            ([1.0, 0.0], [0.0, 0.0]),
+            ([math.nan], [1.0]),
+            ([math.inf], [1.0]),
+            ([1.0], [math.inf]),
+        ):
+            with self.subTest(first=first, second=second):
+                self.assertIsNone(similarity(first, second))
 
 
 class NativeRepetitionTests(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        result = subprocess.run(
-            [str(SIMILARITY_BINARY)],
-            input=json.dumps({"text": "The build failed.", "previous": []}),
-            capture_output=True,
-            text=True,
-            timeout=3,
-            check=True,
-        )
-        if not json.loads(result.stdout)["available"]:
-            raise unittest.SkipTest(
-                "The local English sentence embedding is unavailable"
-            )
+        with objc.autorelease_pool():
+            embedding = NLEmbedding.sentenceEmbeddingForLanguage_(NLLanguageEnglish)
+            if embedding is None:
+                raise unittest.SkipTest(
+                    "The local English sentence embedding is unavailable"
+                )
 
     async def test_close_paraphrases_match_through_the_native_boundary(self) -> None:
         result = await repeat_match(
@@ -153,15 +238,14 @@ class NativeRepetitionTests(unittest.IsolatedAsyncioTestCase):
     async def test_native_high_similarity_does_not_suppress_changed_counts(
         self,
     ) -> None:
-        data = {
-            "text": "There are 16 unstaged edits.",
-            "previous": ["There are 15 unstaged edits."],
-        }
-        result = await asyncio.create_subprocess_exec(
-            str(SIMILARITY_BINARY),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-        )
-        output, _ = await result.communicate(json.dumps(data).encode())
-        self.assertGreater(json.loads(output)["similarities"][0], 0.9)
-        self.assertIsNone(await repeat_match(data["text"], data["previous"]))
+        text = "There are 16 unstaged edits."
+        previous = "There are 15 unstaged edits."
+        with objc.autorelease_pool():
+            embedding = NLEmbedding.sentenceEmbeddingForLanguage_(NLLanguageEnglish)
+            assert embedding is not None
+            score = similarity(
+                embedding.vectorForString_(text), embedding.vectorForString_(previous)
+            )
+        assert score is not None
+        self.assertGreater(score, 0.9)
+        self.assertIsNone(await repeat_match(text, [previous]))

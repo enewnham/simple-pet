@@ -5,13 +5,11 @@ let package = Package(
     name: "SimplePet",
     platforms: [.macOS(.v12)],
     products: [
-        .executable(name: "pet-overlay", targets: ["PetOverlay"]),
-        .executable(name: "pet-speech-similarity", targets: ["PetSpeechSimilarity"])
+        .executable(name: "pet-overlay", targets: ["PetOverlay"])
     ],
     targets: [
         .target(name: "PetCore"),
         .executableTarget(name: "PetOverlay", dependencies: ["PetCore"]),
-        .executableTarget(name: "PetSpeechSimilarity"),
         .executableTarget(name: "AssetImporter", path: "scripts",
                           exclude: ["pet-hook", "fetch-assets.sh", "unpack-assets.py"],
                           sources: ["import-assets.swift"]),

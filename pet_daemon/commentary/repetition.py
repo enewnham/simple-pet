@@ -1,18 +1,16 @@
 import asyncio
-import json
 import math
 import re
 import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import lru_cache
-from pathlib import Path
+
+import objc
+from NaturalLanguage import NLEmbedding, NLLanguageEnglish  # ty: ignore[unresolved-import]
 
 from ..telemetry import event
 
-SIMILARITY_BINARY = (
-    Path(__file__).resolve().parents[2] / ".build" / "pet-speech-similarity"
-)
 SEMANTIC_THRESHOLD = 0.9
 NEGATIONS = {
     "no",
@@ -163,13 +161,53 @@ def unavailable(reason: str) -> None:
     event("speech.similarity_unavailable", reason=reason)
 
 
+def similarity(first: Sequence[float], second: Sequence[float]) -> float | None:
+    if len(first) != len(second):
+        return None
+    dot = 0.0
+    first_norm = 0.0
+    second_norm = 0.0
+    for left, right in zip(first, second):
+        dot += left * right
+        first_norm += left * left
+        second_norm += right * right
+    if first_norm <= 0 or second_norm <= 0:
+        return None
+    value = dot / math.sqrt(first_norm * second_norm)
+    return min(1.0, max(-1.0, value)) if math.isfinite(value) else None
+
+
+def semantic_match(
+    text: str, candidates: Sequence[tuple[int, str]], threshold: float
+) -> RepeatMatch | None:
+    with objc.autorelease_pool():
+        try:
+            embedding = NLEmbedding.sentenceEmbeddingForLanguage_(NLLanguageEnglish)
+            vector = embedding.vectorForString_(text) if embedding is not None else None
+            if vector is None:
+                unavailable("embedding_unavailable")
+                return None
+            scored = []
+            for index, previous in candidates:
+                previous_vector = embedding.vectorForString_(previous)
+                if previous_vector is None:
+                    continue
+                score = similarity(vector, previous_vector)
+                if score is not None and threshold <= score <= 1:
+                    scored.append((score, index))
+            if scored:
+                score, index = max(scored)
+                return RepeatMatch(index, score, "semantic")
+        except objc.error:  # ty: ignore[unresolved-attribute]
+            unavailable("query_failed")
+    return None
+
+
 async def repeat_match(
     text: str,
     history: Sequence[str],
     *,
-    executable: Path = SIMILARITY_BINARY,
     threshold: float = SEMANTIC_THRESHOLD,
-    timeout: float = 2,
 ) -> RepeatMatch | None:
     value = normalized(text)
     candidates = [
@@ -190,45 +228,4 @@ async def repeat_match(
     candidates = eligible
     if not candidates:
         return None
-    process = None
-    try:
-        process = await asyncio.create_subprocess_exec(
-            str(executable),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        request = json.dumps(
-            {"text": text, "previous": [previous for _, previous in candidates]}
-        ).encode()
-        output, _ = await asyncio.wait_for(process.communicate(request), timeout)
-        if process.returncode:
-            unavailable("helper_failed")
-            return None
-        response = json.loads(output)
-        if not response["available"]:
-            unavailable("embedding_unavailable")
-            return None
-        values = response["similarities"]
-        if len(values) != len(candidates):
-            raise ValueError("Similarity response has the wrong size")
-        scored = [
-            (score, candidates[index][0])
-            for index, score in enumerate(values)
-            if type(score) in (int, float)
-            and math.isfinite(score)
-            and threshold <= score <= 1
-        ]
-        if scored:
-            score, index = max(scored)
-            return RepeatMatch(index, score, "semantic")
-    except (TimeoutError, OSError, ValueError, KeyError, TypeError):
-        unavailable("query_failed")
-    finally:
-        if process is not None and process.returncode is None:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-            await process.wait()
-    return None
+    return await asyncio.to_thread(semantic_match, text, candidates, threshold)

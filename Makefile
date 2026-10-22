@@ -15,15 +15,21 @@ build:
 	# Replace the executable's inode to preserve macOS signature validation.
 	install -m 755 "$$(CI=true xcrun swift build -c release $(SWIFT_FLAGS) --show-bin-path)/pet-overlay" .build/pet-overlay.tmp
 	mv -f .build/pet-overlay.tmp .build/pet-overlay
-	install -m 755 "$$(CI=true xcrun swift build -c release $(SWIFT_FLAGS) --show-bin-path)/pet-speech-similarity" .build/pet-speech-similarity.tmp
-	mv -f .build/pet-speech-similarity.tmp .build/pet-speech-similarity
 
 run: setup build
 	bin/pet-daemon
 
 test: setup build
-	CI=true xcrun swift test $(SWIFT_TEST_FLAGS)
-	PET_DESKTOP_CHECK=1 uv run --locked python -m unittest discover -s Tests -v
+	@desktop=$$(uv run --locked python -c 'from AppKit import NSApplication, NSScreen; NSApplication.sharedApplication(); print(int(bool(NSScreen.screens())))') || exit $$?; \
+	swift_filter=; \
+	if [ "$$desktop" = 1 ]; then \
+		echo "Desktop access available; running all tests."; \
+	else \
+		echo "Desktop access unavailable; skipping overlay and desktop tests."; \
+		swift_filter="--skip PetOverlayTests"; \
+	fi; \
+	CI=true xcrun swift test $(SWIFT_TEST_FLAGS) $$swift_filter && \
+	PET_DESKTOP_CHECK=$$desktop uv run --locked python -m unittest discover -s Tests -v
 
 lint: setup
 	uv run --locked ruff check .
