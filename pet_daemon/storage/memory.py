@@ -7,9 +7,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from ..domain import DeliveryStatus, SpeechReason
+from ..logging import get_logger
 from ..prompts import select_prompt
 from ..runtime import SwarmActivity
-from ..telemetry import verbose
 from ..work import WorkIngestion
 from ..work.history import HistoryDetails, RecallQuery, SessionEntry
 from ..work.models import IntentEvidence
@@ -23,6 +23,8 @@ from ..work.views import WorkSubject, collection_targets, connected_work
 from .migrations import migrate
 from .transactions import transaction
 from .work import SQLiteWorkRepository
+
+log = get_logger("pet-daemon")
 
 
 @dataclass(frozen=True)
@@ -333,7 +335,12 @@ class Memory:
                     ),
                 )
         self.prune()
-        verbose("memory.event", id=cursor.lastrowid, event_type=record.event_type)
+        log.debug(
+            "memory.event",
+            detail="payload",
+            id=cursor.lastrowid,
+            event_type=record.event_type,
+        )
         return cursor.lastrowid
 
     def recent(

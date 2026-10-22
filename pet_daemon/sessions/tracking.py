@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import logging
 import time
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from .. import telemetry
 from ..domain import Activity, ExecutionOutcome, PetState, ProcessStatus
+from ..logging import get_logger
 from ..prompts import select_prompt
 from ..runtime import (
     ActiveTool,
@@ -21,6 +20,8 @@ from ..runtime import (
 from ..work.models import ExecutionEvidence, IntentEvidence, ProgressEvidence
 from ..work.observations import SessionObservation
 from .activity import activity
+
+log = get_logger("pet-daemon")
 
 if TYPE_CHECKING:
     from ..runtime import HookEvent
@@ -289,7 +290,7 @@ class Sessions:
                 if old_key in self.members:
                     self.members.remove(old_key)
                     self.members.add(key)
-                telemetry.event(
+                log.info(
                     "session.merged",
                     session=key,
                     merged_session=old_key,
@@ -301,7 +302,7 @@ class Sessions:
                 alias if alias.startswith(f"{harness}:") else f"{harness}:{alias}"
             )
             if alias_key != key and self.aliases.get(alias_key) != key:
-                telemetry.event("session.aliased", session=key, alias=alias_key)
+                log.info("session.aliased", session=key, alias=alias_key)
             self.aliases[alias_key] = key
         if parent:
             session.parent = self._key(harness, parent)
@@ -316,7 +317,7 @@ class Sessions:
                 session.owner = parent_session.owner
                 session.presence = parent_session.presence
         if created:
-            telemetry.event(
+            log.info(
                 "session.created",
                 session=key,
                 parent=session.parent,
@@ -353,7 +354,7 @@ class Sessions:
         session.waiting_since = None
         session.last_check_in = None
         self.members.add(key)
-        telemetry.event(
+        log.info(
             "session.turn_started",
             session=key,
             parent=session.parent,
@@ -374,7 +375,7 @@ class Sessions:
         now: float,
         reason: str,
     ) -> None:
-        telemetry.event(
+        log.info(
             "session.turn_finished",
             session=key,
             parent=session.parent,
@@ -412,7 +413,7 @@ class Sessions:
         key: str | None = None,
         session: AgentSession | None = None,
     ) -> None:
-        telemetry.trace(
+        log.debug(
             "session.event_ignored",
             source_event=event.event,
             reason=reason,
@@ -426,8 +427,9 @@ class Sessions:
         session.activity_uncertain = False
         session.last_event = event.event
         session.changed_at = time.time()
-        telemetry.verbose(
+        log.debug(
             "session.event_accepted",
+            detail="payload",
             session=key,
             source_session=event.session,
             source_event=event.event,
@@ -448,7 +450,7 @@ class Sessions:
         now: float,
         waiting_since: float,
     ) -> None:
-        telemetry.event(
+        log.info(
             "session.resumed",
             session=key,
             parent=session.parent,
@@ -463,7 +465,7 @@ class Sessions:
 
         hook = normalize_hook(event)
         if hook is None:
-            telemetry.trace("session.event_ignored", reason="invalid_event")
+            log.debug("session.event_ignored", reason="invalid_event")
             return None
         return self.apply(hook)
 
@@ -681,7 +683,7 @@ class Sessions:
         if session.waiting and (
             waiting_since is None or waiting_call != session.waiting_call
         ):
-            telemetry.event(
+            log.info(
                 "session.waiting",
                 session=key,
                 parent=session.parent,
@@ -797,7 +799,7 @@ class Sessions:
                 status in (ProcessStatus.EXITED, ProcessStatus.REPLACED)
                 and session.active
             ):
-                telemetry.event(
+                log.info(
                     "session.owner_retired",
                     session=key,
                     owner=owner.packet(),
@@ -808,7 +810,7 @@ class Sessions:
                 )
                 retired.append(key)
             elif status == ProcessStatus.UNKNOWN:
-                telemetry.trace(
+                log.debug(
                     "session.owner_unknown",
                     session=key,
                     owner=owner.packet(),
@@ -823,9 +825,8 @@ class Sessions:
         changed = False
         for key, session in self.by_id.items():
             if session.active and now - session.last_seen >= self.stale_seconds:
-                telemetry.event(
+                log.warning(
                     "session.expired",
-                    level=logging.WARNING,
                     session=key,
                     parent=session.parent,
                     turn=session.turn,
@@ -856,7 +857,7 @@ class Sessions:
         }
         for key in obsolete:
             session = self.by_id[key]
-            telemetry.event(
+            log.info(
                 "session.removed",
                 session=key,
                 parent=session.parent,

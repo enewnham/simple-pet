@@ -16,13 +16,13 @@ from pet_daemon.commentary.cognition import Cognition, CommentaryResult
 from pet_daemon.commentary.context import INSTRUCTIONS
 from pet_daemon.commentary.model import AnthropicModelClient
 from pet_daemon.commentary.summarization import SUMMARY_INSTRUCTIONS
+from pet_daemon.commentary.usage import collect_usage
 from pet_daemon.config import Config
 from pet_daemon.domain import CareKind, ExecutionOutcome, PetState, SpeechReason
 from pet_daemon.runtime import CareTrigger, PetContext, SessionTrigger
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources.hooks import HookEvent
 from pet_daemon.storage import Memory
-from pet_daemon.telemetry import observation
 from pet_daemon.types import JSONValue
 from pet_daemon.work.history import build_session_entry
 from Tests.fixtures import capture_snapshot
@@ -988,7 +988,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.responses.extend(
             [({"speak": history}, "end_turn"), ({"speak": history}, "end_turn")]
         )
-        with observation() as usage:
+        with collect_usage() as usage:
             result = await self.generate_commentary(SpeechReason.PROMPT)
         self.assertEqual(usage[SpeechReason.PROMPT].input_tokens, 200)
         self.assertEqual(usage[SpeechReason.PROMPT].output_tokens, 40)
@@ -1061,7 +1061,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.responses.extend(
             [({"speak": history}, "end_turn"), ({"speak": 5}, "end_turn")]
         )
-        with observation() as usage:
+        with collect_usage() as usage:
             result = await self.generate_commentary(SpeechReason.PROMPT)
         self.assertEqual(usage[SpeechReason.PROMPT].input_tokens, 200)
         self.assertEqual(usage[SpeechReason.PROMPT].output_tokens, 40)

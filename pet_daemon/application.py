@@ -1,6 +1,5 @@
 import asyncio
 import json
-import logging
 import math
 import sqlite3
 import uuid
@@ -9,12 +8,16 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
+import structlog
+
 from .attention import Attention, AttentionSelection
 from .behavior.controller import Behavior
 from .commentary import Cognition, CommentaryResult, CommentarySupport
+from .commentary.usage import collect_usage
 from .config import Config
 from .delivery import DeliveryOutcome, SpeechDelivery, SpeechMessage
 from .domain import DeliveryStatus, SpeechReason
+from .logging import get_logger
 from .runtime import (
     HookEvent,
     OverlayPacket,
@@ -28,11 +31,10 @@ from .sessions.processes import ProcessTracker
 from .sessions.reactions import SessionReactions
 from .sessions.tracking import Sessions
 from .storage import Memory
-from .telemetry import event, observation, trace
 from .work.history import SessionContext, build_session_entry
 from .work.observations import RepositoryObservation
 
-log = logging.getLogger("pet-daemon")
+log = get_logger("pet-daemon")
 
 
 class ObservationProvider(Protocol):
@@ -122,7 +124,7 @@ class Application:
         try:
             self.memory.clear()
         except sqlite3.Error as error:
-            log.warning("Could not clear pet memory: %s", error)
+            log.warning("memory.clear_failed", error=str(error))
             return
         self.preempt()
         self.history_epoch += 1
@@ -144,13 +146,13 @@ class Application:
         if self.process_task:
             self.process_task.cancel()
         self.emit({"text": "", "ttl": 0})
-        event("memory.cleared", pet=self.memory.pet)
+        log.info("memory.cleared", pet=self.memory.pet)
 
     def system_sleep_changed(self, sleeping: bool) -> None:
         if sleeping == self.suspended:
             return
         self.suspended = sleeping
-        event("system.sleep" if sleeping else "system.wake")
+        log.info("system.sleep" if sleeping else "system.wake")
         if sleeping:
             self.behavior.suspend("system_sleep")
             self.preempt()
@@ -175,7 +177,7 @@ class Application:
         self.behavior.stop_movement()
         self.preempt()
         self.manual = (context, ttl)
-        trace("speech.requested", context=context, ttl=ttl)
+        log.debug("speech.requested", context=context, ttl=ttl)
 
     def queue(self, reason: SpeechReason, trigger: Trigger | None = None) -> None:
         self.attention.queue(reason, trigger, self.sessions.failed)
@@ -224,7 +226,7 @@ class Application:
             self.memory.work.observe(observation)
             self.reconcile_targets()
         except (sqlite3.Error, ValueError) as error:
-            log.warning("Could not ingest work observation: %s", error)
+            log.warning("work.ingest_failed", error=str(error))
 
     def _ingest_hook(self, hook: HookEvent) -> None:
         if hook.repo:
@@ -257,7 +259,7 @@ class Application:
                 )
             self.reconcile_targets()
         except (sqlite3.Error, ValueError) as error:
-            log.warning("Could not record work evidence: %s", error)
+            log.warning("work.evidence_failed", error=str(error))
 
     def reconcile_targets(self) -> None:
         if self.reconciling:
@@ -293,7 +295,7 @@ class Application:
             try:
                 self.delivery.acknowledge(packet)
             except sqlite3.Error as error:
-                log.warning("Could not record renderer acceptance: %s", error)
+                log.warning("renderer.acceptance_failed", error=str(error))
         elif feedback == "status":
             if self.behavior.renderer_status(packet):
                 status = self.behavior.status
@@ -312,13 +314,13 @@ class Application:
         try:
             self.memory.clear_speech()
         except sqlite3.Error as error:
-            log.warning("Could not clear pet speech: %s", error)
+            log.warning("speech.clear_failed", error=str(error))
             return
         self.history_epoch += 1
         self.delivery.clear()
         self.last_speech = None
         self.emit({"text": "", "ttl": 0})
-        event("speech.cleared", pet=self.memory.pet)
+        log.info("speech.cleared", pet=self.memory.pet)
 
     def speech_duration(self, speech: str) -> float:
         return max(self.config.speech_ttl, 3 + len(speech.split()) / 2)
@@ -338,7 +340,7 @@ class Application:
             return
         self.preempt()
         self.clicked = True
-        trace("speech.requested", reason="click")
+        log.debug("speech.requested", reason="click")
 
     async def comment(
         self,
@@ -358,15 +360,23 @@ class Application:
             if selection is None
             else selection
         )
-        with observation() as usage:
+        focus_snapshot = selection.focus_session
+        focus_session = focus_snapshot.id if focus_snapshot else None
+        with (
+            collect_usage() as usage,
+            structlog.contextvars.bound_contextvars(
+                observation_id=uuid.uuid4().hex,
+                reason=reason,
+                subject=selection.id,
+                session=focus_session,
+            ),
+        ):
             started = self.clock()
             outcome = "failed"
             epoch = self.revision
             history_epoch = self.history_epoch
             sessions = self.sessions
-            focus_snapshot = selection.focus_session
-            focus_session = focus_snapshot.id if focus_snapshot else None
-            trace("observation.started", reason=reason, subject=selection.id)
+            log.debug("observation.started", reason=reason, subject=selection.id)
             try:
                 if (
                     self.config.summarize_first_request_only
@@ -399,7 +409,7 @@ class Application:
                     or not self.selection_valid(result.prepared.support, trigger)
                 ):
                     outcome = "discarded"
-                    event(
+                    log.info(
                         "observation.discarded",
                         reason="subject_superseded",
                         subject=selection.id,
@@ -434,10 +444,9 @@ class Application:
             except asyncio.CancelledError:
                 outcome = "cancelled"
                 raise
-            except Exception as error:  # noqa: BLE001 - Keep model failures inside the observation task.
-                event(
+            except Exception as error:
+                log.warning(
                     "observation.failed",
-                    level=logging.WARNING,
                     reason=reason,
                     session=focus_session,
                     error=str(error),
@@ -445,7 +454,7 @@ class Application:
                 )
             finally:
                 tokens = usage.get(reason)
-                event(
+                log.info(
                     "observation.finished",
                     reason=reason,
                     subject=selection.id,
@@ -502,7 +511,7 @@ class Application:
         if not summary or current is None:
             return
         if self.cognition.summary_version(current) != result.summary_version:
-            trace("memory.context_discarded", reason="session_changed", session=key)
+            log.debug("memory.context_discarded", reason="session_changed", session=key)
             return
         try:
             self.memory.save_context(
@@ -514,8 +523,8 @@ class Application:
                 current.first_summary_attempted,
             )
         except sqlite3.Error as error:
-            log.warning("Could not save pet session summary: %s", error)
-        trace("memory.context_updated", session=key)
+            log.warning("memory.summary_failed", error=str(error))
+        log.debug("memory.context_updated", session=key)
 
     def delivery_outcome(self, outcome: DeliveryOutcome) -> None:
         message = outcome.message
@@ -560,14 +569,15 @@ class Application:
                     considered_revision=considered,
                 )
             except sqlite3.Error as error:
-                log.warning("Could not record failed speech delivery: %s", error)
+                log.warning("speech.delivery_record_failed", error=str(error))
                 return
         if current:
             assert subject is not None
             self.attention.mark_considered(subject)
-        event(
+        log.info(
             "speech.delivery",
             message=message.message_id,
+            text=message.text,
             subject=message.subject_id,
             version=message.revision,
             outcome=outcome.status,

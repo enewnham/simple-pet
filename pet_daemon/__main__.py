@@ -8,7 +8,7 @@ from anthropic import AsyncAnthropic
 
 from .config import Config
 from .daemon import Daemon
-from .telemetry import VERBOSE, ConsoleFormatter, configure
+from .logging import configure, get_logger
 
 
 async def run(config: Config) -> None:
@@ -40,28 +40,19 @@ def main() -> None:
     detail.add_argument(
         "--verbose",
         action="store_true",
-        help="Show verbose events and full payloads on stderr; JSONL includes all levels",
+        help="Show debug events and full payloads on stderr; JSONL includes all levels",
     )
     args = parser.parse_args()
-    console = logging.StreamHandler()
-    console.setFormatter(
-        ConsoleFormatter(
-            color=console.stream.isatty() and "NO_COLOR" not in os.environ,
-            verbose=args.verbose,
-        )
-    )
-    level = VERBOSE if args.verbose else logging.DEBUG if args.debug else logging.INFO
-    logging.basicConfig(level=level, handlers=[console])
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("anthropic").setLevel(logging.WARNING)
+    configure(verbose=args.verbose, debug=args.debug)
     try:
         config = Config.load(args.config)
         configure(config.log_file, args.verbose, args.debug)
         asyncio.run(run(config))
-    except (OSError, ValueError, TypeError, KeyError, RuntimeError) as error:
-        logging.getLogger("pet-daemon").exception("Daemon failed")
-        parser.exit(1, f"pet-daemon: {error}\n")
+    except KeyboardInterrupt:
+        pass
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+        get_logger("pet-daemon").exception("daemon.failed")
+        parser.exit(1)
     finally:
         logging.shutdown()
 

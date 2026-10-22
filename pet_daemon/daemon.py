@@ -1,7 +1,6 @@
 import asyncio
 import errno
 import json
-import logging
 import os
 import random
 import signal
@@ -20,6 +19,7 @@ from .behavior.controller import Behavior
 from .behavior.sprites import Pack
 from .commentary import AnthropicModelClient, Cognition
 from .config import Config
+from .logging import get_logger
 from .runtime import RandomSource
 from .sessions.processes import ProcessTracker
 from .sessions.reactions import SessionReactions
@@ -27,9 +27,8 @@ from .sessions.tracking import Sessions
 from .sources import RepositoryTracker
 from .sources.hooks import normalize_hook
 from .storage import Memory
-from .telemetry import event, trace, verbose
 
-log = logging.getLogger("pet-daemon")
+log = get_logger("pet-daemon")
 MAX_INPUT_BYTES = 2000
 
 
@@ -87,7 +86,7 @@ class Receiver(asyncio.DatagramProtocol):
         self.daemon.receive(data)
 
     def error_received(self, exc: Exception) -> None:
-        log.warning("Hook socket: %s", exc)
+        log.warning("hook.socket_failed", error=str(exc))
 
 
 class Daemon:
@@ -175,14 +174,15 @@ class Daemon:
         self.sender.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 131072)
         self.sender.setblocking(False)
         self.loop_task = asyncio.create_task(self.loop())
-        verbose(
+        log.debug(
             "daemon.started",
+            detail="payload",
             config=asdict(self.config),
             pet=self.pack.pet,
             clips={key: asdict(clip) for key, clip in self.pack.clips.items()},
             next_observation=self.application.attention.next_observation,
         )
-        event(
+        log.info(
             "daemon.listening",
             socket=self.config.daemon_socket,
             pet=self.pack.pet,
@@ -199,11 +199,10 @@ class Daemon:
                 packet, ensure_ascii=False, allow_nan=False, separators=(",", ":")
             ).encode()
             self.sender.sendto(data, self.config.overlay_socket)
-            verbose("renderer.command", packet=packet)
+            log.debug("renderer.command", detail="payload", packet=packet)
             return True
         except (OSError, ValueError) as error:
-            trace("renderer.delivery_failed", packet=packet, error=str(error))
-            log.warning("Renderer delivery failed: %s", error)
+            log.warning("renderer.delivery_failed", packet=packet, error=str(error))
             return False
 
     def receive(self, data: bytes) -> None:
@@ -212,7 +211,7 @@ class Daemon:
         try:
             packet = json.loads(data.decode("utf-8"), parse_constant=reject_constant)
         except (ValueError, UnicodeError) as error:
-            trace("input.rejected", error=str(error))
+            log.debug("input.rejected", error=str(error))
             return
         if not isinstance(packet, dict):
             return
@@ -229,7 +228,7 @@ class Daemon:
             await asyncio.sleep(0.05)
 
     async def close(self) -> None:
-        event(
+        log.info(
             "daemon.stopping",
             snapshot=asdict(self.application.sessions.activity_view()),
             sessions=len(self.application.sessions.by_id),

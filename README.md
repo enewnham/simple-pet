@@ -31,7 +31,32 @@ bin/pet-daemon
 
 The daemon runs in the foreground. Press Ctrl-C to stop it. Use `make run` for subsequent runs.
 
-Use `bin/pet-daemon --debug` or `--verbose` for troubleshooting. Logs are also available at `logs/pet-daemon.jsonl`.
+Console logs go to stderr with local timestamps, colored levels, event names, and
+key-value fields. Colors are disabled when stderr is redirected or `NO_COLOR` is set.
+
+- `bin/pet-daemon` shows lifecycle events, agent activity, commentary text, and warnings.
+- `bin/pet-daemon --debug` adds decisions and timings while hiding bulky payloads.
+- `bin/pet-daemon --verbose` includes full model requests, responses, and renderer packets.
+
+Every mode writes all levels and full payloads to `logs/pet-daemon.jsonl`, or the
+configured `log_file`. Files rotate at 10 MiB with three backups. JSON records have
+UTC timestamps, levels, event names, logger names, and a process run ID. Commentary
+requests also carry an observation ID, reason, subject, and session across async calls.
+Model payloads can contain user prompts and agent output.
+
+Typical console output looks like:
+
+```text
+10:42:01 I daemon.listening             model=claude-haiku-5-5 pet=my-pet socket=/tmp/pet-daemon.sock
+10:42:06 I observation.finished         duration_seconds=0.842 observation_id=1a2b3c4d outcome=submitted reason=check_in
+10:42:06 I speech.delivery              outcome=accepted text='The parser tests caught that edge case.'
+```
+
+To inspect one request, use its full observation ID from the JSON file:
+
+```sh
+jq 'select(.observation_id == "FULL_OBSERVATION_ID")' logs/pet-daemon.jsonl
+```
 
 ## Connect your agents
 

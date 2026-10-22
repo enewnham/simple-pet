@@ -1,6 +1,5 @@
 import asyncio
 import json
-import logging
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -10,16 +9,16 @@ from anthropic.types import TextBlockParam
 from ..attention import AttentionSelection
 from ..config import Config
 from ..domain import ExecutionOutcome, ModelPurpose, SpeechReason
+from ..logging import get_logger
 from ..runtime import PetContext, SessionContext
 from ..storage import Memory
-from ..telemetry import event, trace
 from .context import PreparedCommentary, PromptBuilder
 from .contracts import JSONSchema, ModelRequest, TextSchema
 from .model import ModelClient
 from .repetition import RepeatMatch, repeat_match
 from .summarization import summary_request
 
-log = logging.getLogger("pet-daemon")
+log = get_logger("pet-daemon")
 
 
 @dataclass(frozen=True)
@@ -197,14 +196,14 @@ class Cognition:
             ):
                 raise summary
             if isinstance(summary, Exception):
-                log.warning("Could not summarize session: %s", summary)
+                log.warning("observation.summary_failed", error=str(summary))
                 summary = None
         else:
             raw_result = await self.complete(prepared.request, reason)
         speech = self.validate_speech(raw_result, explicit)
         match = await self.repetition(speech)
         if match:
-            event(
+            log.info(
                 "speech.repetition",
                 stage="initial",
                 method=match.method,
@@ -232,13 +231,13 @@ class Cognition:
                 raw_result = await self.complete(retry.request, reason)
                 speech = self.validate_speech(raw_result, explicit)
             except Exception as error:  # noqa: BLE001 - Keep failed model retries from discarding accepted speech.
-                event("speech.retry_failed", level=logging.WARNING, error=str(error))
+                log.warning("speech.retry_failed", error=str(error))
                 speech = initial if manual else None
             else:
                 prepared = retry
                 match = await self.repetition(speech)
                 if match:
-                    event(
+                    log.info(
                         "speech.repetition",
                         stage="retry",
                         method=match.method,
@@ -247,7 +246,7 @@ class Cognition:
                     )
                     if not manual:
                         speech = None
-        trace(
+        log.debug(
             "observation.decision",
             reason=reason,
             speaks=speech is not None,

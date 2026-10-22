@@ -10,7 +10,10 @@ import objc
 from NaturalLanguage import NLEmbedding, NLLanguageEnglish  # ty: ignore[unresolved-import]
 
 from ..domain import RepeatMethod
-from ..telemetry import event
+from ..logging import get_logger
+
+log = get_logger("pet-daemon")
+
 
 SEMANTIC_THRESHOLD = 0.9
 NEGATIONS = {
@@ -159,7 +162,7 @@ def content_tokens(text: str) -> set[str]:
 
 @lru_cache(maxsize=16)
 def unavailable(reason: str) -> None:
-    event("speech.similarity_unavailable", reason=reason)
+    log.info("speech.similarity_unavailable", reason=reason)
 
 
 def similarity(first: Sequence[float], second: Sequence[float]) -> float | None:

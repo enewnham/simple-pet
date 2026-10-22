@@ -3,8 +3,8 @@ import time
 from collections.abc import Callable, Coroutine, Iterable
 from pathlib import Path
 
-from .. import telemetry
 from ..domain import CollectionKind
+from ..logging import get_logger
 from ..work.observations import (
     BranchObservation,
     CheckoutObservation,
@@ -15,6 +15,8 @@ from ..work.observations import (
 )
 from . import git, github
 from .git import RunCommand
+
+log = get_logger("pet-daemon")
 
 type CollectionKey = tuple[CollectionKind, str]
 
@@ -183,7 +185,7 @@ class RepositoryTracker:
             self.missing.add(path)
             self._save(CheckoutObservation(path, None, self.clock(), available=False))
             self._sync_subscriptions()
-            telemetry.event("repository.retired", path=path)
+            log.info("repository.retired", path=path)
             return True
         except OSError:
             pass
@@ -255,7 +257,7 @@ class RepositoryTracker:
             if not self._active(key, version, epoch):
                 return
             self._save(CheckoutObservation(path, None, checked_at, str(error)[:240]))
-            telemetry.event(
+            log.info(
                 "repository.refresh_failed", source="git", path=path, error=str(error)
             )
 
@@ -286,7 +288,7 @@ class RepositoryTracker:
             TypeError,
         ) as failure:
             error = str(failure)[:240]
-            telemetry.event(
+            log.info(
                 "repository.refresh_failed",
                 source="github",
                 subject=key[1],

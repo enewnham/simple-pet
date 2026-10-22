@@ -11,6 +11,7 @@ from .domain import (
     SpeechSituation,
     WorkSubjectKind,
 )
+from .logging import get_logger
 from .runtime import (
     CareTrigger,
     PetContext,
@@ -23,8 +24,9 @@ from .runtime import (
 )
 from .sessions.reactions import SessionReaction
 from .storage.memory import HistoryRecord
-from .telemetry import trace
 from .work import WorkSubject
+
+log = get_logger("pet-daemon")
 
 
 @dataclass(frozen=True)
@@ -191,7 +193,7 @@ class Attention:
                 SpeechReason.CHECK_IN: 0,
             }[reason]
             self.pending = (reason, now + delay, trigger)
-        trace(
+        log.debug(
             "observation.queued",
             reason=self.pending[0],
             scheduled_at=self.pending[1],
@@ -462,7 +464,7 @@ class Attention:
     def mark_selected(self, subject_id: str) -> None:
         self.sequence = max(self.clock(), self.sequence + 0.000001)
         self.selections[subject_id] = self.sequence
-        trace("attention.selected", session=subject_id)
+        log.debug("attention.selected", session=subject_id)
 
     def allowed(self, reason: SpeechReason, trigger: Trigger | None = None) -> bool:
         if (

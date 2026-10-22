@@ -4,6 +4,7 @@ from dataclasses import asdict
 from ..behavior.controller import Behavior
 from ..config import Config
 from ..domain import PetState, SpeechReason
+from ..logging import get_logger
 from ..runtime import HookEvent, RandomSource, ReactionTrigger, Trigger
 from ..sentiment import (
     COOLDOWN_SECONDS,
@@ -13,9 +14,10 @@ from ..sentiment import (
     analyzer,
     sentiment_score,
 )
-from ..telemetry import trace, verbose
 from .reactions import SessionReaction, SessionReactions
 from .tracking import AgentSession, Sessions, SessionUpdate
+
+log = get_logger("pet-daemon")
 
 
 class ActivityCoordinator:
@@ -69,8 +71,9 @@ class ActivityCoordinator:
                 self.react_to_sentiment(packet, key, session, sleeping)
             if not sleeping:
                 self.behavior.tick(self.activity(), self.sessions)
-        verbose(
+        log.debug(
             "hook.received",
+            detail="payload",
             packet=packet.packet(),
             result=asdict(result) if result is not None else None,
             snapshot=asdict(self.sessions.activity_view()),
@@ -104,7 +107,7 @@ class ActivityCoordinator:
         if session.sentiment_identity == identity and (
             packet.turn or now - session.sentiment_seen < DUPLICATE_SECONDS
         ):
-            trace("sentiment.evaluated", session=key, decision="duplicate")
+            log.debug("sentiment.evaluated", session=key, decision="duplicate")
             return
         session.sentiment_identity = identity
         session.sentiment_seen = now
@@ -123,4 +126,4 @@ class ActivityCoordinator:
             decision = "played"
         else:
             decision = "blocked"
-        trace("sentiment.evaluated", session=key, compound=score, decision=decision)
+        log.debug("sentiment.evaluated", session=key, compound=score, decision=decision)

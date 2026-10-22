@@ -1,5 +1,4 @@
 import json
-import logging
 import time
 from dataclasses import asdict
 from typing import Protocol
@@ -7,9 +6,12 @@ from typing import Protocol
 from anthropic import AsyncAnthropic
 
 from ..domain import ModelPurpose, SpeechReason
-from ..telemetry import UsageTokens, event, request_usage, verbose
+from ..logging import get_logger
 from .context import encoded_size
 from .contracts import ModelRequest
+from .usage import UsageTokens, request_usage
+
+log = get_logger("pet-daemon")
 
 
 class ModelClient(Protocol):
@@ -25,8 +27,9 @@ class AnthropicModelClient:
     async def complete(
         self, request: ModelRequest, reason: SpeechReason | ModelPurpose
     ) -> dict[str, object]:
-        verbose(
+        log.debug(
             "observation.request",
+            detail="payload",
             reason=reason,
             request=request,
             request_bytes=encoded_size(request),
@@ -50,8 +53,9 @@ class AnthropicModelClient:
                 },
             },
         )
-        verbose(
+        log.debug(
             "observation.response",
+            detail="payload",
             reason=reason,
             response=response.model_dump(mode="json"),
         )
@@ -66,9 +70,8 @@ class AnthropicModelClient:
         if collected is not None:
             previous = collected.get(reason, UsageTokens())
             collected[reason] = previous + tokens
-        event(
+        log.debug(
             "observation.usage",
-            level=logging.DEBUG,
             reason=reason,
             duration_seconds=round(time.monotonic() - started, 3),
             **asdict(tokens),
@@ -82,7 +85,7 @@ class AnthropicModelClient:
         if not isinstance(result, dict):
             raise ValueError("Observation requires an object")  # noqa: TRY004 - Report malformed JSON values through the validation contract.
         if reason == ModelPurpose.SUMMARY:
-            event(
+            log.info(
                 "observation.summary",
                 duration_seconds=round(time.monotonic() - started, 3),
                 **asdict(tokens),

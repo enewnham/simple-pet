@@ -5,12 +5,14 @@ from typing import TypeGuard
 
 from ..config import BehaviorConfig
 from ..domain import ActionKind, Activity, CareKind, ExecutionPhase, PetState
+from ..logging import get_logger
 from ..runtime import OverlayPacket, Point, RandomSource
 from ..sessions.tracking import Sessions
-from ..telemetry import event, trace, verbose
 from .execution import Action, Execution
 from .policy import ANIMATION_ROLES, REACTIONS, Candidate, Observation, Policy
 from .sprites import Clip, Pack
+
+log = get_logger("pet-daemon")
 
 
 def finite_number(value: object) -> TypeGuard[float]:
@@ -140,7 +142,7 @@ class Behavior:
             self.next_care_speech = self.clock() + self.rng.uniform(
                 *self.config.care_speech_interval
             )
-        event("behavior.care", activity=kind)
+        log.info("behavior.care", activity=kind)
         return True
 
     @property
@@ -185,7 +187,7 @@ class Behavior:
         self.emit({"stop_motion": True})
 
     def _interrupt(self, reason: str) -> None:
-        trace(
+        log.debug(
             "behavior.interrupted",
             reason=reason,
             pending=asdict(self.pending) if self.pending is not None else None,
@@ -219,7 +221,7 @@ class Behavior:
             return
         self.nap_until = None
         self.emit({"sleeping": False})
-        event("behavior.woke", reason=reason)
+        log.info("behavior.woke", reason=reason)
         self._interrupt(reason)
         self._rest()
 
@@ -277,7 +279,7 @@ class Behavior:
             or self.status.menu != status.menu
             or self.status.speech != status.speech
         ):
-            verbose("renderer.status", packet=packet)
+            log.debug("renderer.status", detail="payload", packet=packet)
         if self.preferred_position is None or (
             self.status and self.status.dragging and not status.dragging
         ):
@@ -355,7 +357,7 @@ class Behavior:
             }
         )
         if kind in (ActionKind.ERROR, ActionKind.SUCCESS, ActionKind.REACTION):
-            event(
+            log.info(
                 "behavior.reaction",
                 reaction=name,
                 clip=clip.id,
@@ -366,7 +368,7 @@ class Behavior:
                 session=session,
             )
         else:
-            trace(
+            log.debug(
                 "behavior.animation",
                 activity=name,
                 clip=clip.id,
@@ -428,7 +430,7 @@ class Behavior:
                     REACTIONS[kind].kind,
                 )
             )
-            event(
+            log.info(
                 "behavior.reaction",
                 reaction=kind,
                 clip=clip.id,
@@ -499,7 +501,7 @@ class Behavior:
                 "motion": {"x": x, "y": y, "seconds": seconds, "command_id": command},
             }
         )
-        trace(
+        log.debug(
             "behavior.motion",
             activity="roam",
             clip=clip.id,
@@ -552,7 +554,7 @@ class Behavior:
         starting = state == PetState.WORKING and self.state in (None, PetState.IDLE)
         if state != self.state:
             self.state = state
-            event("behavior.state_changed", state=state)
+            log.info("behavior.state_changed", state=state)
             self.emit({"state": state})
         if sessions.engaged:
             self.inactive_since = None
@@ -655,7 +657,9 @@ class Behavior:
             return
         if candidate.name == "nap":
             self.nap_until = now + self.rng.uniform(*self.config.nap_seconds)
-            event("behavior.napping", duration_seconds=round(self.nap_until - now, 2))
+            log.info(
+                "behavior.napping", duration_seconds=round(self.nap_until - now, 2)
+            )
             self.emit({"sleeping": True, "stop_motion": True})
             self._rest()
             self.execution.start(
