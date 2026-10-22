@@ -2256,7 +2256,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(failures), 1)
         self.assertEqual(failures[0].session, "claude:child")
-        self.assertEqual(failures[0].repo, "/repo/parser")
+        self.assertEqual(failures[0].working_directory, "/repo/parser")
 
     async def test_failure_request_and_memory_exclude_injected_diagnostics(
         self,

@@ -16,7 +16,7 @@ from pet_daemon.runtime import CareTrigger, HookEvent, PetContext
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.storage import Memory
 from pet_daemon.work import WorkSubject
-from pet_daemon.work.history import project_event
+from pet_daemon.work.history import build_session_entry
 from pet_daemon.work.observations import (
     BranchObservation,
     CheckoutObservation,
@@ -73,7 +73,7 @@ class ContextTests(unittest.TestCase):
         with self.memory.transaction():
             self.memory.work.record_session(result.observation)
             self.memory.observe_session_context(result.observation)
-            self.memory.record_event(project_event(hook))
+            self.memory.record_event(build_session_entry(hook))
 
     def update_session(self, index: int = 0, **values: Unpack[SessionOptions]) -> None:
         sessions = list(self.snapshot.sessions)

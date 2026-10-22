@@ -23,7 +23,7 @@ from pet_daemon.sources.hooks import HookEvent
 from pet_daemon.storage import Memory
 from pet_daemon.telemetry import observation
 from pet_daemon.types import JSONValue
-from pet_daemon.work.history import project_event
+from pet_daemon.work.history import build_session_entry
 from Tests.fixtures import capture_snapshot
 
 
@@ -683,7 +683,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
             self.cognition.memory.record_event(
-                project_event(
+                build_session_entry(
                     HookEvent(
                         harness="codex",
                         session=f"worker-{index}",
@@ -708,7 +708,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         for index in range(8):
             self.cognition.memory.record_event(
-                project_event(
+                build_session_entry(
                     HookEvent(
                         harness="claude",
                         session="worker",
@@ -720,7 +720,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             )
             self.cognition.memory.record_speech(f"Visible remark {index}", "routine")
         self.cognition.memory.record_event(
-            project_event(
+            build_session_entry(
                 HookEvent(
                     harness="codex",
                     session="unrelated",
@@ -817,7 +817,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         self.cognition.memory.record_event(
-            project_event(
+            build_session_entry(
                 HookEvent(
                     harness="claude",
                     session="worker",
@@ -949,7 +949,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
             self.cognition.memory.record_event(
-                project_event(
+                build_session_entry(
                     HookEvent(
                         harness="claude",
                         session="worker",

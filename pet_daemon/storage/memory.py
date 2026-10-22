@@ -10,13 +10,14 @@ from ..prompts import select_prompt
 from ..runtime import SwarmActivity
 from ..telemetry import verbose
 from ..work import WorkIngestion
-from ..work.history import RecallQuery, SessionFact
+from ..work.history import RecallQuery, SessionDetail, SessionEntry
 from ..work.models import IntentEvidence
 from ..work.observations import (
     RepositoryObservation,
     RepositoryTarget,
     SessionObservation,
 )
+from ..work.validation import repository_identity
 from ..work.views import WorkSubject, collection_targets, connected_work
 from .migrations import migrate
 from .transactions import transaction
@@ -33,9 +34,10 @@ class HistoryRecord:
 class EventRecord:
     id: int
     session: str
-    repo: str
+    working_directory: str
+    repository: str
     event_type: str
-    summary: str
+    details: list[SessionDetail]
     goal: str
     timestamp: float
 
@@ -44,7 +46,7 @@ class EventRecord:
 class ProjectRecord:
     repo: str
     goal: str
-    last_result: str
+    last_request: str
     timestamp: float
 
 
@@ -278,43 +280,54 @@ class Memory:
             )
         self.db.execute("PRAGMA incremental_vacuum(64)")
 
-    def record_event(self, record: SessionFact | None) -> int | None:
+    def record_event(self, record: SessionEntry | None) -> int | None:
         if record is None:
             return None
-        if record.coalesce:
+        details = json.dumps(record.details, ensure_ascii=False)
+        if record.event_type in {"progress", "waiting", "session_start"}:
             previous = self.db.execute(
-                "SELECT event_type,summary FROM events WHERE pet=? AND session=? AND repo=? ORDER BY id DESC LIMIT 1",
-                (self.pet, record.session, record.repo),
+                "SELECT event_type,details FROM events WHERE pet=? AND session=? AND working_directory=? ORDER BY id DESC LIMIT 1",
+                (self.pet, record.session, record.working_directory),
             ).fetchone()
             if (
                 previous
                 and previous["event_type"] == record.event_type
-                and previous["summary"] == record.summary
+                and previous["details"] == details
             ):
                 return None
+        checkout = (
+            self._work_repository.get_checkout(record.working_directory, enclosing=True)
+            if record.working_directory
+            else None
+        )
+        repository = repository_identity(
+            record.repository
+            or (checkout.local.repository if checkout and checkout.local else "")
+        )
         timestamp = self.clock()
         with self.transaction():
             cursor = self.db.execute(
-                "INSERT INTO events(pet,session,repo,event_type,summary,goal,timestamp) VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO events(pet,session,working_directory,repository,event_type,details,goal,timestamp) VALUES (?,?,?,?,?,?,?,?)",
                 (
                     self.pet,
                     record.session,
-                    record.repo,
+                    record.working_directory,
+                    repository,
                     record.event_type,
-                    record.summary,
+                    details,
                     record.goal,
                     timestamp,
                 ),
             )
-            if record.repo and record.requested_goal:
+            if record.working_directory and record.explicit_goal:
                 self.db.execute(
                     """INSERT INTO projects VALUES (?,?,?,?,?) ON CONFLICT(pet,repo) DO UPDATE SET
-                    goal=excluded.goal, last_result=excluded.last_result, timestamp=excluded.timestamp""",
+                    goal=excluded.goal, last_request=excluded.last_request, timestamp=excluded.timestamp""",
                     (
                         self.pet,
-                        record.repo,
-                        record.requested_goal,
-                        record.summary,
+                        record.working_directory,
+                        record.explicit_goal,
+                        record.explicit_goal,
                         timestamp,
                     ),
                 )
@@ -327,17 +340,17 @@ class Memory:
         limit: int = 5,
         *,
         session: str | None = None,
-        repo: str | None = None,
+        working_directory: str | None = None,
         event_types: Iterable[str] | None = None,
     ) -> list[EventRecord]:
-        filters = ["pet=?", "summary != ''"]
+        filters = ["pet=?"]
         values = [self.pet]
         if session is not None:
             filters.append("session=?")
             values.append(session)
-        if repo is not None:
-            filters.append("repo=?")
-            values.append(repo)
+        if working_directory is not None:
+            filters.append("working_directory=?")
+            values.append(working_directory)
         if event_types is not None:
             kinds = tuple(event_types)
             if not kinds:
@@ -349,7 +362,7 @@ class Memory:
         rows = self.db.execute(
             f"""WITH ranked AS (
             SELECT *, ROW_NUMBER() OVER (PARTITION BY session ORDER BY id DESC) AS rank FROM events WHERE {where}
-        ) SELECT id, session, repo, event_type, summary, goal, timestamp
+        ) SELECT id, session, working_directory, repository, event_type, details, goal, timestamp
           FROM ranked ORDER BY rank=1 DESC, id DESC LIMIT ?""",
             (*values, limit),
         ).fetchall()
@@ -357,9 +370,10 @@ class Memory:
             EventRecord(
                 id=row["id"],
                 session=row["session"],
-                repo=row["repo"],
+                working_directory=row["working_directory"],
+                repository=row["repository"],
                 event_type=row["event_type"],
-                summary=row["summary"],
+                details=json.loads(row["details"]),
                 goal=row["goal"],
                 timestamp=row["timestamp"],
             )
@@ -371,10 +385,10 @@ class Memory:
             return []
         query = " AND ".join('"' + term + '"' for term in request.terms)
         excluded = [row.id for row in self.recent()]
-        placeholders = ",".join("?" for _ in excluded) or "NULL"
+        placeholders = ",".join("?" for _ in excluded)
         rows = self.db.execute(
             f"""SELECT e.* FROM events_fts JOIN events e ON e.id=events_fts.rowid
-            WHERE events_fts MATCH ? AND e.pet=? AND e.repo=? AND e.summary != '' AND e.id NOT IN ({placeholders})
+            WHERE events_fts MATCH ? AND e.pet=? AND e.repository=? AND e.id NOT IN ({placeholders})
             ORDER BY e.session=? DESC, bm25(events_fts), e.id DESC LIMIT ?""",
             (query, self.pet, request.repository, *excluded, request.session, limit),
         ).fetchall()
@@ -382,9 +396,10 @@ class Memory:
             EventRecord(
                 id=row["id"],
                 session=row["session"],
-                repo=row["repo"],
+                working_directory=row["working_directory"],
+                repository=row["repository"],
                 event_type=row["event_type"],
-                summary=row["summary"],
+                details=json.loads(row["details"]),
                 goal=row["goal"],
                 timestamp=row["timestamp"],
             )
@@ -395,7 +410,7 @@ class Memory:
         result = []
         for repo in list(dict.fromkeys(repos))[:3]:
             row = self.db.execute(
-                "SELECT repo,goal,last_result,timestamp FROM projects WHERE pet=? AND repo=?",
+                "SELECT repo,goal,last_request,timestamp FROM projects WHERE pet=? AND repo=?",
                 (self.pet, repo),
             ).fetchone()
             if row:
@@ -403,7 +418,7 @@ class Memory:
                     ProjectRecord(
                         repo=row["repo"],
                         goal=row["goal"],
-                        last_result=row["last_result"],
+                        last_request=row["last_request"],
                         timestamp=row["timestamp"],
                     )
                 )

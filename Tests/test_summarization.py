@@ -14,7 +14,7 @@ from pet_daemon.prompts import bounded, select_prompt
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources.hooks import HookEvent
 from pet_daemon.storage import Memory
-from pet_daemon.work.history import project_event
+from pet_daemon.work.history import build_session_entry
 from Tests.fixtures import capture_snapshot, require, session_snapshot
 
 
@@ -59,7 +59,7 @@ class SummarizationTests(unittest.TestCase):
         self, kind: str, session: str = "main", **values: Unpack[EventOptions]
     ) -> None:
         self.memory.record_event(
-            project_event(
+            build_session_entry(
                 HookEvent(
                     harness="codex", session=session, event=kind, repo="/repo", **values
                 )
@@ -82,11 +82,12 @@ class SummarizationTests(unittest.TestCase):
         self.assertEqual(payload["historical_summary"], "Parser work remains pending.")
         self.assertEqual(payload["current_report"]["outcome"], "success")
         self.assertIn(
-            "Parser implemented and tests passed",
+            {"kind": "progress", "text": "Parser implemented and tests passed"},
             payload["reported_results"][0]["report"],
         )
         self.assertIn(
-            "agent reported success", payload["reported_results"][0]["report"]
+            {"kind": "reported_outcome", "text": "success"},
+            payload["reported_results"][0]["report"],
         )
         self.assertEqual(
             payload["reported_results"][0]["age"], "less than a minute ago"
@@ -119,7 +120,10 @@ class SummarizationTests(unittest.TestCase):
         )
         payload = self.payload()
         self.assertEqual(len(payload["reported_results"]), 1)
-        self.assertIn("Parser delivered", payload["reported_results"][0]["report"])
+        self.assertIn(
+            {"kind": "progress", "text": "Parser delivered"},
+            payload["reported_results"][0]["report"],
+        )
         self.assertNotIn("Unrelated migration", json.dumps(payload))
         self.assertEqual(
             payload["current_report"],
@@ -154,7 +158,7 @@ class SummarizationTests(unittest.TestCase):
                     with self.memory.transaction():
                         self.memory.work.record_session(result.observation)
                         self.memory.observe_session_context(result.observation)
-                        self.memory.record_event(project_event(event))
+                        self.memory.record_event(build_session_entry(event))
                 focus = capture_snapshot(
                     sessions.activity_view(), memory=self.memory
                 ).sessions[0]
@@ -166,8 +170,12 @@ class SummarizationTests(unittest.TestCase):
                 )
                 reports = payload["reported_results"]
                 self.assertEqual(len(reports), 1)
-                self.assertIn(outcome, reports[0]["report"])
-                self.assertIn(progress, reports[0]["report"])
+                self.assertIn(
+                    {"kind": "reported_outcome", "text": outcome}, reports[0]["report"]
+                )
+                self.assertIn(
+                    {"kind": "progress", "text": progress}, reports[0]["report"]
+                )
 
     def test_missing_results_preserve_an_unknown_outcome(self) -> None:
         self.focus = replace(self.focus, progress="", outcome=None, turn_active=True)
@@ -235,7 +243,7 @@ class SummarizationTests(unittest.TestCase):
         )[0]
         self.assertEqual(
             payload["reported_results"][0]["report"],
-            bounded(row.summary.removeprefix("turn_done").removeprefix(" | "), 320),
+            row.details,
         )
         self.assertEqual(payload["historical_summary"], "")
 

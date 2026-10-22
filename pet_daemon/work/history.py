@@ -2,24 +2,41 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, TypedDict
 
 from ..prompts import bounded
-from ..sessions.activity import activity, result_summary
+from ..sessions.activity import activity
+from .validation import repository_identity
 
 if TYPE_CHECKING:
     from ..runtime import HookEvent
 
 
+class SessionDetail(TypedDict):
+    kind: Literal["reported_outcome", "activity", "progress"]
+    text: str
+
+
+HISTORY_SEARCH_STOP_WORDS = {
+    "please",
+    "continue",
+    "failed",
+    "error",
+    "build",
+    "tests",
+    "running",
+}
+
+
 @dataclass(frozen=True)
-class SessionFact:
+class SessionEntry:
     session: str
-    repo: str
+    working_directory: str
+    repository: str
     event_type: str
-    summary: str
+    details: list[SessionDetail]
     goal: str
-    requested_goal: str
-    coalesce: bool = False
+    explicit_goal: str
 
 
 @dataclass(frozen=True)
@@ -30,97 +47,85 @@ class RecallQuery:
 
 
 @dataclass(frozen=True)
-class EventContext:
-    id: str
-    repo: str
+class SessionContext:
+    session_id: str
+    working_directory: str
     goal: str
     last_tool: str
     outcome: str | None
     activity: str
 
 
-def project_event(
-    event: HookEvent, context: EventContext | None = None
-) -> SessionFact | None:
+def build_session_entry(
+    event: HookEvent, context: SessionContext | None = None
+) -> SessionEntry | None:
     kind = event.event
-    repo = bounded(event.repo or (context.repo if context else None), 1024)
-    identifier = bounded(
-        context.id if context else f"{event.harness}:{event.session}", 256
-    )
-    progress = bounded(event.progress)
-    requested_goal = bounded(event.goal)
-    goal = requested_goal or bounded(context.goal if context else None)
-    tool = bounded(event.tool or (context.last_tool if context else None), 160)
     if kind in {"tool_start", "tool_done", "tool_error"}:
         return None
+    progress = bounded(event.progress)
     if kind == "progress" and not progress:
         return None
-    terminal = kind in (
+    working_directory = bounded(
+        event.repo or (context.working_directory if context else None), 1024
+    )
+    session_id = bounded(
+        context.session_id if context else f"{event.harness}:{event.session}", 256
+    )
+    explicit_goal = bounded(event.goal)
+    goal = explicit_goal or bounded(context.goal if context else None)
+    terminal = kind in {
         "turn_done",
         "turn_error",
         "subagent_done",
         "interrupt",
         "session_end",
-    )
+    }
     outcome = (
         context.outcome if terminal and context and context.outcome else event.outcome
     )
     if kind == "turn_error":
         outcome = "error"
-    category = (
-        context.activity
-        if context and context.activity
-        else activity(tool, event.tool_name or "")
-    )
-    if terminal:
-        category = "harness"
-    result = result_summary(category, outcome) if outcome else ""
-    if terminal and outcome == "success":
-        result = "Turn completed (agent reported success)"
-    elif terminal and outcome:
-        result = f"{result} (agent reported {outcome})"
-    facts = [
-        kind,
-        goal if kind in ("intent", "subagent_start") else "",
-        result,
-        progress,
-    ]
-    summary = bounded(" | ".join(part for part in facts if part), 320)
-    return SessionFact(
-        identifier,
-        repo,
-        kind,
-        summary,
-        goal,
-        requested_goal,
-        kind in {"progress", "waiting", "session_start"},
+    details: list[SessionDetail] = []
+    if outcome:
+        details.append({"kind": "reported_outcome", "text": outcome})
+        if not terminal:
+            tool = bounded(event.tool or (context.last_tool if context else None), 160)
+            category = (
+                context.activity
+                if context and context.activity
+                else activity(tool, event.tool_name or "")
+            )
+            details.append({"kind": "activity", "text": category})
+    if progress:
+        details.append({"kind": "progress", "text": progress})
+    return SessionEntry(
+        session=session_id,
+        working_directory=working_directory,
+        repository=repository_identity(bounded(event.repository, 1024)),
+        event_type=kind,
+        details=details,
+        goal=goal,
+        explicit_goal=explicit_goal,
     )
 
 
-def recall_query(event: HookEvent | None) -> RecallQuery | None:
-    if not event or event.event != "intent" or not event.repo or not event.goal:
+def build_recall_query(
+    event: HookEvent | None, *, repository: str
+) -> RecallQuery | None:
+    if not event or event.event != "intent" or not repository or not event.goal:
         return None
-    repo = bounded(event.repo, 1024)
     tokens = re.findall(r"[\w]+", event.goal)
-    distinctive = list(
+    search_terms = tuple(
         dict.fromkeys(
-            token
+            token.lower()
             for token in tokens
-            if len(token) >= 5
-            and token.lower()
-            not in {
-                "please",
-                "continue",
-                "failed",
-                "error",
-                "build",
-                "tests",
-                "running",
-            }
+            if len(token) >= 5 and token.lower() not in HISTORY_SEARCH_STOP_WORDS
         )
     )[:3]
-    if not distinctive:
+    if not search_terms:
         return None
-
-    session = bounded(f"{event.harness}:{event.session}", 256)
-    return RecallQuery(repo, session, tuple(distinctive))
+    return RecallQuery(
+        repository=repository_identity(bounded(repository, 1024)),
+        session=bounded(f"{event.harness}:{event.session}", 256),
+        terms=search_terms,
+    )

@@ -28,7 +28,7 @@ from .sessions.processes import ProcessTracker
 from .sessions.tracking import Sessions
 from .storage import Memory
 from .telemetry import event, observation, trace
-from .work.history import EventContext, project_event
+from .work.history import SessionContext, build_session_entry
 from .work.observations import RepositoryObservation
 
 log = logging.getLogger("pet-daemon")
@@ -237,15 +237,15 @@ class Application:
                 self.memory.observe_session_context(result.observation)
                 session = self.sessions.by_id[result.session]
                 self.memory.record_event(
-                    project_event(
+                    build_session_entry(
                         hook,
-                        EventContext(
-                            result.session,
-                            session.repo,
-                            session.goal,
-                            session.last_tool,
-                            session.outcome,
-                            result.activity,
+                        SessionContext(
+                            session_id=result.session,
+                            working_directory=session.repo,
+                            goal=session.goal,
+                            last_tool=session.last_tool,
+                            outcome=session.outcome,
+                            activity=result.activity,
                         ),
                     )
                 )

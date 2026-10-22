@@ -2,17 +2,19 @@ import sqlite3
 
 from .transactions import transaction
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 
 MEMORY_SCHEMA = """
             PRAGMA auto_vacuum = INCREMENTAL;
             CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY, pet TEXT NOT NULL, session TEXT NOT NULL,
-                repo TEXT NOT NULL, event_type TEXT NOT NULL, summary TEXT NOT NULL,
+                working_directory TEXT NOT NULL, repository TEXT NOT NULL,
+                event_type TEXT NOT NULL, details TEXT NOT NULL,
                 goal TEXT NOT NULL, timestamp REAL NOT NULL, data TEXT
             );
-            CREATE INDEX IF NOT EXISTS events_scope ON events(pet, repo, id);
+            CREATE INDEX IF NOT EXISTS events_scope ON events(pet, working_directory, id);
+            CREATE INDEX IF NOT EXISTS events_repository ON events(pet, repository, id);
             CREATE INDEX IF NOT EXISTS events_age ON events(timestamp);
             CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(goal, content=events, content_rowid=id);
             CREATE TRIGGER IF NOT EXISTS events_insert AFTER INSERT ON events BEGIN
@@ -23,7 +25,7 @@ MEMORY_SCHEMA = """
             END;
             CREATE TABLE IF NOT EXISTS projects (
                 pet TEXT NOT NULL, repo TEXT NOT NULL, goal TEXT NOT NULL,
-                last_result TEXT NOT NULL, timestamp REAL NOT NULL,
+                last_request TEXT NOT NULL, timestamp REAL NOT NULL,
                 PRIMARY KEY(pet, repo)
             );
             CREATE TABLE IF NOT EXISTS speech (

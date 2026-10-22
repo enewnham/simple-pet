@@ -6,6 +6,7 @@ from ..config import Config
 from ..prompts import bounded, select_prompt
 from ..runtime import SessionContext
 from ..storage import Memory
+from ..work.history import SessionDetail
 from .contracts import ModelRequest, RequestFactory
 
 SUMMARY_INSTRUCTIONS = """
@@ -40,7 +41,7 @@ def report_age(seconds: float) -> str | None:
 
 class Report(TypedDict):
     age: str | None
-    report: str
+    report: list[SessionDetail]
 
 
 class SummaryPayload(TypedDict):
@@ -91,10 +92,7 @@ def summary_request(
                 "reported_results",
                 {
                     "age": report_age(clock() - row.timestamp),
-                    "report": bounded(
-                        row.summary.removeprefix(row.event_type).removeprefix(" | "),
-                        320,
-                    ),
+                    "report": row.details,
                 },
             )
             for row in reversed(rows)

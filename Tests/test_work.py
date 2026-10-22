@@ -9,7 +9,7 @@ from pet_daemon.runtime import HookEvent, HookTextFields
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.storage.memory import Memory
 from pet_daemon.storage.migrations import SCHEMA_VERSION, migrate
-from pet_daemon.work.history import project_event
+from pet_daemon.work.history import build_session_entry
 from pet_daemon.work.models import RelatedLink
 from pet_daemon.work.observations import (
     BranchObservation,
@@ -52,7 +52,7 @@ class WorkTests(unittest.TestCase):
         if result is not None:
             with self.memory.transaction():
                 self.store.record_session(result.observation)
-                self.memory.record_event(project_event(hook))
+                self.memory.record_event(build_session_entry(hook))
 
     def checkout(
         self, branch: str = "feature", path: str = "/work/parser"
@@ -135,7 +135,7 @@ class WorkTests(unittest.TestCase):
             result = require(sessions.apply(hook))
             with self.memory.transaction():
                 self.store.record_session(result.observation)
-                self.memory.record_event(project_event(hook))
+                self.memory.record_event(build_session_entry(hook))
             return result.session
 
         ingest(
@@ -193,7 +193,10 @@ class WorkTests(unittest.TestCase):
         self.assertEqual(reports, [ProgressView("Second parser report")])
         self.assertTrue(
             any(
-                "First parser report" in record.summary
+                {detail["kind"]: detail["text"] for detail in record.details}.get(
+                    "progress"
+                )
+                == "First parser report"
                 for record in self.memory.recent()
             )
         )
