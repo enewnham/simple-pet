@@ -7,13 +7,13 @@ from pet_daemon.attention import Attention
 from pet_daemon.config import Config
 from pet_daemon.runtime import (
     CareTrigger,
-    EpisodeTrigger,
     FailureSnapshot,
     PetContext,
+    ReactionTrigger,
     SessionContext,
     SessionTrigger,
 )
-from pet_daemon.sessions.episodes import Episode
+from pet_daemon.sessions.reactions import SessionReaction
 from pet_daemon.storage.memory import HistoryRecord
 from pet_daemon.work import WorkStory, WorkSubject
 from Tests.fixtures import (
@@ -136,8 +136,8 @@ class AttentionTests(unittest.TestCase):
         self.assertTrue(
             self.attention.allowed(
                 "check_in",
-                EpisodeTrigger(
-                    Episode(
+                ReactionTrigger(
+                    SessionReaction(
                         kind="waiting",
                         session="cli:parser",
                         generation=1,

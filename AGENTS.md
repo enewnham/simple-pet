@@ -36,7 +36,7 @@ checks. [Makefile](Makefile) defines the check and build commands.
   using a checkout's later state to reinterpret the report.
   [pet_daemon/sources/](pet_daemon/sources/) collects hook, Git, and GitHub observations
   without assigning work to sessions or creating PR tasks.
-  [pet_daemon/sessions/episodes.py](pet_daemon/sessions/episodes.py) tracks reaction episodes for accepted session transitions.
+  [pet_daemon/sessions/reactions.py](pet_daemon/sessions/reactions.py) tracks reactions to accepted session transitions.
 - **Commentary and storage:** [pet_daemon/commentary/context.py](pet_daemon/commentary/context.py)
   builds bounded commentary prompts and captures their supporting facts.
   [pet_daemon/commentary/cognition.py](pet_daemon/commentary/cognition.py) runs model requests,

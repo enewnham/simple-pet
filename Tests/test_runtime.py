@@ -22,8 +22,8 @@ from pet_daemon.config import Config
 from pet_daemon.daemon import Daemon, bind_socket
 from pet_daemon.runtime import (
     CareTrigger,
-    EpisodeTrigger,
     OverlayPacket,
+    ReactionTrigger,
     SessionTrigger,
     Trigger,
 )
@@ -2174,9 +2174,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 lambda session=session: bool(
                     self.daemon.application.attention.pending
                     and isinstance(
-                        self.daemon.application.attention.pending[2], EpisodeTrigger
+                        self.daemon.application.attention.pending[2], ReactionTrigger
                     )
-                    and self.daemon.application.attention.pending[2].episode.session
+                    and self.daemon.application.attention.pending[2].reaction.session
                     == f"cli:{session}"
                 )
             )
@@ -2619,7 +2619,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 and not self.daemon.application.sessions.by_id["cli:one"].calls
             )
         )
-        await self.wait_for(lambda: self.daemon.application.episodes.serial >= 5)
+        await self.wait_for(lambda: self.daemon.application.reactions.serial >= 5)
         self.release.set()
         await self.wait_for(lambda: self.daemon.application.task is None)
         self.assertEqual(self.daemon.application.cognition.memory.speech(), [])

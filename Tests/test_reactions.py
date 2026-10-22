@@ -2,25 +2,25 @@ import unittest
 from typing import Unpack
 
 from pet_daemon.runtime import HookPacket, HookTextFields
-from pet_daemon.sessions.episodes import Episode, Episodes
+from pet_daemon.sessions.reactions import SessionReaction, SessionReactions
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources.hooks import normalize_hook
 from Tests.fixtures import require
 
 
-class EpisodeOptions(HookTextFields, total=False):
+class ReactionOptions(HookTextFields, total=False):
     aliases: list[str]
 
 
-class EpisodeTests(unittest.TestCase):
+class ReactionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.now = 1000
         self.sessions = Sessions(lambda: self.now)
-        self.episodes = Episodes()
+        self.reactions = SessionReactions()
 
     def event(
-        self, event: str, session: str = "one", **extra: Unpack[EpisodeOptions]
-    ) -> list[Episode]:
+        self, event: str, session: str = "one", **extra: Unpack[ReactionOptions]
+    ) -> list[SessionReaction]:
         packet: HookPacket = {
             "event": event,
             "session": session,
@@ -29,16 +29,18 @@ class EpisodeTests(unittest.TestCase):
         }
         hook = require(normalize_hook(packet))
         result = self.sessions.apply(hook)
-        return self.episodes.handle(hook, result, self.sessions) if result else []
+        return self.reactions.handle(hook, result, self.sessions) if result else []
 
-    def fail_tool(self, call: str, session: str = "one") -> list[Episode]:
+    def fail_tool(self, call: str, session: str = "one") -> list[SessionReaction]:
         self.event("tool_start", session=session, call=call, tool="pytest")
         return self.event("tool_error", session=session, call=call)
 
     def test_promotes_third_failure_once_and_rearms_after_recovery(self) -> None:
         self.event("intent", goal="Fix checks")
         kinds = [
-            episode.kind for index in range(5) for episode in self.fail_tool(str(index))
+            reaction.kind
+            for index in range(5)
+            for reaction in self.fail_tool(str(index))
         ]
         self.assertEqual(kinds.count("trouble"), 1)
         self.event("tool_start", call="retry", tool="pytest")
@@ -46,9 +48,9 @@ class EpisodeTests(unittest.TestCase):
             [item.kind for item in self.event("tool_done", call="retry")], ["recovery"]
         )
         kinds = [
-            episode.kind
+            reaction.kind
             for index in range(3)
-            for episode in self.fail_tool(f"again-{index}")
+            for reaction in self.fail_tool(f"again-{index}")
         ]
         self.assertEqual(kinds.count("trouble"), 1)
 
@@ -62,19 +64,19 @@ class EpisodeTests(unittest.TestCase):
         self,
     ) -> None:
         self.event("intent", session="temporary", goal="Fix checks")
-        episodes = [
+        reactions = [
             item
             for index in range(3)
             for item in self.fail_tool(str(index), session="temporary")
         ]
-        trouble = next(item for item in episodes if item.kind == "trouble")
+        trouble = next(item for item in reactions if item.kind == "trouble")
         captured = trouble
-        self.assertTrue(self.episodes.relevant(captured, self.sessions))
+        self.assertTrue(self.reactions.relevant(captured, self.sessions))
         self.event("tool_start", session="temporary", call="retry", tool="pytest")
         self.event("tool_done", session="temporary", call="retry")
         self.fail_tool("another", session="temporary")
         self.event("session_start", session="native", aliases=["temporary"])
-        self.assertFalse(self.episodes.relevant(captured, self.sessions))
+        self.assertFalse(self.reactions.relevant(captured, self.sessions))
 
     def test_another_recovery_supersedes_the_first_in_the_same_turn(self) -> None:
         self.event("intent", goal="Fix checks")
@@ -82,29 +84,29 @@ class EpisodeTests(unittest.TestCase):
         self.event("tool_start", call="retry", tool="pytest")
         recovery = self.event("tool_done", call="retry")[0]
         captured = recovery
-        self.assertTrue(self.episodes.relevant(captured, self.sessions))
+        self.assertTrue(self.reactions.relevant(captured, self.sessions))
         self.fail_tool("another")
         self.event("tool_start", call="retry-again", tool="pytest")
         self.event("tool_done", call="retry-again")
-        self.assertFalse(self.episodes.relevant(captured, self.sessions))
+        self.assertFalse(self.reactions.relevant(captured, self.sessions))
 
-    def test_waiting_episode_is_replaced_after_input_resumes(self) -> None:
+    def test_waiting_reaction_is_replaced_after_input_resumes(self) -> None:
         self.event("intent", goal="Choose an approach")
         waiting = self.event("waiting", call="read")[0]
         self.assertEqual(self.event("waiting", call="read"), [])
         captured = waiting
-        self.assertTrue(self.episodes.relevant(captured, self.sessions))
+        self.assertTrue(self.reactions.relevant(captured, self.sessions))
         self.event("tool_start", call="read", tool="Read")
         self.event("waiting")
-        self.assertFalse(self.episodes.relevant(captured, self.sessions))
+        self.assertFalse(self.reactions.relevant(captured, self.sessions))
 
     def test_alias_merge_preserves_promoted_failure(self) -> None:
         self.event("intent", session="temporary", goal="Fix checks")
         promoted = None
         for index in range(3):
-            for episode in self.fail_tool(str(index), session="temporary"):
-                if episode.kind == "trouble":
-                    promoted = episode
+            for reaction in self.fail_tool(str(index), session="temporary"):
+                if reaction.kind == "trouble":
+                    promoted = reaction
         self.event("session_start", session="native", aliases=["temporary"])
         self.assertNotIn(
             "trouble",
@@ -112,7 +114,7 @@ class EpisodeTests(unittest.TestCase):
         )
         assert promoted is not None
         captured = promoted
-        self.assertTrue(self.episodes.relevant(captured, self.sessions))
+        self.assertTrue(self.reactions.relevant(captured, self.sessions))
 
     def test_new_turn_supersedes_outcome_while_other_session_continues(self) -> None:
         self.event("intent", goal="Fix checks")
@@ -120,25 +122,25 @@ class EpisodeTests(unittest.TestCase):
         outcome = self.event("turn_done")[0]
         captured = outcome
         self.assertTrue(self.sessions.active)
-        self.assertTrue(self.episodes.relevant(captured, self.sessions))
+        self.assertTrue(self.reactions.relevant(captured, self.sessions))
         self.event("intent", goal="Next task")
-        self.assertFalse(self.episodes.relevant(captured, self.sessions))
+        self.assertFalse(self.reactions.relevant(captured, self.sessions))
 
-    def test_new_turn_discards_old_episode_state_before_an_alias_merge(self) -> None:
+    def test_new_turn_discards_old_reaction_state_before_an_alias_merge(self) -> None:
         self.event("intent", session="temporary", goal="First task")
         for index in range(3):
             self.fail_tool(str(index), session="temporary")
         self.event("intent", session="temporary", goal="Second task")
         self.event("session_start", session="native", aliases=["temporary"])
-        episodes = [
+        reactions = [
             item.kind
             for index in range(3)
             for item in self.fail_tool(f"new-{index}", session="native")
         ]
-        self.assertEqual(episodes.count("trouble"), 1)
-        self.assertEqual(len(self.episodes.states), 1)
+        self.assertEqual(reactions.count("trouble"), 1)
+        self.assertEqual(len(self.reactions.states), 1)
 
-    def test_replacing_a_question_starts_a_new_waiting_episode(self) -> None:
+    def test_replacing_a_question_starts_a_new_waiting_reaction(self) -> None:
         self.event("intent", goal="Choose an approach")
         first = self.event("waiting", call="first")[0]
         second = self.event("waiting", call="second")[0]
@@ -146,7 +148,7 @@ class EpisodeTests(unittest.TestCase):
         self.assertNotEqual(first.serial, second.serial)
         self.assertEqual(self.event("waiting", call="second"), [])
         captured = first
-        self.assertFalse(self.episodes.relevant(captured, self.sessions))
+        self.assertFalse(self.reactions.relevant(captured, self.sessions))
 
     def test_merging_active_aliases_preserves_waiting_without_another_reminder(
         self,
@@ -161,5 +163,5 @@ class EpisodeTests(unittest.TestCase):
         self.assertTrue(lane.waiting)
         self.assertEqual(lane.waiting_call, "question")
         captured = waiting
-        self.assertTrue(self.episodes.relevant(captured, self.sessions))
+        self.assertTrue(self.reactions.relevant(captured, self.sessions))
         self.assertEqual(self.event("waiting", session="native", call="question"), [])

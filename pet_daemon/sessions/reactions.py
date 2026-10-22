@@ -1,12 +1,24 @@
 from dataclasses import dataclass, field
+from typing import Literal, assert_never
 
 from ..runtime import HookEvent, SessionActivity
 from .tracking import AgentSession, Sessions, SessionUpdate
 
+type ReactionKind = Literal[
+    "start",
+    "waiting",
+    "investigation",
+    "trouble",
+    "recovery",
+    "failure",
+    "cancelled",
+    "success",
+]
+
 
 @dataclass(frozen=True)
-class Episode:
-    kind: str
+class SessionReaction:
+    kind: ReactionKind
     session: str
     generation: int
     activity: SessionActivity
@@ -14,7 +26,7 @@ class Episode:
 
 
 @dataclass
-class EpisodeState:
+class ReactionState:
     session: AgentSession
     generation: int
     started: bool = False
@@ -27,16 +39,37 @@ class EpisodeState:
     terminal: bool = False
     investigating: bool = False
 
+    def merge(self, other: "ReactionState") -> None:
+        self.started |= other.started
+        self.waiting |= other.waiting
+        waiting_identity = (
+            (self.session.waiting_call, self.session.waiting_since)
+            if self.session.waiting
+            else None
+        )
+        if other.waiting_identity == waiting_identity and (
+            self.waiting_identity != waiting_identity
+            or other.waiting_serial > self.waiting_serial
+        ):
+            self.waiting_serial = other.waiting_serial
+            self.waiting_identity = other.waiting_identity
+        self.trouble.update(other.trouble)
+        self.unresolved.update(other.unresolved)
+        for category, serial in other.category_serials.items():
+            self.category_serials[category] = max(
+                serial, self.category_serials.get(category, 0)
+            )
+        self.terminal |= other.terminal
+        self.investigating |= other.investigating
 
-class Episodes:
+
+class SessionReactions:
     def __init__(self) -> None:
-        self.states: dict[tuple[str, int], EpisodeState] = {}
+        self.states: dict[tuple[str, int], ReactionState] = {}
         self.serial = 0
 
-    def handle(
-        self, packet: HookEvent, result: SessionUpdate, sessions: Sessions
-    ) -> list[Episode]:
-        reconciled: dict[tuple[str, int], EpisodeState] = {}
+    def _reconcile_sessions(self, sessions: Sessions) -> None:
+        reconciled: dict[tuple[str, int], ReactionState] = {}
         for (key, generation), state in self.states.items():
             if state.session.generation != state.generation:
                 continue
@@ -54,41 +87,28 @@ class Episodes:
             )
             previous = reconciled.get(identity)
             if previous:
-                previous.started |= state.started
-                previous.waiting |= state.waiting
-                waiting_identity = (
-                    (session.waiting_call, session.waiting_since)
-                    if session.waiting
-                    else None
-                )
-                if state.waiting_identity == waiting_identity and (
-                    previous.waiting_identity != waiting_identity
-                    or state.waiting_serial > previous.waiting_serial
-                ):
-                    previous.waiting_serial = state.waiting_serial
-                    previous.waiting_identity = state.waiting_identity
-                previous.trouble.update(state.trouble)
-                previous.unresolved.update(state.unresolved)
-                for category, serial in state.category_serials.items():
-                    previous.category_serials[category] = max(
-                        serial, previous.category_serials.get(category, 0)
-                    )
-                previous.terminal |= state.terminal
-                previous.investigating |= state.investigating
+                previous.merge(state)
             else:
                 reconciled[identity] = state
         self.states = reconciled
+
+    def handle(
+        self, packet: HookEvent, result: SessionUpdate, sessions: Sessions
+    ) -> list[SessionReaction]:
+        self._reconcile_sessions(sessions)
         key = result.session
         session = sessions.by_id[key]
         state = self.states.setdefault(
-            (key, session.generation), EpisodeState(session, session.generation)
+            (key, session.generation), ReactionState(session, session.generation)
         )
         emitted = []
 
-        def add(kind: str, activity: SessionActivity = result.activity) -> None:
+        def add(
+            kind: ReactionKind, activity: SessionActivity = result.activity
+        ) -> None:
             self.serial += 1
             emitted.append(
-                Episode(kind, key, session.generation, activity, self.serial)
+                SessionReaction(kind, key, session.generation, activity, self.serial)
             )
             if kind in ("trouble", "recovery"):
                 state.category_serials[activity] = self.serial
@@ -150,23 +170,24 @@ class Episodes:
         state.investigating = session.phase == "investigating"
         return emitted
 
-    def relevant(self, episode: Episode, sessions: Sessions) -> bool:
-        key = sessions.aliases.get(episode.session, episode.session)
+    def relevant(self, reaction: SessionReaction, sessions: Sessions) -> bool:
+        key = sessions.aliases.get(reaction.session, reaction.session)
         session = sessions.by_id.get(key)
-        if session is None or session.generation != episode.generation:
+        if session is None or session.generation != reaction.generation:
             return False
-        kind = episode.kind
+        kind = reaction.kind
         state = self.states.get((key, session.generation))
         if kind == "waiting":
             return bool(
-                session.waiting and state and state.waiting_serial == episode.serial
+                session.waiting and state and state.waiting_serial == reaction.serial
             )
         if kind in ("trouble", "recovery") and (
-            not state or state.category_serials.get(episode.activity) != episode.serial
+            not state
+            or state.category_serials.get(reaction.activity) != reaction.serial
         ):
             return False
         if kind == "trouble":
-            failure = session.failures.get(episode.activity)
+            failure = session.failures.get(reaction.activity)
             return bool(
                 failure
                 and not failure.resolved
@@ -179,6 +200,8 @@ class Episodes:
                 "success" if kind == "success" else "cancelled"
             )
         if kind == "recovery":
-            failure = session.failures.get(episode.activity)
+            failure = session.failures.get(reaction.activity)
             return bool(session.active and failure and failure.resolved)
-        return session.active
+        if kind in ("start", "investigation"):
+            return session.active
+        assert_never(kind)

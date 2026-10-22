@@ -21,8 +21,8 @@ from .behavior.sprites import Pack
 from .commentary import AnthropicModelClient, Cognition
 from .config import Config
 from .runtime import RandomSource
-from .sessions.episodes import Episodes
 from .sessions.processes import ProcessTracker
+from .sessions.reactions import SessionReactions
 from .sessions.tracking import Sessions
 from .sources import RepositoryTracker
 from .sources.hooks import normalize_hook
@@ -108,7 +108,7 @@ class Daemon:
             config.completed_retention_seconds,
             config.activity_fresh_seconds,
         )
-        episodes = Episodes()
+        reactions = SessionReactions()
         attention = Attention(config, clock, self.rng)
         processes = ProcessTracker(clock=clock, interval=config.process_probe_seconds)
         behavior = Behavior(self.pack, config.behavior, clock, self.rng, self.emit)
@@ -131,7 +131,7 @@ class Daemon:
         self.application = Application(
             config,
             sessions=sessions,
-            episodes=episodes,
+            reactions=reactions,
             attention=attention,
             behavior=behavior,
             cognition=cognition,

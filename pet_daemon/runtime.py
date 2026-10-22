@@ -84,8 +84,8 @@ class SubjectTrigger:
 
 
 @dataclass(frozen=True)
-class EpisodeTrigger:
-    episode: Episode
+class ReactionTrigger:
+    reaction: SessionReaction
 
 
 @dataclass(frozen=True)
@@ -93,7 +93,7 @@ class CareTrigger:
     care: str
 
 
-type Trigger = SessionTrigger | SubjectTrigger | EpisodeTrigger | CareTrigger
+type Trigger = SessionTrigger | SubjectTrigger | ReactionTrigger | CareTrigger
 
 
 class RandomSource(Protocol):
@@ -214,7 +214,7 @@ class HookEvent:
 
 
 if TYPE_CHECKING:
-    from .sessions.episodes import Episode
+    from .sessions.reactions import SessionReaction
     from .work.views import WorkStory, WorkSubject
 
 

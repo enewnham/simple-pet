@@ -18,8 +18,8 @@ from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.config import Config
 from pet_daemon.delivery import DeliveryOutcome, SpeechPacket
 from pet_daemon.runtime import HookEvent, OverlayPacket
-from pet_daemon.sessions.episodes import Episodes
 from pet_daemon.sessions.processes import ProcessTracker
+from pet_daemon.sessions.reactions import SessionReactions
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources import RepositoryTracker
 from pet_daemon.sources.hooks import normalize_hook
@@ -131,7 +131,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.app = Application(
             self.config,
             sessions=Sessions(self.clock),
-            episodes=Episodes(),
+            reactions=SessionReactions(),
             attention=self.attention,
             behavior=behavior,
             cognition=Cognition(

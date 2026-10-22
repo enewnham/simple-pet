@@ -3,7 +3,7 @@ from dataclasses import asdict
 
 from ..behavior.controller import Behavior
 from ..config import Config
-from ..runtime import EpisodeTrigger, HookEvent, RandomSource, Trigger
+from ..runtime import HookEvent, RandomSource, ReactionTrigger, Trigger
 from ..sentiment import (
     COOLDOWN_SECONDS,
     DUPLICATE_SECONDS,
@@ -13,7 +13,7 @@ from ..sentiment import (
     sentiment_score,
 )
 from ..telemetry import trace, verbose
-from .episodes import Episode, Episodes
+from .reactions import SessionReaction, SessionReactions
 from .tracking import AgentSession, Sessions, SessionUpdate
 
 
@@ -23,7 +23,7 @@ class ActivityCoordinator:
         config: Config,
         *,
         sessions: Sessions,
-        episodes: Episodes,
+        reactions: SessionReactions,
         behavior: Behavior,
         queue: Callable[[str, Trigger | None], None],
         clock: Callable[[], float],
@@ -31,7 +31,7 @@ class ActivityCoordinator:
     ) -> None:
         self.config = config
         self.sessions = sessions
-        self.episodes = episodes
+        self.reactions = reactions
         self.behavior = behavior
         self.queue = queue
         self.clock = clock
@@ -40,9 +40,9 @@ class ActivityCoordinator:
         self.sentiment_after = float("-inf")
         analyzer()
 
-    def reset(self, sessions: Sessions, episodes: Episodes) -> None:
+    def reset(self, sessions: Sessions, reactions: SessionReactions) -> None:
         self.sessions = sessions
-        self.episodes = episodes
+        self.reactions = reactions
         self.error_until = 0
         self.sentiment_after = float("-inf")
 
@@ -60,10 +60,10 @@ class ActivityCoordinator:
         if result:
             key = result.session
             session = self.sessions.by_id[key]
-            for episode in self.episodes.handle(packet, result, self.sessions):
+            for reaction in self.reactions.handle(packet, result, self.sessions):
                 if not sleeping:
-                    self.behavior.react(episode.kind, self.sessions, key)
-                self.queue_episode(episode, packet)
+                    self.behavior.react(reaction.kind, self.sessions, key)
+                self.queue_reaction(reaction, packet)
             if packet.event == "intent" and not session.parent:
                 self.react_to_sentiment(packet, key, session, sleeping)
             if not sleeping:
@@ -76,16 +76,16 @@ class ActivityCoordinator:
         )
         return result
 
-    def queue_episode(self, episode: Episode, hook: HookEvent) -> None:
-        trigger = EpisodeTrigger(episode)
-        if episode.kind in ("trouble", "failure"):
+    def queue_reaction(self, reaction: SessionReaction, hook: HookEvent) -> None:
+        trigger = ReactionTrigger(reaction)
+        if reaction.kind in ("trouble", "failure"):
             self.error_until = self.clock() + self.config.behavior.error_seconds
             self.queue("failure", trigger)
-        elif episode.kind == "start" and hook.event in ("intent", "subagent_start"):
+        elif reaction.kind == "start" and hook.event in ("intent", "subagent_start"):
             self.queue("prompt", trigger)
-        elif episode.kind == "waiting":
+        elif reaction.kind == "waiting":
             self.queue("check_in", trigger)
-        elif episode.kind in ("success", "cancelled", "recovery"):
+        elif reaction.kind in ("success", "cancelled", "recovery"):
             self.queue("completion", trigger)
 
     def react_to_sentiment(

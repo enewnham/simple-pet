@@ -15,16 +15,16 @@ from .commentary import Cognition, CommentaryResult, CommentarySupport
 from .config import Config
 from .delivery import DeliveryOutcome, SpeechDelivery, SpeechMessage
 from .runtime import (
-    EpisodeTrigger,
     HookEvent,
     OverlayPacket,
     PetContext,
     RandomSource,
+    ReactionTrigger,
     Trigger,
 )
 from .sessions.coordinator import ActivityCoordinator
-from .sessions.episodes import Episodes
 from .sessions.processes import ProcessTracker
+from .sessions.reactions import SessionReactions
 from .sessions.tracking import Sessions
 from .storage import Memory
 from .telemetry import event, observation, trace
@@ -55,7 +55,7 @@ class Application:
         config: Config,
         *,
         sessions: Sessions,
-        episodes: Episodes,
+        reactions: SessionReactions,
         attention: Attention,
         behavior: Behavior,
         cognition: Cognition,
@@ -70,7 +70,7 @@ class Application:
     ) -> None:
         self.config = config
         self.sessions = sessions
-        self.episodes = episodes
+        self.reactions = reactions
         self.attention = attention
         self.behavior = behavior
         self.cognition = cognition
@@ -98,7 +98,7 @@ class Application:
         self.agent_activity = ActivityCoordinator(
             config,
             sessions=sessions,
-            episodes=episodes,
+            reactions=reactions,
             behavior=behavior,
             queue=self.queue,
             clock=clock,
@@ -131,8 +131,8 @@ class Application:
             self.config.completed_retention_seconds,
             self.config.activity_fresh_seconds,
         )
-        self.episodes = Episodes()
-        self.agent_activity.reset(self.sessions, self.episodes)
+        self.reactions = SessionReactions()
+        self.agent_activity.reset(self.sessions, self.reactions)
         self.manual = None
         self.clicked = False
         self.last_speech = None
@@ -457,8 +457,8 @@ class Application:
     def selection_valid(
         self, support: CommentarySupport, trigger: Trigger | None
     ) -> bool:
-        if isinstance(trigger, EpisodeTrigger) and not self.episodes.relevant(
-            trigger.episode, self.sessions
+        if isinstance(trigger, ReactionTrigger) and not self.reactions.relevant(
+            trigger.reaction, self.sessions
         ):
             return False
         return support.valid(self.context(trigger))
@@ -612,7 +612,7 @@ class Application:
             manual=self.manual,
             clicked=self.clicked,
             care=self.behavior.care_remark,
-            episode_relevant=lambda trigger: self.episodes.relevant(
+            reaction_relevant=lambda trigger: self.reactions.relevant(
                 trigger, self.sessions
             ),
             delivery_pending=self.delivery.has_pending(),

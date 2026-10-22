@@ -105,7 +105,7 @@ It does not establish the quality of unsimulated model prose or desktop visual b
 - `commentary/cognition.py` requests commentary for the supplied selection.
 - `storage/` persists work, selection history, and atomic message acceptance.
 - `delivery.py` owns renderer acknowledgment and runtime retries.
-- `sessions/tracking.py` owns execution. `sessions/episodes.py` retains separate reaction bookkeeping.
+- `sessions/tracking.py` owns execution. `sessions/reactions.py` retains separate reaction bookkeeping.
 
 Schema version 7 preserves version 4/5/6 history and records attention history and message
 outcomes. Speech history, message acceptance, and captured-version surfacing commit in one

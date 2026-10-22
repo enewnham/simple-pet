@@ -6,15 +6,15 @@ from dataclasses import dataclass, replace
 from .config import Config
 from .runtime import (
     CareTrigger,
-    EpisodeTrigger,
     PetContext,
     RandomSource,
+    ReactionTrigger,
     SessionContext,
     SessionTrigger,
     SubjectTrigger,
     Trigger,
 )
-from .sessions.episodes import Episode
+from .sessions.reactions import SessionReaction
 from .storage.memory import HistoryRecord
 from .telemetry import trace
 from .work import WorkSubject
@@ -131,8 +131,8 @@ def _session_tier(session: SessionContext) -> int:
 def _target_session(trigger: Trigger | None) -> str | None:
     if isinstance(trigger, SessionTrigger):
         return trigger.session_id
-    if isinstance(trigger, EpisodeTrigger):
-        return trigger.episode.session
+    if isinstance(trigger, ReactionTrigger):
+        return trigger.reaction.session
     return None
 
 
@@ -379,7 +379,7 @@ class Attention:
         manual: tuple[str, float | None] | None = None,
         clicked: bool = False,
         care: str | None = None,
-        episode_relevant: Callable[[Episode], bool] = lambda trigger: True,
+        reaction_relevant: Callable[[SessionReaction], bool] = lambda trigger: True,
         delivery_pending: bool = False,
     ) -> AttentionRequest | None:
         now = self.clock()
@@ -392,8 +392,8 @@ class Attention:
         if self.pending and now >= self.pending[1]:
             reason, _, trigger = self.pending
             self.pending = None
-            if not isinstance(trigger, EpisodeTrigger) or episode_relevant(
-                trigger.episode
+            if not isinstance(trigger, ReactionTrigger) or reaction_relevant(
+                trigger.reaction
             ):
                 return AttentionRequest(reason, trigger=trigger)
         if check_in:
@@ -441,8 +441,8 @@ class Attention:
     def allowed(self, reason: str, trigger: Trigger | None = None) -> bool:
         if (
             reason in ("click", "explicit")
-            or isinstance(trigger, EpisodeTrigger)
-            and trigger.episode.kind == "waiting"
+            or isinstance(trigger, ReactionTrigger)
+            and trigger.reaction.kind == "waiting"
         ):
             return True
         return (
