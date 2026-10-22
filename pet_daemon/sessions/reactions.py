@@ -40,7 +40,7 @@ class ReactionState:
     terminal: bool = False
     investigating: bool = False
 
-    def merge(self, other: "ReactionState") -> None:
+    def merge(self, other: ReactionState) -> None:
         self.started |= other.started
         self.waiting |= other.waiting
         waiting_identity = (

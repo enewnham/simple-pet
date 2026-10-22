@@ -48,7 +48,7 @@ class SelectionSupport:
         cls,
         subject: WorkSubject | None,
         focus: SessionContext | None,
-    ) -> "SelectionSupport":
+    ) -> SelectionSupport:
         return cls(
             subject.revision if subject else None,
             (
@@ -110,7 +110,7 @@ class AttentionSelection:
             )
         return True
 
-    def refresh(self, snapshot: PetContext) -> "AttentionSelection":
+    def refresh(self, snapshot: PetContext) -> AttentionSelection:
         subjects = {subject.id: subject for subject in snapshot.work}
         sessions = {session.id: session for session in snapshot.sessions}
         subject = subjects.get(self.subject.id) if self.subject is not None else None

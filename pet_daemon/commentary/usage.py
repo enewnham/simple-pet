@@ -11,7 +11,7 @@ class UsageTokens:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
 
-    def __add__(self, other: "UsageTokens") -> "UsageTokens":
+    def __add__(self, other: UsageTokens) -> UsageTokens:
         return UsageTokens(
             input_tokens=self.input_tokens + other.input_tokens,
             output_tokens=self.output_tokens + other.output_tokens,
@@ -26,7 +26,7 @@ request_usage = contextvars.ContextVar[dict[str, UsageTokens] | None](
 
 
 @contextlib.contextmanager
-def collect_usage() -> Generator[dict[str, UsageTokens], None, None]:
+def collect_usage() -> Generator[dict[str, UsageTokens]]:
     usage: dict[str, UsageTokens] = {}
     usage_token = request_usage.set(usage)
     try:

@@ -245,7 +245,7 @@ def main() -> None:
         parser.error("unsupported hook event")
     try:
         payload = json.load(sys.stdin)
-    except (ValueError, OSError):
+    except ValueError, OSError:
         payload = {}
     if not isinstance(payload, dict):
         payload = {}

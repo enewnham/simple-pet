@@ -5,7 +5,7 @@ from contextlib import contextmanager
 
 
 @contextmanager
-def transaction(db: sqlite3.Connection) -> Generator[None, None, None]:
+def transaction(db: sqlite3.Connection) -> Generator[None]:
     name = "pet_" + uuid.uuid4().hex
     db.execute(f"SAVEPOINT {name}")
     try:

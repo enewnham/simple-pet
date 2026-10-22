@@ -8,7 +8,7 @@ UV_PYTHON_INSTALL_DIR ?= $(CURDIR)/.cache/uv/python
 export UV_CACHE_DIR UV_PYTHON_INSTALL_DIR
 
 setup:
-	uv sync --locked --python 3.12
+	uv sync --locked --python 3.15
 
 build:
 	CI=true xcrun swift build -c release $(SWIFT_FLAGS)

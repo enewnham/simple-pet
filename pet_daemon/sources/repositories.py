@@ -180,7 +180,7 @@ class RepositoryTracker:
     def _retire_missing(self, path: str) -> bool:
         try:
             Path(path).stat()
-        except (FileNotFoundError, NotADirectoryError):
+        except FileNotFoundError, NotADirectoryError:
             self.paths.pop(path, None)
             self.missing.add(path)
             self._save(CheckoutObservation(path, None, self.clock(), available=False))

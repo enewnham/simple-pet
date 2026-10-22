@@ -74,7 +74,7 @@ def normalize_hook(packet: object) -> HookEvent | None:
     if "outcome" in packet:
         try:
             outcome = ExecutionOutcome(packet["outcome"])
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return None
         if outcome == ExecutionOutcome.STALE:
             return None

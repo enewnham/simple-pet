@@ -24,7 +24,7 @@ def _parse_process(line: str) -> ProcessRow | None:
     try:
         stat = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
         started = f"proc:{stat[19]}"
-    except (OSError, IndexError):
+    except OSError, IndexError:
         pass
     return ProcessIdentity(pid, started), parent, fields[7], fields[8]
 
@@ -57,7 +57,7 @@ def _processes(pid: int | None = None) -> dict[int, ProcessRow]:
 def discover_owner(harness: str, pid: int | None = None) -> ProcessIdentity | None:
     try:
         rows = _processes()
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return None
     current = os.getppid() if pid is None else pid
     ancestors = []
@@ -95,7 +95,7 @@ def discover_owner(harness: str, pid: int | None = None) -> ProcessIdentity | No
 def process_identity(pid: int) -> ProcessIdentity | None:
     try:
         row = _processes(pid).get(pid)
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return None
     return row[0] if row and "Z" not in row[2] else None
 
@@ -103,7 +103,7 @@ def process_identity(pid: int) -> ProcessIdentity | None:
 def probe(identity: ProcessIdentity) -> ProcessStatus:
     try:
         row = _processes(identity.pid).get(identity.pid)
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return ProcessStatus.UNKNOWN
     if row is None or "Z" in row[2]:
         return ProcessStatus.EXITED

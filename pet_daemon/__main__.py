@@ -50,7 +50,7 @@ def main() -> None:
         asyncio.run(run(config))
     except KeyboardInterrupt:
         pass
-    except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+    except OSError, ValueError, TypeError, KeyError, RuntimeError:
         get_logger("pet-daemon").exception("daemon.failed")
         parser.exit(1)
     finally:

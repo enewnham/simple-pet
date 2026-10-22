@@ -101,7 +101,7 @@ class Config:
     behavior: BehaviorConfig = field(default_factory=BehaviorConfig)
 
     @classmethod
-    def load(cls, path: str | Path) -> "Config":
+    def load(cls, path: str | Path) -> Config:
         path = Path(path).resolve()
         data = json.loads(path.read_text())
         if not isinstance(data, dict):

@@ -77,7 +77,7 @@ def unlink_owned(path: str, identity: tuple[int, int]) -> None:
 
 
 class Receiver(asyncio.DatagramProtocol):
-    def __init__(self, daemon: "Daemon") -> None:
+    def __init__(self, daemon: Daemon) -> None:
         self.daemon = daemon
 
     def datagram_received(
