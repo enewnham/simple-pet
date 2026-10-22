@@ -117,12 +117,13 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         local = self.checkout().local
         assert local is not None
         self.assertEqual((local.unstaged, local.untracked, local.staged), (1, 1, 1))
-        self.assertEqual(
-            self.branch().pr,
-            await github.observe(
-                None, "feature", run=self.command, repository="example.test/team/repo"
-            ),
-        )
+        pr = self.branch().pr
+        assert pr is not None
+        self.assertEqual(pr.number, 1)
+        self.assertEqual(pr.url, "https://example.test/team/repo/pull/1")
+        self.assertEqual(pr.head, self.pr["headRefOid"])
+        self.assertEqual(pr.repository, "example.test/team/repo")
+        self.assertEqual(pr.title, "Improve parser")
         for item in self.tracker.snapshot():
             self.assertEqual(repository_observation_from_mapping(item.packet()), item)
 

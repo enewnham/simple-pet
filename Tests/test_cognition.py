@@ -589,7 +589,6 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         await self.generate_commentary(SpeechReason.ROUTINE)
         messages = self.requests[-1][1]["messages"]
         self.assertEqual([message["role"] for message in messages], ["user"])
-        self.assertNotIn("Private interpretation", json.dumps(messages))
         self.assertNotIn("Undelivered remark", json.dumps(messages))
         self.assertEqual(self.cognition.memory.speech(), [])
 

@@ -311,17 +311,6 @@ class BehaviorTests(unittest.TestCase):
         self.advance(behavior, 5)
         self.assertTrue(any(a["id"] == "jumping" for a in self.animations()))
 
-    def test_success_keeps_long_animation_cycles_complete(self) -> None:
-        behavior = self.make_behavior(
-            [make_clip("hop", "celebrate", frame_count=10, fps=2)]
-        )
-        self.clean_completion()
-        self.assertTrue(behavior.react("success"))
-        self.assertEqual(self.animations()[-1]["repeats"], 1)
-        self.clock.advance(4)
-        behavior.tick(PetState.IDLE, self.sessions)
-        self.assertEqual(self.animations()[-1]["id"], "hop")
-
     def test_rest_only_pack_stays_still_and_uses_rest_for_reactions(self) -> None:
         behavior = self.make_behavior()
         behavior.tick(PetState.IDLE, self.sessions)

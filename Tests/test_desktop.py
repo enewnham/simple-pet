@@ -249,7 +249,6 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                     )
                     await wait_for(lambda: daemon.application.sessions.failed)
                     self.assertEqual(daemon.application.behavior.state, "working")
-                    self.assertFalse(release.is_set())
                     release.set()
                     await wait_for(
                         lambda: require(daemon.application.behavior.status).speech

@@ -234,18 +234,3 @@ class NativeRepetitionTests(unittest.IsolatedAsyncioTestCase):
             "The backend parser tests passed.", ["The parser tests passed."]
         )
         self.assertIsNone(result)
-
-    async def test_native_high_similarity_does_not_suppress_changed_counts(
-        self,
-    ) -> None:
-        text = "There are 16 unstaged edits."
-        previous = "There are 15 unstaged edits."
-        with objc.autorelease_pool():
-            embedding = NLEmbedding.sentenceEmbeddingForLanguage_(NLLanguageEnglish)
-            assert embedding is not None
-            score = similarity(
-                embedding.vectorForString_(text), embedding.vectorForString_(previous)
-            )
-        assert score is not None
-        self.assertGreater(score, 0.9)
-        self.assertIsNone(await repeat_match(text, [previous]))

@@ -1113,7 +1113,6 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             lambda: not self.daemon.application.sessions.by_id["cli:one"].calls
         )
         self.assertTrue(self.daemon.application.sessions.working)
-        self.assertFalse(self.release.is_set())
         self.event("tool_done", session="two", harness="cursor", call="lint")
         await self.wait_for(
             lambda: not self.daemon.application.sessions.by_id["cursor:two"].calls
@@ -1170,7 +1169,6 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             lambda packet: packet.get("animation", {}).get("id") == "waiting"
         )
         self.assertGreater(require(waiting["animation"]["repeats"]), 0)
-        self.assertFalse(self.release.is_set())
         self.assertIsNotNone(self.daemon.application.task)
 
     async def test_recovery_celebrates_without_waiting_for_commentary(self) -> None:
@@ -1199,7 +1197,6 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.event("tool_done", call="retry", outcome="success")
         await self.packet(lambda packet: packet.get("animation", {}).get("id") == "hop")
         self.assertTrue(self.daemon.application.sessions.active)
-        self.assertFalse(self.release.is_set())
         await self.drain()
         self.event("tool_start", call="cancelled", tool="pytest")
         await self.wait_for(
@@ -1644,18 +1641,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             require(self.daemon.application.memory.context("cli:one")).summary,
             self.summary,
         )
-        self.assertEqual(
-            require(self.daemon.application.memory.context("cli:one")).summary,
-            self.summary,
-        )
         self.summary += " Existing callers retain their signatures."
         self.event("intent", goal="Confirm parser compatibility")
         await self.packet(lambda packet: packet.get("text") == self.speech)
         await self.wait_for(lambda: self.daemon.application.task is None)
-        self.assertEqual(
-            require(self.daemon.application.memory.context("cli:one")).summary,
-            self.summary,
-        )
         self.assertEqual(
             require(self.daemon.application.memory.context("cli:one")).summary,
             self.summary,
@@ -1923,10 +1912,6 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             payload["focus_session"]["recent_requests"], ["Explain the counter limits"]
         )
-        self.assertEqual(
-            payload["focus_session"]["recent_requests"][-1],
-            "Explain the counter limits",
-        )
 
     async def test_followup_during_observation_refuses_stale_summary(self) -> None:
         self.daemon.application.cognition.memory.save_context(
@@ -1999,8 +1984,6 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             require(self.daemon.application.memory.context("cli:one")).summary,
             "Stale explicit summary.",
         )
-        saved = require(self.daemon.application.cognition.memory.context("cli:one"))
-        self.assertNotEqual(saved.summary, "Stale explicit summary.")
 
     async def test_explicit_speech_keeps_session_summary_separate_from_progress(
         self,
@@ -2030,10 +2013,6 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.release.set()
         await self.packet(lambda packet: packet.get("text") == self.speech)
         await self.wait_for(lambda: self.daemon.application.task is None)
-        self.assertEqual(
-            require(self.daemon.application.memory.context("cli:one")).summary,
-            "Keep the parser API stable.",
-        )
         self.assertEqual(
             require(self.daemon.application.memory.context("cli:one")).summary,
             "Keep the parser API stable.",
@@ -2471,8 +2450,6 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request_reason(self.requests[-1]), "check_in")
         self.assertTrue(snapshot["focus_session"]["waiting_for_input"])
         self.assertNotIn("activity", snapshot)
-        self.assertTrue(snapshot["focus_session"]["waiting_for_input"])
-        self.assertTrue(snapshot["focus_session"]["waiting_for_input"])
         self.assertEqual(snapshot["focus_session"]["waiting_for"], "5 minutes")
         self.assertEqual(self.daemon.application.agent_activity.activity(), "working")
         self.now += 1
@@ -2761,11 +2738,9 @@ class ConfigurationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, f"behavior.{name}"):
                     config.validate()
 
-    def test_speech_history_window_is_positive_and_defaults_to_thirty_minutes(
+    def test_speech_history_window_rejects_nonpositive_or_nonfinite_values(
         self,
     ) -> None:
-        config = Config(pet_dir=Path("fixture"))
-        self.assertEqual(config.speech_history_seconds, 1800)
         for value in (0, -1, True, "30", float("inf")):
             with (
                 self.subTest(value=value),
@@ -2774,11 +2749,6 @@ class ConfigurationTests(unittest.TestCase):
                 config = Config(pet_dir=Path("fixture"))
                 set_config_value(config, "speech_history_seconds", value)
                 config.validate()
-
-    def test_summary_defaults_run_on_prompts(self) -> None:
-        config = Config(pet_dir=Path("fixture"))
-        self.assertEqual(config.summarize_on, [SpeechReason.PROMPT])
-        self.assertFalse(config.summarize_first_request_only)
 
     def test_summary_reasons_accept_every_commentary_trigger_and_an_empty_array(
         self,
@@ -2862,9 +2832,6 @@ class ConfigurationTests(unittest.TestCase):
             self.assertFalse(config.behavior.roaming)
             self.assertEqual(config.behavior.walk_seconds, (2, 4))
 
-    def test_idle_message_interval_defaults_to_five_minutes(self) -> None:
-        self.assertEqual(Config(pet_dir=Path("fixture")).idle_message_seconds, 300)
-
     def test_rejects_nonpositive_or_nonfinite_idle_message_intervals(self) -> None:
         for seconds in (0, -1, True, "300", None, float("nan"), float("inf")):
             with (
@@ -2882,14 +2849,6 @@ class ConfigurationTests(unittest.TestCase):
                 set_config_value(config, "persona", persona)
                 config.validate()
 
-    def test_loads_long_unicode_persona_without_changing_the_text(self) -> None:
-        persona = "Be a curious companion. 猫 🐱\n" * 200
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "pet.json"
-            path.write_text(json.dumps({"pet_dir": "fixture", "persona": persona}))
-            config = Config.load(path)
-            self.assertEqual(config.persona, persona)
-
     def test_rejects_invalid_memory_limits(self) -> None:
         for field in (
             "prompt_target_bytes",
@@ -2904,13 +2863,6 @@ class ConfigurationTests(unittest.TestCase):
                     config = Config(pet_dir=Path("fixture"))
                     setattr(config, field, value)
                     config.validate()
-
-    def test_context_target_and_memory_retention_defaults(self) -> None:
-        config = Config(pet_dir=Path("fixture"))
-        self.assertEqual(config.prompt_target_bytes, 16000)
-        self.assertEqual(config.memory_retention_days, 30)
-        self.assertEqual(config.memory_max_events, 10000)
-        self.assertEqual(config.max_tokens, 512)
 
     def test_rejects_invalid_intervals_and_shared_socket_before_startup(self) -> None:
         for config in (

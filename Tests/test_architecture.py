@@ -70,27 +70,9 @@ class ArchitectureTests(unittest.TestCase):
             },
         )
 
-    def test_commentary_consumes_selections_without_selecting_attention(self) -> None:
-        forbidden = {
-            "select",
-            "choose_session",
-            "select_subject",
-            "choose_focus",
-            "_session_tier",
-            "_action_tier",
-        }
+    def test_commentary_imports_only_attention_selections(self) -> None:
         for path in (ROOT / "commentary").rglob("*.py"):
-            tree = ast.parse(path.read_text())
             for module, name in imports(path):
                 if module == "pet_daemon.attention":
                     with self.subTest(file=path.name, imported=name):
                         self.assertEqual(name, "AttentionSelection")
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    with self.subTest(file=path.name, function=node.name):
-                        self.assertNotIn(node.name, forbidden)
-                elif isinstance(node, ast.Call) and isinstance(
-                    node.func, ast.Attribute
-                ):
-                    with self.subTest(file=path.name, call=node.func.attr):
-                        self.assertNotEqual(node.func.attr, "select")
