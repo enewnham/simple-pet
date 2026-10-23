@@ -7,6 +7,12 @@ renders the pet. They communicate over local Unix datagram sockets.
 Start with [README.md](README.md) for setup, agent hooks, configuration, and development
 checks. [Makefile](Makefile) defines the check and build commands.
 
+## Code style
+
+When writing, refactoring, or reviewing code, load the
+[code-style skill](.agents/skills/code-style/SKILL.md) for repository conventions
+that require judgment beyond formatting, linting, and type checks.
+
 ## Follow the work
 
 - **Agent input:** [scripts/pet-hook](scripts/pet-hook) adapts harness events.
