@@ -7,6 +7,13 @@ description: Investigate a recent Simple Pet behavior such as speech, silence, r
 
 Investigate the behavior the user names. Treat the logs, SQLite store, active configuration, and daemon code as evidence. The visible symptom may come from a hook, timer, model request, delivery acknowledgment, or renderer state, so follow the event path that fits the case.
 
+## Start cheaply
+
+- Resume an existing case from `case.json`, saved results, and its investigation script. Presentation changes render saved results. Extend evidence or rerun an experiment when the question or inputs change.
+- Load live logs once, preserve the relevant records, and print a compact event index. Inspect selected request fields or the matching session in a snapshot. Keep full payloads in artifacts.
+- Choose the smallest production entrypoint that answers the question. Check live model availability before preparing model experiments, and compare the running daemon's recorded configuration with the working tree before source-level replay.
+- Use the [investigation recipes](references/investigation.md) for cached capture, compact inspection, and choosing a replay boundary. Keep collection, experiments, and report rendering separately callable in case scripts.
+
 ## Establish the case
 
 - Record the user's question, approximate time, expected and observed behavior, checkout revision, config path and relevant values, pet pack, and model. Distinguish facts captured during the incident from details reconstructed later.
@@ -19,37 +26,16 @@ Investigate the behavior the user names. Treat the logs, SQLite store, active co
 
 Write a case specific Python script under `.cache/triage/<case-id>/`. Use `pet_daemon.replay.ReplayHarness` to drive the application with controlled hooks, renderer packets, process evidence, and clock advances. It runs the daemon's application logic with isolated storage and records model calls, emitted packets, and events. Use the current API in `pet_daemon/replay.py`; pass the incident's config or pack when asset behavior matters. For a model quality question, run one live model sample by default when credentials are available and record the model, config, prompt, output, and usage. Label fixture responses and other offline stubs clearly; they establish control-flow behavior but cannot establish model quality.
 
-```python
-import asyncio
-
-from pet_daemon.replay import ReplayHarness
-
-
-async def scenario():
-    async with ReplayHarness(seed=0) as replay:
-        replay.ingest(
-            {
-                "harness": "codex",
-                "session": "root",
-                "event": "intent",
-                "goal": "Check timing.",
-            }
-        )
-        await replay.advance(2)
-        return replay.result()
-
-
-result = asyncio.run(scenario())
-```
-
-This example uses the offline fixture model. Inspect `result["events"]`, `result["packets"]`, and `result["calls"]` for the behavior under test.
-
 Start replay from the same state for each candidate explanation. Run before and after experiments with identical inputs, timing, config, model mode, and initial storage. Change only the condition under test. A SQLite backup can supply identical initial storage. Set `wall_time` to the scenario's time when history age or retention matters. Preserve the inputs and raw results for both runs. Compare behavior fields, since delivery UUIDs and measured model latency can differ. State which inputs were captured and which were reconstructed. If the available evidence cannot reproduce the symptom, identify the missing input and report the narrower result.
 
 The fixture command in `pet_daemon.replay` supplies commentary reasons directly. Use `ReplayHarness.advance` for automatic scheduling and delivery timing. For a narrower experiment, import the relevant production builder or controller and call it directly.
 
 ## Leave a reviewable result
 
-Write `.cache/triage/<case-id>/report.md` and `case.json`. Keep the report short: question and observed behavior, evidence with file/line or database query, causal path, experiment and result, conclusion and confidence, and next action. Put uncertainties next to the claims they limit. `case.json` records the scenario, provenance, code/config/model metadata, and artifact paths in fields that fit the case.
+Write `.cache/triage/<case-id>/report.md` and `case.json`. Use [the inspector template](assets/report.md) as a starting point. Adapt the sections to the behavior and remove unused rows.
+
+Make the Markdown read like an inspector UI. Use short labels, status fields, compact tables, timelines, quoted output, and checkboxes. Tell the complete causal story through the sequence of evidence. Keep explanatory text in short finding cells. Put full prompts, raw JSON, code, and detailed assumptions behind `<details>` sections or links to adjacent files. Prefer an input → state → decision → visible result trace over narrative paragraphs. Place uncertainty beside the affected finding. Compare recorded behavior and experimental results explicitly, with each experiment's changed input and outcome visible together.
+
+`case.json` records the scenario, provenance, code/config/model metadata, and artifact paths in fields that fit the case.
 
 Use `pet_daemon.triage.save_case` after each investigation pass. It keeps the current report and case at the case root, and saves numbered `iterations/<number>/report.md`, `case.json`, `result.json`, and the Python script when supplied. Keep raw requests, responses, packets, and SQL results in the iteration result or adjacent files when they matter. A later pass adds an iteration rather than rewriting earlier evidence. Summarize the finding and point the user to the report.
