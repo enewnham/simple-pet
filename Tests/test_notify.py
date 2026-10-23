@@ -12,14 +12,29 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TypedDict
 
+from pet_daemon.attention import AttentionSelection
+from pet_daemon.commentary.cognition import Cognition
+from pet_daemon.commentary.contracts import ModelRequest
+from pet_daemon.commentary.story import prepare
+from pet_daemon.config import Config
+from pet_daemon.domain import ModelPurpose, SpeechReason, SpeechSituation
 from pet_daemon.runtime import ProcessPacket
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources.hooks import normalize_hook
+from pet_daemon.storage import Memory
+from Tests.fixtures import capture_snapshot
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT = ROOT / "bin" / "pet-notify"
 HOOK = ROOT / "scripts" / "pet-hook"
 WRAPPER = ROOT / "examples" / "pet-run"
+
+
+class NoModel:
+    async def complete(
+        self, request: ModelRequest, reason: SpeechReason | ModelPurpose
+    ) -> dict[str, object]:
+        raise AssertionError("Preparing a request must not call the model")
 
 
 class ReceivedPacket(TypedDict, total=False):
@@ -292,7 +307,8 @@ class NotifyTests(unittest.TestCase):
             },
         )
         packet = self.receive()
-        self.assertEqual(len(packet["progress"]), 240)
+        self.assertLessEqual(len(packet["progress"]), 800)
+        self.assertTrue(packet["progress"].endswith("[omitted]"))
         self.assertEqual(packet["turn"], "turn-one")
         self.assertNotIn("transcript_path", packet)
 
@@ -306,14 +322,83 @@ class NotifyTests(unittest.TestCase):
         self.assertIn("Fix the parser for UTF-8 input.", goal)
         self.assertIn("[omitted]", goal)
 
+    def test_cli_and_native_goals_filter_markdown_before_story_selection(self) -> None:
+        prompt = (
+            "Review the commentary.\n"
+            + "> Fix the haunted mail.\n" * 60
+            + "```python\nraise RuntimeError('invented failure')\n```\n"
+            + "Request | Response\n--- | ---\nMail | Unrelated worry\n\n"
+            + "Background details.\n" * 100
+            + "Fix the parser for UTF-8 input."
+        )
+        self.run_client("intent", "--session", "cli-review", "--text", prompt)
+        cli_packet = self.receive()
+        self.run_hook(
+            "claude",
+            "UserPromptSubmit",
+            {"session_id": "hook-review", "prompt": prompt},
+        )
+        hook_packet = self.receive()
+        native_packet = {
+            "harness": "codex",
+            "session": "native-review",
+            "event": "intent",
+            "goal": prompt,
+        }
+        for packet in (cli_packet, hook_packet, native_packet):
+            with self.subTest(harness=packet["harness"]):
+                memory = Memory(
+                    self.path / f"{packet['harness']}.sqlite3",
+                    "pet",
+                    clock=lambda: 1000,
+                )
+                try:
+                    sessions = Sessions(lambda: 1000)
+                    result = sessions.handle(packet)
+                    self.assertIsNotNone(result)
+                    assert result is not None
+                    memory.observe_session_context(result.observation)
+                    memory.work.record_session(result.observation)
+                    activity = sessions.activity_view()
+                    subjects = memory.connected_work(activity)
+                    snapshot = capture_snapshot(activity, memory=memory, work=subjects)
+                    selection = AttentionSelection(
+                        subjects[0],
+                        activity.sessions[0],
+                        (),
+                        SpeechReason.ROUTINE,
+                        SpeechSituation.ROUTINE,
+                    )
+                    cognition = Cognition(
+                        NoModel(), Config(pet_dir=self.path), memory=memory
+                    )
+                    prepared = prepare(snapshot, selection, memory, cognition.request)
+                    self.assertIsNotNone(prepared)
+                    assert prepared is not None
+                    content = prepared.request["messages"][0]["content"]
+                    self.assertIn("Fix the parser for UTF-8 input.", content)
+                    for noise in (
+                        "haunted mail",
+                        "invented failure",
+                        "Unrelated worry",
+                    ):
+                        self.assertNotIn(noise, content)
+                finally:
+                    memory.close()
+
     def test_cli_intent_keeps_unicode_request_within_packet_limit(self) -> None:
-        prompt = "背景。 " * 400 + "Fix parser/猫.py for 🐈 input."
+        prompt = (
+            "> Fix the haunted mail.\n" * 60
+            + "背景。 " * 400
+            + "Fix parser/猫.py for 🐈 input."
+        )
         session = "worker-" + "s" * 400
         self.run_client("intent", "--session", session, "--text", prompt)
         packet = self.receive()
         goal = packet["goal"]
         self.assertEqual(packet["session"], session)
         self.assertIn("Fix parser/猫.py for 🐈 input.", goal)
+        self.assertNotIn("haunted mail", goal)
         self.assertLessEqual(len(goal), 1000)
 
     def test_claude_stop_failure_closes_the_turn_as_error(self) -> None:

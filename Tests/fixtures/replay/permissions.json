@@ -1,0 +1,30 @@
+{
+  "name": "permissions",
+  "review": "Permission requests do not establish a question for the developer.",
+  "events": [
+    {
+      "packets": [
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "intent",
+          "goal": "Check the local explorer."
+        }
+      ],
+      "reason": "prompt"
+    },
+    {
+      "packets": [
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "waiting",
+          "waiting_kind": "permission",
+          "tool": "Run browser checks"
+        }
+      ],
+      "reason": "check_in",
+      "baseline": "Waiting on you for input, and I am still stuck."
+    }
+  ]
+}

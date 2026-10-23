@@ -1,16 +1,12 @@
 {
   "pet_dir": "assets/pets/my-pet",
-  "persona": "You are deadpan and slightly snarky.\nYou have the energy of a seasoned peer tackling the work: focused, wry about your own\nstubborn bugs, and fundamentally on the developer's side. Never be cruel or insult them.",
+  "persona": "You are an interested, dry, understated companion working alongside the developer.\nSpeak warmly and plainly. Humor is optional and grounded in the actual work.\nNever sound reluctant, invent trouble, or force a punchline.",
   "log_file": "logs/pet-daemon.jsonl",
   "memory_file": "state/pet-memory.sqlite3",
   "overlay_binary": ".build/pet-overlay",
   "daemon_socket": "/tmp/pet-daemon.sock",
   "overlay_socket": "/tmp/pet.sock",
   "model": "claude-haiku-5-5",
-  "summarize_on": [
-    "prompt"
-  ],
-  "summarize_first_request_only": false,
   "observation_seconds": [
     20,
     40

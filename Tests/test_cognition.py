@@ -12,13 +12,15 @@ import httpx
 
 from pet_daemon.attention import Attention
 from pet_daemon.behavior.sprites import Pack
-from pet_daemon.commentary.cognition import Cognition, CommentaryResult
+from pet_daemon.commentary.cognition import (
+    Cognition,
+    CommentaryResult,
+    StoryUnavailable,
+)
 from pet_daemon.commentary.context import INSTRUCTIONS
 from pet_daemon.commentary.model import AnthropicModelClient
-from pet_daemon.commentary.summarization import SUMMARY_INSTRUCTIONS
-from pet_daemon.commentary.usage import collect_usage
 from pet_daemon.config import Config
-from pet_daemon.domain import CareKind, ExecutionOutcome, PetState, SpeechReason
+from pet_daemon.domain import CareKind, PetState, SpeechReason
 from pet_daemon.runtime import CareTrigger, PetContext, SessionTrigger
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources.hooks import HookEvent
@@ -50,8 +52,9 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.directory = Path(self.temporary.name)
         self.requests = []
         self.observation_requests = []
-        self.summary_requests = []
-        self.summary = None
+        self.story_requests = []
+        self.story_response = None
+        self.call_kinds = []
         self.responses = []
         self.client = anthropic.AsyncAnthropic(
             api_key="test-key",
@@ -116,14 +119,27 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
 
     def transport(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        summary = body["output_config"]["format"]["schema"]["required"] == ["summary"]
-        if summary:
-            self.summary_requests.append((request, body))
-            result = {"summary": self.summary}
+        story = "intent" in body["output_config"]["format"]["schema"]["required"]
+        if story:
+            self.call_kinds.append("story")
+            self.story_requests.append((request, body))
+            payload = json.loads(body["messages"][0]["content"])
+            source = payload["current_work"]["latest_request_source"]
+            result = {
+                "intent": {"text": "Follow the current request.", "sources": [source]},
+                "decisions": [],
+                "progress": [],
+            }
+            if self.story_response is not None:
+                result = (
+                    self.story_response()
+                    if callable(self.story_response)
+                    else self.story_response
+                )
             return httpx.Response(
                 200,
                 json={
-                    "id": "msg_summary",
+                    "id": "msg_story",
                     "type": "message",
                     "role": "assistant",
                     "model": self.config.model,
@@ -133,6 +149,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                     "usage": {"input_tokens": 100, "output_tokens": 20},
                 },
             )
+        self.call_kinds.append("commentary")
         self.requests.append((request, body))
         self.observation_requests.append((request, body))
         responses = self.responses
@@ -179,9 +196,13 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         if result:
             with self.memory.transaction():
                 self.memory.observe_session_context(result.observation)
+                self.memory.work.record_session(result.observation)
 
     def snapshot(self) -> PetContext:
-        return capture_snapshot(self.sessions.activity_view(), memory=self.memory)
+        activity = self.sessions.activity_view()
+        return capture_snapshot(
+            activity, memory=self.memory, work=self.memory.connected_work(activity)
+        )
 
     async def generate_commentary(
         self, reason: SpeechReason = SpeechReason.ROUTINE, context: str | None = None
@@ -427,7 +448,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 "end_turn",
             )
         )
-        result = await self.generate_for_context(snapshot, SpeechReason.CLICK)
+        await self.generate_for_context(snapshot, SpeechReason.CLICK)
         body = self.requests[-1][1]
         payload = json.loads(body["messages"][0]["content"])
         self.assertNotIn("id", payload["current_work"])
@@ -437,7 +458,6 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(payload["current_moment"]["kind"], "input_requested")
         self.assertNotIn("other_sessions", payload)
-        self.assertEqual(result.summary_session, "codex:parallel-3")
         direction = body["system"][1]["text"]
         self.assertIn(
             "Describe the input or permission only when provided",
@@ -602,7 +622,10 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.responses.append(({"speak": "The parser is progressing."}, "end_turn"))
         await self.generate_commentary(SpeechReason.ROUTINE, "🐈" * 100000)
         content = self.requests[-1][1]["messages"][0]["content"]
-        self.assertEqual(json.loads(content)["current_moment"]["text"], "🐈" * 2000)
+        self.assertLessEqual(len(json.loads(content)["current_moment"]["text"]), 2000)
+        self.assertTrue(
+            json.loads(content)["current_moment"]["text"].endswith("[omitted]")
+        )
         self.assertNotIn("reason", json.loads(content))
 
     async def test_concurrent_work_keeps_triggering_session_and_active_tool_durations(
@@ -835,329 +858,140 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("Old task report", json.dumps(payload))
                 self.assertNotIn("A recent spoken line", json.dumps(payload))
 
-    async def test_summary_triggers_follow_configuration_without_changing_commentary(
-        self,
-    ) -> None:
-        self.config.summarize_on = [
-            SpeechReason.COMPLETION,
-            SpeechReason.ROUTINE,
-            SpeechReason.FAILURE,
-            SpeechReason.CHECK_IN,
-            SpeechReason.CLICK,
-            SpeechReason.EXPLICIT,
-        ]
-        for reason in (SpeechReason.PROMPT, *self.config.summarize_on):
-            with self.subTest(reason=reason):
-                self.responses.append(({"speak": "Working on the parser."}, "end_turn"))
-                await self.generate_for_context(self.snapshot(), reason)
-        self.assertEqual(len(self.summary_requests), 5)
-        self.assertEqual(len(self.observation_requests), 7)
-        self.config.summarize_on = []
-        await self.generate_for_context(self.snapshot(), SpeechReason.PROMPT)
-        self.assertEqual(len(self.summary_requests), 5)
-        self.assertEqual(len(self.observation_requests), 8)
-
-    async def test_small_target_preserves_latest_instruction_in_commentary_and_summary(
-        self,
-    ) -> None:
-        self.config.prompt_target_bytes = 1
-        for index in range(4):
-            self.handle(
-                {
-                    "harness": "claude",
-                    "session": "worker",
-                    "event": "intent",
-                    "goal": ("Historical context with JSON escapes \x00. " * 30)
-                    + f"Fix parser issue {index}.",
-                }
-            )
-        await self.generate_for_context(self.snapshot(), SpeechReason.PROMPT)
-        for _, body in (self.observation_requests[-1], self.summary_requests[-1]):
-            self.assertIn("Fix parser issue 3", body["messages"][0]["content"])
-
-    async def test_summary_uses_only_the_focused_session(self) -> None:
+    async def test_completion_without_a_captured_request_keeps_its_report(self) -> None:
         self.handle(
             {
                 "harness": "codex",
-                "session": "focus",
-                "event": "intent",
-                "goal": "Validate parser behavior",
+                "session": "late",
+                "event": "tool_start",
+                "call": "check",
+                "tool": "pytest",
             }
         )
-        snapshot = self.snapshot()
-        snapshot = replace(snapshot, trigger=SessionTrigger("codex:focus"))
-        self.summary = "Parser validation awaits the next checks."
-        result = await self.generate_for_context(snapshot, SpeechReason.PROMPT)
+        self.handle(
+            {
+                "harness": "codex",
+                "session": "late",
+                "event": "turn_done",
+                "progress": "Checks passed.",
+            }
+        )
+        snapshot = replace(self.snapshot(), trigger=SessionTrigger("codex:late"))
+        await self.generate_for_context(snapshot, SpeechReason.COMPLETION)
         payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
-        self.assertEqual(payload["current_work"]["request"], "Validate parser behavior")
-        self.assertEqual(result.summary_session, "codex:focus")
-        self.assertEqual(result.summary, self.summary)
-        summary = json.loads(self.summary_requests[-1][1]["messages"][0]["content"])
-        self.assertEqual(summary["current_work"]["request"], "Validate parser behavior")
-        self.assertNotIn("Refactor batch inserts", json.dumps(summary))
         self.assertEqual(
-            summary, {"current_work": {"request": "Validate parser behavior"}}
+            payload["current_moment"]["reported_progress"], "Checks passed."
         )
-        self.assertEqual(
-            self.summary_requests[-1][1]["system"],
-            [{"type": "text", "text": SUMMARY_INSTRUCTIONS}],
-        )
-        self.assertEqual(
-            self.summary_requests[-1][1]["output_config"]["format"]["schema"][
-                "required"
-            ],
-            ["summary"],
-        )
-        focus = next(
-            session for session in snapshot.sessions if session.id == "codex:focus"
-        )
-        self.assertEqual(
-            result.summary_version,
-            self.cognition.summary_version(focus),
-        )
-        schema = self.requests[-1][1]["output_config"]["format"]["schema"]
-        self.assertNotIn("summary_session", schema["properties"])
 
-    async def test_summary_version_captures_report_evidence_before_generation(
+    async def test_story_is_saved_before_commentary_and_reused_for_unchanged_work(
         self,
     ) -> None:
-        snapshot = self.snapshot()
-        focus = snapshot.sessions[0]
-        before = self.cognition.summary_version(focus)
+        await self.generate_commentary()
+        self.assertEqual(self.call_kinds, ["story", "commentary"])
+        narrative = self.memory.load_narrative("claude:worker")
+        self.assertIsNotNone(narrative)
+        payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
+        self.assertEqual(
+            payload["current_work"]["story"], "Follow the current request."
+        )
+        self.assertNotIn("earlier_context", payload)
+        await self.generate_commentary()
+        self.assertEqual(self.call_kinds, ["story", "commentary", "commentary"])
 
-        def report_arrives() -> tuple[dict[str, object], str]:
+    async def test_stale_story_is_not_saved_or_spoken(self) -> None:
+        def change_request() -> dict[str, object]:
+            payload = json.loads(self.story_requests[-1][1]["messages"][0]["content"])
+            source = payload["current_work"]["latest_request_source"]
             self.handle(
                 {
                     "harness": "claude",
                     "session": "worker",
-                    "event": "progress",
-                    "progress": "Checks completed",
-                }
-            )
-            self.cognition.memory.record_event(
-                build_session_entry(
-                    HookEvent(
-                        harness="claude",
-                        session="worker",
-                        event="turn_done",
-                        outcome=ExecutionOutcome.SUCCESS,
-                        progress="An earlier report was recovered",
-                    )
-                )
-            )
-            return {"speak": None}, "end_turn"
-
-        self.responses.append(report_arrives)
-        result = await self.generate_for_context(snapshot, SpeechReason.PROMPT)
-        self.assertEqual(result.summary_version, before)
-        self.assertNotEqual(
-            result.summary_version,
-            self.cognition.summary_version(self.snapshot().sessions[0]),
-        )
-
-    async def test_repeated_automatic_remark_retries_once_and_preserves_generated_summary(
-        self,
-    ) -> None:
-        history = "The parser still needs its edge cases checked."
-        self.cognition.memory.record_speech(history, SpeechReason.ROUTINE)
-        self.summary = "The parser review includes edge cases."
-        self.responses.extend(
-            [({"speak": history}, "end_turn"), ({"speak": history}, "end_turn")]
-        )
-        with collect_usage() as usage:
-            result = await self.generate_commentary(SpeechReason.PROMPT)
-        self.assertEqual(usage[SpeechReason.PROMPT].input_tokens, 200)
-        self.assertEqual(usage[SpeechReason.PROMPT].output_tokens, 40)
-        self.assertEqual(usage["summary"].input_tokens, 100)
-        self.assertEqual(usage[SpeechReason.PROMPT].cache_read_tokens, 20)
-        self.assertEqual(usage["summary"].cache_read_tokens, 0)
-        self.assertEqual(usage["summary"].cache_write_tokens, 0)
-        self.assertIsNone(result.speak)
-        self.assertEqual(result.summary, self.summary)
-        self.assertEqual(len(self.observation_requests), 2)
-        self.assertEqual(len(self.summary_requests), 1)
-        first, retry = [body for _, body in self.observation_requests]
-        self.assertEqual(first["messages"], retry["messages"])
-        self.assertEqual(first["system"][0], retry["system"][0])
-        self.assertIn(first["system"][1]["text"], retry["system"][1]["text"])
-        self.assertIn("<reconsideration>", retry["system"][1]["text"])
-        self.assertNotIn(history, json.dumps(first))
-        self.assertNotIn(history, json.dumps(retry))
-        self.assertEqual(len(self.cognition.memory.speech()), 1)
-
-    async def test_deliberate_request_delivers_the_retry_even_when_it_repeats(
-        self,
-    ) -> None:
-        history = "Hello, I am here with you."
-        self.cognition.memory.record_speech(history, SpeechReason.CLICK)
-        self.responses.extend(
-            [({"speak": history}, "end_turn"), ({"speak": history}, "end_turn")]
-        )
-        result = await self.generate_commentary(SpeechReason.EXPLICIT, "Say hello")
-        self.assertEqual(result.speak, history)
-        self.assertEqual(len(self.observation_requests), 2)
-        self.assertEqual(self.summary_requests, [])
-        self.assertNotIn(
-            history, self.observation_requests[-1][1]["messages"][0]["content"]
-        )
-
-    async def test_expired_and_cleared_history_do_not_cause_a_retry(self) -> None:
-        history = "The parser still needs its edge cases checked."
-        self.cognition.memory.record_speech(history, SpeechReason.ROUTINE)
-        self.clock.advance(self.config.speech_history_seconds)
-        self.responses.append(({"speak": history}, "end_turn"))
-        result = await self.generate_commentary(SpeechReason.ROUTINE)
-        self.assertEqual(result.speak, history)
-        self.assertEqual(len(self.observation_requests), 1)
-        self.cognition.memory.record_speech(history, SpeechReason.ROUTINE)
-        self.cognition.memory.clear_speech()
-        self.responses.append(({"speak": history}, "end_turn"))
-        result = await self.generate_commentary(SpeechReason.ROUTINE)
-        self.assertEqual(result.speak, history)
-        self.assertEqual(len(self.observation_requests), 2)
-
-    async def test_failed_retry_preserves_the_validated_remark_for_a_deliberate_request(
-        self,
-    ) -> None:
-        history = "Hello, I am here with you."
-        self.cognition.memory.record_speech(history, SpeechReason.CLICK)
-        self.responses.extend(
-            [({"speak": history}, "end_turn"), ({"speak": None}, "end_turn")]
-        )
-        result = await self.generate_commentary(SpeechReason.EXPLICIT, "Say hello")
-        self.assertEqual(result.speak, history)
-        self.assertEqual(len(self.observation_requests), 2)
-
-    async def test_failed_automatic_retry_preserves_the_summary_and_declines_speech(
-        self,
-    ) -> None:
-        history = "The parser still needs its edge cases checked."
-        self.cognition.memory.record_speech(history, SpeechReason.ROUTINE)
-        self.summary = "The parser review includes edge cases."
-        self.responses.extend(
-            [({"speak": history}, "end_turn"), ({"speak": 5}, "end_turn")]
-        )
-        with collect_usage() as usage:
-            result = await self.generate_commentary(SpeechReason.PROMPT)
-        self.assertEqual(usage[SpeechReason.PROMPT].input_tokens, 200)
-        self.assertEqual(usage[SpeechReason.PROMPT].output_tokens, 40)
-        self.assertEqual(usage["summary"].input_tokens, 100)
-        self.assertEqual(usage[SpeechReason.PROMPT].cache_read_tokens, 20)
-        self.assertEqual(usage["summary"].cache_read_tokens, 0)
-        self.assertEqual(usage["summary"].cache_write_tokens, 0)
-        self.assertIsNone(result.speak)
-        self.assertEqual(result.summary, self.summary)
-        self.assertEqual(len(self.observation_requests), 2)
-        self.assertEqual(len(self.summary_requests), 1)
-
-    async def test_retry_accepts_a_new_current_fact_without_using_previous_speech_as_evidence(
-        self,
-    ) -> None:
-        history = "The parser checks report 2 failures."
-        fresh = "The parser checks report 3 failures."
-        self.cognition.memory.record_speech(history, SpeechReason.ROUTINE)
-        self.handle(
-            {
-                "harness": "claude",
-                "session": "worker",
-                "event": "progress",
-                "progress": fresh,
-            }
-        )
-        self.responses.extend(
-            [({"speak": history}, "end_turn"), ({"speak": fresh}, "end_turn")]
-        )
-        result = await self.generate_commentary(SpeechReason.ROUTINE)
-        self.assertEqual(result.speak, fresh)
-        self.assertEqual(len(self.observation_requests), 2)
-        self.assertNotIn(history, json.dumps(self.observation_requests[-1][1]))
-        self.assertIn(fresh, self.observation_requests[-1][1]["messages"][0]["content"])
-
-    async def test_retry_refreshes_current_evidence_and_preserves_the_original_summary_version(
-        self,
-    ) -> None:
-        history = "The parser checks report 2 failures."
-        fresh = "The parser checks report 3 failures."
-        self.cognition.memory.record_speech(history, SpeechReason.ROUTINE)
-        self.handle(
-            {
-                "harness": "claude",
-                "session": "worker",
-                "event": "progress",
-                "progress": "The parser checks are running",
-            }
-        )
-        snapshot = self.snapshot()
-        before = self.cognition.summary_version(snapshot.sessions[0])
-
-        def first_reply() -> tuple[dict[str, object], str]:
-            self.handle(
-                {
-                    "harness": "claude",
-                    "session": "worker",
-                    "event": "progress",
-                    "progress": fresh,
-                }
-            )
-            return {"speak": history}, "end_turn"
-
-        self.responses.extend([first_reply, ({"speak": fresh}, "end_turn")])
-        result = await self.generate_for_context(
-            snapshot, SpeechReason.ROUTINE, refresh=lambda: self.snapshot()
-        )
-        first, retry = [
-            json.loads(body["messages"][0]["content"])
-            for _, body in self.observation_requests
-        ]
-        self.assertEqual(
-            first["current_moment"]["reported_progress"],
-            "The parser checks are running",
-        )
-        self.assertEqual(retry["current_moment"]["reported_progress"], fresh)
-        self.assertNotIn(history, json.dumps(retry))
-        self.assertEqual(result.speak, fresh)
-        self.assertEqual(result.summary_version, before)
-        self.assertNotEqual(
-            result.summary_version,
-            self.cognition.summary_version(self.snapshot().sessions[0]),
-        )
-
-    async def test_retry_keeps_its_subject_when_another_session_requests_input(
-        self,
-    ) -> None:
-        history = "The parser checks are running."
-        self.cognition.memory.record_speech(history, SpeechReason.ROUTINE)
-        snapshot = self.snapshot()
-
-        def first_reply() -> tuple[dict[str, object], str]:
-            self.handle(
-                {
-                    "harness": "codex",
-                    "session": "review",
                     "event": "intent",
-                    "goal": "Review the renderer",
+                    "goal": "Investigate cancellations",
                 }
             )
-            self.handle(
-                {
-                    "harness": "codex",
-                    "session": "review",
-                    "event": "waiting",
-                    "progress": "Choose a layout",
-                }
-            )
-            return {"speak": history}, "end_turn"
+            return {
+                "intent": {"text": "Stale story.", "sources": [source]},
+                "decisions": [],
+                "progress": [],
+            }
 
-        self.responses.extend(
-            [first_reply, ({"speak": "I am checking the batch inserts."}, "end_turn")]
-        )
-        result = await self.generate_for_context(
-            snapshot, SpeechReason.ROUTINE, refresh=lambda: self.snapshot()
-        )
-        payload = json.loads(self.observation_requests[-1][1]["messages"][0]["content"])
-        self.assertEqual(result.summary_session, "claude:worker")
+        self.story_response = change_request
+        with self.assertRaises(StoryUnavailable):
+            await self.generate_for_context(
+                self.snapshot(), SpeechReason.ROUTINE, refresh=self.snapshot
+            )
+        self.assertIsNone(self.memory.load_narrative("claude:worker"))
+        self.assertEqual(self.requests, [])
+
+    async def test_failed_story_defers_automatic_speech_but_click_uses_current_request(
+        self,
+    ) -> None:
+        self.story_response = {"intent": None, "decisions": [], "progress": []}
+        with self.assertRaises(StoryUnavailable):
+            await self.generate_commentary()
+        self.assertEqual(self.requests, [])
+        self.responses.append(({"speak": "I am here."}, "end_turn"))
+        await self.generate_commentary(SpeechReason.CLICK)
+        payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
         self.assertEqual(payload["current_work"]["request"], "Refactor batch inserts")
-        self.assertNotIn("Choose a layout", json.dumps(payload))
+        self.assertNotIn("story", payload["current_work"])
+        self.assertNotIn("earlier_context", payload)
+
+    async def test_previous_speech_stays_out_of_both_model_stages(self) -> None:
+        history = "Mail's in. Quiet now."
+        self.memory.record_speech(history, SpeechReason.ROUTINE)
+        self.handle(
+            {
+                "harness": "claude",
+                "session": "worker",
+                "event": "progress",
+                "progress": "Checked the prose. " + history,
+            }
+        )
+        self.responses.append(({"speak": "I checked the prose."}, "end_turn"))
+        await self.generate_commentary()
+        for _, body in [*self.story_requests, *self.requests]:
+            self.assertNotIn(history, json.dumps(body))
+
+    async def test_spoken_cached_story_is_excluded_from_both_later_model_stages(
+        self,
+    ) -> None:
+        await self.generate_commentary()
+        history = "Follow the current request."
+        self.memory.record_speech(history, SpeechReason.ROUTINE)
+        await self.generate_commentary()
+        self.assertNotIn(history, json.dumps(self.requests[-1][1]))
+        self.handle(
+            {
+                "harness": "claude",
+                "session": "worker",
+                "event": "progress",
+                "progress": "Checked cancellation behavior.",
+            }
+        )
+        await self.generate_commentary()
+        self.assertNotIn(history, json.dumps(self.story_requests[-1][1]))
+        self.assertNotIn(history, json.dumps(self.requests[-1][1]))
+
+    async def test_repeated_automatic_speech_is_silent_without_another_model_call(
+        self,
+    ) -> None:
+        history = "I checked the parser."
+        self.memory.record_speech(history, SpeechReason.ROUTINE)
+        self.responses.append(({"speak": history}, "end_turn"))
+        result = await self.generate_commentary()
+        self.assertIsNone(result.speak)
+        self.assertEqual(self.call_kinds, ["story", "commentary"])
+
+    async def test_manual_acknowledgment_does_not_retry_repeated_text(self) -> None:
+        history = "Hello, I am here."
+        self.memory.record_speech(history, SpeechReason.CLICK)
+        self.responses.append(({"speak": history}, "end_turn"))
+        result = await self.generate_commentary(SpeechReason.CLICK)
+        self.assertEqual(result.speak, history)
+        self.assertEqual(self.call_kinds, ["story", "commentary"])
+        self.assertNotIn(history, json.dumps(self.requests[-1][1]))
 
     async def test_rejects_invalid_results_without_recording_speech(self) -> None:
         invalid = [
@@ -1176,7 +1010,6 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         for reason, context in (
             (SpeechReason.EXPLICIT, None),
             (SpeechReason.EXPLICIT, "Please speak"),
-            (SpeechReason.CHECK_IN, None),
             (SpeechReason.CLICK, None),
             (SpeechReason.ROUTINE, "Please speak"),
         ):
@@ -1184,26 +1017,6 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 self.responses.append(({"speak": None}, "end_turn"))
                 with self.assertRaises(ValueError):
                     await self.generate_commentary(reason, context)
-        self.assertEqual(self.cognition.memory.speech(), [])
-
-    async def test_api_failure_propagates_without_retries_or_recording_speech(
-        self,
-    ) -> None:
-        self.responses.append(
-            httpx.Response(
-                500,
-                json={
-                    "type": "error",
-                    "error": {"type": "api_error", "message": "Fixture failure"},
-                },
-            )
-        )
-        with self.assertRaises(anthropic.InternalServerError):
-            await self.generate_commentary()
-        self.assertEqual(len(self.requests), 1)
-        self.assertEqual(self.cognition.memory.speech(), [])
-        result = await self.generate_commentary()
-        self.assertIsNone(result.speak)
         self.assertEqual(self.cognition.memory.speech(), [])
 
 

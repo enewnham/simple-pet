@@ -1,0 +1,24 @@
+{
+  "name": "truncated_tables",
+  "review": "Keep report prose and exclude table fragments.",
+  "events": [
+    {
+      "packets": [
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "intent",
+          "goal": "Explain API message types."
+        },
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "turn_done",
+          "progress": "Identified two request types.\n| Request | Response |\n| --- | --- |\n| Commentary | Silence |\nChecked both request builders."
+        }
+      ],
+      "reason": "completion",
+      "baseline": "The summary stuff is cleaner than my last bug fix."
+    }
+  ]
+}

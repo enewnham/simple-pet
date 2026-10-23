@@ -4,10 +4,12 @@ import time
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 from ..domain import Activity, ExecutionOutcome, PetState, ProcessStatus
 from ..logging import get_logger
 from ..prompts import select_prompt
+from ..prose import prose_text
 from ..runtime import (
     ActiveTool,
     ConvergenceItem,
@@ -482,6 +484,24 @@ class Sessions:
             return None
         return self.apply(hook)
 
+    @staticmethod
+    def _resumes_codex_child(session: AgentSession, event: HookEvent) -> bool:
+        if not (
+            session.harness == "codex"
+            and session.parent
+            and session.finished
+            and event.event == "tool_start"
+            and event.call
+            and event.turn
+            and session.turn
+        ):
+            return False
+        try:
+            previous, current = UUID(session.turn), UUID(event.turn)
+        except ValueError:
+            return False
+        return previous.version == current.version == 7 and current.time > previous.time
+
     def apply(self, event: HookEvent) -> SessionUpdate | None:
         kind = event.event
         now = self.clock()
@@ -491,10 +511,12 @@ class Sessions:
             return None
         key, session = identity
         turn = event.turn
+        resumes_child = self._resumes_codex_child(session, event)
         if (
             turn
             and session.turn
             and turn != session.turn
+            and not resumes_child
             and kind
             not in (
                 "intent",
@@ -533,7 +555,7 @@ class Sessions:
             ):
                 self._open(key, session, event, now)
             if event.goal:
-                request = select_prompt(event.goal)
+                request = select_prompt(prose_text(event.goal))
                 if not session.intent_received:
                     session.goal = request
                 session.intent_received = True
@@ -543,7 +565,7 @@ class Sessions:
         elif kind == "tool_start":
             if not event.call:
                 return self._ignored(event, "missing_call", key, session)
-            if session.finished and not event.manual:
+            if session.finished and not event.manual and not resumes_child:
                 return self._ignored(event, "finished_session", key, session)
             if not session.active:
                 self._open(key, session, event, now)
@@ -749,7 +771,7 @@ class Sessions:
     ) -> SessionObservation:
         reports: list[IntentEvidence | ProgressEvidence | ExecutionEvidence] = []
         if event.goal and event.event in ("intent", "subagent_start"):
-            reports.append(IntentEvidence(key, select_prompt(event.goal)))
+            reports.append(IntentEvidence(key, select_prompt(prose_text(event.goal))))
         if session.finished:
             kind = "turn_done" if event.event.startswith("tool_") else event.event
             reports.append(

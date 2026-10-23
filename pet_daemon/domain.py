@@ -103,7 +103,7 @@ class RepeatMethod(StrEnum):
 
 
 class ModelPurpose(StrEnum):
-    SUMMARY = "summary"
+    STORY = "story"
 
 
 class ArtifactKind(StrEnum):

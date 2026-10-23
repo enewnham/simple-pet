@@ -4,12 +4,10 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TypeGuard, get_origin
 
-from .domain import SpeechReason
-
 DEFAULT_PERSONA = """
-You are deadpan and slightly snarky.
-You have the energy of a seasoned peer tackling the work: focused, wry about your own
-stubborn bugs, and fundamentally on the developer's side. Never be cruel or insult them.
+You are an interested, dry, understated companion working alongside the developer.
+Speak warmly and plainly. Humor is optional and grounded in the actual work.
+Never sound reluctant, invent trouble, or force a punchline.
 """.strip()
 
 
@@ -79,10 +77,6 @@ class Config:
     daemon_socket: str = "/tmp/pet-daemon.sock"
     overlay_socket: str = "/tmp/pet.sock"
     model: str = "claude-haiku-5-5"
-    summarize_on: list[SpeechReason] = field(
-        default_factory=lambda: [SpeechReason.PROMPT]
-    )
-    summarize_first_request_only: bool = False
     observation_seconds: tuple[float, float] = (20, 40)
     idle_message_seconds: float = 300
     prompt_target_bytes: int = 16000
@@ -106,16 +100,6 @@ class Config:
         data = json.loads(path.read_text())
         if not isinstance(data, dict):
             raise ValueError("Configuration must be a JSON object")  # noqa: TRY004 - Report malformed JSON values through the validation contract.
-        if "summarize_on" in data:
-            reasons = data["summarize_on"]
-            if not isinstance(reasons, list):
-                raise ValueError("summarize_on must be an array of commentary reasons")
-            try:
-                data["summarize_on"] = [SpeechReason(reason) for reason in reasons]
-            except (TypeError, ValueError) as error:
-                raise ValueError(
-                    "summarize_on must be an array of commentary reasons"
-                ) from error
         behavior = BehaviorConfig(**data.pop("behavior", {}))
         config = cls(**data, behavior=behavior)
         for name in ("pet_dir", "overlay_binary", "log_file", "memory_file"):
@@ -132,12 +116,6 @@ class Config:
 
     def validate(self) -> None:
         self.behavior.validate()
-        if not isinstance(self.summarize_on, list) or any(
-            not isinstance(reason, SpeechReason) for reason in self.summarize_on
-        ):
-            raise ValueError("summarize_on must be an array of commentary reasons")
-        if type(self.summarize_first_request_only) is not bool:
-            raise ValueError("summarize_first_request_only must be a boolean")
         if not interval(self.observation_seconds):
             raise ValueError(
                 "observation_seconds must be a positive [minimum, maximum]"

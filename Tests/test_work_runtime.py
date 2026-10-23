@@ -19,7 +19,7 @@ from pet_daemon.sources import RepositoryTracker
 from pet_daemon.sources.git import CommandOptions, command
 from pet_daemon.types import JSONObject
 from pet_daemon.work.observations import BranchObservation, PullRequestObservation
-from Tests.fixtures import require
+from Tests.fixtures import require, story_response
 from Tests.test_runtime import PNG, reply
 
 
@@ -49,7 +49,6 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             pet_dir=root,
             daemon_socket=str(root / "daemon.sock"),
             overlay_socket=str(root / "overlay.sock"),
-            summarize_on=[],
             observation_seconds=(3600, 3600),
             request_timeout=5,
             memory_file=root / "memory.sqlite3",
@@ -96,7 +95,27 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         }
 
         async def handler(request: httpx.Request) -> httpx.Response:
-            self.requests.append(json.loads(request.content))
+            body = json.loads(request.content)
+            if body["output_config"]["format"]["schema"]["required"] == [
+                "intent",
+                "decisions",
+                "progress",
+            ]:
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "story-fixture",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": self.config.model,
+                        "content": [
+                            {"type": "text", "text": json.dumps(story_response(body))}
+                        ],
+                        "stop_reason": "end_turn",
+                        "usage": {"input_tokens": 10, "output_tokens": 10},
+                    },
+                )
+            self.requests.append(body)
             speech = self.speech
             self.entered.set()
             if self.slow:

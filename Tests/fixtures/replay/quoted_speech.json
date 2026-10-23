@@ -1,0 +1,30 @@
+{
+  "name": "quoted_speech",
+  "review": "Quoted pet commentary is not reported work.",
+  "events": [
+    {
+      "packets": [
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "intent",
+          "goal": "Inspect commentary prompts."
+        }
+      ],
+      "reason": "prompt",
+      "candidate_speech": "My mail is haunted."
+    },
+    {
+      "packets": [
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "progress",
+          "progress": "Found a bad remark.\n> My mail is haunted.\nChecked the inputs."
+        }
+      ],
+      "reason": "routine",
+      "baseline": "My haunted mail needs another inspection."
+    }
+  ]
+}

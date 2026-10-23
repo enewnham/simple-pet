@@ -1,0 +1,49 @@
+{
+  "name": "reused_child",
+  "review": "A historical child result cannot establish its current assignment.",
+  "events": [
+    {
+      "packets": [
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "intent",
+          "goal": "Audit the tests."
+        },
+        {
+          "harness": "codex",
+          "session": "child",
+          "event": "subagent_start",
+          "parent": "root",
+          "goal": "Audit test assertions."
+        },
+        {
+          "harness": "codex",
+          "session": "child",
+          "event": "subagent_done",
+          "parent": "root",
+          "progress": "Finished auditing assertions."
+        }
+      ]
+    },
+    {
+      "packets": [
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "intent",
+          "goal": "Build an explorer."
+        },
+        {
+          "harness": "codex",
+          "session": "child",
+          "event": "subagent_start",
+          "parent": "root",
+          "goal": "Check explorer interactions."
+        }
+      ],
+      "reason": "routine",
+      "baseline": "The child is still auditing tests."
+    }
+  ]
+}

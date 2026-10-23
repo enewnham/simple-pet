@@ -17,7 +17,7 @@ from pet_daemon.config import Config
 from pet_daemon.daemon import Daemon
 from pet_daemon.domain import SpeechSituation
 from pet_daemon.types import JSONObject
-from Tests.fixtures import require
+from Tests.fixtures import require, story_response
 
 
 @unittest.skipUnless(
@@ -57,7 +57,9 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                 body = json.loads(request.content)
                 requests.append(body)
                 summary = body["output_config"]["format"]["schema"]["required"] == [
-                    "summary"
+                    "intent",
+                    "decisions",
+                    "progress",
                 ]
                 explicit = (
                     not summary
@@ -78,7 +80,7 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                             {
                                 "type": "text",
                                 "text": json.dumps(
-                                    {"summary": "Build and test the parser."}
+                                    story_response(body)
                                     if summary
                                     else {"speak": speech if explicit else None}
                                 ),

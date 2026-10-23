@@ -1,0 +1,42 @@
+{
+  "name": "failure_cancel",
+  "review": "Partial progress does not erase cancellation or failure.",
+  "events": [
+    {
+      "packets": [
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "intent",
+          "goal": "Check explorer interactions."
+        },
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "turn_error",
+          "progress": "Checked navigation. Browser checks failed.",
+          "outcome": "error"
+        }
+      ],
+      "reason": "completion"
+    },
+    {
+      "packets": [
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "intent",
+          "goal": "Stop the checks."
+        },
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "interrupt",
+          "progress": "Stopped before the remaining checks.",
+          "outcome": "cancelled"
+        }
+      ],
+      "reason": "completion"
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "name": "repeated_completed",
+  "review": "Unchanged completed work stays quiet after accepted speech.",
+  "events": [
+    {
+      "packets": [
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "intent",
+          "goal": "Check the explorer."
+        },
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "turn_done",
+          "progress": "Checked the explorer interactions."
+        }
+      ],
+      "reason": "routine",
+      "candidate_speech": "I checked the explorer interactions.",
+      "expected_speech": true
+    },
+    {
+      "after_seconds": 60,
+      "reason": "routine",
+      "candidate_speech": "I checked the explorer interactions.",
+      "expected_speech": false
+    }
+  ]
+}

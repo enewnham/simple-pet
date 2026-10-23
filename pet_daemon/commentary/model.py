@@ -84,9 +84,9 @@ class AnthropicModelClient:
         result = json.loads(content)
         if not isinstance(result, dict):
             raise ValueError("Observation requires an object")  # noqa: TRY004 - Report malformed JSON values through the validation contract.
-        if reason == ModelPurpose.SUMMARY:
+        if reason == ModelPurpose.STORY:
             log.info(
-                "observation.summary",
+                "observation.story",
                 duration_seconds=round(time.monotonic() - started, 3),
                 **asdict(tokens),
             )

@@ -5,7 +5,7 @@ A native macOS desktop pet that speaks about your coding agents’ work. A local
 ![Simple Pet demo](docs/media/simple-pet.webp)
 
 - Tracks concurrent work across Claude Code, Codex, Cursor CLI, and command wrappers.
-- Speaks in a configurable persona and remembers session context and recent remarks across restarts.
+- Speaks in a configurable persona and remembers work across restarts.
 - Roams, reacts to work, and takes short naps when idle.
 - Supports custom sprite packs, dragging, and clicking interactions.
 
@@ -95,6 +95,11 @@ Customize `persona` to change the pet's voice. Use `memory_retention_days` and
 PR links, stack membership, and basic PR state. Repository observations provide context
 for the agents' reports.
 
+The pet maintains a short work story from user requests and scoped agent reports before
+generating commentary. Quoted text, code blocks, and tables are excluded from reports.
+Recent pet remarks stay local for repetition checks and are excluded from model prompts.
+Unchanged completed work stays quiet.
+
 Remembered work and speech are stored locally. Use the commands below to clear them.
 
 Use `prompt_target_bytes` to control how much optional context is included in model
@@ -119,6 +124,22 @@ Run the checks in a logged-in macOS session:
 ```sh
 make check
 ```
+
+Replay sanitized commentary sequences without API calls:
+
+```sh
+uv run --locked python -m pet_daemon.replay
+```
+
+Pass a fixture file or directory to select sequences. To compare three model samples
+per sequence using the configured persona and model:
+
+```sh
+uv run --locked python -m pet_daemon.replay --model-run --config pet.config.json
+```
+
+Results, requests, latency, and token usage are saved under `.cache/replays/`.
+Review the comparisons before committing prompt changes.
 
 ## License and attribution
 

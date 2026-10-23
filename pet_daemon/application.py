@@ -12,7 +12,8 @@ import structlog
 
 from .attention import Attention, AttentionSelection
 from .behavior.controller import Behavior
-from .commentary import Cognition, CommentaryResult, CommentarySupport
+from .commentary import Cognition, CommentarySupport
+from .commentary.cognition import StoryUnavailable
 from .commentary.usage import collect_usage
 from .config import Config
 from .delivery import DeliveryOutcome, SpeechDelivery, SpeechMessage
@@ -32,6 +33,7 @@ from .sessions.reactions import SessionReactions
 from .sessions.tracking import Sessions
 from .storage import Memory
 from .work.history import SessionContext, build_session_entry
+from .work.narrative import semantic_revision
 from .work.observations import RepositoryObservation
 
 log = get_logger("pet-daemon")
@@ -199,7 +201,10 @@ class Application:
                 )
             sessions.append(session)
         runtime = replace(runtime, sessions=tuple(sessions))
-        subjects = self.memory.connected_work(runtime)
+        subjects = tuple(
+            replace(subject, revision=semantic_revision(subject.story))
+            for subject in self.memory.connected_work(runtime)
+        )
         stories = {
             session: subject.story
             for subject in subjects
@@ -378,21 +383,6 @@ class Application:
             sessions = self.sessions
             log.debug("observation.started", reason=reason, subject=selection.id)
             try:
-                if (
-                    self.config.summarize_first_request_only
-                    and self.cognition.should_summarize(focus_snapshot, reason)
-                ):
-                    assert focus_session is not None
-                    assert focus_snapshot is not None
-                    focus = focus_snapshot
-                    self.memory.save_context(
-                        focus_session,
-                        focus.initial_request,
-                        focus.summary,
-                        focus.recent_requests,
-                        focus.request_count,
-                        True,
-                    )
                 result = await asyncio.wait_for(
                     self.cognition.generate_commentary(
                         snapshot, selection, refresh=lambda: self.context(trigger)
@@ -402,7 +392,6 @@ class Application:
                 if sessions is not self.sessions:
                     outcome = "discarded"
                     return
-                self.save_summary(result)
                 if (
                     epoch != self.revision
                     or history_epoch != self.history_epoch
@@ -441,6 +430,11 @@ class Application:
                         )
                         self.delivery.submit(message)
                         outcome = "submitted"
+            except StoryUnavailable as error:
+                outcome = "deferred"
+                log.info(
+                    "observation.deferred", reason=str(error), subject=selection.id
+                )
             except asyncio.CancelledError:
                 outcome = "cancelled"
                 raise
@@ -498,34 +492,6 @@ class Application:
             and self.selection_valid(support.commentary, support.trigger)
         )
 
-    def save_summary(self, result: CommentaryResult) -> None:
-        if result.summary is None:
-            return
-        summary = " ".join(result.summary.split())
-        key = result.summary_session
-        assert key is not None
-        current = next(
-            (session for session in self.context().sessions if session.id == key),
-            None,
-        )
-        if not summary or current is None:
-            return
-        if self.cognition.summary_version(current) != result.summary_version:
-            log.debug("memory.context_discarded", reason="session_changed", session=key)
-            return
-        try:
-            self.memory.save_context(
-                key,
-                current.initial_request,
-                summary,
-                current.recent_requests,
-                current.request_count,
-                current.first_summary_attempted,
-            )
-        except sqlite3.Error as error:
-            log.warning("memory.summary_failed", error=str(error))
-        log.debug("memory.context_updated", session=key)
-
     def delivery_outcome(self, outcome: DeliveryOutcome) -> None:
         message = outcome.message
         if message.history_epoch != self.history_epoch:
@@ -565,13 +531,11 @@ class Application:
                     text=message.text,
                     subject_id=message.subject_id,
                     revision=message.revision,
-                    last_selected=last_selected,
-                    considered_revision=considered,
                 )
             except sqlite3.Error as error:
                 log.warning("speech.delivery_record_failed", error=str(error))
                 return
-        if current:
+        if current and outcome.status == DeliveryStatus.ACCEPTED:
             assert subject is not None
             self.attention.mark_considered(subject)
         log.info(

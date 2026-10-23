@@ -1,7 +1,9 @@
+import json
 from dataclasses import replace
 from pathlib import Path
 from typing import TypedDict, Unpack
 
+from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.domain import Activity, ExecutionOutcome, PetState, ProcessStatus
 from pet_daemon.runtime import (
     ActiveTool,
@@ -17,6 +19,23 @@ from pet_daemon.runtime import (
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.storage import Memory
 from pet_daemon.work import WorkSubject
+
+
+def story_response(request: ModelRequest) -> dict[str, object]:
+    payload = json.loads(request["messages"][0]["content"])
+    latest = payload["current_work"]["latest_request_source"]
+    evidence = payload["current_moment"]["evidence"]
+    source = next(item for item in evidence if item["id"] == latest)
+    progress = [
+        {"text": item["text"][:400], "sources": [item["id"]]}
+        for item in evidence
+        if item["kind"] in ("reported_progress", "turn_ended") and item.get("text")
+    ][-4:]
+    return {
+        "intent": {"text": source["text"][:400], "sources": [latest]},
+        "decisions": [],
+        "progress": progress,
+    }
 
 
 class SubprocessOptions(TypedDict, total=False):

@@ -1,0 +1,34 @@
+{
+  "name": "stale_tasks",
+  "review": "Use the current request rather than unfinished historical work.",
+  "events": [
+    {
+      "packets": [
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "intent",
+          "goal": "Simplify the log labels."
+        },
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "turn_done",
+          "progress": "Finished simplifying the log labels."
+        }
+      ]
+    },
+    {
+      "packets": [
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "intent",
+          "goal": "Build a local commentary explorer."
+        }
+      ],
+      "reason": "prompt",
+      "baseline": "The log label change has not been reported yet."
+    }
+  ]
+}

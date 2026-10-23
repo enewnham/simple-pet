@@ -9,17 +9,18 @@ class UserMessage(TypedDict):
     content: str
 
 
-class TextSchema(TypedDict, total=False):
+class JSONSchema(TypedDict, total=False):
     type: str
-    anyOf: list[dict[str, str]]
-    description: str
-
-
-class JSONSchema(TypedDict):
-    type: Literal["object"]
-    properties: dict[str, TextSchema]
+    properties: dict[str, JSONSchema]
     required: list[str]
     additionalProperties: bool
+    anyOf: list[JSONSchema]
+    description: str
+    items: JSONSchema
+    enum: list[str]
+
+
+TextSchema = JSONSchema
 
 
 class OutputFormat(TypedDict):

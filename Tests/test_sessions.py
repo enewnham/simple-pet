@@ -414,6 +414,115 @@ class SessionsTests(unittest.TestCase):
             "Second goal",
         )
 
+    def test_completed_codex_child_resumes_with_a_newer_tool_turn(self) -> None:
+        first_turn = "01a164f8-cc78-7db0-9431-d81a5bcdf270"
+        next_turn = "01a16500-0096-7432-8fa1-05603ac2a0e2"
+        self.event("intent", harness="codex", goal="Review the changes", turn="parent")
+        self.event("subagent_start", harness="codex", session="child", parent="main")
+        self.event(
+            "tool_start",
+            harness="codex",
+            session="child",
+            turn=first_turn,
+            call="first",
+        )
+        self.event(
+            "tool_done", harness="codex", session="child", turn=first_turn, call="first"
+        )
+        self.event("subagent_done", harness="codex", session="child", parent="main")
+        child = self.sessions.by_id["codex:child"]
+        generation = child.generation
+        result = self.event(
+            "tool_start", harness="codex", session="child", turn=next_turn, call="next"
+        )
+        self.assertIn(
+            ExecutionEvidence("codex:child", "resumed", None, None, None),
+            require(result).observation.reports,
+        )
+        self.assertTrue(child.working)
+        self.assertEqual(child.turn, next_turn)
+        self.assertEqual(child.generation, generation + 1)
+        parent = self.sessions.by_id["codex:main"]
+        self.assertEqual(parent.turn, "parent")
+        self.assertTrue(parent.active)
+        self.assertEqual(child.parent, "codex:main")
+        self.assertEqual(child.goal, "Review the changes")
+        self.assertEqual(set(child.calls), {"next"})
+        self.assertIsNone(
+            self.event("turn_done", harness="codex", session="child", turn=first_turn)
+        )
+        self.assertIsNotNone(
+            self.event(
+                "tool_done",
+                harness="codex",
+                session="child",
+                turn=next_turn,
+                call="next",
+            )
+        )
+        result = require(
+            self.event("subagent_done", harness="codex", session="child", parent="main")
+        )
+        execution = next(
+            report
+            for report in result.observation.reports
+            if isinstance(report, ExecutionEvidence)
+        )
+        self.assertEqual(execution.outcome, ExecutionOutcome.SUCCESS)
+        self.assertFalse(child.active)
+        self.assertFalse(child.calls)
+        self.assertIsNone(
+            self.event(
+                "tool_start",
+                harness="codex",
+                session="child",
+                turn=first_turn,
+                call="late",
+            )
+        )
+        self.assertEqual(child.turn, next_turn)
+        self.assertFalse(child.active)
+
+    def test_completed_sessions_reject_tool_turns_without_evidence_of_child_resumption(
+        self,
+    ) -> None:
+        first_turn = "01a164f8-cc78-7db0-9431-d81a5bcdf270"
+        next_turn = "01a16500-0096-7432-8fa1-05603ac2a0e2"
+        cases = (
+            ("codex", "main", first_turn, first_turn),
+            ("codex", "main", first_turn, "01a164f8-cc78-7fff-bfff-ffffffffffff"),
+            ("codex", "main", next_turn, first_turn),
+            ("codex", "main", "unknown", next_turn),
+            ("codex", "main", first_turn, "unknown"),
+            ("codex", "main", first_turn, "01a16500-0096-4432-8fa1-05603ac2a0e2"),
+            ("codex", "main", first_turn, ""),
+            ("codex", "", first_turn, next_turn),
+            ("claude", "main", first_turn, next_turn),
+        )
+        for index, (harness, parent, previous, incoming) in enumerate(cases):
+            with self.subTest(harness=harness, parent=parent, incoming=incoming):
+                subject = f"subject-{index}"
+                self.event(
+                    "intent",
+                    harness=harness,
+                    session=subject,
+                    parent=parent,
+                    turn=previous,
+                )
+                self.event("turn_done", harness=harness, session=subject, turn=previous)
+                self.assertIsNone(
+                    self.event(
+                        "tool_start",
+                        harness=harness,
+                        session=subject,
+                        turn=incoming,
+                        call="late",
+                    )
+                )
+                session = self.sessions.by_id[f"{harness}:{subject}"]
+                self.assertFalse(session.active)
+                self.assertEqual(session.turn, previous)
+
     def test_error_outcome_on_tool_completion_records_failure(self) -> None:
         self.event("tool_start", call="checks", tool="pytest")
         result = self.event("tool_done", call="checks", outcome="error")

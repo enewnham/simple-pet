@@ -44,7 +44,7 @@ from pet_daemon.work.observations import (
     RepositoryObservation,
 )
 from pet_daemon.work.views import AssociationView, ProgressView
-from Tests.fixtures import require
+from Tests.fixtures import require, story_response
 
 
 class FixtureProvider:
@@ -75,6 +75,7 @@ class FixtureProvider:
 class FixtureModel:
     def __init__(self) -> None:
         self.requests = []
+        self.story_requests = []
         self.text: str | None = (
             "The parser preserves escaped delimiters inside quoted fields."
         )
@@ -82,6 +83,9 @@ class FixtureModel:
     async def complete(
         self, request: ModelRequest, reason: SpeechReason | ModelPurpose
     ) -> dict[str, object]:
+        if reason == ModelPurpose.STORY:
+            self.story_requests.append(request)
+            return story_response(request)
         self.requests.append((request, reason))
         return {"speak": self.text}
 
@@ -91,7 +95,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.now = 1000.0
         self.clock = lambda: self.now
-        self.config = Config(pet_dir=Path(self.temporary.name), summarize_on=[])
+        self.config = Config(pet_dir=Path(self.temporary.name))
         self.config.behavior.sentiment_reactions = False
         self.memory = Memory(
             Path(self.temporary.name) / "memory.sqlite3",
@@ -413,7 +417,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(reported_pr.url, artifacts)
         self.assertNotIn(unrelated_pr.url, artifacts)
 
-    async def test_repeated_progress_about_another_branch_becomes_commentary_for_its_pr(
+    async def test_repeated_progress_preserves_report_context_without_repeating_speech(
         self,
     ) -> None:
         self.report("Tests pass")
@@ -454,13 +458,10 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.report("Tests pass")
         self.attention.next_observation = self.now
         snapshot = self.app.context()
-        request = require(self.attention.request(snapshot))
-        selection = self.attention.select(snapshot, request.reason)
-        self.model.text = "The quoted-field examples pass their validation."
-        await self.app.comment(request.reason, snapshot=snapshot, selection=selection)
+        self.assertIsNone(self.attention.request(snapshot))
         latest_report = next(
             report
-            for report in require(selection.subject).story.activity
+            for report in snapshot.work[0].story.activity
             if isinstance(report.details, ProgressView)
             and report.details.reported_progress == "Tests pass"
         )
@@ -577,15 +578,18 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         packet, selection = await self.submit_commentary()
         payload = json.loads(self.model.requests[0][0]["messages"][0]["content"])
-        self.assertIn(parent_report, json.dumps(payload["current_moment"]))
-        self.assertNotIn(child_report, json.dumps(payload["current_moment"]))
-        child_context = next(
-            item
-            for item in payload["earlier_context"]
-            if item.get("scope") == "Document quoted-field examples"
+        self.assertIn(parent_report, json.dumps(payload["current_work"]))
+        self.assertIn(child_report, json.dumps(payload["current_work"]))
+        story_payload = json.loads(
+            self.model.story_requests[0]["messages"][0]["content"]
         )
-        self.assertIn(child_report, json.dumps(child_context))
-        self.assertNotIn(parent_report, json.dumps(child_context))
+        child_sources = [
+            item
+            for item in story_payload["current_moment"]["evidence"]
+            if item["scope"] == "child assignment: Document quoted-field examples"
+        ]
+        self.assertIn(child_report, json.dumps(child_sources))
+        self.assertNotIn(parent_report, json.dumps(child_sources))
         self.assertNotIn("artifacts", json.dumps(payload))
         self.assertNotIn(child_pr.url, json.dumps(payload))
         self.assertEqual(self.memory.speech(), [])
@@ -680,7 +684,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.memory.message_outcome(packet["delivery_id"]))
         self.assertEqual(self.memory.speech(), [])
 
-    async def test_silence_and_exhausted_delivery_persist_consideration(self) -> None:
+    async def test_silence_persists_consideration_and_failed_delivery_stays_retryable(
+        self,
+    ) -> None:
         self.model.text = None
         await self.app.comment(SpeechReason.ROUTINE)
         restored = Attention(
@@ -708,7 +714,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             random.Random(0),
             self.memory.load_attention_history(),
         )
-        self.assertFalse(restored.is_new(self.app.context().work[0]))
+        self.assertTrue(restored.is_new(self.app.context().work[0]))
+        self.assertTrue(self.attention.is_new(self.app.context().work[0]))
+        self.assertEqual(self.memory.speech(), [])
 
     async def test_late_acceptance_records_captured_story_without_suppressing_new_report(
         self,

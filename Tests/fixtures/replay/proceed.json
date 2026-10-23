@@ -1,0 +1,27 @@
+{
+  "name": "proceed",
+  "review": "Resolve a short follow-up from the relevant earlier request.",
+  "events": [
+    {
+      "packets": [
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "intent",
+          "goal": "Build a local commentary explorer."
+        }
+      ]
+    },
+    {
+      "packets": [
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "intent",
+          "goal": "Proceed."
+        }
+      ],
+      "reason": "prompt"
+    }
+  ]
+}

@@ -31,7 +31,7 @@ from pet_daemon.runtime import (
 from pet_daemon.sources import RepositoryTracker
 from pet_daemon.sources.git import CommandOptions
 from pet_daemon.work.observations import BranchObservation, PullRequestObservation
-from Tests.fixtures import require
+from Tests.fixtures import require, story_response
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII="
@@ -55,9 +55,9 @@ def request_reason(body: ModelRequest) -> str:
 
 
 def reply(
-    speak: str | None = None, summary: str | None = None, is_summary: bool = False
+    speak: str | None = None, *, result: dict[str, object] | None = None
 ) -> httpx.Response:
-    result = {"summary": summary} if is_summary else {"speak": speak}
+    result = result if result is not None else {"speak": speak}
     return httpx.Response(
         200,
         json={
@@ -106,41 +106,32 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.config.behavior.automatic_speech_cooldown_seconds = 0
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
-        self.retry_entered = asyncio.Event()
-        self.retry_slow = False
-        self.retry_delay = 0
         self.requests: list[ModelRequest] = []
-        self.summary_requests: list[ModelRequest] = []
+        self.story_requests: list[ModelRequest] = []
         self.http_status = 200
-        self.summary_status = 200
+        self.story_status = 200
         self.speech: str | None = "The tests have reconsidered."
         self.fixture_speech: str = self.speech
         self.fixture_revision = 0
         self.speech_by_reason = {}
-        self.summary = None
         self.slow = False
         self.delay = 0
 
         async def handler(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
-            response_context = self.summary
-            summary = body["output_config"]["format"]["schema"]["required"] == [
-                "summary"
+            story = body["output_config"]["format"]["schema"]["required"] == [
+                "intent",
+                "decisions",
+                "progress",
             ]
-            requests = self.summary_requests if summary else self.requests
+            requests = self.story_requests if story else self.requests
             requests.append(body)
             self.entered.set()
-            if not summary and "<reconsideration>" in body["system"][-1]["text"]:
-                self.retry_entered.set()
-                if self.retry_slow:
-                    await self.release.wait()
-                if self.retry_delay:
-                    await asyncio.sleep(self.retry_delay)
             if self.delay:
                 await asyncio.sleep(self.delay)
             if self.slow:
                 await self.release.wait()
-            status = self.summary_status if summary else self.http_status
+            status = self.story_status if story else self.http_status
             if status != 200:
                 return httpx.Response(
                     status,
@@ -149,8 +140,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                         "error": {"type": "api_error", "message": "fixture failure"},
                     },
                 )
-            if summary:
-                return reply(summary=response_context, is_summary=True)
+            if story:
+                return reply(result=story_response(body))
             reason = request_reason(body)
             if (
                 self.speech == self.fixture_speech
@@ -162,7 +153,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.speech = self.fixture_speech
             speech = self.speech_by_reason.get(reason, self.speech)
-            return reply(speech, summary=response_context)
+            return reply(speech)
 
         self.client = AsyncAnthropic(
             api_key="test-fixture",
@@ -614,18 +605,15 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             {"kind": "explicit_context", "text": "Look at the parser"},
         )
 
-    async def test_clear_speech_discards_pending_remark_and_preserves_session_summary(
+    async def test_clear_speech_discards_pending_remark_and_preserves_session_context(
         self,
     ) -> None:
         self.slow = True
-        self.summary = "Keep the parser API stable."
         self.daemon.application.memory.record_speech(
             "Earlier remark", SpeechReason.ROUTINE
         )
         self.event("intent", goal="Improve parser")
-        await self.wait_for(
-            lambda: len(self.requests) == 1 and len(self.summary_requests) == 1
-        )
+        await self.wait_for(lambda: len(self.story_requests) == 1)
         self.send({"kind": "clear_speech"})
         await self.packet(
             lambda packet: packet.get("text") == "" and packet.get("ttl") == 0
@@ -635,8 +623,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.daemon.application.memory.speech(), [])
         self.assertTrue(self.daemon.application.sessions.active)
         self.assertEqual(
-            require(self.daemon.application.memory.context("cli:one")).summary,
-            self.summary,
+            require(self.daemon.application.memory.context("cli:one")).initial_request,
+            "Improve parser",
         )
         self.assertFalse(any(packet.get("text") for packet in await self.drain()))
         self.slow = False
@@ -843,7 +831,6 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.addCleanup(task.cancel)
         await asyncio.wait_for(self.entered.wait(), 1)
-        payload = json.loads(self.requests[-1]["messages"][0]["content"])
         self.event("intent", session="other", goal="Document the renderer")
         await self.wait_for(
             lambda: (
@@ -855,7 +842,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.release.set()
         await task
-        return payload
+        return json.loads(self.requests[-1]["messages"][0]["content"])
 
     async def test_omitted_session_changes_preserve_focused_commentary(self) -> None:
         self.config.prompt_target_bytes = 1
@@ -899,8 +886,6 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.addCleanup(task.cancel)
         await asyncio.wait_for(self.entered.wait(), 1)
-        payload = json.loads(self.requests[-1]["messages"][0]["content"])
-        self.assertNotIn("Persist parser sessions", json.dumps(payload))
         self.repository_pr.update(state="MERGED", mergedAt="2026-10-17T00:00:00Z")
         self.repositories.github_interval = 0
         await self.wait_for(
@@ -1490,13 +1475,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.event("intent", goal="Inspect checks")
         await asyncio.wait_for(self.entered.wait(), 1)
         self.send({"kind": "renderer", "event": "click"})
-        await self.wait_for(lambda: len(self.requests) == 2)
+        await self.wait_for(lambda: len(self.story_requests) == 2)
         self.release.set()
         speech = await self.packet(lambda packet: "text" in packet)
         self.assertEqual(speech["text"], self.speech)
-        self.assertEqual(
-            [request_reason(body) for body in self.requests], ["prompt", "click"]
-        )
+        self.assertEqual([request_reason(body) for body in self.requests], ["click"])
         self.assertNotIn(
             "Superseded acknowledgment.",
             json.dumps(
@@ -1563,342 +1546,133 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         packet = await self.packet(lambda packet: "text" in packet)
         self.assertEqual(packet["text"], self.speech)
 
-    async def test_computer_sleep_cancels_a_repeated_speech_retry_without_delivery(
+    async def test_repeated_automatic_speech_is_suppressed_without_another_model_call(
         self,
     ) -> None:
         history = "The parser still needs its edge cases checked."
         self.speech = history
         self.daemon.application.memory.record_speech(history, SpeechReason.ROUTINE)
-        self.retry_slow = True
         self.event("intent", goal="Review parser edge cases")
-        await asyncio.wait_for(self.retry_entered.wait(), 1)
-        self.send({"kind": "renderer", "event": "system_sleep"})
+        await self.wait_for(
+            lambda: len(self.requests) == 1 and self.daemon.application.task is None
+        )
+        self.assertEqual(
+            [row.text for row in self.daemon.application.memory.speech()], [history]
+        )
+        self.assertFalse(any(packet.get("text") for packet in await self.drain()))
+
+    async def test_story_updates_before_commentary_and_reuses_unchanged_evidence(
+        self,
+    ) -> None:
+        self.event("intent", goal="Refactor the parser")
+        await self.packet(lambda packet: "text" in packet)
+        await self.wait_for(lambda: self.daemon.application.task is None)
+        self.assertEqual(len(self.story_requests), 1)
+        narrative = require(self.daemon.application.memory.load_narrative("cli:one"))
+        self.assertEqual(narrative.intent.text, "Refactor the parser")
+        payload = json.loads(self.requests[0]["messages"][0]["content"])
+        self.assertEqual(payload["current_work"]["story"], "Refactor the parser")
+        await self.comment(SpeechReason.COMPLETION)
+        self.assertEqual(len(self.story_requests), 1)
+        self.assertEqual(len(self.requests), 2)
+        await self.drain()
+        self.event("intent", goal="Investigate the parser timeout")
+        await self.packet(lambda packet: "text" in packet)
+        self.assertEqual(len(self.story_requests), 2)
+        self.assertEqual(
+            require(
+                self.daemon.application.memory.load_narrative("cli:one")
+            ).intent.text,
+            "Investigate the parser timeout",
+        )
+
+    async def test_story_failure_defers_automatic_speech_and_retains_prior_story(
+        self,
+    ) -> None:
+        self.event("intent", goal="Refactor the parser")
+        await self.packet(lambda packet: "text" in packet)
+        await self.wait_for(lambda: self.daemon.application.task is None)
+        previous = self.daemon.application.memory.load_narrative("cli:one")
+        self.story_status = 500
+        self.event("intent", goal="Validate parser behavior")
         await self.wait_for(
             lambda: (
-                self.daemon.application.suspended
-                and self.daemon.application.task is None
+                len(self.story_requests) == 2 and self.daemon.application.task is None
+            )
+        )
+        self.assertEqual(
+            self.daemon.application.memory.load_narrative("cli:one"), previous
+        )
+        self.assertEqual(len(self.requests), 1)
+        self.assertFalse(any(packet.get("text") for packet in await self.drain()))
+        self.send({"kind": "renderer", "event": "click"})
+        await self.packet(lambda packet: "text" in packet)
+        payload = json.loads(self.requests[-1]["messages"][0]["content"])
+        self.assertNotIn("Refactor the parser", json.dumps(payload))
+
+    async def test_silent_commentary_keeps_story_without_acknowledging_speech(
+        self,
+    ) -> None:
+        self.speech = None
+        self.event("intent", goal="Refactor the parser")
+        await self.wait_for(
+            lambda: len(self.requests) == 1 and self.daemon.application.task is None
+        )
+        self.assertEqual(
+            require(
+                self.daemon.application.memory.load_narrative("cli:one")
+            ).intent.text,
+            "Refactor the parser",
+        )
+        self.assertEqual(self.daemon.application.memory.speech(), [])
+        self.assertFalse(any(packet.get("text") for packet in await self.drain()))
+
+    async def test_followup_during_story_generation_discards_the_stale_story(
+        self,
+    ) -> None:
+        self.slow = True
+        self.event("intent", goal="Refactor the parser", turn="first")
+        await asyncio.wait_for(self.entered.wait(), 1)
+        self.assertEqual(self.requests, [])
+        self.event(
+            "intent", goal="Keep the parser API unchanged", turn="first", manual=True
+        )
+        await self.wait_for(
+            lambda: (
+                "Keep the parser API unchanged"
+                in require(
+                    self.daemon.application.memory.context("cli:one")
+                ).recent_requests
             )
         )
         self.release.set()
-        self.assertEqual(len(self.requests), 2)
-        self.assertEqual(
-            [row.text for row in self.daemon.application.memory.speech()], [history]
-        )
-        self.assertFalse(any(packet.get("text") for packet in await self.drain()))
+        await self.packet(lambda packet: "text" in packet)
+        await self.wait_for(lambda: self.daemon.application.task is None)
+        narrative = require(self.daemon.application.memory.load_narrative("cli:one"))
+        self.assertEqual(narrative.intent.text, "Keep the parser API unchanged")
+        self.assertEqual(len(self.requests), 1)
 
-    async def test_repeated_speech_retry_shares_the_observation_timeout(self) -> None:
-        history = "The parser still needs its edge cases checked."
-        self.speech = history
-        self.daemon.application.memory.record_speech(history, SpeechReason.ROUTINE)
-        self.config.request_timeout = 0.15
-        self.retry_delay = 1
-        with self.assertLogs("pet-daemon", level="WARNING"):
-            self.event("intent", goal="Review parser edge cases")
-            await asyncio.wait_for(self.retry_entered.wait(), 1)
+    async def test_interleaved_work_keeps_separate_stories(self) -> None:
+        for session, goal in (
+            ("parser", "Refactor the parser"),
+            ("hooks", "Review Python hooks"),
+        ):
+            self.event("intent", session=session, goal=goal)
+            await self.packet(lambda packet: "text" in packet)
             await self.wait_for(lambda: self.daemon.application.task is None)
-        self.assertEqual(len(self.requests), 2)
+        memory = self.daemon.application.memory
         self.assertEqual(
-            [row.text for row in self.daemon.application.memory.speech()], [history]
-        )
-        self.assertFalse(any(packet.get("text") for packet in await self.drain()))
-
-    async def test_summary_updates_on_each_prompt_and_skips_completion_by_default(
-        self,
-    ) -> None:
-        self.summary = "Keep the parser API compatible."
-        self.event("intent", goal="Refactor the parser")
-        await self.packet(lambda packet: packet.get("text") == self.speech)
-        await self.wait_for(lambda: self.daemon.application.task is None)
-        self.event("intent", goal="Investigate the parser timeout")
-        await self.packet(lambda packet: packet.get("text") == self.speech)
-        await self.wait_for(lambda: self.daemon.application.task is None)
-        self.assertEqual(len(self.summary_requests), 2)
-        payload = json.loads(self.summary_requests[-1]["messages"][0]["content"])
-        self.assertEqual(
-            payload["current_work"]["request"], "Investigate the parser timeout"
-        )
-        self.assertNotIn(self.summary, json.dumps(payload))
-        self.assertIn("Refactor the parser", json.dumps(payload["earlier_context"]))
-        await self.comment(SpeechReason.COMPLETION)
-        self.assertEqual(len(self.summary_requests), 2)
-        self.assertEqual(len(self.requests), 3)
-
-    async def test_new_summaries_replace_prior_context_without_a_character_limit(
-        self,
-    ) -> None:
-        self.summary = "Keep the parser API compatible."
-        self.event("intent", goal="Refactor the parser")
-        await self.packet(lambda packet: packet.get("text") == self.speech)
-        await self.wait_for(lambda: self.daemon.application.task is None)
-        self.daemon.application.sessions.by_id["cli:one"]
-        self.summary = "The parser " + "compatibility " * 40 + "remains intact."
-        self.event("intent", goal="Review parser compatibility")
-        await self.packet(lambda packet: packet.get("text") == self.speech)
-        await self.wait_for(lambda: self.daemon.application.task is None)
-        self.assertEqual(
-            require(self.daemon.application.memory.context("cli:one")).summary,
-            self.summary,
-        )
-        self.summary += " Existing callers retain their signatures."
-        self.event("intent", goal="Confirm parser compatibility")
-        await self.packet(lambda packet: packet.get("text") == self.speech)
-        await self.wait_for(lambda: self.daemon.application.task is None)
-        self.assertEqual(
-            require(self.daemon.application.memory.context("cli:one")).summary,
-            self.summary,
-        )
-        self.assertEqual(len(self.requests), 3)
-
-    async def test_first_request_summary_overrides_triggers_and_survives_a_failed_attempt_and_restart(
-        self,
-    ) -> None:
-        self.config.summarize_first_request_only = True
-        self.config.summarize_on = []
-        self.summary_status = 500
-        initial = (
-            "Refactor the parser while keeping the public interface unchanged. " * 8
-        )
-        self.event("intent", goal=initial)
-        await self.packet(lambda packet: packet.get("text") == self.speech)
-        await self.wait_for(lambda: self.daemon.application.task is None)
-        self.assertEqual(len(self.summary_requests), 1)
-        payload = json.loads(self.summary_requests[0]["messages"][0]["content"])
-        self.assertEqual(payload["current_work"]["request"], initial)
-        self.assertEqual(set(payload), {"current_work"})
-        self.assertNotIn("progress", payload)
-        self.assertNotIn("historical_summary", payload)
-        saved = require(self.daemon.application.cognition.memory.context("cli:one"))
-        self.assertTrue(saved.first_summary_attempted)
-        self.assertEqual(saved.initial_request, initial)
-        await self.comment(SpeechReason.PROMPT)
-        self.assertEqual(len(self.summary_requests), 1)
-        await self.daemon.close()
-        self.daemon = Daemon(self.config, self.client, rng=random.Random(7))
-        await self.daemon.start()
-        self.send_status()
-        await self.packet(lambda packet: packet.get("state") == "idle")
-        self.config.summarize_on = [
-            SpeechReason.PROMPT,
-            SpeechReason.COMPLETION,
-            SpeechReason.EXPLICIT,
-        ]
-        self.summary_status = 200
-        self.event("intent", goal="Debug the timeout")
-        await self.packet(lambda packet: packet.get("text") == self.speech)
-        await self.wait_for(lambda: self.daemon.application.task is None)
-        self.daemon.application.sessions.by_id["cli:one"]
-        self.assertEqual(
-            require(self.daemon.application.memory.context("cli:one")).initial_request,
-            initial,
+            require(memory.load_narrative("cli:parser")).intent.text,
+            "Refactor the parser",
         )
         self.assertEqual(
-            require(self.daemon.application.memory.context("cli:one")).request_count, 2
+            require(memory.load_narrative("cli:hooks")).intent.text,
+            "Review Python hooks",
         )
-        for reason in (SpeechReason.COMPLETION, SpeechReason.EXPLICIT):
-            await self.comment(reason, "Parser work")
-        self.assertEqual(len(self.summary_requests), 1)
-        await self.drain()
-        self.event("intent", session="another", goal="Review hooks")
-        await self.packet(lambda packet: packet.get("text") == self.speech)
-        await self.wait_for(lambda: self.daemon.application.task is None)
-        self.assertEqual(len(self.summary_requests), 2)
-        payload = json.loads(self.summary_requests[-1]["messages"][0]["content"])
-        self.assertEqual(payload["current_work"]["request"], "Review hooks")
-
-    async def test_silent_summary_informs_later_session_commentary(self) -> None:
-        self.use_clock()
-        self.speech = None
-        self.summary = "Parser refactor awaits validation."
-        self.event("intent", goal="Refactor the parser", turn="first")
-        await self.wait_for(
-            lambda: (
-                self.daemon.application.cognition.memory.context("cli:one") is not None
-                and require(
-                    self.daemon.application.cognition.memory.context("cli:one")
-                ).summary
-                == self.summary
-            )
-        )
-        await self.wait_for(lambda: self.daemon.application.task is None)
-        self.assertEqual(len(self.requests), 1)
-        self.assertEqual(self.daemon.application.cognition.memory.speech(), [])
-        self.now += 20
-        self.daemon.application.attention.next_observation = self.now
-        await self.wait_for(
-            lambda: self.daemon.application.attention.next_observation > self.now
-        )
-        self.assertEqual(len(self.requests), 1)
-        self.summary = None
-        self.speech = "The parser still needs validation."
-        await self.comment(SpeechReason.EXPLICIT, "Check the parser")
-        await self.packet(lambda packet: "text" in packet)
         payload = json.loads(self.requests[-1]["messages"][0]["content"])
-        self.assertNotIn("current_work", payload)
-        self.assertEqual(
-            require(self.daemon.application.memory.context("cli:one")).summary,
-            "Parser refactor awaits validation.",
-        )
-        self.speech = "The parser context guides compatibility checks."
-        await self.comment(SpeechReason.ROUTINE)
-        await self.packet(lambda packet: "text" in packet)
-        payload = json.loads(self.requests[-1]["messages"][0]["content"])
-        self.assertEqual(payload["current_work"]["request"], "Refactor the parser")
-        self.assertNotIn("Parser refactor awaits validation.", json.dumps(payload))
-        self.assertEqual(len(self.requests), 3)
-
-    async def test_first_request_summary_restores_bookkeeping_from_a_session_alias(
-        self,
-    ) -> None:
-        self.config.summarize_first_request_only = True
-        self.daemon.application.cognition.memory.save_context(
-            "cli:old-id", "Review hooks", "Hook review", ["Review hooks"], 1, True
-        )
-        self.event(
-            "intent", session="new-id", aliases=["old-id"], goal="Check hook edge cases"
-        )
-        await self.packet(lambda packet: packet.get("text") == self.speech)
-        await self.wait_for(lambda: self.daemon.application.task is None)
-        self.assertEqual(self.summary_requests, [])
-        self.daemon.application.sessions.by_id["cli:new-id"]
-        self.assertEqual(
-            require(
-                self.daemon.application.memory.context("cli:new-id")
-            ).initial_request,
-            "Review hooks",
-        )
-        self.assertEqual(
-            require(self.daemon.application.memory.context("cli:new-id")).request_count,
-            2,
-        )
-        self.assertTrue(
-            require(
-                self.daemon.application.memory.context("cli:new-id")
-            ).first_summary_attempted
-        )
-
-    async def test_first_request_summary_uses_the_initial_prompt_when_followups_are_queued_together(
-        self,
-    ) -> None:
-        self.config.summarize_first_request_only = True
-        for goal in ("Refactor the parser", "Keep its API unchanged"):
-            self.daemon.receive(
-                json.dumps(
-                    {
-                        "kind": "event",
-                        "event": "intent",
-                        "harness": "cli",
-                        "session": "one",
-                        "goal": goal,
-                    }
-                ).encode()
-            )
-        await self.packet(lambda packet: packet.get("text") == self.speech)
-        await self.wait_for(lambda: self.daemon.application.task is None)
-        self.assertEqual(len(self.summary_requests), 1)
-        payload = json.loads(self.summary_requests[0]["messages"][0]["content"])
-        self.assertEqual(payload["current_work"]["request"], "Refactor the parser")
-        self.assertEqual(set(payload), {"current_work"})
-        self.assertNotIn("Keep its API unchanged", json.dumps(payload))
-
-    async def test_subagent_inherited_context_does_not_consume_its_first_request_summary(
-        self,
-    ) -> None:
-        self.config.summarize_first_request_only = True
-        self.event("intent", goal="Refactor the parser")
-        await self.packet(lambda packet: packet.get("text") == self.speech)
-        await self.wait_for(lambda: self.daemon.application.task is None)
-        self.event("subagent_start", session="child", parent="one")
-        await self.wait_for(
-            lambda: "cli:child" in self.daemon.application.sessions.by_id
-        )
-        self.assertEqual(len(self.requests), 1)
-        self.event("waiting", session="child", call="inherited-question")
-        await self.packet(lambda packet: packet.get("text") == self.speech)
-        await self.wait_for(lambda: self.daemon.application.task is None)
-        await self.comment(SpeechReason.PROMPT, trigger=SessionTrigger("cli:child"))
-        await self.packet(lambda packet: packet.get("text") == self.speech)
-        self.assertEqual(len(self.summary_requests), 1)
-        self.event("intent", session="child", goal="Inspect parser edge cases")
-        await self.wait_for(
-            lambda: not self.daemon.application.sessions.by_id["cli:child"].waiting
-        )
-        self.event("waiting", session="child", call="parser-question")
-        await self.packet(lambda packet: packet.get("text") == self.speech)
-        await self.wait_for(lambda: self.daemon.application.task is None)
-        await self.comment(SpeechReason.PROMPT, trigger=SessionTrigger("cli:child"))
-        await self.packet(lambda packet: packet.get("text") == self.speech)
-        self.assertEqual(len(self.summary_requests), 2)
-        payload = json.loads(self.summary_requests[-1]["messages"][0]["content"])
-        self.assertEqual(
-            payload["current_work"]["request"], "Inspect parser edge cases"
-        )
         self.assertNotIn("Refactor the parser", json.dumps(payload))
-
-    async def test_interleaved_work_keeps_separate_summaries_and_commentary(
-        self,
-    ) -> None:
-        self.summary = "Keep the parser API stable."
-        self.event(
-            "intent",
-            session="parser",
-            goal="Refactor the parser without changing its API",
-        )
-        await self.packet(lambda packet: "text" in packet)
-        await self.wait_for(lambda: self.daemon.application.task is None)
-        self.summary = "Remove redundant Python hook handling."
-        self.event(
-            "intent", session="hooks", goal="Review Python hooks for redundant handling"
-        )
-        await self.packet(lambda packet: "text" in packet)
-        await self.wait_for(lambda: self.daemon.application.task is None)
-        commentary = json.loads(self.requests[-1]["messages"][0]["content"])
-        self.assertEqual(
-            commentary["current_work"]["request"],
-            "Review Python hooks for redundant handling",
-        )
-        self.assertNotIn("other_sessions", commentary)
-        self.assertNotIn("Refactor the parser", json.dumps(commentary))
-        for request, excluded in zip(self.summary_requests, ("Python hooks", "parser")):
+        for request, excluded in zip(self.story_requests, ("Python hooks", "parser")):
             self.assertNotIn(excluded, request["messages"][0]["content"])
-        memory = self.daemon.application.cognition.memory
-        self.assertEqual(
-            require(memory.context("cli:parser")).summary,
-            "Keep the parser API stable.",
-        )
-        self.assertEqual(
-            require(memory.context("cli:hooks")).summary,
-            "Remove redundant Python hook handling.",
-        )
-        self.event("turn_done", session="hooks", progress="Hook cleanup passed checks")
-        await self.packet(lambda packet: "text" in packet, timeout=2)
-        await self.wait_for(lambda: self.daemon.application.task is None)
-        commentary = json.loads(self.requests[-1]["messages"][0]["content"])
-        self.assertEqual(
-            commentary["current_work"]["request"],
-            "Review Python hooks for redundant handling",
-        )
-        self.assertNotIn("convergence", commentary)
-        self.assertNotIn("other_sessions", commentary)
-        self.assertTrue(self.daemon.application.sessions.by_id["cli:parser"].active)
-        summary_count = len(self.summary_requests)
-        await self.comment(SpeechReason.ROUTINE)
-        self.assertEqual(len(self.summary_requests), summary_count)
-
-    async def test_summary_failure_preserves_commentary_and_saved_context(self) -> None:
-        self.summary = "Keep the parser API stable."
-        self.event("intent", goal="Refactor the parser")
-        await self.packet(lambda packet: "text" in packet)
-        await self.wait_for(lambda: self.daemon.application.task is None)
-        self.summary_status = 500
-        self.event("intent", goal="Validate parser behavior")
-        await self.packet(lambda packet: packet.get("text") == self.speech)
-        await self.wait_for(lambda: self.daemon.application.task is None)
-        self.assertEqual(
-            require(
-                self.daemon.application.cognition.memory.context("cli:one")
-            ).summary,
-            "Keep the parser API stable.",
-        )
 
     async def test_followup_with_the_same_native_turn_reaches_the_next_prompt(
         self,
@@ -1917,156 +1691,36 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.packet(lambda packet: "text" in packet)
         self.assertEqual(len(self.requests), 2)
         payload = json.loads(self.requests[-1]["messages"][0]["content"])
-        self.assertEqual(request_reason(self.requests[-1]), "prompt")
         self.assertEqual(
             payload["current_work"]["request"], "Explain the counter limits"
         )
 
-    async def test_followup_during_observation_refuses_stale_summary(self) -> None:
-        self.daemon.application.cognition.memory.save_context(
-            "cli:one",
-            "Refactor the parser",
-            "Keep its API stable",
-            ["Refactor the parser"],
-        )
-        self.slow = True
-        self.summary = "Stale parser summary."
-        self.event("intent", goal="Refactor the parser", turn="first")
-        await asyncio.wait_for(self.entered.wait(), 1)
-        self.event(
-            "intent", goal="Keep the parser API unchanged", turn="first", manual=True
-        )
-        await self.wait_for(
-            lambda: (
-                "Keep the parser API unchanged"
-                in require(
-                    self.daemon.application.memory.context("cli:one")
-                ).recent_requests
-            )
-        )
-        self.summary = None
-        self.release.set()
-        await self.wait_for(
-            lambda: self.daemon.application.task is None and len(self.requests) >= 2
-        )
-        self.daemon.application.sessions.by_id["cli:one"]
-        self.assertNotEqual(
-            require(self.daemon.application.memory.context("cli:one")).summary,
-            "Stale parser summary.",
-        )
-        self.assertEqual(
-            require(self.daemon.application.memory.context("cli:one")).initial_request,
-            "Refactor the parser",
-        )
-        self.assertIn(
-            "Keep the parser API unchanged",
-            require(self.daemon.application.memory.context("cli:one")).recent_requests,
-        )
-        self.assertEqual(len(self.daemon.application.cognition.memory.speech()), 1)
-
-    async def test_explicit_speech_cannot_overwrite_context_after_a_followup(
-        self,
-    ) -> None:
-        self.event("intent", goal="Refactor the parser", turn="first")
-        await self.packet(lambda packet: "text" in packet)
-        await self.wait_for(lambda: self.daemon.application.task is None)
-        self.entered.clear()
-        self.slow = True
-        self.summary = "Stale explicit summary."
-        self.send({"kind": "speak", "context": "Comment on the parser"})
-        await asyncio.wait_for(self.entered.wait(), 1)
-        self.event("intent", goal="Keep the parser API unchanged", turn="first")
-        await self.wait_for(
-            lambda: (
-                "Keep the parser API unchanged"
-                in require(
-                    self.daemon.application.memory.context("cli:one")
-                ).recent_requests
-            )
-        )
-        self.summary = None
-        self.release.set()
-        await self.wait_for(
-            lambda: self.daemon.application.task is None and len(self.requests) >= 3
-        )
-        self.assertNotEqual(
-            require(self.daemon.application.memory.context("cli:one")).summary,
-            "Stale explicit summary.",
-        )
-
-    async def test_explicit_speech_keeps_session_summary_separate_from_progress(
-        self,
-    ) -> None:
-        self.summary = "Keep the parser API stable."
-        self.event("intent", goal="Refactor the parser", turn="first")
-        await self.packet(lambda packet: packet.get("text") == self.speech)
-        await self.wait_for(lambda: self.daemon.application.task is None)
-        generation = self.daemon.application.sessions.by_id["cli:one"].generation
-        self.config.summarize_on = [SpeechReason.EXPLICIT]
-        self.summary = "Parser validation remains pending."
-        self.speech = "The parser has another edge case."
-        self.slow = True
-        self.send({"kind": "speak", "context": "Comment on the parser"})
-        await self.wait_for(lambda: len(self.requests) == 2)
-        self.assertEqual(len(self.summary_requests), 1)
-        self.event("progress", progress="Parser validation passed", turn="first")
-        await self.wait_for(
-            lambda: (
-                self.daemon.application.sessions.by_id["cli:one"].progress
-                == "Parser validation passed"
-            )
-        )
-        self.assertEqual(
-            self.daemon.application.sessions.by_id["cli:one"].generation, generation
-        )
-        self.release.set()
-        await self.packet(lambda packet: packet.get("text") == self.speech)
-        await self.wait_for(lambda: self.daemon.application.task is None)
-        self.assertEqual(
-            require(self.daemon.application.memory.context("cli:one")).summary,
-            "Keep the parser API stable.",
-        )
-
-    async def test_restart_restores_context_when_hooks_arrive_without_restoring_live_calls(
-        self,
-    ) -> None:
-        self.summary = "Parser checks are pending."
+    async def test_restart_keeps_story_without_restoring_live_calls(self) -> None:
         self.event("intent", goal="Refactor the parser", turn="first")
         await self.packet(lambda packet: "text" in packet)
         self.event("tool_start", call="checks", tool="pytest")
         await self.wait_for(lambda: self.daemon.application.sessions.working)
+        saved = self.daemon.application.memory.load_narrative("cli:one")
         await self.daemon.close()
-        self.summary = None
         self.daemon = Daemon(self.config, self.client, rng=random.Random(7))
         self.assertFalse(self.daemon.application.sessions.active)
-        self.assertFalse(self.daemon.application.sessions.working)
+        self.assertEqual(
+            self.daemon.application.memory.load_narrative("cli:one"), saved
+        )
         await self.daemon.start()
         self.send_status()
         await self.packet(lambda packet: packet.get("state") == "idle")
         self.event("intent", goal="Continue parser validation", turn="second")
         await self.packet(lambda packet: "text" in packet)
-        lane = self.daemon.application.sessions.by_id["cli:one"]
+        self.assertFalse(self.daemon.application.sessions.by_id["cli:one"].calls)
         self.assertEqual(
-            require(self.daemon.application.memory.context("cli:one")).initial_request,
-            "Refactor the parser",
-        )
-        self.assertEqual(
-            require(self.daemon.application.memory.context("cli:one")).summary,
-            "Parser checks are pending.",
-        )
-        self.assertIn(
+            require(
+                self.daemon.application.memory.load_narrative("cli:one")
+            ).intent.text,
             "Continue parser validation",
-            require(self.daemon.application.memory.context("cli:one")).recent_requests,
         )
-        self.assertFalse(lane.calls)
-        payload = json.loads(self.requests[-1]["messages"][-1]["content"])
-        self.assertEqual(
-            payload["current_work"]["request"], "Continue parser validation"
-        )
-        self.assertIn(
-            "Refactor the parser",
-            [item.get("request") for item in payload["earlier_context"]],
-        )
+        evidence = json.loads(self.story_requests[-1]["messages"][0]["content"])
+        self.assertIn("Refactor the parser", json.dumps(evidence))
 
     async def test_routine_observations_require_a_change_in_work(self) -> None:
         self.use_clock()
@@ -2563,6 +2217,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_recovery_discards_stale_automatic_speech_without_recording_it(
         self,
     ) -> None:
+        self.config.behavior.automatic_speech_cooldown_seconds = 90
+        self.daemon.application.attention.last_attempt = self.daemon.clock()
         self.slow = True
         self.event("intent", harness="claude", goal="Repair tests")
         self.event("tool_start", harness="claude", call="bad", tool="pytest")
@@ -2766,46 +2422,6 @@ class ConfigurationTests(unittest.TestCase):
                 set_config_value(config, "speech_history_seconds", value)
                 config.validate()
 
-    def test_summary_reasons_accept_every_commentary_trigger_and_an_empty_array(
-        self,
-    ) -> None:
-        for reasons in (
-            [],
-            [
-                SpeechReason.PROMPT,
-                SpeechReason.COMPLETION,
-                SpeechReason.ROUTINE,
-                SpeechReason.FAILURE,
-                SpeechReason.CHECK_IN,
-                SpeechReason.CLICK,
-                SpeechReason.EXPLICIT,
-            ],
-        ):
-            with self.subTest(reasons=reasons):
-                config = Config(pet_dir=Path("fixture"))
-                set_config_value(config, "summarize_on", reasons)
-                config.validate()
-
-    def test_summary_configuration_rejects_unknown_reasons_and_nonboolean_flags(
-        self,
-    ) -> None:
-        for reasons in ("prompt", None, ["intent"], [None], [[]]):
-            with (
-                self.subTest(reasons=reasons),
-                self.assertRaisesRegex(ValueError, "summarize_on"),
-            ):
-                config = Config(pet_dir=Path("fixture"))
-                set_config_value(config, "summarize_on", reasons)
-                config.validate()
-        for value in (1, 0, "true", None):
-            with (
-                self.subTest(value=value),
-                self.assertRaisesRegex(ValueError, "summarize_first_request_only"),
-            ):
-                config = Config(pet_dir=Path("fixture"))
-                set_config_value(config, "summarize_first_request_only", value)
-                config.validate()
-
     def test_loads_startup_paths_relative_to_config_and_configurable_timing(
         self,
     ) -> None:
@@ -2821,7 +2437,6 @@ class ConfigurationTests(unittest.TestCase):
                         "memory_retention_days": 14,
                         "memory_max_events": 500,
                         "persona": "A calm garden companion.",
-                        "summarize_on": ["completion"],
                         "log_file": "analysis/pet.jsonl",
                         "memory_file": "state/companion.sqlite3",
                         "behavior": {"walk_seconds": [2, 4], "roaming": False},
@@ -2838,8 +2453,6 @@ class ConfigurationTests(unittest.TestCase):
                 Path(directory).resolve() / "state/companion.sqlite3",
             )
             self.assertEqual(config.persona, "A calm garden companion.")
-            self.assertEqual(len(config.summarize_on), 1)
-            self.assertIs(config.summarize_on[0], SpeechReason.COMPLETION)
             self.assertEqual(config.observation_seconds, (15, 25))
             self.assertEqual(config.idle_message_seconds, 450)
             self.assertEqual(config.prompt_target_bytes, 12000)

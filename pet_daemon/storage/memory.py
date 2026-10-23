@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import TypedDict
 
 from ..domain import DeliveryStatus, SpeechReason
 from ..logging import get_logger
@@ -12,12 +13,14 @@ from ..prompts import select_prompt
 from ..runtime import SwarmActivity
 from ..work import WorkIngestion
 from ..work.history import HistoryDetails, RecallQuery, SessionEntry
-from ..work.models import IntentEvidence
+from ..work.models import IntentEvidence, SessionReport
+from ..work.narrative import NarrativeStatement, WorkNarrative
 from ..work.observations import (
     RepositoryObservation,
     RepositoryTarget,
     SessionObservation,
 )
+from ..work.serialization import report_from_data
 from ..work.validation import repository_identity
 from ..work.views import WorkSubject, collection_targets, connected_work
 from .migrations import migrate
@@ -80,6 +83,11 @@ class SpeechRecord:
     timestamp: float
 
 
+class StoredStatement(TypedDict):
+    text: str
+    sources: list[str]
+
+
 class Memory:
     def __init__(
         self,
@@ -130,6 +138,56 @@ class Memory:
             )
             for row in rows
         }
+
+    def load_narrative(self, subject_id: str) -> WorkNarrative | None:
+        row = self.db.execute(
+            "SELECT data FROM work_narratives WHERE pet=? AND subject=?",
+            (self.pet, subject_id),
+        ).fetchone()
+        if row is None:
+            return None
+        data = json.loads(row["data"])
+
+        def statement(value: StoredStatement) -> NarrativeStatement:
+            return NarrativeStatement(value["text"], tuple(value["sources"]))
+
+        return WorkNarrative(
+            subject_id,
+            data["revision"],
+            statement(data["intent"]),
+            tuple(statement(value) for value in data["decisions"]),
+            tuple(statement(value) for value in data["progress"]),
+            data["sources"],
+        )
+
+    def save_narrative(self, narrative: WorkNarrative) -> None:
+        with self.transaction():
+            self.db.execute(
+                """INSERT INTO work_narratives VALUES (?,?,?,?)
+                ON CONFLICT(pet,subject) DO UPDATE SET
+                data=excluded.data,updated_at=excluded.updated_at""",
+                (
+                    self.pet,
+                    narrative.subject_id,
+                    json.dumps(asdict(narrative), ensure_ascii=False),
+                    self.clock(),
+                ),
+            )
+
+    def narrative_reports(self, sessions: Sequence[str]) -> tuple[SessionReport, ...]:
+        aliases = self.session_aliases()
+        identities = {aliases.get(identifier, identifier) for identifier in sessions}
+        identities.update(
+            alias for alias, target in aliases.items() if target in identities
+        )
+        if not identities:
+            return ()
+        placeholders = ",".join("?" for _ in identities)
+        rows = self.db.execute(
+            f"SELECT data FROM work_reports WHERE pet=? AND session IN ({placeholders}) ORDER BY observed_at,id",
+            (self.pet, *sorted(identities)),
+        )
+        return tuple(report_from_data(json.loads(row["data"])) for row in rows)
 
     def save_attention_history(
         self, subject_id: str, last_selected: float, considered_revision: str | None
@@ -279,6 +337,10 @@ class Memory:
             )
             self.db.execute(
                 "DELETE FROM message_outcomes WHERE pet=? AND timestamp < ?",
+                (self.pet, cutoff),
+            )
+            self.db.execute(
+                "DELETE FROM work_narratives WHERE pet=? AND updated_at < ?",
                 (self.pet, cutoff),
             )
         self.db.execute("PRAGMA incremental_vacuum(64)")
@@ -562,6 +624,7 @@ class Memory:
                 "contexts",
                 "attention_history",
                 "message_outcomes",
+                "work_narratives",
             ):
                 self.db.execute(f"DELETE FROM {table} WHERE pet=?", (self.pet,))
 

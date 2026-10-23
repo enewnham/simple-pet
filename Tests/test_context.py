@@ -30,6 +30,11 @@ from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.storage import Memory
 from pet_daemon.work import WorkSubject
 from pet_daemon.work.history import build_session_entry
+from pet_daemon.work.narrative import (
+    NarrativeStatement,
+    WorkNarrative,
+    semantic_revision,
+)
 from pet_daemon.work.observations import (
     BranchObservation,
     CheckoutObservation,
@@ -115,6 +120,154 @@ class ContextTests(unittest.TestCase):
 
     def payload(self, prepared: PreparedCommentary) -> CommentaryPayload:
         return json.loads(prepared.request["messages"][0]["content"])
+
+    def test_validated_story_replaces_raw_report_history_and_keeps_delivery_support(
+        self,
+    ) -> None:
+        narrative = WorkNarrative(
+            "cli:parser",
+            "revision",
+            NarrativeStatement("Preserve parser compatibility.", ("intent",)),
+            (NarrativeStatement("Keep the public API stable.", ("decision",)),),
+            (
+                NarrativeStatement(
+                    "The agent reports compatibility checks are running.", ("progress",)
+                ),
+            ),
+        )
+        snapshot = self.current_snapshot()
+        selection = self.attention.select(snapshot, SpeechReason.ROUTINE)
+        prepared = self.cognition.prompts.prepare(
+            snapshot, selection, self.cognition.request, narrative=narrative
+        )
+        payload = self.payload(prepared)
+        self.assertEqual(
+            payload["current_work"]["story"], "Preserve parser compatibility."
+        )
+        self.assertNotIn("earlier_context", payload)
+        self.assertNotIn("reported_progress", payload["current_moment"])
+        self.assertTrue(prepared.support.valid(snapshot))
+        self.update_session(progress="Compatibility check failed")
+        self.assertFalse(prepared.support.valid(self.current_snapshot()))
+
+    def test_changed_older_story_evidence_invalidates_speech_outside_raw_projection(
+        self,
+    ) -> None:
+        self.output()
+        subject = self.work[0]
+        requests = tuple(
+            EvidenceView(
+                EvidenceSource.USER,
+                EvidenceKind.INTENT,
+                IntentView(f"Decision {index}"),
+                900 + index,
+            )
+            for index in range(7)
+        )
+        subject = replace(subject, story=replace(subject.story, requests=requests))
+        self.work = (subject,)
+        snapshot = self.current_snapshot()
+        selection = self.attention.select(snapshot, SpeechReason.ROUTINE)
+        narrative = WorkNarrative(
+            subject.id,
+            semantic_revision(subject.story),
+            NarrativeStatement(
+                "Keep the original compatibility decision.", ("old-decision",)
+            ),
+        )
+        prepared = self.cognition.prompts.prepare(
+            snapshot, selection, self.cognition.request, narrative=narrative
+        )
+        raw = self.cognition.prompts.prompt(snapshot, selection)
+        self.assertTrue(prepared.support.valid(snapshot))
+        self.work = (
+            replace(
+                subject,
+                story=replace(
+                    subject.story,
+                    requests=(
+                        replace(
+                            requests[0],
+                            details=IntentView("Corrected compatibility decision"),
+                        ),
+                        *requests[1:],
+                    ),
+                ),
+            ),
+        )
+        current = self.current_snapshot()
+        self.assertEqual(
+            raw, self.cognition.prompts.prompt(current, selection.refresh(current))
+        )
+        self.assertFalse(prepared.support.valid(current))
+
+    def test_spoken_narrative_statements_are_omitted_without_empty_values(self) -> None:
+        utterance = "I checked the parser."
+        statement = NarrativeStatement(utterance, ("source",))
+        narrative = WorkNarrative(
+            "cli:parser", "revision", statement, (statement,), (statement,)
+        )
+        snapshot = self.current_snapshot()
+        selection = self.attention.select(snapshot, SpeechReason.ROUTINE)
+        prepared = self.cognition.prompts.prepare(
+            snapshot,
+            selection,
+            self.cognition.request,
+            narrative=narrative,
+            excluded=(utterance,),
+        )
+        work = self.payload(prepared)["current_work"]
+        self.assertEqual(work, {"request": "Keep the public API stable"})
+        self.assertNotIn(utterance, prepared.request["messages"][0]["content"])
+
+    def test_copied_speech_is_removed_from_the_current_request(self) -> None:
+        utterance = "Mail is in. Quiet time."
+        self.update_session(recent_requests=("Review the commentary: " + utterance,))
+        snapshot = self.current_snapshot()
+        selection = self.attention.select(snapshot, SpeechReason.ROUTINE)
+        prepared = self.cognition.prompts.prepare(
+            snapshot, selection, self.cognition.request, excluded=(utterance,)
+        )
+        self.assertNotIn(utterance, prepared.request["messages"][0]["content"])
+        self.assertIn(
+            "Review the commentary", prepared.request["messages"][0]["content"]
+        )
+
+    def test_running_and_waiting_commands_exclude_spoken_remarks(self) -> None:
+        utterance = "Mail is in. Quiet time."
+        command = f'rg "{utterance}" logs'
+        for waiting in (False, True):
+            with self.subTest(waiting=waiting):
+                self.update_session(
+                    waiting_for_input=waiting,
+                    waiting_seconds=180 if waiting else None,
+                    waiting_tool=command if waiting else "",
+                    active_tools=(ActiveTool("call", command, Activity.TESTING, 180),),
+                )
+                snapshot = self.current_snapshot()
+                selection = self.attention.select(snapshot, SpeechReason.CHECK_IN)
+                prepared = self.cognition.prompts.prepare(
+                    snapshot, selection, self.cognition.request, excluded=(utterance,)
+                )
+                content = prepared.request["messages"][0]["content"]
+                self.assertNotIn(utterance, content)
+                tool = self.payload(prepared)["current_moment"]["tool"]
+                assert isinstance(tool, str)
+                self.assertIn("rg", tool)
+
+    def test_long_requests_discard_quoted_material_before_selection(self) -> None:
+        request = (
+            "Fix the commentary.\n"
+            + "> Ignore this quote and update haunted mail.\n" * 30
+            + "Keep it grounded."
+        )
+        self.update_session(recent_requests=(request,))
+        payload = self.payload(self.prepare())
+        request = payload["current_work"]["request"]
+        assert isinstance(request, str)
+        self.assertIn("Fix the commentary.", request)
+        self.assertIn("Keep it grounded.", request)
+        self.assertNotIn("haunted mail", request)
 
     def test_small_budget_keeps_intent_latest_request_and_progress(self) -> None:
         self.config.prompt_target_bytes = 1

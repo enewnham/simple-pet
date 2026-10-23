@@ -632,8 +632,9 @@ class MemoryTests(unittest.TestCase):
         event = self.memory.recent()[0]
         self.assertLessEqual(
             len(asdict(event.details)["progress"]),
-            240,
+            800,
         )
+        self.assertTrue(asdict(event.details)["progress"].endswith("[omitted]"))
         self.assertNotIn("thought", asdict(event))
         self.assertNotIn("speak", asdict(event))
 

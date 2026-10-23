@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from ..domain import Activity, ExecutionOutcome
 from ..prompts import bounded
+from ..prose import work_prose
 from ..sessions.activity import activity
 from .validation import repository_identity
 
@@ -74,7 +75,7 @@ def build_session_entry(
     kind = event.event
     if kind in {"tool_start", "tool_done", "tool_error"}:
         return None
-    progress = bounded(event.progress)
+    progress = work_prose(event.progress)
     if kind == "progress" and not progress:
         return None
     working_directory = bounded(

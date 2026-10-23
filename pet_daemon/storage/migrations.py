@@ -2,7 +2,7 @@ import sqlite3
 
 from .transactions import transaction
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 
 MEMORY_SCHEMA = """
@@ -76,6 +76,12 @@ DELIVERY_SCHEMA = """
                 PRIMARY KEY(pet,message_id));
 """
 
+NARRATIVE_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS work_narratives (
+        pet TEXT NOT NULL, subject TEXT NOT NULL, data TEXT NOT NULL,
+        updated_at REAL NOT NULL, PRIMARY KEY(pet,subject));
+"""
+
 
 def execute_schema(db: sqlite3.Connection, script: str) -> None:
     statement = ""
@@ -112,6 +118,7 @@ DROP_SCHEMA = """
     DROP TABLE IF EXISTS message_outcomes;
     DROP TABLE IF EXISTS work_updates;
     DROP TABLE IF EXISTS work_decisions;
+    DROP TABLE IF EXISTS work_narratives;
 """
 
 
@@ -126,4 +133,5 @@ def migrate(db: sqlite3.Connection) -> None:
         execute_schema(db, MEMORY_SCHEMA)
         execute_schema(db, WORK_SCHEMA)
         execute_schema(db, DELIVERY_SCHEMA)
+        execute_schema(db, NARRATIVE_SCHEMA)
         db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

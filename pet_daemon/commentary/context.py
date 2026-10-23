@@ -1,5 +1,5 @@
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,8 +15,10 @@ from ..domain import (
     SpeechSituation,
 )
 from ..prompts import bounded, select_prompt
+from ..prose import prose_text, work_prose
 from ..runtime import PetContext
 from ..types import JSONObject
+from ..work.narrative import WorkNarrative, semantic_revision
 from .contracts import ModelRequest, RequestFactory
 from .presentation import work_record
 
@@ -47,8 +49,8 @@ reports do not describe current assignments or prove that unfinished work contin
 Child reports describe only their assignment. Use human-readable ages to judge freshness.
 
 React as the pet doing this work in first person. Choose one meaningful detail rather
-than reciting a status report. Let humor concern your own effort, uncertainty, or stubborn
-bugs. Do not speculate that the developer or agents neglected a request. Omit publication
+than reciting a status report. Let humor arise only from the supplied work. Humor is optional. Stay interested and
+understated. Avoid reluctant replies, compulsory punchlines, and invented past failures. Do not speculate that the developer or agents neglected a request. Omit publication
 mechanics, PR details, commit hashes, and branch names. Do not invent plans or assign work
 to the developer. A reported result establishes only what that report says succeeded.
 A successful call alone does not establish that the requested work succeeded.
@@ -84,14 +86,6 @@ CARE_SITUATIONS = frozenset(
         SpeechSituation.CARE_CONSTERNATION,
     }
 )
-RETRY_INSTRUCTIONS = """
-Keep the configured persona. Look beyond the most obvious status update and choose
-another supported detail or a different reaction.
-When current observations establish that the same work continues, you may acknowledge
-that continuation. Keep the remark grounded in the supplied observations. Do not invent
-news or obligations to make it different. Silence is appropriate for optional commentary
-when there is no fresh angle.
-""".strip()
 CACHE_CONTROL: CacheControlEphemeralParam = {"type": "ephemeral", "ttl": "1h"}
 
 
@@ -129,7 +123,10 @@ def context_priority(earlier: list[JSONObject]) -> list[int]:
 
 
 def project_payload(
-    snapshot: PetContext, selection: AttentionSelection, timestamp: float
+    snapshot: PetContext,
+    selection: AttentionSelection,
+    timestamp: float,
+    excluded: Sequence[str] = (),
 ) -> CommentaryPayload:
     payload: CommentaryPayload = {}
     situation = selection.situation
@@ -142,7 +139,7 @@ def project_payload(
         return {
             "current_moment": {
                 "kind": "explicit_context",
-                "text": bounded(selection.context, 2000),
+                "text": work_prose(selection.context, 2000, excluded),
             }
         }
     if selection.reason == SpeechReason.EXPLICIT:
@@ -165,7 +162,9 @@ def project_payload(
         request = work["intent"]
     current_work: JSONObject = {}
     if request:
-        current_work["request"] = select_prompt(request)
+        prose = select_prompt(prose_text(request, excluded))
+        if prose:
+            current_work["request"] = prose
     if focus and focus.repo:
         current_work["project"] = bounded(Path(focus.repo).name, 120)
     if current_work:
@@ -181,13 +180,17 @@ def project_payload(
     ) -> None:
         if not text:
             return
-        item: JSONObject = {field: bounded(text, 600)}
+        text = work_prose(text, 600, excluded)
+        if not text:
+            return
+        item: JSONObject = {field: text}
         if observed_at is not None:
             age = duration(timestamp - observed_at)
             if age:
                 item["age"] = age + " ago"
-        if scope:
-            item["scope"] = bounded(scope, 200)
+        scope_text = work_prose(scope, 200, excluded)
+        if scope_text:
+            item["scope"] = scope_text
         for previous in earlier:
             if {
                 key: value for key, value in previous.items() if key != "outcome"
@@ -206,7 +209,7 @@ def project_payload(
             )
     elif focus:
         for previous in focus.recent_requests[-4:-1]:
-            add_earlier(select_prompt(previous), "request")
+            add_earlier(select_prompt(prose_text(previous, excluded)), "request")
     moment: JSONObject = {"kind": "work_update"}
     if focus:
         if focus.waiting_for_input:
@@ -217,8 +220,9 @@ def project_payload(
                 if focus.waiting_kind == "question"
                 else "waiting"
             }
-            if focus.waiting_tool:
-                moment["tool"] = bounded(focus.waiting_tool, 160)
+            command = work_prose(focus.waiting_tool, 160, excluded)
+            if command:
+                moment["tool"] = command
             elapsed = duration(focus.waiting_seconds)
             if elapsed:
                 moment["elapsed"] = elapsed
@@ -247,7 +251,7 @@ def project_payload(
             moment = {"kind": "request_received"}
         if situation == SpeechSituation.CHECK_IN_RUNNING and focus.active_tools:
             tool = max(focus.active_tools, key=lambda tool: tool.duration_seconds)
-            command = bounded(tool.tool, 160)
+            command = work_prose(tool.tool, 160, excluded)
             if command:
                 moment["tool"] = command
             elapsed = duration(tool.duration_seconds)
@@ -315,7 +319,9 @@ def project_payload(
         SpeechSituation.PROMPT,
         SpeechSituation.FAILURE,
     ):
-        moment["reported_progress"] = bounded(current_report, 600)
+        prose = work_prose(current_report, 600, excluded)
+        if prose:
+            moment["reported_progress"] = prose
     payload["current_moment"] = moment
     if earlier:
         payload["earlier_context"] = [
@@ -338,6 +344,7 @@ def stable_payload(payload: CommentaryPayload) -> CommentaryPayload:
 class CommentarySupport:
     selection: AttentionSelection
     payload: CommentaryPayload
+    narrative_revision: str | None = None
 
     def valid(self, snapshot: PetContext) -> bool:
         if self.selection.situation in CARE_SITUATIONS:
@@ -355,6 +362,29 @@ class CommentarySupport:
         if not self.selection.supported(snapshot):
             return False
         refreshed = self.selection.refresh(snapshot)
+        if self.narrative_revision is not None and (
+            refreshed.subject is None
+            or semantic_revision(refreshed.subject.story) != self.narrative_revision
+        ):
+            return False
+        if self.selection.situation == SpeechSituation.FAILURE:
+            before = self.selection.focus_session
+            after = refreshed.focus_session
+            original = before.failure if before else None
+            current_failure = after.failure if after else None
+            if (
+                original is None
+                or current_failure is None
+                or current_failure.resolved
+                or not current_failure.current_turn
+                or (original.activity, original.count, original.goal)
+                != (
+                    current_failure.activity,
+                    current_failure.count,
+                    current_failure.goal,
+                )
+            ):
+                return False
         if self.selection.situation == SpeechSituation.CHECK_IN_RUNNING:
             before = self.selection.focus_session
             after = refreshed.focus_session
@@ -404,15 +434,8 @@ class PromptBuilder:
                 )
         return direction
 
-    def system(
-        self, selection: AttentionSelection, retry: bool = False
-    ) -> list[TextBlockParam]:
-        direction = self.situation(selection)
-        direction = "<request>\n" + direction + "\n</request>"
-        if retry:
-            direction += (
-                "\n<reconsideration>\n" + RETRY_INSTRUCTIONS + "\n</reconsideration>"
-            )
+    def system(self, selection: AttentionSelection) -> list[TextBlockParam]:
+        direction = "<request>\n" + self.situation(selection) + "\n</request>"
         return [
             {
                 "type": "text",
@@ -426,9 +449,52 @@ class PromptBuilder:
         ]
 
     def prompt(
-        self, snapshot: PetContext, selection: AttentionSelection
+        self,
+        snapshot: PetContext,
+        selection: AttentionSelection,
+        narrative: WorkNarrative | None = None,
+        *,
+        basic: bool = False,
+        excluded: Sequence[str] = (),
     ) -> CommentaryPayload:
-        return project_payload(snapshot, selection, self.clock())
+        payload = project_payload(snapshot, selection, self.clock(), excluded)
+        if narrative is not None and "current_work" in payload:
+            work = payload["current_work"]
+            intent = work_prose(narrative.intent.text, 400, excluded)
+            if intent:
+                work["story"] = intent
+            decisions = [
+                text
+                for item in narrative.decisions
+                if (text := work_prose(item.text, 400, excluded))
+            ]
+            if decisions:
+                work["decisions"] = [text for text in decisions]
+            progress = [
+                text
+                for item in narrative.progress
+                if (text := work_prose(item.text, 400, excluded))
+            ]
+            if progress:
+                work["reported_progress"] = [text for text in progress]
+            payload.pop("earlier_context", None)
+            moment = payload.get("current_moment", {})
+            if moment.get("kind") not in (
+                "permission_request",
+                "input_requested",
+                "waiting",
+            ):
+                moment.pop("reported_progress", None)
+        elif basic:
+            payload.pop("earlier_context", None)
+            moment = payload.get("current_moment", {})
+            if moment.get("kind") not in (
+                "permission_request",
+                "input_requested",
+                "waiting",
+            ):
+                moment.pop("reported_progress", None)
+        return payload
 
     def prepare(
         self,
@@ -436,10 +502,15 @@ class PromptBuilder:
         selection: AttentionSelection,
         make_request: RequestFactory,
         speech_required: bool = False,
-        retry: bool = False,
+        *,
+        narrative: WorkNarrative | None = None,
+        basic: bool = False,
+        excluded: Sequence[str] = (),
     ) -> PreparedCommentary:
-        payload = self.prompt(snapshot, selection)
-        system = self.system(selection, retry)
+        payload = self.prompt(
+            snapshot, selection, narrative, basic=basic, excluded=excluded
+        )
+        system = self.system(selection)
         selected = deepcopy(payload)
         earlier = selected.pop("earlier_context", [])
         included: list[int] = []
@@ -455,5 +526,15 @@ class PromptBuilder:
             included.append(index)
         request = make_request(selected, system, speech_required=speech_required)
         return PreparedCommentary(
-            selection, request, CommentarySupport(selection, deepcopy(selected))
+            selection,
+            request,
+            CommentarySupport(
+                selection,
+                project_payload(snapshot, selection, self.clock())
+                if narrative is not None or basic
+                else deepcopy(selected),
+                narrative.revision
+                if narrative is not None and selection.subject is not None
+                else None,
+            ),
         )
