@@ -58,6 +58,20 @@ To inspect one request, use its full observation ID from the JSON file:
 jq 'select(.observation_id == "FULL_OBSERVATION_ID")' logs/pet-daemon.jsonl
 ```
 
+Browse commentary requests in a terminal:
+
+```sh
+bin/pet-inspect
+bin/pet-inspect /path/to/pet-daemon.jsonl
+```
+
+The viewer shows a timeline of commentary attempts beside the speech bubble,
+system prompt, and messages sent to Claude. Markdown is rendered and JSON is
+indented. Rows show delivery outcomes, including displayed and silent attempts.
+Story-generation requests are excluded. The viewer reads the log and its numbered
+rotations. Use ↑/↓ to select a request, Tab to move between panes, the mouse wheel
+to scroll, r to refresh, and q to quit.
+
 ## Connect your agents
 
 Add the client and hook adapter to PATH before launching your harness:

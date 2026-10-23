@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+pet_root="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$pet_root/.cache/uv}"
+export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-$pet_root/.cache/uv/python}"
+export PYTHONPATH="$pet_root:$PYTHONPATH"
+exec uv run --locked --project "$pet_root" python -m pet_daemon.inspect "$@"

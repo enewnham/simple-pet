@@ -9,6 +9,7 @@ dependencies = [
     "pyobjc-framework-naturallanguage>=12.2.2,<13",
     "rich>=14,<15",
     "structlog>=26.1,<27",
+    "textual>=6,<7",
 ]
 
 [tool.uv]
