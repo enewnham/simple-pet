@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import sys
@@ -8,6 +9,7 @@ from datetime import datetime
 from enum import Enum
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import cast
 
 import structlog
 from structlog.stdlib import get_logger
@@ -96,11 +98,6 @@ class ConsolePresentation:
         if not self.verbose:
             for key in PAYLOAD_FIELDS:
                 event.pop(key, None)
-            for key, value in event.items():
-                if key not in {"event", "exc_info", "stack", "timestamp", "level"}:
-                    rendered = str(value)
-                    if len(rendered) > 300:
-                        event[key] = rendered[:297] + "..."
         return event
 
 
@@ -111,10 +108,11 @@ def configure(
     colors = sys.stderr.isatty() and "NO_COLOR" not in os.environ
     styles = structlog.dev.ConsoleRenderer.get_default_column_styles(colors)
     level_styles = structlog.dev.ConsoleRenderer.get_default_level_styles(colors)
+    level_styles["debug"] = styles.logger_name
 
     def render_level(key: str, value: object) -> str:
         level = str(value)
-        return f"{level_styles[level]}{level[0].upper()}{styles.reset}"
+        return f"{styles.bright}{level_styles[level]}{level[0].upper()}{styles.reset}"
 
     renderer = structlog.dev.ConsoleRenderer(
         colors=colors,
@@ -124,6 +122,23 @@ def configure(
             color_system="truecolor" if colors else None,
         ),
     )
+    default_formatter = cast(
+        structlog.dev.KeyValueColumnFormatter, renderer.columns[0].formatter
+    )
+    scalar_repr = default_formatter.value_repr
+
+    def render_value(value: object) -> str:
+        if isinstance(value, (dict, list, tuple, set, frozenset, Enum)) or (
+            is_dataclass(value) and not isinstance(value, type)
+        ):
+            rendered = json.dumps(value, default=json_default, ensure_ascii=False)
+        else:
+            rendered = scalar_repr(value)
+        return (
+            rendered[:297] + "..." if not verbose and len(rendered) > 300 else rendered
+        )
+
+    default_formatter.value_repr = render_value
     for column in renderer.columns:
         if column.key == "level":
             column.formatter = render_level
