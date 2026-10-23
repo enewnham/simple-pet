@@ -144,7 +144,6 @@ class SessionReactions:
             "turn_error",
             "subagent_done",
             "interrupt",
-            "session_end",
             "tool_done",
             "tool_error",
         )
@@ -172,7 +171,11 @@ class SessionReactions:
     def relevant(self, reaction: SessionReaction, sessions: Sessions) -> bool:
         key = sessions.aliases.get(reaction.session, reaction.session)
         session = sessions.by_id.get(key)
-        if session is None or session.generation != reaction.generation:
+        if (
+            session is None
+            or session.retired
+            or session.generation != reaction.generation
+        ):
             return False
         kind = reaction.kind
         state = self.states.get((key, session.generation))

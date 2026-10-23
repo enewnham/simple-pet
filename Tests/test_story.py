@@ -71,6 +71,34 @@ class StoryTests(unittest.TestCase):
             )
         )
 
+    def test_story_sources_preserve_observation_time_across_later_requests(
+        self,
+    ) -> None:
+        self.memory.work.clock = lambda: 700
+        self.add(IntentEvidence("codex:root", "Inspect parser"))
+        self.memory.work.clock = lambda: 880
+        self.add(ProgressEvidence("codex:root", "Parser checks passed"))
+        self.memory.clock = lambda: 1000
+        first = self.prepared()
+        report = next(
+            source
+            for source in first.sources.values()
+            if source["kind"] == "reported_progress"
+        )
+        self.assertEqual(report["observed_at"], 880)
+        self.assertEqual(report["origin"], "codex:root")
+        payload = json.loads(first.request["messages"][0]["content"])
+        evidence = payload["current_moment"]["evidence"]
+        self.assertEqual(evidence[-1]["age"], "2 minutes ago")
+        self.memory.clock = lambda: 8200
+        later = self.prepared()
+        payload = json.loads(later.request["messages"][0]["content"])
+        self.assertEqual(
+            payload["current_moment"]["evidence"][-1]["age"], "2 hours ago"
+        )
+        self.assertEqual(first.sources, later.sources)
+        self.assertEqual(first.revision, later.revision)
+
     def test_latest_followup_keeps_original_intent_beyond_recent_requests(self) -> None:
         self.add(IntentEvidence("codex:root", "Implement quoted-field parsing"))
         for text in (

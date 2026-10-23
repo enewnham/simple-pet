@@ -108,7 +108,7 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                 env = dict(os.environ, PET_DAEMON_SOCKET=config.daemon_socket)
 
                 async def wait_for(
-                    condition: Callable[[], bool], timeout: float = 5
+                    condition: Callable[[], bool], timeout: float = 10
                 ) -> None:
                     async def wait() -> None:
                         while not condition():

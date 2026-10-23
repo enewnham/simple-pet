@@ -1,7 +1,7 @@
 from collections.abc import Mapping
 from typing import cast
 
-from ..domain import ExecutionOutcome
+from ..domain import ExecutionOutcome, SessionSource
 from ..runtime import HookEvent, HookTextFields, ProcessIdentity
 
 EVENTS = frozenset(
@@ -21,7 +21,6 @@ EVENTS = frozenset(
         "waiting",
     }
 )
-HARNESS = frozenset({"cli", "claude", "codex", "cursor"})
 TEXT_FIELDS = (
     "parent",
     "parent_call",
@@ -49,12 +48,15 @@ def normalize_hook(packet: object) -> HookEvent | None:
     )
     if (
         not isinstance(harness, str)
-        or harness not in HARNESS
         or not isinstance(event, str)
         or event not in EVENTS
         or not isinstance(session, str)
         or not session
     ):
+        return None
+    try:
+        session_source = SessionSource(harness)
+    except ValueError:
         return None
     if any(
         name in packet and not isinstance(packet[name], str) for name in TEXT_FIELDS
@@ -83,7 +85,7 @@ def normalize_hook(packet: object) -> HookEvent | None:
     validated = cast(HookTextFields, packet)
     code = packet.get("exit_code")
     return HookEvent(
-        harness,
+        session_source,
         session,
         event,
         aliases=tuple(aliases),

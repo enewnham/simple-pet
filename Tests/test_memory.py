@@ -6,7 +6,13 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import patch
 
-from pet_daemon.domain import Activity, DeliveryStatus, ExecutionOutcome, SpeechReason
+from pet_daemon.domain import (
+    Activity,
+    DeliveryStatus,
+    ExecutionOutcome,
+    SessionSource,
+    SpeechReason,
+)
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources.hooks import HookEvent, normalize_hook
 from pet_daemon.storage import Memory
@@ -77,7 +83,8 @@ class MemoryTests(unittest.TestCase):
     def observe_checkout(self, memory: Memory | None = None) -> CheckoutObservation:
         memory = memory or self.memory
         self.ingest(
-            HookEvent("codex", "one", "session_start", repo="/repo/parser"), memory
+            HookEvent(SessionSource.CODEX, "one", "session_start", repo="/repo/parser"),
+            memory,
         )
         checkpoint = CheckoutObservation(
             "/repo/parser",
@@ -218,7 +225,7 @@ class MemoryTests(unittest.TestCase):
     def test_clear_erases_saved_knowledge_for_the_current_pet(self) -> None:
         other = Memory(self.path, "other-pet", clock=lambda: self.now)
         event = HookEvent(
-            harness="codex",
+            harness=SessionSource.CODEX,
             session="one",
             event="intent",
             repo="/repo/parser",
@@ -509,7 +516,7 @@ class MemoryTests(unittest.TestCase):
             self.memory.record_event(
                 build_session_entry(
                     HookEvent(
-                        "codex",
+                        SessionSource.CODEX,
                         "one",
                         "intent",
                         repo=location,
@@ -527,7 +534,7 @@ class MemoryTests(unittest.TestCase):
             self.event(f"Recent progress {index}")
         request = build_recall_query(
             HookEvent(
-                "codex",
+                SessionSource.CODEX,
                 "one",
                 "intent",
                 repo="/another/worktree",
@@ -549,7 +556,7 @@ class MemoryTests(unittest.TestCase):
         self,
     ) -> None:
         event = HookEvent(
-            "codex",
+            SessionSource.CODEX,
             "one",
             "intent",
             repo="/repo/parser",
@@ -696,7 +703,10 @@ class MemoryTests(unittest.TestCase):
         self.memory.record_event(
             build_session_entry(
                 HookEvent(
-                    "claude", "one", "interrupt", outcome=ExecutionOutcome.CANCELLED
+                    SessionSource.CLAUDE,
+                    "one",
+                    "interrupt",
+                    outcome=ExecutionOutcome.CANCELLED,
                 )
             )
         )
@@ -715,13 +725,17 @@ class MemoryTests(unittest.TestCase):
                 SpeechReason.ROUTINE,
                 "work",
                 "revision",
-                50,
-                "revision",
+                HistoryRecord(50, "revision"),
             )
         )
         self.assertFalse(
             self.memory.record_acceptance(
-                "message", "Duplicate", SpeechReason.ROUTINE, "work", "new", 60, "new"
+                "message",
+                "Duplicate",
+                SpeechReason.ROUTINE,
+                "work",
+                "new",
+                HistoryRecord(60, "new"),
             )
         )
         outcome = require(self.memory.message_outcome("message"))
@@ -736,7 +750,7 @@ class MemoryTests(unittest.TestCase):
         )
 
     def test_late_acceptance_preserves_newer_consideration(self) -> None:
-        self.memory.save_attention_history("work", 60, "new")
+        self.memory.save_attention_history("work", HistoryRecord(60, "new"))
         self.memory.record_acceptance(
             "message", "Earlier report", SpeechReason.ROUTINE, "work", "old"
         )
@@ -757,8 +771,7 @@ class MemoryTests(unittest.TestCase):
                 SpeechReason.ROUTINE,
                 "work",
                 "revision",
-                50,
-                "revision",
+                HistoryRecord(50, "revision"),
             )
         self.assertIsNone(self.memory.message_outcome("message"))
         self.assertEqual(self.memory.speech(), [])
@@ -769,8 +782,7 @@ class MemoryTests(unittest.TestCase):
                 SpeechReason.ROUTINE,
                 subject_id="work",
                 revision="revision",
-                last_selected=50,
-                considered_revision="revision",
+                history=HistoryRecord(50, "revision"),
             )
         self.assertIsNone(self.memory.message_outcome("message"))
 
@@ -787,8 +799,7 @@ class MemoryTests(unittest.TestCase):
                 SpeechReason.ROUTINE,
                 "work",
                 "revision",
-                50,
-                "revision",
+                HistoryRecord(50, "revision"),
             )
         self.assertIsNone(self.memory.message_outcome("message"))
         self.assertEqual(self.memory.speech(), [])
@@ -805,8 +816,7 @@ class MemoryTests(unittest.TestCase):
                 "Parser covered",
                 "work",
                 "revision",
-                50,
-                "revision",
+                HistoryRecord(50, "revision"),
             )
         )
         self.assertFalse(
@@ -814,7 +824,7 @@ class MemoryTests(unittest.TestCase):
                 "message",
                 SpeechReason.ROUTINE,
                 subject_id="work",
-                considered_revision="other",
+                history=HistoryRecord(considered_subject_revision="other"),
             )
         )
         self.assertEqual(
@@ -907,7 +917,10 @@ class MemoryTests(unittest.TestCase):
         try:
             for memory in (self.memory, other):
                 self.ingest(
-                    HookEvent("codex", "one", "intent", goal="Improve parser"), memory
+                    HookEvent(
+                        SessionSource.CODEX, "one", "intent", goal="Improve parser"
+                    ),
+                    memory,
                 )
                 self.observe_checkout(memory)
             self.assertEqual(
@@ -932,12 +945,23 @@ class MemoryTests(unittest.TestCase):
         self.memory = Memory(
             self.path, "fixture", clock=lambda: self.now, retention_days=1
         )
-        self.ingest(HookEvent("codex", "one", "intent", goal="Improve parser"))
-        self.ingest(HookEvent("codex", "one", "intent", goal="Check parser edge cases"))
+        self.ingest(
+            HookEvent(SessionSource.CODEX, "one", "intent", goal="Improve parser")
+        )
+        self.ingest(
+            HookEvent(
+                SessionSource.CODEX, "one", "intent", goal="Check parser edge cases"
+            )
+        )
         self.now += 2 * 86400
         self.memory.prune()
         self.ingest(
-            HookEvent("codex", "one", "progress", progress="Parser edge cases pass")
+            HookEvent(
+                SessionSource.CODEX,
+                "one",
+                "progress",
+                progress="Parser edge cases pass",
+            )
         )
         story = self.memory.connected_work(sessions_snapshot())[0].story
         self.assertEqual(story.intent, "Check parser edge cases")
@@ -957,7 +981,9 @@ class MemoryTests(unittest.TestCase):
     def test_nested_ingestion_rolls_back_checkpoint_and_domain_changes_together(
         self,
     ) -> None:
-        self.ingest(HookEvent("codex", "one", "intent", goal="Improve parser"))
+        self.ingest(
+            HookEvent(SessionSource.CODEX, "one", "intent", goal="Improve parser")
+        )
         observation = CheckoutObservation(
             "/repo/parser",
             GitObservation(
@@ -979,7 +1005,11 @@ class MemoryTests(unittest.TestCase):
             self.assertRaisesRegex(RuntimeError, "rollback"),
             self.memory.transaction(),
         ):
-            self.ingest(HookEvent("codex", "one", "session_start", repo="/repo/parser"))
+            self.ingest(
+                HookEvent(
+                    SessionSource.CODEX, "one", "session_start", repo="/repo/parser"
+                )
+            )
             self.memory.work.observe(observation)
             raise RuntimeError("rollback")
         self.assertEqual(self.memory.load_repositories(), ())
@@ -997,7 +1027,9 @@ class MemoryTests(unittest.TestCase):
         self,
     ) -> None:
         self.now = 2_000_000_000
-        self.memory.save_attention_history("work-one", 2, "meaningful-revision")
+        self.memory.save_attention_history(
+            "work-one", HistoryRecord(2, "meaningful-revision")
+        )
         self.memory.prune()
         self.memory.close()
         self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
@@ -1008,11 +1040,41 @@ class MemoryTests(unittest.TestCase):
         other = Memory(self.path, "other-pet", clock=lambda: self.now)
         try:
             self.assertEqual(other.load_attention_history(), {})
-            other.save_attention_history("work-one", 7, "other-revision")
+            other.save_attention_history("work-one", HistoryRecord(7, "other-revision"))
             self.memory.clear()
             self.assertEqual(self.memory.load_attention_history(), {})
             self.assertEqual(
                 other.load_attention_history()["work-one"].last_selected, 7
+            )
+        finally:
+            other.close()
+
+    def test_subject_and_session_consideration_share_a_canonical_identity(self) -> None:
+        identifier = "codex:parser"
+        original = HistoryRecord(
+            last_selected=50,
+            considered_subject_revision="combined-story",
+            considered_session_revision="parser-result",
+        )
+        self.memory.save_attention_history(identifier, original)
+        updated = replace(original, considered_subject_revision="child-progress")
+        self.memory.save_attention_history(identifier, updated)
+        self.memory.close()
+        self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
+        self.assertEqual(self.memory.load_attention_history(), {identifier: updated})
+        other = Memory(self.path, "other-pet", clock=lambda: self.now)
+        try:
+            self.assertEqual(other.load_attention_history(), {})
+            other_history = HistoryRecord(
+                considered_subject_revision="other-story",
+                considered_session_revision="other-result",
+            )
+            other.save_attention_history(identifier, other_history)
+            self.assertEqual(
+                self.memory.load_attention_history(), {identifier: updated}
+            )
+            self.assertEqual(
+                other.load_attention_history(), {identifier: other_history}
             )
         finally:
             other.close()
@@ -1025,7 +1087,11 @@ class MemoryTests(unittest.TestCase):
                 self.memory.save_context(
                     "codex:one", "Improve parser", "Parser summary", ["Improve parser"]
                 )
-                self.ingest(HookEvent("codex", "one", "intent", goal="Improve parser"))
+                self.ingest(
+                    HookEvent(
+                        SessionSource.CODEX, "one", "intent", goal="Improve parser"
+                    )
+                )
                 self.observe_checkout()
                 self.memory.close()
                 with sqlite3.connect(self.path) as database:

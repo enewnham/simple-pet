@@ -26,7 +26,13 @@ class Clock:
 class SessionsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.clock = Clock()
-        self.sessions = Sessions(self.clock, stale_seconds=60, retention_seconds=120)
+        self.sessions = Sessions(
+            self.clock,
+            stale_seconds=60,
+            retention_seconds=120,
+            fresh_seconds=3600,
+            wall_clock=self.clock,
+        )
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.memory = Memory(
@@ -823,6 +829,33 @@ class SessionsTests(unittest.TestCase):
         self.assertEqual(snapshot.activity, "working")
         self.assertTrue(self.sessions.active)
 
+    def test_closure_preserves_reported_result_and_original_timing(self) -> None:
+        self.event("intent", goal="Build it")
+        self.clock.advance(10)
+        self.event("turn_done", outcome="success", progress="Checks pass")
+        session = self.sessions.by_id["claude:main"]
+        ended, changed_at = session.ended, session.changed_at
+        self.clock.advance(30)
+        self.event("session_end")
+        self.assertEqual(session.outcome, ExecutionOutcome.SUCCESS)
+        self.assertEqual(session.ended, ended)
+        self.assertEqual(session.changed_at, changed_at)
+        last_seen = session.last_seen
+        self.clock.advance(30)
+        self.assertIsNone(self.event("session_end"))
+        self.assertEqual(session.last_seen, last_seen)
+        self.assertEqual(session.ended, ended)
+
+    def test_closure_without_report_keeps_outcome_unknown(self) -> None:
+        self.event("intent", goal="Build it")
+        self.event("tool_start", call="build", tool="build")
+        self.event("session_end")
+        session = self.sessions.by_id["claude:main"]
+        self.assertFalse(session.active)
+        self.assertFalse(session.calls)
+        self.assertIsNone(session.outcome)
+        self.assertFalse(self.sessions.clean_convergence)
+
     def test_stale_lane_expires_and_retention_removes_aliases(self) -> None:
         self.event("intent", aliases=["alternate"], goal="Build it")
         self.event("tool_start", call="build", tool="build")
@@ -833,7 +866,7 @@ class SessionsTests(unittest.TestCase):
         self.assertTrue(self.sessions.prune())
         self.assertFalse(self.sessions.working)
         self.assertFalse(self.sessions.active)
-        self.assertEqual(self.sessions.by_id["claude:main"].outcome, "stale")
+        self.assertIsNone(self.sessions.by_id["claude:main"].outcome)
         self.assertIsNone(self.sessions.convergence)
         self.clock.now += 120
         self.sessions.prune()
@@ -992,7 +1025,7 @@ class SessionsTests(unittest.TestCase):
         self.event("tool_start", session="stale", call="build", tool="Build")
         self.clock.advance(60)
         self.sessions.prune()
-        self.assertEqual(self.sessions.by_id["claude:stale"].outcome, "stale")
+        self.assertIsNone(self.sessions.by_id["claude:stale"].outcome)
         self.assertEqual(self.sessions.check_in_due(30), [])
 
 

@@ -98,7 +98,8 @@ for the agents' reports.
 The pet maintains a short work story from user requests and scoped agent reports before
 generating commentary. Quoted text, code blocks, and tables are excluded from reports.
 Recent pet remarks stay local for repetition checks and are excluded from model prompts.
-Unchanged completed work stays quiet.
+The pet reacts to each reported result at most once, within five minutes of the turn ending.
+It also comments on live work and current waits.
 
 Remembered work and speech are stored locally. Use the commands below to clear them.
 
@@ -125,13 +126,13 @@ Run the checks in a logged-in macOS session:
 make check
 ```
 
-Replay sanitized commentary sequences without API calls:
+Replay commentary fixtures without API calls:
 
 ```sh
 uv run --locked python -m pet_daemon.replay
 ```
 
-Pass a fixture file or directory to select sequences. To compare three model samples
+Pass a fixture file or directory to select sequences. To generate a model sample
 per sequence using the configured persona and model:
 
 ```sh
@@ -139,7 +140,12 @@ uv run --locked python -m pet_daemon.replay --model-run --config pet.config.json
 ```
 
 Results, requests, latency, and token usage are saved under `.cache/replays/`.
-Review the comparisons before committing prompt changes.
+Use `--samples 3` for repeated samples. Review the comparisons before committing prompt changes.
+
+Use `$pet-triage` in Codex to investigate recent commentary, reactions, movement,
+naps, or timing. Describe the behavior or paste a log entry. The
+[skill](.agents/skills/pet-triage/SKILL.md) saves Markdown findings, evidence, and
+replay comparisons under `.cache/triage/`. Follow-up prompts continue the same case.
 
 ## License and attribution
 

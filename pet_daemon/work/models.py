@@ -191,6 +191,7 @@ class SessionRecord:
     execution: SessionReport | None = None
     changed_at: float = 0
     aliases: tuple[str, ...] = ()
+    closure: SessionReport | None = None
 
 
 @dataclass

@@ -6,7 +6,7 @@ import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
-from ..domain import ProcessStatus
+from ..domain import ProcessStatus, SessionSource
 from ..runtime import ProcessIdentity
 
 type ProcessRow = tuple[ProcessIdentity, int, str, str]
@@ -54,7 +54,9 @@ def _processes(pid: int | None = None) -> dict[int, ProcessRow]:
     return rows
 
 
-def discover_owner(harness: str, pid: int | None = None) -> ProcessIdentity | None:
+def discover_owner(
+    harness: SessionSource, pid: int | None = None
+) -> ProcessIdentity | None:
     try:
         rows = _processes()
     except OSError, subprocess.SubprocessError:
@@ -85,8 +87,11 @@ def discover_owner(harness: str, pid: int | None = None) -> ProcessIdentity | No
         except ValueError:
             continue
         executable = Path(argv[0]).name if argv else ""
-        if harness in ("claude", "codex") and executable == harness:
-            if harness == "codex" and "app-server" in argv[1:]:
+        if (
+            harness in (SessionSource.CLAUDE, SessionSource.CODEX)
+            and executable == harness
+        ):
+            if harness == SessionSource.CODEX and "app-server" in argv[1:]:
                 continue
             return identity
     return None
@@ -116,11 +121,13 @@ class ProcessTracker:
         clock: Callable[[], float] = time.monotonic,
         interval: float = 10,
         concurrency: int = 4,
+        probe_process: Callable[[ProcessIdentity], ProcessStatus] | None = None,
     ) -> None:
         self.clock = clock
         self.interval = interval
         self.semaphore = asyncio.Semaphore(concurrency)
         self.checked: dict[ProcessIdentity, float] = {}
+        self.probe_process = probe_process
 
     async def refresh(
         self, identities: Iterable[ProcessIdentity]
@@ -141,7 +148,8 @@ class ProcessTracker:
             identity: ProcessIdentity,
         ) -> tuple[ProcessIdentity, ProcessStatus]:
             async with self.semaphore:
-                status = await asyncio.to_thread(probe, identity)
+                probe_process = self.probe_process or probe
+                status = await asyncio.to_thread(probe_process, identity)
             self.checked[identity] = self.clock()
             return identity, status
 

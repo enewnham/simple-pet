@@ -96,6 +96,7 @@ class Daemon:
         client: AsyncAnthropic,
         clock: Callable[[], float] = time.monotonic,
         rng: RandomSource | None = None,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self.config = config
         self.clock = clock
@@ -106,20 +107,23 @@ class Daemon:
             config.stale_seconds,
             config.completed_retention_seconds,
             config.activity_fresh_seconds,
+            wall_clock=wall_clock,
         )
         reactions = SessionReactions()
-        attention = Attention(config, clock, self.rng)
+        attention = Attention(config, clock, self.rng, wall_clock=wall_clock)
         processes = ProcessTracker(clock=clock, interval=config.process_probe_seconds)
         behavior = Behavior(self.pack, config.behavior, clock, self.rng, self.emit)
         memory = Memory(
             config.memory_file,
             self.pack.pet,
-            time.time,
+            wall_clock,
             config.memory_retention_days,
             config.memory_max_events,
             speech_history_seconds=config.speech_history_seconds,
         )
-        cognition = Cognition(AnthropicModelClient(client), config, memory=memory)
+        cognition = Cognition(
+            AnthropicModelClient(client), config, memory=memory, clock=wall_clock
+        )
         repositories = RepositoryTracker(
             lambda observation: self.application.ingest(observation),
             local_interval=config.repository_refresh_seconds,

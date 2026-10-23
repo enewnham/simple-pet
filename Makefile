@@ -1,6 +1,7 @@
 .PHONY: setup build importer run test check lint format assets clean
 
 SWIFT_FLAGS ?= --disable-sandbox
+PYTHON_TEST_WORKERS ?= auto
 SWIFT_TESTING_PLUGIN = $(wildcard $(dir $(shell xcrun --find swiftc))../lib/swift/host/plugins/testing/libTestingMacros.dylib)
 SWIFT_TEST_FLAGS = $(SWIFT_FLAGS) $(if $(SWIFT_TESTING_PLUGIN),-Xswiftc -load-plugin-library -Xswiftc $(SWIFT_TESTING_PLUGIN))
 UV_CACHE_DIR ?= $(CURDIR)/.cache/uv
@@ -38,7 +39,7 @@ test: setup
 		swift_filter="--skip PetOverlayTests"; \
 	fi; \
 	CI=true xcrun swift test $(SWIFT_TEST_FLAGS) $$swift_filter && \
-	PET_DESKTOP_CHECK=$$desktop uv run --locked python -m unittest discover -s Tests -v
+	PET_DESKTOP_CHECK=$$desktop uv run --locked python -m pytest Tests -n $(PYTHON_TEST_WORKERS) --dist worksteal -v
 
 lint: setup
 	uv run --locked ruff check .

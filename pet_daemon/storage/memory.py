@@ -32,8 +32,9 @@ log = get_logger("pet-daemon")
 
 @dataclass(frozen=True)
 class HistoryRecord:
-    last_selected: float
-    considered_revision: str | None
+    last_selected: float = 0
+    considered_subject_revision: str | None = None
+    considered_session_revision: str | None = None
 
 
 @dataclass(frozen=True)
@@ -128,13 +129,14 @@ class Memory:
 
     def load_attention_history(self) -> dict[str, HistoryRecord]:
         rows = self.db.execute(
-            "SELECT subject,last_selected,considered_revision FROM attention_history WHERE pet=?",
+            "SELECT subject,last_selected,considered_subject_revision,considered_session_revision FROM attention_history WHERE pet=?",
             (self.pet,),
         ).fetchall()
         return {
             row["subject"]: HistoryRecord(
                 last_selected=row["last_selected"],
-                considered_revision=json.loads(row["considered_revision"]),
+                considered_subject_revision=row["considered_subject_revision"],
+                considered_session_revision=row["considered_session_revision"],
             )
             for row in rows
         }
@@ -189,18 +191,20 @@ class Memory:
         )
         return tuple(report_from_data(json.loads(row["data"])) for row in rows)
 
-    def save_attention_history(
-        self, subject_id: str, last_selected: float, considered_revision: str | None
-    ) -> None:
+    def save_attention_history(self, subject_id: str, history: HistoryRecord) -> None:
         with self.transaction():
             self.db.execute(
-                """INSERT INTO attention_history VALUES (?,?,?,?,?) ON CONFLICT(pet,subject) DO UPDATE SET
-                last_selected=excluded.last_selected,considered_revision=excluded.considered_revision,updated_at=excluded.updated_at""",
+                """INSERT INTO attention_history VALUES (?,?,?,?,?,?) ON CONFLICT(pet,subject) DO UPDATE SET
+                last_selected=excluded.last_selected,
+                considered_subject_revision=excluded.considered_subject_revision,
+                considered_session_revision=excluded.considered_session_revision,
+                updated_at=excluded.updated_at""",
                 (
                     self.pet,
                     subject_id,
-                    last_selected,
-                    json.dumps(considered_revision),
+                    history.last_selected,
+                    history.considered_subject_revision,
+                    history.considered_session_revision,
                     self.clock(),
                 ),
             )
@@ -212,8 +216,7 @@ class Memory:
         reason: SpeechReason,
         subject_id: str | None = None,
         revision: str | None = None,
-        last_selected: float = 0,
-        considered_revision: str | None = None,
+        history: HistoryRecord | None = None,
     ) -> bool:
         with self.transaction():
             previous = self.db.execute(
@@ -244,10 +247,8 @@ class Memory:
                 "INSERT INTO speech(pet,text,reason,timestamp) VALUES (?,?,?,?)",
                 (self.pet, text, reason, timestamp),
             )
-            if subject_id is not None and considered_revision is not None:
-                self.save_attention_history(
-                    subject_id, last_selected, considered_revision
-                )
+            if subject_id is not None and history is not None:
+                self.save_attention_history(subject_id, history)
             self.prune()
         return True
 
@@ -258,8 +259,7 @@ class Memory:
         text: str = "",
         subject_id: str | None = None,
         revision: str | None = None,
-        last_selected: float = 0,
-        considered_revision: str | None = None,
+        history: HistoryRecord | None = None,
     ) -> bool:
         with self.transaction():
             result = self.db.execute(
@@ -277,14 +277,8 @@ class Memory:
                     self.clock(),
                 ),
             )
-            if (
-                result.rowcount
-                and subject_id is not None
-                and considered_revision is not None
-            ):
-                self.save_attention_history(
-                    subject_id, last_selected, considered_revision
-                )
+            if result.rowcount and subject_id is not None and history is not None:
+                self.save_attention_history(subject_id, history)
         return bool(result.rowcount)
 
     def message_outcome(self, message_id: str) -> MessageOutcome | None:

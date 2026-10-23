@@ -138,7 +138,11 @@ class Cognition:
         snapshot: PetContext,
         selection: AttentionSelection,
         refresh: Callable[[], PetContext] | None = None,
+        eligible: Callable[[AttentionSelection, PetContext], bool] | None = None,
     ) -> CommentaryResult:
+        snapshot = refresh() if refresh else snapshot
+        if eligible and not eligible(selection, snapshot):
+            raise StoryUnavailable("Work is no longer eligible")
         reason = selection.reason
         explicit = selection.context is not None or reason in (
             SpeechReason.CLICK,
@@ -161,6 +165,8 @@ class Cognition:
             basic = True
         snapshot = refresh() if refresh else snapshot
         selection = selection.refresh(snapshot)
+        if eligible and not eligible(selection, snapshot):
+            raise StoryUnavailable("Work is no longer eligible")
         prepared = self.prompts.prepare(
             snapshot,
             selection,

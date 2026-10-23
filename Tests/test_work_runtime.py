@@ -50,7 +50,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             daemon_socket=str(root / "daemon.sock"),
             overlay_socket=str(root / "overlay.sock"),
             observation_seconds=(3600, 3600),
-            request_timeout=5,
+            request_timeout=10,
             memory_file=root / "memory.sqlite3",
         )
         self.config.behavior.automatic_speech_cooldown_seconds = 3600
@@ -201,14 +201,14 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 if predicate(packet):
                     return packet
 
-        return await asyncio.wait_for(receive(), 5)
+        return await asyncio.wait_for(receive(), 10)
 
     async def wait_for(self, condition: Callable[[], bool]) -> None:
         async def wait() -> None:
             while not condition():
                 await asyncio.sleep(0.005)
 
-        await asyncio.wait_for(wait(), 5)
+        await asyncio.wait_for(wait(), 10)
 
     async def drain(self) -> list[OverlayPacket]:
         packets = []

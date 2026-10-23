@@ -1,0 +1,44 @@
+{
+  "name": "unspoken_completion_expiry",
+  "review": "An unaccepted result survives restart until the original five-minute deadline, including elapsed sleep time.",
+  "events": [
+    {
+      "packets": [
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "intent",
+          "goal": "Accept JSON packets with spaces in the hook reader."
+        },
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "turn_done",
+          "progress": "Updated the hook reader to accept spaced JSON and verified the packet replay."
+        }
+      ]
+    },
+    {
+      "restart": true,
+      "after_seconds": 299,
+      "reason": "completion",
+      "candidate_speech": "The hook reader accepts spaced JSON, and the packet replay passes.",
+      "accepted": false,
+      "expected_speech": true
+    },
+    {
+      "restart": true,
+      "after_seconds": 0,
+      "wall_seconds": 1,
+      "reason": "completion",
+      "candidate_speech": "Spaced JSON parsing is done.",
+      "expected_speech": false
+    },
+    {
+      "after_seconds": 1,
+      "wall_seconds": 14400,
+      "reason": "routine",
+      "expected_speech": false
+    }
+  ]
+}

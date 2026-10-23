@@ -7,7 +7,7 @@ from dataclasses import replace
 from typing import Protocol
 
 from ..domain import ArtifactKind
-from .association import decide_observation, report_context
+from .association import TERMINAL_EVENTS, decide_observation, report_context
 from .models import ArtifactReference, ExecutionEvidence, ReportContext, SessionReport
 from .observations import (
     BranchObservation,
@@ -22,7 +22,7 @@ from .validation import normalize_reference, repository_identity
 class WorkRepository(Protocol):
     def transaction(self) -> AbstractContextManager[None]: ...
     def save_session(self, observation: SessionObservation, now: float) -> None: ...
-    def append_report(self, report: SessionReport) -> None: ...
+    def append_report(self, report: SessionReport) -> bool: ...
     def session_location(self, session: str) -> str: ...
     def get_checkout(
         self, path: str, *, enclosing: bool = False
@@ -106,7 +106,15 @@ class WorkIngestion:
                 for payload in observation.reports
             )
             for payload, context in zip(observation.reports, contexts, strict=True):
-                self.repository.append_report(SessionReport(payload, context, now))
+                appended = self.repository.append_report(
+                    SessionReport(payload, context, now)
+                )
+                if (
+                    not appended
+                    and isinstance(payload, ExecutionEvidence)
+                    and payload.event in TERMINAL_EVENTS - {"session_end"}
+                ):
+                    break
 
     def observe(self, collected: RepositoryObservation) -> None:
         with self.repository.transaction():

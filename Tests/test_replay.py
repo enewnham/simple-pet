@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.commentary.usage import UsageTokens, request_usage
 from pet_daemon.domain import ModelPurpose, SpeechReason
-from pet_daemon.replay import FixtureModel, replay_sequence, run
+from pet_daemon.replay import FixtureModel, ReplayHarness, replay_sequence, run
 
 FIXTURES = Path(__file__).parent / "fixtures" / "replay"
 
@@ -38,6 +38,20 @@ class FailingModel(FixtureModel):
 
 
 class ReplayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_model_recording_preserves_application_token_usage(self) -> None:
+        async with ReplayHarness(client=FailingModel(0)) as replay:
+            await replay.comment(SpeechReason.EXPLICIT, "Check the parser.")
+            finished = next(
+                event
+                for event in replay.events
+                if event["event"] == "observation.finished"
+            )
+            self.assertEqual(finished["input_tokens"], 15)
+            self.assertEqual(finished["output_tokens"], 4)
+            self.assertEqual(
+                replay.model.calls[0]["usage"]["explicit"]["input_tokens"], 15
+            )
+
     async def replay(self, name: str) -> dict[str, Any]:
         return await replay_sequence(
             json.loads((FIXTURES / f"{name}.json").read_text())
@@ -68,6 +82,35 @@ class ReplayTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(first["accepted"])
         self.assertEqual(repeated["decision"], "unchanged_work")
         self.assertFalse(repeated["calls"])
+
+    async def test_completion_stays_consumed_across_restart_and_closure(self) -> None:
+        result = await self.replay("spaced_json_restart")
+        first, *later = result["steps"]
+        self.assertTrue(first["accepted"])
+        for step in later:
+            self.assertEqual(step["decision"], "unchanged_work")
+            self.assertIsNone(step["speech"])
+            self.assertFalse(step["calls"])
+
+    async def test_silent_completion_stays_consumed_after_restart(self) -> None:
+        fixture = json.loads((FIXTURES / "spaced_json_restart.json").read_text())
+        fixture["events"][0]["candidate_speech"] = None
+        result = await replay_sequence(fixture)
+        first, *later = result["steps"]
+        self.assertEqual(first["decision"], "silence")
+        for step in later:
+            self.assertFalse(step["calls"])
+
+    async def test_unspoken_completion_expires_at_original_deadline_after_restart(
+        self,
+    ) -> None:
+        result = await self.replay("unspoken_completion_expiry")
+        before, at_deadline, after_sleep = result["steps"]
+        self.assertEqual(before["decision"], "speech")
+        self.assertFalse(before["accepted"])
+        for step in (at_deadline, after_sleep):
+            self.assertEqual(step["decision"], "unchanged_work")
+            self.assertFalse(step["calls"])
 
     async def test_failed_delivery_leaves_unchanged_work_eligible(self) -> None:
         fixture = json.loads((FIXTURES / "repeated_completed.json").read_text())

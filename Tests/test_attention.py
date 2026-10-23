@@ -9,6 +9,7 @@ from pet_daemon.domain import (
     Activity,
     CareKind,
     ExecutionOutcome,
+    ProcessStatus,
     SpeechReason,
     WorkSubjectKind,
 )
@@ -21,9 +22,8 @@ from pet_daemon.runtime import (
     SessionTrigger,
 )
 from pet_daemon.sessions.reactions import SessionReaction
-from pet_daemon.storage.memory import HistoryRecord
 from pet_daemon.work import WorkStory, WorkSubject
-from pet_daemon.work.views import SessionContribution
+from pet_daemon.work.views import SessionContribution, WorkUpdate
 from Tests.fixtures import (
     capture_snapshot,
     require,
@@ -36,7 +36,9 @@ class AttentionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.now = 0
         self.config = Config(pet_dir=Path("."), observation_seconds=(30, 30))
-        self.attention = Attention(self.config, lambda: self.now, random.Random(0))
+        self.attention = Attention(
+            self.config, lambda: self.now, random.Random(0), wall_clock=lambda: self.now
+        )
 
     def snapshot(self, *sessions: SessionContext) -> PetContext:
         members = sessions
@@ -52,6 +54,129 @@ class AttentionTests(unittest.TestCase):
             for session in members
         )
         return capture_snapshot(sessions_snapshot(*members), work=subjects)
+
+    def update_snapshot(
+        self, *sessions: SessionContext, updates: tuple[WorkUpdate, ...]
+    ) -> PetContext:
+        snapshot = self.connected_snapshot(*sessions)
+        return replace(snapshot, work=(replace(snapshot.work[0], updates=updates),))
+
+    def test_completed_update_expires_at_its_original_deadline_without_runtime(
+        self,
+    ) -> None:
+        update = WorkUpdate("cli:root", "result", 10, 10)
+        snapshot = self.update_snapshot(
+            session_snapshot(id="cli:root"), updates=(update,)
+        )
+        snapshot = replace(snapshot, sessions=())
+        self.now = 309
+        self.assertTrue(self.attention.routine_eligible(snapshot.work[0], snapshot))
+        selected = self.attention.select(snapshot)
+        self.assertEqual(selected.update, update)
+        self.assertTrue(self.attention.selection_eligible(selected, snapshot))
+        self.now = 310
+        self.assertFalse(self.attention.routine_eligible(snapshot.work[0], snapshot))
+        self.assertFalse(self.attention.selection_eligible(selected, snapshot))
+
+    def test_click_consideration_keeps_pending_member_updates_eligible(self) -> None:
+        update = WorkUpdate("cli:root", "result", 10, 10)
+        snapshot = self.update_snapshot(
+            session_snapshot(id="cli:root"), updates=(update,)
+        )
+        self.attention.mark_considered(snapshot.work[0])
+        self.assertTrue(self.attention.routine_eligible(snapshot.work[0], snapshot))
+        self.attention.mark_considered(snapshot.work[0], update)
+        self.assertFalse(self.attention.routine_eligible(snapshot.work[0], snapshot))
+
+    def test_consumed_result_follows_a_session_alias(self) -> None:
+        old = WorkUpdate("cli:old", "result", 10, 10)
+        subject = self.snapshot(session_snapshot(id="cli:old")).work[0]
+        self.attention.mark_considered(subject, old)
+        renamed = replace(old, session="cli:root", aliases=("cli:old",))
+        snapshot = self.update_snapshot(
+            session_snapshot(id="cli:root"), updates=(renamed,)
+        )
+        self.assertFalse(self.attention.routine_eligible(snapshot.work[0], snapshot))
+
+    def test_active_update_uses_owner_or_recent_hooks_beyond_five_minutes(self) -> None:
+        update = WorkUpdate("cli:root", "progress", 0)
+        session = session_snapshot(
+            id="cli:root",
+            turn_active=True,
+            last_hook_at=0,
+            presence=ProcessStatus.ALIVE,
+        )
+        snapshot = self.update_snapshot(session, updates=(update,))
+        self.now = 1000
+        self.assertTrue(self.attention.routine_eligible(snapshot.work[0], snapshot))
+        snapshot = replace(
+            snapshot, sessions=(replace(session, presence=ProcessStatus.UNKNOWN),)
+        )
+        self.assertFalse(self.attention.routine_eligible(snapshot.work[0], snapshot))
+        snapshot = replace(
+            snapshot,
+            sessions=(
+                replace(session, presence=ProcessStatus.UNKNOWN, last_hook_at=999),
+            ),
+        )
+        self.assertTrue(self.attention.routine_eligible(snapshot.work[0], snapshot))
+
+    def test_live_child_selects_its_assignment_after_parent_result_is_consumed(
+        self,
+    ) -> None:
+        parent = WorkUpdate("cli:root", "result", 10, 10)
+        child = WorkUpdate("cli:child", "assignment", 20)
+        snapshot = self.update_snapshot(
+            session_snapshot(id="cli:root", outcome=ExecutionOutcome.SUCCESS),
+            session_snapshot(id="cli:child", parent="cli:root", turn_active=True),
+            updates=(parent, child),
+        )
+        self.attention.mark_considered(snapshot.work[0], parent)
+        selected = self.attention.select(snapshot)
+        self.assertEqual(selected.update, child)
+        self.assertEqual(require(selected.focus_session).id, "cli:child")
+        self.attention.mark_considered(snapshot.work[0], child)
+        self.assertFalse(self.attention.routine_eligible(snapshot.work[0], snapshot))
+        targeted = replace(snapshot, trigger=SessionTrigger("cli:root"))
+        self.assertFalse(
+            self.attention.selection_eligible(
+                self.attention.select(targeted, SpeechReason.COMPLETION), targeted
+            )
+        )
+
+    def test_live_parent_does_not_revive_consumed_child_result(self) -> None:
+        parent = WorkUpdate("cli:root", "assignment", 10)
+        child = WorkUpdate("cli:child", "result", 20, 20)
+        snapshot = self.update_snapshot(
+            session_snapshot(id="cli:root", turn_active=True),
+            session_snapshot(
+                id="cli:child", parent="cli:root", outcome=ExecutionOutcome.SUCCESS
+            ),
+            updates=(parent, child),
+        )
+        self.attention.mark_considered(snapshot.work[0], child)
+        self.assertEqual(self.attention.select(snapshot).update, parent)
+        targeted = replace(snapshot, trigger=SessionTrigger("cli:child"))
+        self.assertFalse(
+            self.attention.selection_eligible(
+                self.attention.select(targeted, SpeechReason.COMPLETION), targeted
+            )
+        )
+
+    def test_check_ins_require_live_work_even_after_an_update_is_consumed(self) -> None:
+        update = WorkUpdate("cli:root", "progress", 10)
+        snapshot = self.update_snapshot(
+            session_snapshot(id="cli:root", turn_active=True), updates=(update,)
+        )
+        self.attention.mark_considered(snapshot.work[0], update)
+        routine = self.attention.select(snapshot)
+        self.assertFalse(self.attention.selection_eligible(routine, snapshot))
+        selected = self.attention.select(snapshot, SpeechReason.CHECK_IN)
+        self.assertTrue(self.attention.selection_eligible(selected, snapshot))
+        snapshot = replace(
+            snapshot, sessions=(replace(snapshot.sessions[0], turn_active=False),)
+        )
+        self.assertFalse(self.attention.selection_eligible(selected, snapshot))
 
     def test_rotates_within_a_tier_before_preferring_recency(self) -> None:
         snapshot = self.snapshot(
@@ -292,15 +417,9 @@ class AttentionTests(unittest.TestCase):
         selected = self.attention.select(snapshot)
         self.attention.scheduled(selected.id)
         self.attention.mark_considered(require(selected.subject))
-        last_selected, revision = self.attention.history(require(selected.id))
+        history = self.attention.history(require(selected.id))
         restored = Attention(self.config, lambda: self.now, random.Random(0))
-        restored.restore(
-            {
-                require(selected.id): HistoryRecord(
-                    last_selected=last_selected, considered_revision=revision
-                )
-            }
-        )
+        restored.restore({require(selected.id): history})
         self.now = 60
         self.assertFalse(restored.is_new(require(selected.subject)))
         self.assertIsNone(restored.request(snapshot))

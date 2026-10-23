@@ -10,6 +10,7 @@ from pet_daemon.domain import (
     EvidenceSource,
     LinkRelationship,
     PullRequestState,
+    SessionSource,
 )
 from pet_daemon.runtime import HookEvent, HookTextFields
 from pet_daemon.sessions.tracking import Sessions
@@ -18,6 +19,7 @@ from pet_daemon.storage.memory import Memory
 from pet_daemon.storage.migrations import SCHEMA_VERSION, migrate
 from pet_daemon.work.history import build_session_entry
 from pet_daemon.work.models import RelatedLink
+from pet_daemon.work.narrative import semantic_revision
 from pet_daemon.work.observations import (
     BranchObservation,
     CheckoutObservation,
@@ -75,6 +77,58 @@ class WorkTests(unittest.TestCase):
             with self.memory.transaction():
                 self.store.record_session(result.observation)
                 self.memory.record_event(build_session_entry(hook))
+
+    def test_closure_and_replayed_completion_preserve_the_original_result(self) -> None:
+        self.event("intent", goal="Accept spaced JSON", repo="/work/parser")
+        self.now += 1
+        self.event("turn_done", progress="Spaced JSON parses successfully.")
+        original = self.memory.connected_work(sessions_snapshot())[0]
+        original_update = original.updates[0]
+        self.now += 20
+        self.event("session_end")
+        closed = self.memory.connected_work(sessions_snapshot())[0]
+        self.assertEqual(closed.updates[0], original_update)
+        self.assertEqual(
+            semantic_revision(closed.story), semantic_revision(original.story)
+        )
+        self.assertEqual(closed.changed_at, original.changed_at)
+        self.sessions = Sessions(lambda: self.now)
+        self.now += 20
+        self.store.observe(self.checkout(branch="different-work"))
+        self.event(
+            "turn_done", progress="The duplicate hook describes the same finished turn."
+        )
+        replayed = self.memory.connected_work(sessions_snapshot())[0]
+        self.assertEqual(replayed.updates[0].revision, original_update.revision)
+        self.assertEqual(replayed.updates[0].ended_at, original_update.ended_at)
+        self.assertEqual(
+            semantic_revision(replayed.story), semantic_revision(original.story)
+        )
+        result = next(
+            record.details
+            for record in replayed.story.activity
+            if isinstance(record.details, ExecutionView)
+        )
+        self.assertEqual(result.reported_execution_outcome, "success")
+
+    def test_repeated_request_establishes_new_work_after_closure(self) -> None:
+        self.event("intent", goal="Accept spaced JSON")
+        self.now += 1
+        self.event("turn_done", progress="Spaced JSON parses successfully.")
+        original = self.memory.connected_work(sessions_snapshot())[0].updates[0]
+        self.event("session_end")
+        self.now += 10
+        self.event("intent", goal="Accept spaced JSON")
+        active = self.memory.connected_work(sessions_snapshot())[0].updates[0]
+        self.assertNotEqual(active.revision, original.revision)
+        self.assertIsNone(active.ended_at)
+        active_story = self.memory.connected_work(sessions_snapshot())[0].story
+        self.assertEqual(active_story.requests[-1].observed_at, self.now)
+        self.now += 1
+        self.event("turn_done", progress="Spaced JSON parses successfully.")
+        completed = self.memory.connected_work(sessions_snapshot())[0].updates[0]
+        self.assertNotEqual(completed.revision, original.revision)
+        self.assertEqual(completed.ended_at, self.now)
 
     def checkout(
         self, branch: str = "feature", path: str = "/work/parser"
@@ -161,17 +215,33 @@ class WorkTests(unittest.TestCase):
             return result.session
 
         ingest(
-            HookEvent("codex", "a", "session_start", repo="/work/a", aliases=("old-a",))
+            HookEvent(
+                SessionSource.CODEX,
+                "a",
+                "session_start",
+                repo="/work/a",
+                aliases=("old-a",),
+            )
         )
-        ingest(
-            HookEvent("codex", "b", "session_start", repo="/work/b", aliases=("old-b",))
-        )
-        ingest(HookEvent("codex", "b", "intent", goal="Initial parser goal"))
-        self.now += 1
-        ingest(HookEvent("codex", "a", "intent", goal="Refined parser goal"))
         ingest(
             HookEvent(
-                "codex",
+                SessionSource.CODEX,
+                "b",
+                "session_start",
+                repo="/work/b",
+                aliases=("old-b",),
+            )
+        )
+        ingest(
+            HookEvent(SessionSource.CODEX, "b", "intent", goal="Initial parser goal")
+        )
+        self.now += 1
+        ingest(
+            HookEvent(SessionSource.CODEX, "a", "intent", goal="Refined parser goal")
+        )
+        ingest(
+            HookEvent(
+                SessionSource.CODEX,
                 "a",
                 "progress",
                 progress="First parser report",
@@ -183,7 +253,7 @@ class WorkTests(unittest.TestCase):
         self.now += 1
         ingest(
             HookEvent(
-                "codex",
+                SessionSource.CODEX,
                 "b",
                 "progress",
                 progress="Second parser report",
@@ -193,14 +263,21 @@ class WorkTests(unittest.TestCase):
                 pull_request=self.pr(8).url,
             )
         )
-        ingest(HookEvent("codex", "b", "waiting"))
+        ingest(HookEvent(SessionSource.CODEX, "b", "waiting"))
         ingest(
             HookEvent(
-                "codex", "child", "subagent_start", parent="a", goal="Check escapes"
+                SessionSource.CODEX,
+                "child",
+                "subagent_start",
+                parent="a",
+                goal="Check escapes",
             )
         )
         self.assertEqual(
-            ingest(HookEvent("codex", "b", "session_start", aliases=("a",))), "codex:b"
+            ingest(
+                HookEvent(SessionSource.CODEX, "b", "session_start", aliases=("a",))
+            ),
+            "codex:b",
         )
         subjects = self.memory.connected_work(sessions.activity_view())
         self.assertEqual(tuple(subject.id for subject in subjects), ("codex:b",))

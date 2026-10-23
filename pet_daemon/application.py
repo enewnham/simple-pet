@@ -1,5 +1,4 @@
 import asyncio
-import json
 import math
 import sqlite3
 import uuid
@@ -135,6 +134,7 @@ class Application:
             self.config.stale_seconds,
             self.config.completed_retention_seconds,
             self.config.activity_fresh_seconds,
+            wall_clock=self.sessions.wall_clock,
         )
         self.reactions = SessionReactions()
         self.agent_activity.reset(self.sessions, self.reactions)
@@ -385,7 +385,10 @@ class Application:
             try:
                 result = await asyncio.wait_for(
                     self.cognition.generate_commentary(
-                        snapshot, selection, refresh=lambda: self.context(trigger)
+                        snapshot,
+                        selection,
+                        refresh=lambda: self.context(trigger),
+                        eligible=self.attention.selection_eligible,
                     ),
                     timeout=self.config.request_timeout,
                 )
@@ -465,23 +468,23 @@ class Application:
             trigger.reaction, self.sessions
         ):
             return False
-        return support.valid(self.context(trigger))
+        snapshot = self.context(trigger)
+        return self.attention.selection_eligible(
+            support.selection, snapshot
+        ) and support.valid(snapshot)
 
     def mark_considered(self, selection: AttentionSelection) -> None:
-        if selection.subject is not None:
-            last_selected, _ = self.attention.history(selection.subject.id)
-            considered = json.dumps(
-                selection.subject.revision, sort_keys=True, separators=(",", ":")
-            )
-            self.memory.save_attention_history(
-                selection.subject.id, last_selected, considered
-            )
-            self.attention.mark_considered(selection.subject)
+        records = self.attention.consideration(selection.subject, selection.update)
+        with self.memory.transaction():
+            for identifier, history in records.items():
+                self.memory.save_attention_history(identifier, history)
+        self.attention.mark_considered(selection.subject, selection.update)
 
     def persist_attention(self, subject_id: str | None) -> None:
         if subject_id is not None:
-            last_selected, considered = self.attention.history(subject_id)
-            self.memory.save_attention_history(subject_id, last_selected, considered)
+            self.memory.save_attention_history(
+                subject_id, self.attention.history(subject_id)
+            )
 
     def delivery_valid(self, message: SpeechMessage) -> bool:
         support = message.support
@@ -501,26 +504,25 @@ class Application:
             None,
         )
         current = subject is not None and subject.revision == message.revision
-        last_selected, _ = (
-            self.attention.history(message.subject_id)
-            if message.subject_id is not None
-            else (0, None)
-        )
-        considered = (
-            json.dumps(message.revision, sort_keys=True, separators=(",", ":"))
-            if current
-            else None
-        )
+        selection = message.support.commentary.selection if message.support else None
+        update = selection.update if selection else None
+        update_current = bool(subject and update and update in subject.updates)
+        considered_subject = subject if current else None
+        considered_update = update if update_current else None
         if outcome.status == DeliveryStatus.ACCEPTED:
-            self.memory.record_acceptance(
-                message.message_id,
-                message.text,
-                message.reason,
-                subject_id=message.subject_id,
-                revision=message.revision,
-                last_selected=last_selected,
-                considered_revision=considered,
+            records = self.attention.consideration(
+                considered_subject, considered_update
             )
+            with self.memory.transaction():
+                self.memory.record_acceptance(
+                    message.message_id,
+                    message.text,
+                    message.reason,
+                    subject_id=message.subject_id,
+                    revision=message.revision,
+                )
+                for identifier, history in records.items():
+                    self.memory.save_attention_history(identifier, history)
             self.last_speech = (message.text, self.clock())
             self.attention.last_attempt = self.clock()
         elif outcome.status == DeliveryStatus.FAILED:
@@ -535,9 +537,8 @@ class Application:
             except sqlite3.Error as error:
                 log.warning("speech.delivery_record_failed", error=str(error))
                 return
-        if current and outcome.status == DeliveryStatus.ACCEPTED:
-            assert subject is not None
-            self.attention.mark_considered(subject)
+        if outcome.status == DeliveryStatus.ACCEPTED:
+            self.attention.mark_considered(considered_subject, considered_update)
         log.info(
             "speech.delivery",
             message=message.message_id,
@@ -579,8 +580,7 @@ class Application:
         check_in = tuple(
             key
             for key in self.sessions.check_in_due(self.config.idle_message_seconds)
-            if not self.sessions.by_id[key].parent
-            and not self.sessions.by_id[key].waiting
+            if not self.sessions.by_id[key].parent or self.sessions.by_id[key].waiting
         )
         request = self.attention.request(
             snapshot,
@@ -607,6 +607,8 @@ class Application:
         selection = self.attention.select(
             snapshot, request.reason, request.context, request.eligible
         )
+        if not self.attention.selection_eligible(selection, snapshot):
+            return
         if request.reason == SpeechReason.CHECK_IN and selection.focus_session:
             self.sessions.by_id[selection.focus_session.id].last_check_in = now
         self.attention.scheduled(selection.id)

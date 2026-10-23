@@ -11,7 +11,9 @@ from unittest.mock import patch
 
 from pet_daemon.domain import (
     CollectionKind,
+    SessionSource,
 )
+from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources import RepositoryTarget, RepositoryTracker, git, github
 from pet_daemon.sources.git import CommandOptions
 from pet_daemon.sources.github import GitHubPullRequest
@@ -787,6 +789,26 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class HookObservationTests(unittest.TestCase):
+    def test_session_sources_preserve_wire_values_and_canonical_session_ids(
+        self,
+    ) -> None:
+        for kind in SessionSource:
+            with self.subTest(harness=kind):
+                hook = normalize_hook(
+                    {"harness": kind.value, "session": "one", "event": "intent"}
+                )
+                assert hook is not None
+                self.assertIs(hook.harness, kind)
+                packet = hook.packet()
+                self.assertIs(type(packet["harness"]), str)
+                self.assertEqual(packet["harness"], kind.value)
+                self.assertEqual(hook.subject, f"{kind.value}:one")
+                sessions = Sessions(lambda: 1000)
+                update = sessions.apply(hook)
+                assert update is not None
+                self.assertEqual(update.session, hook.subject)
+                self.assertIs(sessions.by_id[update.session].harness, kind)
+
     def test_hook_preserves_session_routing_and_tool_metadata(self) -> None:
         packet = {
             "kind": "event",

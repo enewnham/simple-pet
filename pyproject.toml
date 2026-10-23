@@ -28,6 +28,8 @@ missing-type-argument = "error"
 
 [dependency-groups]
 dev = [
+    "pytest>=9,<10",
+    "pytest-xdist>=3.8,<4",
     "ruff>=0.17.1",
     "ty>=0.0.90",
 ]

@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from pet_daemon.domain import SessionSource
 from pet_daemon.prose import work_prose
 from pet_daemon.sessions.processes import discover_owner
 from pet_daemon.user_text import sentiment_excerpt
@@ -254,7 +255,7 @@ def main() -> None:
         payload = {}
     result = update(args.harness, args.event, payload)
     if result:
-        owner = discover_owner(args.harness)
+        owner = discover_owner(SessionSource(args.harness))
         if owner:
             result["owner"] = owner.packet()
         CLIENT["send"](result)

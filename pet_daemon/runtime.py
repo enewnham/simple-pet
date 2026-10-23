@@ -4,7 +4,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, NotRequired, Protocol, TypedDict
 
-from .domain import Activity, CareKind, ExecutionOutcome, PetState, ProcessStatus
+from .domain import (
+    Activity,
+    CareKind,
+    ExecutionOutcome,
+    PetState,
+    ProcessStatus,
+    SessionSource,
+)
 
 type WaitingKind = Literal["permission", "question"]
 
@@ -137,7 +144,7 @@ class ProcessIdentity:
 
 @dataclass(frozen=True)
 class HookEvent:
-    harness: str
+    harness: SessionSource
     session: str
     event: str
     aliases: tuple[str, ...] = ()
@@ -171,7 +178,7 @@ class HookEvent:
     def packet(self) -> HookPacket:
         packet: HookPacket = {
             "kind": "event",
-            "harness": self.harness,
+            "harness": self.harness.value,
             "session": self.session,
             "event": self.event,
         }
@@ -267,6 +274,8 @@ class SessionContext:
     progress: str
     failure: FailureSnapshot | None
     outcome: ExecutionOutcome | None
+    last_hook_at: float = 0
+    retired: bool = False
     user_sentiment: UserSentiment | None = None
     connected_work: WorkStory | None = None
     waiting_kind: WaitingKind | None = None

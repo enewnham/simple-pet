@@ -5,7 +5,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from pet_daemon.domain import ProcessStatus
+from pet_daemon.domain import ProcessStatus, SessionSource
 from pet_daemon.sessions.processes import (
     ProcessIdentity,
     ProcessTracker,
@@ -45,7 +45,7 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
                 await tracker.refresh(sessions.process_owners())
             )
             self.assertFalse(sessions.active)
-            self.assertEqual(sessions.by_id["claude:main"].outcome, "stale")
+            self.assertIsNone(sessions.by_id["claude:main"].outcome)
         finally:
             if child.returncode is None:
                 child.kill()
@@ -110,12 +110,12 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
             patch("pet_daemon.sessions.processes._processes", return_value=rows),
             patch.dict(os.environ, {}, clear=True),
         ):
-            self.assertEqual(discover_owner("claude", pid=30), rows[20][0])
-            self.assertIsNone(discover_owner("cursor", pid=30))
+            self.assertEqual(discover_owner(SessionSource.CLAUDE, pid=30), rows[20][0])
+            self.assertIsNone(discover_owner(SessionSource.CURSOR, pid=30))
             rows[20] = row(20, 10, "/usr/bin/codex app-server")
-            self.assertIsNone(discover_owner("codex", pid=30))
+            self.assertIsNone(discover_owner(SessionSource.CODEX, pid=30))
             rows[20] = row(20, 10, "/usr/bin/codex exec task")
-            self.assertEqual(discover_owner("codex", pid=30), rows[20][0])
+            self.assertEqual(discover_owner(SessionSource.CODEX, pid=30), rows[20][0])
 
     def test_explicit_wrapper_must_match_a_live_ancestor_identity(self) -> None:
         owner = ProcessIdentity(20, "wrapper-start")
@@ -127,56 +127,77 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
             with patch.dict(
                 os.environ, {"PET_OWNER_PID": "20", "PET_OWNER_STARTED": owner.started}
             ):
-                self.assertEqual(discover_owner("cli", pid=30), owner)
+                self.assertEqual(discover_owner(SessionSource.COMMAND, pid=30), owner)
             with patch.dict(
                 os.environ, {"PET_OWNER_PID": "20", "PET_OWNER_STARTED": "wrong"}
             ):
-                self.assertIsNone(discover_owner("cli", pid=30))
+                self.assertIsNone(discover_owner(SessionSource.COMMAND, pid=30))
             with patch.dict(
                 os.environ, {"PET_OWNER_PID": "40", "PET_OWNER_STARTED": owner.started}
             ):
-                self.assertIsNone(discover_owner("cli", pid=30))
+                self.assertIsNone(discover_owner(SessionSource.COMMAND, pid=30))
 
 
 class FreshnessTests(unittest.TestCase):
     def setUp(self) -> None:
         self.now = 1000
-        self.sessions = Sessions(lambda: self.now)
+        self.sessions = Sessions(lambda: self.now, wall_clock=lambda: self.now)
 
     def event(self, kind: str, **fields: object) -> SessionUpdate | None:
         return self.sessions.handle(
             {"event": kind, "harness": "claude", "session": "main", **fields}
         )
 
-    def test_quiet_live_turn_permits_rest_and_resumes_when_activity_arrives(
-        self,
-    ) -> None:
+    def test_verified_owner_keeps_quiet_work_live_through_stale_timeout(self) -> None:
         owner = process_identity(os.getpid())
         assert owner is not None
         self.event("intent", owner=owner.packet())
+        self.event("tool_start", call="long", tool="build")
         self.sessions.apply_process_status({owner: ProcessStatus.ALIVE})
-        self.now += 300
-        self.assertFalse(self.sessions.working)
-        self.assertFalse(self.sessions.engaged)
-        self.assertTrue(self.sessions.active)
-        item = self.sessions.activity_view().sessions[0]
-        self.assertTrue(item.activity_uncertain)
-        self.assertEqual(item.presence, "alive")
-        self.event("progress", progress="Still looking")
+        self.now += 7200
+        self.sessions.prune()
         self.assertTrue(self.sessions.working)
         self.assertTrue(self.sessions.engaged)
+        self.assertTrue(self.sessions.active)
+        self.assertFalse(self.sessions.activity_view().sessions[0].activity_uncertain)
 
-    def test_outstanding_tools_and_explicit_waiting_remain_engaged(self) -> None:
+    def test_ownerless_calls_and_waits_need_recent_hooks(self) -> None:
         self.event("intent")
         self.event("tool_start", call="long", tool="build")
-        self.now += 600
+        self.now += 299
         self.assertTrue(self.sessions.working)
-        self.assertTrue(self.sessions.engaged)
+        self.now += 1
+        self.assertFalse(self.sessions.working)
+        self.assertFalse(self.sessions.engaged)
         self.event("tool_done", call="long")
         self.event("waiting", call="answer")
-        self.now += 600
-        self.assertFalse(self.sessions.working)
         self.assertTrue(self.sessions.engaged)
+        self.now += 300
+        self.assertFalse(self.sessions.engaged)
+        self.assertEqual(self.sessions.check_in_due(30), [])
+
+    def test_owner_exit_preserves_result_and_closure_does_not_revive_it(self) -> None:
+        owner = ProcessIdentity(42, "owner-start")
+        self.event("intent", owner=owner.packet())
+        self.event("turn_done", outcome="success")
+        session = self.sessions.by_id["claude:main"]
+        original_time = session.changed_at
+        self.now += 10
+        self.sessions.apply_process_status({owner: ProcessStatus.EXITED})
+        self.assertTrue(session.retired)
+        self.assertEqual(session.outcome, "success")
+        self.assertEqual(session.changed_at, original_time)
+        self.event("session_end")
+        self.assertTrue(session.retired)
+
+    def test_wall_time_expiry_counts_system_sleep(self) -> None:
+        wall = 1000.0
+        self.sessions = Sessions(lambda: self.now, wall_clock=lambda: wall)
+        self.event("intent")
+        self.event("tool_start", call="long", tool="build")
+        wall += 300
+        self.assertFalse(self.sessions.engaged)
+        self.assertTrue(self.sessions.active)
 
     def test_owner_exit_retires_an_inherited_child_without_claiming_success(
         self,
@@ -202,4 +223,4 @@ class FreshnessTests(unittest.TestCase):
         self.now += 3600
         self.sessions.prune()
         self.assertFalse(self.sessions.active)
-        self.assertEqual(self.sessions.by_id["claude:main"].outcome, "stale")
+        self.assertIsNone(self.sessions.by_id["claude:main"].outcome)

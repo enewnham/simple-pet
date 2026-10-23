@@ -9,6 +9,7 @@ from ..types import JSONObject, JSONValue
 from ..work.models import ExecutionEvidence, IntentEvidence, ProgressEvidence
 from ..work.narrative import NarrativeStatement, WorkNarrative, semantic_revision
 from ..work.views import ExecutionView, IntentView, ProgressView, revision_key
+from .context import duration
 from .contracts import JSONSchema, ModelRequest, RequestFactory
 
 INSTRUCTIONS = """
@@ -53,7 +54,12 @@ def prepare(
     latest_request_source = ""
 
     def add(
-        kind: str, text: str, scope: str, outcome: str | None = None, origin: str = ""
+        kind: str,
+        text: str,
+        scope: str,
+        outcome: str | None = None,
+        origin: str = "",
+        observed_at: float | None = None,
     ) -> None:
         nonlocal latest_request_source
         prose = work_prose(text, limit=1200, excluded=excluded)
@@ -65,6 +71,10 @@ def prepare(
         if not prose and not outcome:
             return
         identifier = revision_key((source, origin))[:24]
+        if observed_at is not None:
+            source["observed_at"] = observed_at
+        if origin:
+            source["origin"] = origin
         sources[identifier] = source
         latest_sources[origin, kind] = identifier
         if kind == "request" and scope == "root":
@@ -89,26 +99,55 @@ def prepare(
         )
         match item:
             case IntentEvidence(_, text):
-                add("request", text, scope, origin=identity)
+                add(
+                    "request",
+                    text,
+                    scope,
+                    origin=identity,
+                    observed_at=report.observed_at,
+                )
             case ProgressEvidence(_, text):
-                add("reported_progress", text, scope, origin=identity)
+                add(
+                    "reported_progress",
+                    text,
+                    scope,
+                    origin=identity,
+                    observed_at=report.observed_at,
+                )
             case ExecutionEvidence(_, event, outcome, _, progress) if event in {
                 "turn_done",
                 "turn_error",
                 "subagent_done",
                 "interrupt",
-                "session_end",
             }:
-                add("turn_ended", progress or "", scope, outcome, origin=identity)
+                add(
+                    "turn_ended",
+                    progress or "",
+                    scope,
+                    outcome,
+                    origin=identity,
+                    observed_at=report.observed_at,
+                )
     if not sources:
         for record in (*subject.story.requests, *subject.story.activity):
             match record.details:
                 case IntentView(text):
-                    add("request", text, "root")
+                    add("request", text, "root", observed_at=record.observed_at)
                 case ProgressView(text):
-                    add("reported_progress", text, "root")
+                    add(
+                        "reported_progress",
+                        text,
+                        "root",
+                        observed_at=record.observed_at,
+                    )
                 case ExecutionView("turn ended", progress, outcome):
-                    add("turn_ended", progress or "", "root", outcome)
+                    add(
+                        "turn_ended",
+                        progress or "",
+                        "root",
+                        outcome,
+                        observed_at=record.observed_at,
+                    )
     if not reports:
         for index, child in enumerate(subject.story.sessions):
             assignment = work_prose(child.scope, limit=300, excluded=excluded)
@@ -118,9 +157,21 @@ def prepare(
             for record in (*child.requests, *child.activity):
                 match record.details:
                     case IntentView(text):
-                        add("request", text, scope, origin=str(index))
+                        add(
+                            "request",
+                            text,
+                            scope,
+                            origin=str(index),
+                            observed_at=record.observed_at,
+                        )
                     case ProgressView(text):
-                        add("reported_progress", text, scope, origin=str(index))
+                        add(
+                            "reported_progress",
+                            text,
+                            scope,
+                            origin=str(index),
+                            observed_at=record.observed_at,
+                        )
                     case ExecutionView("turn ended", progress, outcome):
                         add(
                             "turn_ended",
@@ -128,6 +179,7 @@ def prepare(
                             scope,
                             outcome,
                             origin=str(index),
+                            observed_at=record.observed_at,
                         )
     if not latest_request_source:
         add("request", subject.story.intent, "root")
@@ -169,10 +221,21 @@ def prepare(
         ):
             retained_sources = candidate
     sources = {key: value for key, value in sources.items() if key in retained_sources}
+
+    def evidence(identifier: str, source: JSONObject) -> JSONObject:
+        item = {"id": identifier, **source}
+        observed_at = item.pop("observed_at", None)
+        item.pop("origin", None)
+        if isinstance(observed_at, (int, float)):
+            age = duration(memory.clock() - observed_at)
+            if age:
+                item["age"] = age + " ago"
+        return item
+
     payload: JSONObject = {
         "current_work": {"latest_request_source": latest_request_source},
         "current_moment": {
-            "evidence": [{"id": key, **value} for key, value in sources.items()]
+            "evidence": [evidence(key, value) for key, value in sources.items()]
         },
     }
     if previous:

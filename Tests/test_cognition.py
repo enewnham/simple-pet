@@ -20,7 +20,7 @@ from pet_daemon.commentary.cognition import (
 from pet_daemon.commentary.context import INSTRUCTIONS
 from pet_daemon.commentary.model import AnthropicModelClient
 from pet_daemon.config import Config
-from pet_daemon.domain import CareKind, PetState, SpeechReason
+from pet_daemon.domain import CareKind, PetState, SessionSource, SpeechReason
 from pet_daemon.runtime import CareTrigger, PetContext, SessionTrigger
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources.hooks import HookEvent
@@ -79,14 +79,16 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.memory = Memory(
             self.directory / "memory.sqlite3", self.pack.pet, clock=self.clock
         )
-        self.attention = Attention(self.config, self.clock, random.Random(0))
+        self.attention = Attention(
+            self.config, self.clock, random.Random(0), wall_clock=self.clock
+        )
         self.cognition = Cognition(
             AnthropicModelClient(self.client),
             self.config,
             clock=self.clock,
             memory=self.memory,
         )
-        self.sessions = Sessions(self.clock)
+        self.sessions = Sessions(self.clock, wall_clock=self.clock)
         self.handle(
             {
                 "harness": "claude",
@@ -703,7 +705,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             self.cognition.memory.record_event(
                 build_session_entry(
                     HookEvent(
-                        harness="codex",
+                        harness=SessionSource.CODEX,
                         session=f"worker-{index}",
                         event="progress",
                         repo="/repo/parser",
@@ -728,7 +730,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             self.cognition.memory.record_event(
                 build_session_entry(
                     HookEvent(
-                        harness="claude",
+                        harness=SessionSource.CLAUDE,
                         session="worker",
                         event="progress",
                         repo="/repo/parser",
@@ -742,7 +744,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.cognition.memory.record_event(
             build_session_entry(
                 HookEvent(
-                    harness="codex",
+                    harness=SessionSource.CODEX,
                     session="unrelated",
                     event="intent",
                     repo="/repo/billing",
@@ -835,7 +837,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.cognition.memory.record_event(
             build_session_entry(
                 HookEvent(
-                    harness="claude",
+                    harness=SessionSource.CLAUDE,
                     session="worker",
                     event="intent",
                     repo="/old",

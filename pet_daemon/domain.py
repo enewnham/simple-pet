@@ -1,6 +1,13 @@
 from enum import StrEnum
 
 
+class SessionSource(StrEnum):
+    COMMAND = "cli"
+    CLAUDE = "claude"
+    CODEX = "codex"
+    CURSOR = "cursor"
+
+
 class Activity(StrEnum):
     INVESTIGATING = "investigating"
     EDITING = "editing"

@@ -24,10 +24,12 @@ from pet_daemon.domain import (
     ExecutionOutcome,
     LinkRelationship,
     ModelPurpose,
+    ProcessStatus,
     PullRequestState,
+    SessionSource,
     SpeechReason,
 )
-from pet_daemon.runtime import HookEvent, OverlayPacket
+from pet_daemon.runtime import HookEvent, OverlayPacket, ProcessIdentity, SessionTrigger
 from pet_daemon.sessions.processes import ProcessTracker
 from pet_daemon.sessions.reactions import SessionReactions
 from pet_daemon.sessions.tracking import Sessions
@@ -76,6 +78,9 @@ class FixtureModel:
     def __init__(self) -> None:
         self.requests = []
         self.story_requests = []
+        self.before_response: Callable[[SpeechReason | ModelPurpose], None] | None = (
+            None
+        )
         self.text: str | None = (
             "The parser preserves escaped delimiters inside quoted fields."
         )
@@ -85,8 +90,12 @@ class FixtureModel:
     ) -> dict[str, object]:
         if reason == ModelPurpose.STORY:
             self.story_requests.append(request)
+            if self.before_response:
+                self.before_response(reason)
             return story_response(request)
         self.requests.append((request, reason))
+        if self.before_response:
+            self.before_response(reason)
         return {"speak": self.text}
 
 
@@ -105,7 +114,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.model = FixtureModel()
         self.provider = FixtureProvider()
         self.packets: list[OverlayPacket] = []
-        self.attention = Attention(self.config, self.clock, random.Random(0))
+        self.attention = Attention(
+            self.config, self.clock, random.Random(0), wall_clock=self.clock
+        )
         directory = Path(self.temporary.name)
         (directory / "pixel.png").write_bytes(
             base64.b64decode(
@@ -147,7 +158,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.app = Application(
             self.config,
-            sessions=Sessions(self.clock),
+            sessions=Sessions(self.clock, wall_clock=self.clock),
             reactions=SessionReactions(),
             attention=self.attention,
             behavior=behavior,
@@ -216,7 +227,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.temporary.cleanup()
 
     def report(self, text: str, *, session: str = "parser") -> None:
-        self.provider.publish(HookEvent("codex", session, "progress", progress=text))
+        self.provider.publish(
+            HookEvent(SessionSource.CODEX, session, "progress", progress=text)
+        )
 
     async def submit_commentary(self) -> tuple[SpeechPacket, AttentionSelection]:
         snapshot = self.app.context()
@@ -243,24 +256,80 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
+    async def test_closure_before_generation_discards_the_scheduled_snapshot(
+        self,
+    ) -> None:
+        snapshot = self.app.context()
+        selection = self.attention.select(snapshot)
+        self.provider.publish(HookEvent(SessionSource.CODEX, "parser", "session_end"))
+        await self.app.comment(
+            SpeechReason.ROUTINE, snapshot=snapshot, selection=selection
+        )
+        self.assertEqual(self.model.story_requests, [])
+        self.assertEqual(self.model.requests, [])
+        self.assertFalse(self.app.delivery.has_pending())
+
+    async def test_current_waits_receive_periodic_check_ins_until_liveness_expires(
+        self,
+    ) -> None:
+        self.config.idle_message_seconds = 10
+        self.config.behavior.automatic_speech_cooldown_seconds = 0
+        self.provider.publish(
+            HookEvent(
+                SessionSource.CODEX, "parser", "waiting", progress="Choose a format"
+            )
+        )
+        self.attention.pending = None
+        self.now += 10
+        self.app.tick()
+        self.assertEqual(self.app.reason, SpeechReason.CHECK_IN)
+        self.assertEqual(
+            self.app.sessions.by_id["codex:parser"].last_check_in, self.now
+        )
+        await require(self.app.task)
+        if self.packets and "delivery_id" in self.packets[-1]:
+            self.app.receive_renderer(
+                {
+                    "kind": "renderer",
+                    "event": "speech_accepted",
+                    "delivery_id": self.packets[-1]["delivery_id"],
+                }
+            )
+        self.now += self.config.activity_fresh_seconds
+        self.app.tick()
+        self.assertIsNone(self.app.task)
+        self.assertEqual(self.app.sessions.check_in_due(10), [])
+
     async def test_child_lifecycle_retains_reports_without_interrupting_the_root(
         self,
     ) -> None:
         self.packets.clear()
         for event in (
             HookEvent(
-                "codex",
+                SessionSource.CODEX,
                 "examples",
                 "subagent_start",
                 parent="parser",
                 goal="Document quoted-field examples",
             ),
-            HookEvent("codex", "examples", "tool_start", call="check", tool="pytest"),
-            HookEvent("codex", "examples", "tool_error", call="check"),
-            HookEvent("codex", "examples", "tool_start", call="retry", tool="pytest"),
-            HookEvent("codex", "examples", "tool_done", call="retry"),
             HookEvent(
-                "codex",
+                SessionSource.CODEX,
+                "examples",
+                "tool_start",
+                call="check",
+                tool="pytest",
+            ),
+            HookEvent(SessionSource.CODEX, "examples", "tool_error", call="check"),
+            HookEvent(
+                SessionSource.CODEX,
+                "examples",
+                "tool_start",
+                call="retry",
+                tool="pytest",
+            ),
+            HookEvent(SessionSource.CODEX, "examples", "tool_done", call="retry"),
+            HookEvent(
+                SessionSource.CODEX,
                 "examples",
                 "subagent_done",
                 progress="Documented escaped delimiter examples.",
@@ -285,11 +354,13 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         self.provider.publish(
-            HookEvent("codex", "examples", "subagent_start", parent="parser")
+            HookEvent(
+                SessionSource.CODEX, "examples", "subagent_start", parent="parser"
+            )
         )
         self.provider.publish(
             HookEvent(
-                "codex",
+                SessionSource.CODEX,
                 "examples",
                 "waiting",
                 call="question",
@@ -316,7 +387,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.attention.next_observation = self.now + 3600
         for child in ("examples", "escapes"):
             self.provider.publish(
-                HookEvent("codex", child, "subagent_start", parent="parser")
+                HookEvent(SessionSource.CODEX, child, "subagent_start", parent="parser")
             )
         self.now += 6
         self.report("Reviewing the delegated findings.")
@@ -343,7 +414,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs("pet-daemon", level="WARNING"):
             self.provider.publish(
                 HookEvent(
-                    "codex",
+                    SessionSource.CODEX,
                     "parser",
                     "intent",
                     goal=failed_intent,
@@ -367,7 +438,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.provider.publish(replace(self.observation, pr=None, checked_at=self.now))
         self.provider.publish(
             HookEvent(
-                "codex",
+                SessionSource.CODEX,
                 "parser",
                 "turn_done",
                 outcome=ExecutionOutcome.SUCCESS,
@@ -531,7 +602,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.report(parent_report)
         self.provider.publish(
             HookEvent(
-                "codex",
+                SessionSource.CODEX,
                 "examples",
                 "subagent_start",
                 parent="parser",
@@ -559,6 +630,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 self.now,
             )
         )
+        self.now += 1
         self.report(child_report, session="examples")
         subjects = self.app.context().work
         self.assertEqual(len(subjects), 1)
@@ -578,8 +650,8 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         packet, selection = await self.submit_commentary()
         payload = json.loads(self.model.requests[0][0]["messages"][0]["content"])
-        self.assertIn(parent_report, json.dumps(payload["current_work"]))
-        self.assertIn(child_report, json.dumps(payload["current_work"]))
+        self.assertIn(parent_report, json.dumps(payload["earlier_context"]))
+        self.assertIn(child_report, json.dumps(payload["current_moment"]))
         story_payload = json.loads(
             self.model.story_requests[0]["messages"][0]["content"]
         )
@@ -612,11 +684,13 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         self.provider.publish(
-            HookEvent("codex", "parser", "progress", aliases=("parser-alias",))
+            HookEvent(
+                SessionSource.CODEX, "parser", "progress", aliases=("parser-alias",)
+            )
         )
         self.provider.publish(
             HookEvent(
-                "codex",
+                SessionSource.CODEX,
                 "examples",
                 "subagent_start",
                 parent="parser-alias",
@@ -632,7 +706,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(require(subject.story.sessions[0].context).checkout, "")
         self.provider.publish(
             HookEvent(
-                "codex",
+                SessionSource.CODEX,
                 "examples",
                 "progress",
                 repo="/fixture/parser-examples",
@@ -643,6 +717,214 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(require(child.context).checkout, "/fixture/parser-examples")
         self.assertEqual(len(self.app.context().work), 1)
 
+    def complete_turn(self, session: str = "parser") -> None:
+        self.provider.publish(
+            HookEvent(
+                SessionSource.CODEX,
+                session,
+                "turn_done",
+                outcome=ExecutionOutcome.SUCCESS,
+            )
+        )
+
+    def restart_attention_and_sessions(self) -> None:
+        self.attention = Attention(
+            self.config,
+            self.clock,
+            random.Random(0),
+            self.memory.load_attention_history(),
+            wall_clock=self.clock,
+        )
+        self.app.attention = self.attention
+        self.app.sessions = Sessions(self.clock, wall_clock=self.clock)
+        self.app.reactions = SessionReactions()
+        self.app.agent_activity.sessions = self.app.sessions
+        self.app.agent_activity.reactions = self.app.reactions
+
+    async def test_accepted_completion_stays_consumed_through_restart_and_closure(
+        self,
+    ) -> None:
+        self.complete_turn()
+        packet, _ = await self.submit_commentary()
+        self.accept(packet)
+        self.assertEqual(len(self.memory.speech()), 1)
+        self.restart_attention_and_sessions()
+        self.assertFalse(
+            self.attention.routine_eligible(
+                self.app.context().work[0], self.app.context()
+            )
+        )
+        self.now += 10
+        self.provider.publish(HookEvent(SessionSource.CODEX, "parser", "session_end"))
+        snapshot = self.app.context()
+        self.assertFalse(self.attention.routine_eligible(snapshot.work[0], snapshot))
+        await self.app.comment(SpeechReason.COMPLETION)
+        self.assertEqual(len(self.model.requests), 1)
+        self.now += 7200
+        await self.app.comment(SpeechReason.ROUTINE)
+        self.assertEqual(len(self.model.requests), 1)
+        self.assertEqual(
+            require(self.memory.message_outcome(packet["delivery_id"])).outcome,
+            "accepted",
+        )
+
+    async def test_unspoken_completion_expires_at_original_grace_after_restart(
+        self,
+    ) -> None:
+        self.complete_turn()
+        self.restart_attention_and_sessions()
+        self.now += 299
+        snapshot = self.app.context()
+        selection = self.attention.select(snapshot)
+        self.assertIsNotNone(selection.update)
+        self.assertTrue(self.attention.selection_eligible(selection, snapshot))
+        self.provider.publish(HookEvent(SessionSource.CODEX, "parser", "session_end"))
+        self.now += 1
+        await self.app.comment(SpeechReason.ROUTINE)
+        self.assertEqual(self.model.story_requests, [])
+        self.assertEqual(self.model.requests, [])
+
+    async def test_verified_active_work_remains_eligible_beyond_completion_grace(
+        self,
+    ) -> None:
+        owner = ProcessIdentity(42, "fixture-owner")
+        self.provider.publish(
+            HookEvent(
+                SessionSource.CODEX,
+                "parser",
+                "progress",
+                progress="Checking parser cases",
+                owner=owner,
+            )
+        )
+        self.app.sessions.apply_process_status({owner: ProcessStatus.ALIVE})
+        self.now += 7200
+        await self.app.comment(SpeechReason.ROUTINE)
+        self.assertEqual(len(self.model.requests), 1)
+        self.assertTrue(self.app.delivery.has_pending())
+
+    async def test_completion_expiring_during_story_generation_stops_commentary(
+        self,
+    ) -> None:
+        self.complete_turn()
+        wall = self.now
+        self.attention.wall_clock = lambda: wall
+        self.app.sessions.wall_clock = lambda: wall
+
+        def sleep_during_story(reason: SpeechReason | ModelPurpose) -> None:
+            nonlocal wall
+            if reason == ModelPurpose.STORY:
+                wall += 300
+
+        self.model.before_response = sleep_during_story
+        await self.app.comment(SpeechReason.ROUTINE)
+        self.assertEqual(len(self.model.story_requests), 1)
+        self.assertEqual(self.model.requests, [])
+        self.assertFalse(self.app.delivery.has_pending())
+
+    async def test_completion_expiring_during_commentary_stops_submission(self) -> None:
+        self.complete_turn()
+        wall = self.now
+        self.attention.wall_clock = lambda: wall
+        self.app.sessions.wall_clock = lambda: wall
+
+        def sleep_during_commentary(reason: SpeechReason | ModelPurpose) -> None:
+            nonlocal wall
+            if reason == SpeechReason.ROUTINE:
+                wall += 300
+
+        self.model.before_response = sleep_during_commentary
+        await self.app.comment(SpeechReason.ROUTINE)
+        self.assertEqual(len(self.model.requests), 1)
+        self.assertFalse(self.app.delivery.has_pending())
+        self.assertFalse(any("delivery_id" in packet for packet in self.packets))
+        self.assertEqual(self.memory.speech(), [])
+
+    async def test_completion_delivery_retries_stop_at_grace_expiry(self) -> None:
+        self.complete_turn()
+        self.now += 299
+        packet, _ = await self.submit_commentary()
+        emitted = len([item for item in self.packets if "delivery_id" in item])
+        self.now += 1
+        self.app.delivery.tick()
+        self.assertFalse(self.app.delivery.has_pending())
+        self.assertEqual(
+            len([item for item in self.packets if "delivery_id" in item]), emitted
+        )
+        self.assertIsNone(self.memory.message_outcome(packet["delivery_id"]))
+
+    async def test_failed_completion_delivery_remains_eligible_before_expiry(
+        self,
+    ) -> None:
+        self.complete_turn()
+        packet, selection = await self.submit_commentary()
+        for _ in range(2):
+            self.now += 2
+            self.app.delivery.tick()
+        self.assertEqual(
+            require(self.memory.message_outcome(packet["delivery_id"])).outcome,
+            "failed",
+        )
+        self.assertTrue(
+            self.attention.selection_eligible(selection, self.app.context())
+        )
+        self.assertEqual(self.memory.speech(), [])
+
+    async def test_deliberate_silence_consumes_queued_completion(self) -> None:
+        self.complete_turn()
+        trigger = require(self.attention.pending)[2]
+        self.model.text = None
+        await self.app.comment(SpeechReason.ROUTINE)
+        self.now += 2
+        await self.app.comment(SpeechReason.COMPLETION, trigger=trigger)
+        self.assertEqual(len(self.model.requests), 1)
+        self.assertEqual(self.memory.speech(), [])
+
+    async def test_live_child_cannot_revive_consumed_parent_completion(self) -> None:
+        self.complete_turn()
+        packet, _ = await self.submit_commentary()
+        self.accept(packet)
+        self.provider.publish(
+            HookEvent(
+                SessionSource.CODEX,
+                "child",
+                "subagent_start",
+                parent="parser",
+                goal="Check examples",
+            )
+        )
+        snapshot = self.app.context(SessionTrigger("codex:parser"))
+        selection = self.attention.select(snapshot, SpeechReason.COMPLETION)
+        self.assertIsNone(selection.update)
+        self.assertFalse(self.attention.selection_eligible(selection, snapshot))
+        child_snapshot = self.app.context(SessionTrigger("codex:child"))
+        child_selection = self.attention.select(child_snapshot, SpeechReason.PROMPT)
+        self.assertEqual(require(child_selection.update).session, "codex:child")
+        self.assertTrue(
+            self.attention.selection_eligible(child_selection, child_snapshot)
+        )
+
+    async def test_live_parent_cannot_revive_consumed_child_completion(self) -> None:
+        self.provider.publish(
+            HookEvent(
+                SessionSource.CODEX,
+                "child",
+                "subagent_start",
+                parent="parser",
+                goal="Check examples",
+            )
+        )
+        self.complete_turn("child")
+        self.model.text = None
+        await self.app.comment(
+            SpeechReason.COMPLETION, trigger=SessionTrigger("codex:child")
+        )
+        self.report("The parent is still checking the parser")
+        snapshot = self.app.context(SessionTrigger("codex:child"))
+        selection = self.attention.select(snapshot, SpeechReason.COMPLETION)
+        self.assertIsNone(selection.update)
+        self.assertFalse(self.attention.selection_eligible(selection, snapshot))
+
     async def test_pending_delivery_defers_other_work_and_queued_automatic_generation(
         self,
     ) -> None:
@@ -651,7 +933,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.config.idle_message_seconds = 1
         await self.submit_commentary()
         self.provider.publish(
-            HookEvent("codex", "other", "intent", goal="Document the renderer")
+            HookEvent(
+                SessionSource.CODEX, "other", "intent", goal="Document the renderer"
+            )
         )
         self.app.queue(SpeechReason.PROMPT)
         self.attention.next_observation = self.now
@@ -672,6 +956,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             self.clock,
             random.Random(0),
             self.memory.load_attention_history(),
+            wall_clock=self.clock,
         )
         self.now += max(self.config.observation_seconds)
         restored.next_observation = self.now
@@ -694,6 +979,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             self.clock,
             random.Random(0),
             self.memory.load_attention_history(),
+            wall_clock=self.clock,
         )
         self.assertFalse(restored.is_new(self.app.context().work[0]))
         self.report("Added examples for escaped delimiters.")
@@ -713,6 +999,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             self.clock,
             random.Random(0),
             self.memory.load_attention_history(),
+            wall_clock=self.clock,
         )
         self.assertTrue(restored.is_new(self.app.context().work[0]))
         self.assertTrue(self.attention.is_new(self.app.context().work[0]))

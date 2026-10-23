@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Unpack
 
-from pet_daemon.attention import Attention
+from pet_daemon.attention import Attention, AttentionSelection
 from pet_daemon.commentary import Cognition
 from pet_daemon.commentary.context import CommentaryPayload, PreparedCommentary
 from pet_daemon.commentary.contracts import ModelRequest
@@ -22,6 +22,7 @@ from pet_daemon.domain import (
     ModelPurpose,
     ProcessStatus,
     PullRequestState,
+    SessionSource,
     SpeechReason,
     SpeechSituation,
 )
@@ -49,6 +50,7 @@ from pet_daemon.work.views import (
     IntentView,
     ProgressView,
     SessionContribution,
+    WorkUpdate,
 )
 from Tests.fixtures import (
     SessionOptions,
@@ -121,7 +123,7 @@ class ContextTests(unittest.TestCase):
     def payload(self, prepared: PreparedCommentary) -> CommentaryPayload:
         return json.loads(prepared.request["messages"][0]["content"])
 
-    def test_validated_story_replaces_raw_report_history_and_keeps_delivery_support(
+    def test_validated_story_keeps_selected_progress_and_aged_support(
         self,
     ) -> None:
         narrative = WorkNarrative(
@@ -144,11 +146,48 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(
             payload["current_work"]["story"], "Preserve parser compatibility."
         )
-        self.assertNotIn("earlier_context", payload)
-        self.assertNotIn("reported_progress", payload["current_moment"])
+        self.assertEqual(
+            payload["current_moment"]["reported_progress"],
+            "Checking parser compatibility",
+        )
+        self.assertEqual(
+            payload["earlier_context"][-1]["reported_progress"],
+            "The agent reports compatibility checks are running.",
+        )
         self.assertTrue(prepared.support.valid(snapshot))
         self.update_session(progress="Compatibility check failed")
         self.assertFalse(prepared.support.valid(self.current_snapshot()))
+
+    def test_cached_narrative_ages_follow_wall_time_without_changing_support(
+        self,
+    ) -> None:
+        narrative = WorkNarrative(
+            "cli:parser",
+            "revision",
+            NarrativeStatement("Preserve parser compatibility.", ("request",)),
+            progress=(NarrativeStatement("Parser checks passed.", ("report",)),),
+            sources={
+                "request": {"observed_at": 700, "scope": "root"},
+                "report": {"observed_at": 880, "scope": "root"},
+            },
+        )
+        self.memory.save_narrative(narrative)
+        cached = self.memory.load_narrative("cli:parser")
+        snapshot = self.current_snapshot()
+        selection = self.attention.select(snapshot, SpeechReason.ROUTINE)
+        prepared = self.cognition.prompts.prepare(
+            snapshot, selection, self.cognition.request, narrative=cached
+        )
+        report = self.payload(prepared)["earlier_context"][-1]
+        self.assertEqual(report["age"], "2 minutes ago")
+        self.cognition.clock = lambda: 8200
+        later = self.cognition.prompts.prepare(
+            snapshot, selection, self.cognition.request, narrative=cached
+        )
+        report = self.payload(later)["earlier_context"][-1]
+        self.assertEqual(report["age"], "2 hours ago")
+        self.assertEqual(prepared.support, later.support)
+        self.assertEqual(cached, self.memory.load_narrative("cli:parser"))
 
     def test_changed_older_story_evidence_invalidates_speech_outside_raw_projection(
         self,
@@ -335,18 +374,30 @@ class ContextTests(unittest.TestCase):
         self.update_session(presence=ProcessStatus.ALIVE)
         self.assertTrue(prepared.support.valid(self.current_snapshot()))
 
-    def test_quiet_connected_work_keeps_its_intent_without_a_live_session(self) -> None:
+    def test_historical_work_projection_keeps_its_request_without_a_live_session(
+        self,
+    ) -> None:
         self.record_hook(
-            HookEvent("cli", "parser", "intent", goal="Preserve parser compatibility")
+            HookEvent(
+                SessionSource.COMMAND,
+                "parser",
+                "intent",
+                goal="Preserve parser compatibility",
+            )
         )
         self.snapshot = replace(self.snapshot, sessions=())
         self.work = self.memory.connected_work(self.snapshot)
-        prepared = self.prepare()
+        snapshot = self.current_snapshot()
+        selection = AttentionSelection(
+            self.work[0], None, (), SpeechReason.CLICK, SpeechSituation.CLICK_WORKING
+        )
+        prepared = self.cognition.prompts.prepare(
+            snapshot, selection, self.cognition.request
+        )
         payload = self.payload(prepared)
         self.assertEqual(
             payload["current_work"]["request"], "Preserve parser compatibility"
         )
-        self.assertTrue(prepared.support.valid(self.current_snapshot()))
 
     def test_manifest_rejects_a_superseded_runtime_transition(self) -> None:
         prepared = self.prepare()
@@ -386,7 +437,7 @@ class ContextTests(unittest.TestCase):
         if not self.memory.recent(session="cli:parser", event_types=("intent",)):
             self.record_hook(
                 HookEvent(
-                    "cli",
+                    SessionSource.COMMAND,
                     "parser",
                     "intent",
                     goal="Make session tracking survive restarts",
@@ -411,7 +462,9 @@ class ContextTests(unittest.TestCase):
                 1000,
             )
         )
-        self.record_hook(HookEvent("cli", "parser", "session_start", repo="/parser"))
+        self.record_hook(
+            HookEvent(SessionSource.COMMAND, "parser", "session_start", repo="/parser")
+        )
         self.memory.work.observe(
             BranchObservation(
                 "example.test/team/parser",
@@ -665,6 +718,121 @@ class ContextTests(unittest.TestCase):
         )
         self.assertFalse(prepared.support.valid(self.current_snapshot()))
 
+    def test_selected_terminal_failure_preserves_the_failed_call(self) -> None:
+        self.output()
+        subject = self.work[0]
+        story = replace(
+            subject.story,
+            activity=(
+                EvidenceView(
+                    EvidenceSource.HARNESS,
+                    EvidenceKind.EXECUTION,
+                    ExecutionView("turn ended", None, ExecutionOutcome.ERROR),
+                    1000,
+                ),
+            ),
+        )
+        self.work = (replace(subject, story=story),)
+        snapshot = self.current_snapshot()
+        selection = AttentionSelection(
+            self.work[0],
+            snapshot.sessions[0],
+            (),
+            SpeechReason.FAILURE,
+            SpeechSituation.FAILURE,
+            update=WorkUpdate(subject.id, "terminal-revision", 1000, 1000),
+        )
+        moment = self.cognition.prompts.prompt(snapshot, selection)["current_moment"]
+        self.assertEqual(moment, {"kind": "failed_call"})
+
+    def test_selected_completion_preserves_outcome_without_runtime_after_restart(
+        self,
+    ) -> None:
+        self.output()
+        subject = self.work[0]
+        story = replace(
+            subject.story,
+            activity=(
+                EvidenceView(
+                    EvidenceSource.HARNESS,
+                    EvidenceKind.EXECUTION,
+                    ExecutionView(
+                        "turn ended", "Parser checks passed", ExecutionOutcome.SUCCESS
+                    ),
+                    1000,
+                ),
+            ),
+        )
+        self.work = (replace(subject, story=story),)
+        self.snapshot = replace(self.snapshot, sessions=())
+        snapshot = self.current_snapshot()
+        selection = AttentionSelection(
+            self.work[0],
+            None,
+            (),
+            SpeechReason.ROUTINE,
+            SpeechSituation.COMPLETION,
+            update=WorkUpdate(subject.id, "terminal-revision", 1000, 1000),
+        )
+        moment = self.cognition.prompts.prompt(snapshot, selection)["current_moment"]
+        self.assertEqual(moment["kind"], "turn_ended")
+        self.assertEqual(moment["outcome"], "success")
+        self.assertEqual(moment["reported_progress"], "Parser checks passed")
+
+    def test_selected_child_update_keeps_parent_result_in_historical_context(
+        self,
+    ) -> None:
+        self.output()
+        subject = self.work[0]
+        story = replace(
+            subject.story,
+            activity=(
+                EvidenceView(
+                    EvidenceSource.HARNESS,
+                    EvidenceKind.EXECUTION,
+                    ExecutionView(
+                        "turn ended", "Parent checks passed", ExecutionOutcome.SUCCESS
+                    ),
+                    700,
+                ),
+            ),
+            sessions=(
+                SessionContribution(
+                    "Inspect the parser",
+                    session="cli:child",
+                    activity=(
+                        EvidenceView(
+                            EvidenceSource.HARNESS,
+                            EvidenceKind.PROGRESS,
+                            ProgressView("Child is inspecting escape handling"),
+                            940,
+                        ),
+                    ),
+                ),
+            ),
+        )
+        self.work = (replace(subject, story=story),)
+        snapshot = self.current_snapshot()
+        selection = replace(
+            self.attention.select(snapshot, SpeechReason.ROUTINE),
+            subject=self.work[0],
+            update=WorkUpdate("cli:child", "child-revision", 940, None),
+        )
+        payload = self.cognition.prompts.prompt(snapshot, selection)
+        self.assertEqual(payload["current_work"]["request"], "Inspect the parser")
+        self.assertEqual(
+            payload["current_moment"]["reported_progress"],
+            "Child is inspecting escape handling",
+        )
+        self.assertEqual(payload["current_moment"]["age"], "1 minute ago")
+        self.assertTrue(
+            any(
+                item.get("reported_progress") == "Parent checks passed"
+                and item["age"] == "5 minutes ago"
+                for item in payload["earlier_context"]
+            )
+        )
+
     def test_child_report_keeps_the_assignment_observed_before_its_result(self) -> None:
         self.output()
         report = EvidenceView(
@@ -714,7 +882,14 @@ class ContextTests(unittest.TestCase):
             outcome=ExecutionOutcome.CANCELLED,
             progress="Started checking parser behavior",
         )
-        moment = self.payload(self.prepare())["current_moment"]
+        snapshot = self.current_snapshot()
+        selection = AttentionSelection(
+            None, snapshot.sessions[0], (), SpeechReason.CLICK, SpeechSituation.ROUTINE
+        )
+        prepared = self.cognition.prompts.prepare(
+            snapshot, selection, self.cognition.request
+        )
+        moment = self.payload(prepared)["current_moment"]
         self.assertEqual(moment["kind"], "work_update")
         self.assertEqual(moment["state"], "quiet")
         self.assertEqual(moment["outcome"], "cancelled")

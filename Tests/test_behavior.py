@@ -12,8 +12,13 @@ from typing import TypeVar, Unpack
 from pet_daemon.behavior.controller import Behavior
 from pet_daemon.behavior.sprites import Clip, Pack
 from pet_daemon.config import BehaviorConfig
-from pet_daemon.domain import PetState
-from pet_daemon.runtime import AnimationPacket, MotionPacket, OverlayPacket
+from pet_daemon.domain import PetState, ProcessStatus
+from pet_daemon.runtime import (
+    AnimationPacket,
+    MotionPacket,
+    OverlayPacket,
+    ProcessIdentity,
+)
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.types import JSONObject
 from Tests.fixtures import BehaviorOptions, require
@@ -69,7 +74,7 @@ class BehaviorTests(unittest.TestCase):
         self.clock = Clock()
         self.rng = RandomChoices()
         self.output: list[OverlayPacket] = []
-        self.sessions = Sessions(self.clock)
+        self.sessions = Sessions(self.clock, wall_clock=self.clock)
 
     def make_behavior(
         self,
@@ -728,6 +733,7 @@ class BehaviorTests(unittest.TestCase):
         self.advance(behavior, 600, PetState.WORKING)
         self.assertIsNone(behavior.pending)
         self.assertEqual(self.animations()[-1]["id"], "quiet-pose")
+        self.sessions.handle({"harness": "cli", "session": "one", "event": "progress"})
         behavior.resume()
         behavior.tick(PetState.WORKING, self.sessions)
         self.assertEqual(self.animations()[-1]["id"], "busy")
@@ -780,10 +786,11 @@ class BehaviorTests(unittest.TestCase):
         self.advance(behavior, 119)
         self.assertFalse(behavior.sleeping)
 
-    def test_outstanding_tools_and_waiting_turns_keep_pet_awake(self) -> None:
+    def test_verified_calls_and_waiting_turns_keep_pet_awake(self) -> None:
         for event in ("tool_start", "waiting"):
             with self.subTest(event=event):
-                self.sessions = Sessions(self.clock)
+                self.sessions = Sessions(self.clock, wall_clock=self.clock)
+                owner = ProcessIdentity(42, "verified-start")
                 self.sessions.handle(
                     {
                         "harness": "cli",
@@ -791,8 +798,10 @@ class BehaviorTests(unittest.TestCase):
                         "event": event,
                         "goal": "Plan changes",
                         "call": "long",
+                        "owner": owner.packet(),
                     }
                 )
+                self.sessions.apply_process_status({owner: ProcessStatus.ALIVE})
                 behavior = self.make_behavior(naps=True, nap_interval=(1, 1))
                 self.advance(behavior, 600)
                 self.assertFalse(behavior.sleeping)
@@ -834,7 +843,7 @@ class BehaviorTests(unittest.TestCase):
             {"pointer": {"x": 200, "y": 152}},
         ):
             with self.subTest(interaction=interaction):
-                self.sessions = Sessions(self.clock)
+                self.sessions = Sessions(self.clock, wall_clock=self.clock)
                 behavior = self.make_behavior(naps=True, nap_interval=(1, 1))
                 self.wait_for_nap(behavior)
                 if interaction is None:

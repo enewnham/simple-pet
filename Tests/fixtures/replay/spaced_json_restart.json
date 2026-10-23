@@ -1,0 +1,68 @@
+{
+  "name": "spaced_json_restart",
+  "review": "A consumed completion stays quiet across restart, repeated closure, naps, and hours passing.",
+  "events": [
+    {
+      "packets": [
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "intent",
+          "goal": "Accept JSON packets with spaces in the hook reader."
+        },
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "turn_done",
+          "progress": "Updated the hook reader to accept spaced JSON and verified the packet replay."
+        }
+      ],
+      "reason": "completion",
+      "candidate_speech": "The hook reader accepts spaced JSON, and the packet replay passes.",
+      "expected_speech": true
+    },
+    {
+      "restart": true,
+      "after_seconds": 30,
+      "reason": "completion",
+      "candidate_speech": "Spaced JSON parsing is done.",
+      "expected_speech": false
+    },
+    {
+      "after_seconds": 30,
+      "packets": [
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "session_end"
+        }
+      ],
+      "reason": "routine",
+      "expected_speech": false
+    },
+    {
+      "after_seconds": 1,
+      "packets": [
+        {
+          "harness": "codex",
+          "session": "root",
+          "event": "session_end"
+        }
+      ],
+      "reason": "completion",
+      "expected_speech": false
+    },
+    {
+      "after_seconds": 10,
+      "wall_seconds": 14400,
+      "reason": "check_in",
+      "expected_speech": false
+    },
+    {
+      "restart": true,
+      "after_seconds": 1,
+      "reason": "routine",
+      "expected_speech": false
+    }
+  ]
+}

@@ -2,6 +2,7 @@ import json
 import sqlite3
 from contextlib import AbstractContextManager
 
+from ..work.association import TERMINAL_EVENTS
 from ..work.models import (
     ExecutionEvidence,
     IntentEvidence,
@@ -95,7 +96,7 @@ class SQLiteWorkRepository:
             )
             self.bind_alias(alias, identity)
 
-    def append_report(self, report: SessionReport) -> None:
+    def append_report(self, report: SessionReport) -> bool:
         session = report.payload.session
         kind = report.record().kind
         identities = (
@@ -103,17 +104,34 @@ class SQLiteWorkRepository:
             *(alias for alias, target in self.aliases().items() if target == session),
         )
         placeholders = ",".join("?" for _ in identities)
+        if isinstance(
+            report.payload, ExecutionEvidence
+        ) and report.payload.event in TERMINAL_EVENTS - {"session_end"}:
+            rows = self.db.execute(
+                f"SELECT data FROM work_reports WHERE pet=? AND session IN ({placeholders}) AND kind=? ORDER BY id DESC",
+                (self.pet, *identities, kind),
+            )
+            for row in rows:
+                previous = report_from_data(json.loads(row["data"]))
+                payload = previous.payload
+                if (
+                    isinstance(payload, ExecutionEvidence)
+                    and payload.event != "session_end"
+                ):
+                    if payload.event in TERMINAL_EVENTS:
+                        return False
+                    break
         row = self.db.execute(
             f"SELECT data FROM work_reports WHERE pet=? AND session IN ({placeholders}) AND kind=? ORDER BY id DESC LIMIT 1",
             (self.pet, *identities, kind),
         ).fetchone()
-        if row:
+        if row and not isinstance(report.payload, IntentEvidence):
             recorded = report_from_data(json.loads(row["data"]))
             if (
                 recorded.payload == report.payload
                 and recorded.context == report.context
             ):
-                return
+                return False
         self.db.execute(
             "INSERT INTO work_reports(pet,session,kind,data,observed_at) VALUES (?,?,?,?,?)",
             (
@@ -124,6 +142,7 @@ class SQLiteWorkRepository:
                 report.observed_at,
             ),
         )
+        return True
 
     def bind_alias(self, alias: str, session: str) -> None:
         self.db.execute(
@@ -213,6 +232,7 @@ class SQLiteWorkRepository:
                 report
                 for report in reversed(reports)
                 if isinstance(report.payload, ExecutionEvidence)
+                and report.payload.event != "session_end"
             ),
             None,
         )
@@ -232,7 +252,19 @@ class SQLiteWorkRepository:
             location_at=row["location_at"],
             reports=authored,
             execution=execution,
-            changed_at=reports[-1].observed_at if reports else 0,
+            closure=next(
+                (
+                    report
+                    for report in reversed(reports)
+                    if isinstance(report.payload, ExecutionEvidence)
+                    and report.payload.event == "session_end"
+                ),
+                None,
+            ),
+            changed_at=max(
+                max((report.observed_at for report in authored), default=0),
+                execution.observed_at if execution else 0,
+            ),
             aliases=identities[1:],
         )
 

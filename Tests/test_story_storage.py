@@ -5,6 +5,7 @@ from pathlib import Path
 
 from pet_daemon.domain import SpeechReason
 from pet_daemon.storage import Memory
+from pet_daemon.storage.memory import HistoryRecord
 from pet_daemon.storage.migrations import SCHEMA_VERSION
 from pet_daemon.work.models import IntentEvidence
 from pet_daemon.work.narrative import NarrativeStatement, WorkNarrative
@@ -29,7 +30,11 @@ class StoryStorageTests(unittest.TestCase):
             ),
             sources={
                 "request": {"text": "Inspect parser"},
-                "report": {"text": "Checks passed"},
+                "report": {
+                    "text": "Checks passed",
+                    "observed_at": 880,
+                    "origin": "root",
+                },
             },
         )
 
@@ -47,7 +52,7 @@ class StoryStorageTests(unittest.TestCase):
             )
         )
         self.memory.record_speech("Inspecting", SpeechReason.ROUTINE)
-        self.memory.save_attention_history("root", 100, "acknowledged")
+        self.memory.save_attention_history("root", HistoryRecord(100, "acknowledged"))
         self.memory.save_narrative(self.narrative())
         self.memory.close()
         with sqlite3.connect(self.path) as database:

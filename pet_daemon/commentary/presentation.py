@@ -83,6 +83,7 @@ class WorkRecord(TypedDict):
 
 
 class AgentSessionRecord(TypedDict):
+    session: str
     scope: str
     requests: tuple[PresentedEvidence, ...]
     activity: tuple[PresentedEvidence, ...]
@@ -170,6 +171,7 @@ def work_record(work: WorkStory) -> WorkRecord:
     if work.sessions:
         result["sessions"] = tuple(
             {
+                "session": agent.session,
                 "scope": agent.scope,
                 "requests": tuple(evidence_record(record) for record in agent.requests),
                 "activity": tuple(evidence_record(record) for record in agent.activity),

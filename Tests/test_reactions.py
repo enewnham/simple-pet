@@ -54,6 +54,18 @@ class ReactionTests(unittest.TestCase):
         ]
         self.assertEqual(kinds.count("trouble"), 1)
 
+    def test_session_closure_does_not_create_a_terminal_reaction(self) -> None:
+        self.event("intent", goal="Build it")
+        self.assertEqual(self.event("session_end"), [])
+        self.assertEqual(self.event("session_end"), [])
+        self.assertIsNone(self.sessions.by_id["claude:one"].outcome)
+
+    def test_closure_keeps_the_existing_terminal_reaction_relevant(self) -> None:
+        self.event("intent", goal="Build it")
+        terminal = self.event("turn_done")[0]
+        self.assertEqual(self.event("session_end"), [])
+        self.assertTrue(self.reactions.relevant(terminal, self.sessions))
+
     def test_failed_turn_and_cancellation_have_distinct_reactions(self) -> None:
         self.event("intent", goal="Fix checks")
         self.assertEqual([item.kind for item in self.event("turn_error")], ["failure"])

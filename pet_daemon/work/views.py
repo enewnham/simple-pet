@@ -129,6 +129,7 @@ class SessionContribution:
     requests: tuple[EvidenceView, ...] = ()
     activity: tuple[EvidenceView, ...] = ()
     context: ReportContext | None = None
+    session: str = ""
 
 
 @dataclass(frozen=True)
@@ -143,6 +144,15 @@ class WorkStory:
 
 
 @dataclass(frozen=True)
+class WorkUpdate:
+    session: str
+    revision: str
+    observed_at: float
+    ended_at: float | None = None
+    aliases: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class WorkSubject:
     id: str
     kind: WorkSubjectKind
@@ -150,6 +160,7 @@ class WorkSubject:
     revision: str
     story: WorkStory
     sessions: tuple[str, ...] = ()
+    updates: tuple[WorkUpdate, ...] = ()
 
 
 def project_evidence(record: EvidenceRecord) -> EvidenceView | None:
@@ -291,7 +302,10 @@ def session_work(state: WorkFacts, agent: SessionRecord) -> WorkStory:
         and isinstance(agent.execution.payload, ExecutionEvidence)
         and agent.execution.payload.event in TERMINAL_EVENTS
     )
-    if not ended:
+    closed = agent.closure and (
+        not agent.execution or agent.closure.observed_at >= agent.execution.observed_at
+    )
+    if not ended and not closed:
         contexts.append((current_context(state, agent), True))
     contexts.extend((report.context, False) for report in agent.reports)
     if agent.execution:
@@ -528,6 +542,35 @@ def revision_key(value: object) -> str:
     return hashlib.sha256(canonical(value).encode()).hexdigest()
 
 
+def work_update(agent: SessionRecord, story: WorkStory) -> WorkUpdate:
+    from .narrative import semantic_revision
+
+    execution = agent.execution
+    ended_at = (
+        execution.observed_at
+        if execution
+        and isinstance(execution.payload, ExecutionEvidence)
+        and execution.payload.event in TERMINAL_EVENTS
+        else None
+    )
+    return WorkUpdate(
+        agent.id,
+        revision_key(
+            (
+                semantic_revision(story),
+                execution.observed_at if execution else None,
+                tuple(record.observed_at for record in story.requests),
+            )
+        ),
+        max(
+            (record.observed_at or 0 for record in (*story.requests, *story.activity)),
+            default=0,
+        ),
+        ended_at,
+        agent.aliases,
+    )
+
+
 def connected_work(
     state: WorkFacts, activity: SwarmActivity
 ) -> tuple[WorkSubject, ...]:
@@ -565,6 +608,7 @@ def connected_work(
                 story.requests,
                 story.activity,
                 current_context(state, state.sessions[identifier]),
+                identifier,
             )
             for identifier, story in stories.items()
             if identifier != root
@@ -626,6 +670,10 @@ def connected_work(
                 revision,
                 story,
                 tuple(sorted(names)),
+                tuple(
+                    work_update(state.sessions[identifier], member)
+                    for identifier, member in stories.items()
+                ),
             )
         )
     return tuple(sorted(subjects, key=lambda item: (-item.changed_at, item.id)))

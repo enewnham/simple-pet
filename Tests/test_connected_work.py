@@ -12,6 +12,7 @@ from pet_daemon.domain import (
     ExecutionOutcome,
     LinkRelationship,
     PullRequestState,
+    SessionSource,
 )
 from pet_daemon.runtime import HookEvent
 from pet_daemon.sessions.tracking import Sessions
@@ -131,7 +132,7 @@ class ConnectedWorkTests(unittest.TestCase):
         for path, (name, goal, report) in zip(paths, scopes):
             self.event(
                 HookEvent(
-                    "codex",
+                    SessionSource.CODEX,
                     name,
                     "intent",
                     goal=goal,
@@ -139,7 +140,9 @@ class ConnectedWorkTests(unittest.TestCase):
                     parent="root" if name != "root" else None,
                 )
             )
-            self.event(HookEvent("codex", name, "progress", progress=report))
+            self.event(
+                HookEvent(SessionSource.CODEX, name, "progress", progress=report)
+            )
         subjects = self.subjects()
         self.assertEqual(len(subjects), 1)
         subject = subjects[0]
@@ -193,7 +196,7 @@ class ConnectedWorkTests(unittest.TestCase):
     ) -> None:
         self.event(
             HookEvent(
-                "codex",
+                SessionSource.CODEX,
                 "child",
                 "intent",
                 parent="codex:root",
@@ -202,7 +205,10 @@ class ConnectedWorkTests(unittest.TestCase):
         )
         self.event(
             HookEvent(
-                "codex", "child", "progress", progress="The restart example is ready."
+                SessionSource.CODEX,
+                "child",
+                "progress",
+                progress="The restart example is ready.",
             )
         )
         before = self.subjects()
@@ -210,7 +216,7 @@ class ConnectedWorkTests(unittest.TestCase):
         self.assertEqual(before[0].id, "codex:root")
         self.event(
             HookEvent(
-                "codex",
+                SessionSource.CODEX,
                 "root",
                 "intent",
                 aliases=("root-conversation",),
@@ -236,10 +242,10 @@ class ConnectedWorkTests(unittest.TestCase):
             ("storage", "Review session storage", "Check serialized fields"),
             ("restore", "Review restart restoration", "Check restart behavior"),
         ):
-            self.event(HookEvent("codex", name, "intent", goal=goal))
+            self.event(HookEvent(SessionSource.CODEX, name, "intent", goal=goal))
             self.event(
                 HookEvent(
-                    "codex",
+                    SessionSource.CODEX,
                     name,
                     "progress",
                     progress=f"Reviewing {pr.url} for {ticket}",
@@ -247,7 +253,11 @@ class ConnectedWorkTests(unittest.TestCase):
             )
             self.event(
                 HookEvent(
-                    "codex", name + "-child", "intent", parent=name, goal=child_goal
+                    SessionSource.CODEX,
+                    name + "-child",
+                    "intent",
+                    parent=name,
+                    goal=child_goal,
                 )
             )
         subjects = self.subjects()
@@ -273,14 +283,14 @@ class ConnectedWorkTests(unittest.TestCase):
         sessions = Sessions(lambda: self.now, retention_seconds=1)
         for event in (
             HookEvent(
-                "codex",
+                SessionSource.CODEX,
                 "child",
                 "intent",
                 parent="root",
                 goal="Document restart examples",
             ),
             HookEvent(
-                "codex",
+                SessionSource.CODEX,
                 "child",
                 "turn_done",
                 progress="The restart example is ready.",
@@ -302,7 +312,9 @@ class ConnectedWorkTests(unittest.TestCase):
         self.assertEqual(subjects[0].story.requests, ())
         self.assertEqual(subjects[0].story.activity, ())
         config = Config(pet_dir=Path(self.temporary.name), observation_seconds=(1, 1))
-        attention = Attention(config, lambda: self.now, random.Random(0))
+        attention = Attention(
+            config, lambda: self.now, random.Random(0), wall_clock=lambda: self.now
+        )
         self.now += 1
         snapshot = capture_snapshot(runtime, work=subjects)
         request = require(attention.request(snapshot))
