@@ -10,8 +10,11 @@ component to adopt the same structure.
 the state into the daemon's representation:
 
 ```python
-state=PullRequestState(data["state"]),
-merged_at=data.get("mergedAt"),
+PullRequest(
+    ...,
+    state=PullRequestState(data["state"]),
+    merged_at=data.get("mergedAt"),
+)
 ```
 
 `pet_daemon/domain.py` defines the daemon's closed vocabulary.

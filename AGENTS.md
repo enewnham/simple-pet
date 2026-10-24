@@ -7,6 +7,20 @@ renders the pet. They communicate over local Unix datagram sockets.
 Start with [README.md](README.md) for setup, agent hooks, configuration, and development
 checks. [Makefile](Makefile) defines the check and build commands.
 
+Prefer `make` targets for local setup, builds, formatting, linting, and tests.
+Run focused tests when they cover the change.
+
+```sh
+# All tests
+make test
+make test-python
+make test-swift
+
+# Run specific tests
+make test-python ARGS='Tests/test_notify.py'
+make test-swift ARGS='--filter PetCoreTests'
+```
+
 ## Code style
 
 When writing, refactoring, or reviewing code, load the
@@ -15,9 +29,9 @@ that require judgment beyond formatting, linting, and type checks.
 
 ## Follow the work
 
-- **Agent input:** [scripts/pet-hook](scripts/pet-hook) adapts harness events.
+- **Agent input:** [scripts/pet-hook](scripts/pet-hook) adapts coding tool events.
   [bin/pet-notify](bin/pet-notify) sends commands. [examples/](examples/) contains
-  harness hook configurations and a command wrapper.
+  coding tool hook configurations and a command wrapper.
   [pet_daemon/user_text.py](pet_daemon/user_text.py) extracts bounded user prose for sentiment scoring.
 - **Application flow:** [pet_daemon/daemon.py](pet_daemon/daemon.py) owns sockets,
   process startup, shutdown, and wiring. [pet_daemon/application.py](pet_daemon/application.py)

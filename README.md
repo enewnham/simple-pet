@@ -74,27 +74,27 @@ to scroll, r to refresh, and q to quit.
 
 ## Connect your agents
 
-Add the client and hook adapter to PATH before launching your harness:
+Add the client and hook adapter to PATH before launching your coding tool:
 
 ```sh
 export PATH="$PWD/bin:$PWD/scripts:$PATH"
 ```
 
-Merge the hooks from the matching example into your harness configuration, preserving unrelated settings and handlers:
+Merge the hooks from the matching example into your coding tool configuration, preserving unrelated settings and handlers:
 
-| Harness | Example | Destination |
+| Coding tool | Example | Destination |
 | --- | --- | --- |
 | Claude Code | [claude-settings.json](examples/claude-settings.json) | `~/.claude/settings.json` |
 | Codex | [codex-hooks.json](examples/codex-hooks.json) | `~/.codex/hooks.json` |
 | Cursor CLI | [cursor-hooks.json](examples/cursor-hooks.json) | `~/.cursor/hooks.json` |
 
-If the harness cannot find `pet-hook` through PATH, replace it in the hook commands with the absolute path to `scripts/pet-hook`. In Codex, review and trust the definitions through `/hooks`.
+If the coding tool cannot find `pet-hook` through PATH, replace it in the hook commands with the absolute path to `scripts/pet-hook`. In Codex, review and trust the definitions through `/hooks`.
 
 Hooks provide agent intent, reported progress, and execution signals. The pet uses
 execution signals for activity and animation. Tool output, stack traces, and diagnostic
 details are discarded.
 
-For commands outside a harness, use the wrapper:
+For commands outside a coding tool, use the wrapper:
 
 ```sh
 examples/pet-run pytest
@@ -134,7 +134,7 @@ Set `PET_DAEMON_SOCKET` if the daemon uses a custom socket path.
 
 ## Development checks
 
-Run the checks in a logged-in macOS session:
+Run checks
 
 ```sh
 make check
