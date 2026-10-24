@@ -21,6 +21,12 @@ package = false
 [tool.ruff.lint]
 extend-select = ["ANN"]
 
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.pylint]
+max-statements = 80
+
 [tool.ty.src]
 include = ["**/*.py"]
 

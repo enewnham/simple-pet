@@ -251,16 +251,17 @@ func run() throws {
         }
         try manager.moveItem(at: output, to: backup)
     }
-    do { try manager.moveItem(at: staging, to: output) }
-    catch {
+    do { try manager.moveItem(at: staging, to: output) } catch {
         if manager.fileExists(atPath: backup.path) { try? manager.moveItem(at: backup, to: output) }
         throw error
     }
     if manager.fileExists(atPath: backup.path) { try manager.removeItem(at: backup) }
+    // Rely on extract to construct clips with string frame paths.
+    // swiftlint:disable force_cast
     let clips = metadata["clips"] as! [String: [String: Any]]
     for id in clips.keys.sorted() { print("\(id): \((clips[id]!["frames"] as! [String]).count) frames (\(clips[id]!["role"]!))") }
+    // swiftlint:enable force_cast
     print("Assets written to \(output.path)")
 }
 
-do { try run() }
-catch { fputs("Asset import failed: \(error)\n", stderr); exit(1) }
+do { try run() } catch { fputs("Asset import failed: \(error)\n", stderr); exit(1) }

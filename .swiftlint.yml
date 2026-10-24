@@ -1,0 +1,14 @@
+included:
+  - Sources
+  - Tests
+  - scripts/import-assets.swift
+  - Package.swift
+
+disabled_rules:
+  - identifier_name
+  - line_length
+  - trailing_comma
+  - cyclomatic_complexity
+  - function_body_length
+  - large_tuple
+  - optional_data_string_conversion

@@ -1,0 +1,14 @@
+included:
+  - Sources
+  - scripts/import-assets.swift
+
+only_rules:
+  - cyclomatic_complexity
+  - function_body_length
+
+cyclomatic_complexity:
+  warning: 15
+  ignores_case_statements: true
+
+function_body_length:
+  warning: 80

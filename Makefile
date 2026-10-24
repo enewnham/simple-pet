@@ -1,4 +1,4 @@
-.PHONY: setup build importer run test test-python test-swift check lint format assets clean
+.PHONY: setup build importer run test test-python test-swift check lint lint-python lint-swift complexity complexity-python complexity-swift format assets clean
 
 SWIFT_FLAGS ?= --disable-sandbox
 PYTHON_TEST_WORKERS ?= auto
@@ -54,10 +54,25 @@ test-python: setup
 	fi; \
 	PET_DESKTOP_CHECK=$$desktop uv run --locked python -m pytest $(if $(strip $(ARGS)),$(ARGS),Tests) -n $(PYTHON_TEST_WORKERS) --dist worksteal -v
 
-lint: setup
+lint: lint-python lint-swift
+
+lint-python: setup
 	uv run --locked ruff check .
 	uv run --locked ruff format --check .
 	uv run --locked ty check
+
+lint-swift complexity-swift: export DYLD_FRAMEWORK_PATH := $(dir $(shell xcrun --find swiftc))../lib$(if $(DYLD_FRAMEWORK_PATH),:$(DYLD_FRAMEWORK_PATH))
+
+lint-swift:
+	swiftlint lint --strict --no-cache --config .swiftlint.yml
+
+complexity: complexity-python complexity-swift
+
+complexity-python: setup
+	uv run --locked ruff check pet_daemon --select C901,PLR0915 --exit-zero --output-format concise
+
+complexity-swift:
+	swiftlint lint --lenient --no-cache --config .swiftlint-complexity.yml
 
 format: setup
 	uv run --locked ruff format .

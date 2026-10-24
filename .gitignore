@@ -7,6 +7,7 @@
 !.env.example
 __pycache__/
 .ruff_cache/
+.swiftlint_cache/
 assets/*/
 assets/openpets-source.json
 assets/manifest.json
