@@ -1,4 +1,4 @@
-.PHONY: setup build importer run test check lint format assets clean
+.PHONY: setup build importer run test test-python test-swift check lint format assets clean
 
 SWIFT_FLAGS ?= --disable-sandbox
 PYTHON_TEST_WORKERS ?= auto
@@ -25,21 +25,34 @@ importer: .build/debug/AssetImporter
 run: setup build
 	bin/pet-daemon
 
-test: setup
+ifneq ($(strip $(ARGS)),)
+test:
+	$(error Use make test-python ARGS=... or make test-swift ARGS=... to select tests)
+else
+test: test-swift test-python
+endif
+
+test-swift: setup
+	@desktop=$$(uv run --locked python -c 'from AppKit import NSApplication, NSScreen; NSApplication.sharedApplication(); print(int(bool(NSScreen.screens())))') || exit $$?; \
+	swift_filter=; \
+	if [ "$$desktop" != 1 ]; then \
+		echo "Desktop access unavailable; skipping overlay tests."; \
+		swift_filter="--skip PetOverlayTests"; \
+	fi; \
+	CI=true xcrun swift test $(SWIFT_TEST_FLAGS) $$swift_filter $(ARGS)
+
+test-python: setup
 	@ps -ww -axo pid=,ppid=,lstart=,stat=,command= >/dev/null 2>&1 || { \
 		echo "Process tests require ps access. Run make test outside the agent sandbox." >&2; \
 		exit 1; \
 	}
 	@desktop=$$(uv run --locked python -c 'from AppKit import NSApplication, NSScreen; NSApplication.sharedApplication(); print(int(bool(NSScreen.screens())))') || exit $$?; \
-	swift_filter=; \
 	if [ "$$desktop" = 1 ]; then \
-		echo "Desktop access available; running all tests."; \
+		echo "Desktop access available; running Python tests."; \
 	else \
-		echo "Desktop access unavailable; skipping overlay and desktop tests."; \
-		swift_filter="--skip PetOverlayTests"; \
+		echo "Desktop access unavailable; skipping desktop tests."; \
 	fi; \
-	CI=true xcrun swift test $(SWIFT_TEST_FLAGS) $$swift_filter && \
-	PET_DESKTOP_CHECK=$$desktop uv run --locked python -m pytest Tests -n $(PYTHON_TEST_WORKERS) --dist worksteal -v
+	PET_DESKTOP_CHECK=$$desktop uv run --locked python -m pytest $(if $(strip $(ARGS)),$(ARGS),Tests) -n $(PYTHON_TEST_WORKERS) --dist worksteal -v
 
 lint: setup
 	uv run --locked ruff check .
