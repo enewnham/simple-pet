@@ -11,7 +11,10 @@ from pydantic import BaseModel, Field
 from .commentary.request import SpeechConditions
 from .domain import DeliveryStatus, SpeechReason
 from .identity import SessionIdentity
+from .logging import get_logger
 from .runtime import Trigger
+
+log = get_logger("pet-daemon")
 
 
 class DeliveryConditions(BaseModel):
@@ -100,7 +103,11 @@ class SpeechDelivery:
                 }
             )
         except OSError:
-            pass
+            log.exception(
+                "speech.send_failed",
+                message=message.message_id,
+                attempt=delivery.attempts,
+            )
 
     def acknowledge(self, packet: Mapping[str, object]) -> bool:
         if packet.get("event") != "speech_accepted":

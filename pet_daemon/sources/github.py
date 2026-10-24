@@ -3,10 +3,13 @@ from typing import Required, TypedDict
 from urllib.parse import urlsplit
 
 from ..domain import ArtifactKind, EvidenceSource, LinkRelationship, PullRequestState
+from ..logging import get_logger
 from ..repository_identity import RemoteRepository, RepositoryIdentity
 from ..work.models import RelatedLink
 from ..work.observations import PullRequest
 from .git import CommandPath, RunCommand, canonical_repository, command
+
+log = get_logger("pet-daemon")
 
 
 class GitHubPullRequest(TypedDict, total=False):
@@ -136,6 +139,13 @@ async def _stack_links(
         TypeError,
         TimeoutError,
     ) as error:
+        log.warning(
+            "repository.stack_links_failed",
+            repository=pr.repository.value,
+            pull_request=pr.number,
+            error=str(error),
+            exc_info=True,
+        )
         pr.related_links_error = str(error)[:240]
         return pr
 

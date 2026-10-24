@@ -13,9 +13,10 @@ from ..domain import ModelPurpose, SpeechReason
 from ..logging import get_logger
 from ..runtime import PetContext
 from ..storage import Memory
+from ..types import JSONObject
 from ..work.narrative import WorkNarrative, semantic_revision
 from . import story
-from .contracts import JSONSchema, ModelRequest
+from .contracts import ModelRequest
 from .model import ModelClient
 from .repetition import RepeatMatch, repeat_match
 from .request import CommentaryRequest, PromptBuilder
@@ -66,9 +67,9 @@ class Cognition:
         self.memory = memory
         self.prompts = PromptBuilder(config, lambda: self.clock())
 
-    def schema(self, speech_required: bool = False) -> JSONSchema:
+    def schema(self, speech_required: bool = False) -> JSONObject:
         response = RequiredSpeechResponse if speech_required else SpeechResponse
-        return cast(JSONSchema, transform_schema(response))
+        return cast(JSONObject, transform_schema(response))
 
     def request(
         self,
@@ -141,6 +142,12 @@ class Cognition:
         except StoryUnavailable:
             raise
         except Exception as error:
+            log.exception(
+                "observation.story_failed",
+                model=self.config.model,
+                subject=selection.id,
+                error=str(error),
+            )
             raise StoryUnavailable("Work story could not be updated") from error
 
     async def generate_commentary(

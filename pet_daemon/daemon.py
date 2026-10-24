@@ -85,7 +85,7 @@ class Receiver(asyncio.DatagramProtocol):
         self.daemon.receive(data)
 
     def error_received(self, exc: Exception) -> None:
-        log.warning("hook.socket_failed", error=str(exc))
+        log.error("hook.socket_failed", error=str(exc), exc_info=exc)
 
 
 class Daemon:
@@ -205,7 +205,7 @@ class Daemon:
             log.debug("renderer.command", detail="payload", packet=packet)
             return True
         except (OSError, ValueError) as error:
-            log.warning("renderer.delivery_failed", packet=packet, error=str(error))
+            log.exception("renderer.delivery_failed", packet=packet, error=str(error))
             return False
 
     def receive(self, data: bytes) -> None:

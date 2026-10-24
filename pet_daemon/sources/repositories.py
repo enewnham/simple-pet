@@ -286,8 +286,12 @@ class RepositoryTracker:
                     error=str(error)[:240],
                 )
             )
-            log.info(
-                "repository.refresh_failed", source="git", path=path, error=str(error)
+            log.warning(
+                "repository.refresh_failed",
+                source="git",
+                path=path,
+                error=str(error),
+                exc_info=True,
             )
 
     async def _github(
@@ -317,11 +321,12 @@ class RepositoryTracker:
             TypeError,
         ) as failure:
             error = str(failure)[:240]
-            log.info(
+            log.warning(
                 "repository.refresh_failed",
                 source="github",
                 subject=key[1],
                 error=error,
+                exc_info=True,
             )
         if not self._is_active(key, version, epoch):
             return

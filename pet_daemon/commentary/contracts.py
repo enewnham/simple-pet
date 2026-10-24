@@ -3,29 +3,17 @@ from typing import Literal, Protocol, TypedDict
 
 from anthropic.types import TextBlockParam, ThinkingConfigDisabledParam
 
+from ..types import JSONObject
+
 
 class UserMessage(TypedDict):
     role: Literal["user"]
     content: str
 
 
-class JSONSchema(TypedDict, total=False):
-    type: str
-    properties: dict[str, JSONSchema]
-    required: list[str]
-    additionalProperties: bool
-    anyOf: list[JSONSchema]
-    description: str
-    items: JSONSchema
-    enum: list[str]
-
-
-TextSchema = JSONSchema
-
-
 class OutputFormat(TypedDict):
     type: Literal["json_schema"]
-    schema: JSONSchema
+    schema: JSONObject
 
 
 class OutputConfig(TypedDict):

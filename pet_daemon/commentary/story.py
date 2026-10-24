@@ -26,7 +26,7 @@ from ..work.models import (
 )
 from ..work.narrative import NarrativeStatement, WorkNarrative, semantic_revision
 from ..work.stories import revision_key
-from .contracts import JSONSchema, ModelRequest, RequestFactory
+from .contracts import ModelRequest, RequestFactory
 from .request import duration
 
 INSTRUCTIONS = """
@@ -331,7 +331,7 @@ def prepare(
     payload = _story_payload(collector, sources, previous, memory.clock, target_bytes)
     request = make_request(payload, [{"type": "text", "text": INSTRUCTIONS}])
     request["output_config"]["format"]["schema"] = cast(
-        JSONSchema, transform_schema(StoryResponse)
+        JSONObject, transform_schema(StoryResponse)
     )
     request["max_tokens"] = max(request["max_tokens"], 1400)
     return WorkNarrativeRequest(

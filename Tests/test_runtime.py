@@ -1314,9 +1314,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(speech["ttl"], 15)
         self.assertEqual(request_reason(self.requests[-1]), "click")
         schema = self.requests[0]["output_config"]["format"]["schema"]
-        self.assertEqual(set(schema["properties"]), {"speak"})
+        properties = schema["properties"]
+        assert isinstance(properties, dict)
+        self.assertEqual(set(properties), {"speak"})
         self.assertEqual(schema["required"], ["speak"])
-        self.assertEqual(schema["properties"]["speak"]["type"], "string")
+        speak = properties["speak"]
+        assert isinstance(speak, dict)
+        self.assertEqual(speak["type"], "string")
 
     async def test_napping_pauses_routine_commentary_and_click_wakes_for_speech(
         self,

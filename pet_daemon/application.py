@@ -118,7 +118,7 @@ class Application:
         try:
             self.memory.clear()
         except sqlite3.Error as error:
-            log.warning("memory.clear_failed", error=str(error))
+            log.exception("memory.clear_failed", error=str(error))
             return
         self.preempt()
         self.history_epoch += 1
@@ -215,7 +215,7 @@ class Application:
             self.memory.work.observe(observation)
             self.reconcile_targets()
         except (sqlite3.Error, ValueError) as error:
-            log.warning("work.ingest_failed", error=str(error))
+            log.exception("work.ingest_failed", error=str(error))
 
     def _ingest_hook(self, hook: HookEvent) -> None:
         if hook.repo:
@@ -248,7 +248,7 @@ class Application:
                 )
             self.reconcile_targets()
         except (sqlite3.Error, ValueError) as error:
-            log.warning("work.evidence_failed", error=str(error))
+            log.exception("work.evidence_failed", error=str(error))
 
     def reconcile_targets(self) -> None:
         if self.reconciling:
@@ -284,7 +284,7 @@ class Application:
             try:
                 self.delivery.acknowledge(packet)
             except sqlite3.Error as error:
-                log.warning("renderer.acceptance_failed", error=str(error))
+                log.exception("renderer.acceptance_failed", error=str(error))
         elif feedback == "status":
             if self.behavior.update_renderer_status(packet):
                 status = self.behavior.status
@@ -303,7 +303,7 @@ class Application:
         try:
             self.memory.clear_speech()
         except sqlite3.Error as error:
-            log.warning("speech.clear_failed", error=str(error))
+            log.exception("speech.clear_failed", error=str(error))
             return
         self.history_epoch += 1
         self.delivery.clear()
@@ -430,12 +430,11 @@ class Application:
                 outcome = "cancelled"
                 raise
             except Exception as error:
-                log.warning(
+                log.exception(
                     "observation.failed",
                     reason=reason,
                     session=focus_session,
                     error=str(error),
-                    exc_info=True,
                 )
             finally:
                 tokens = usage.get(reason)
@@ -525,7 +524,7 @@ class Application:
                     revision=message.revision,
                 )
             except sqlite3.Error as error:
-                log.warning("speech.delivery_record_failed", error=str(error))
+                log.exception("speech.delivery_record_failed", error=str(error))
                 return
         if outcome.status == DeliveryStatus.ACCEPTED:
             self.attention.mark_considered(considered_subject, considered_update)

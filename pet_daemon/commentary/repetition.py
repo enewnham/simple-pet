@@ -203,7 +203,9 @@ def semantic_match(
                 score, index = max(scored)
                 return RepeatMatch(index, score, RepeatMethod.SEMANTIC)
         except objc.error:  # ty: ignore[unresolved-attribute]
-            unavailable("query_failed")
+            log.warning(
+                "speech.similarity_unavailable", reason="query_failed", exc_info=True
+            )
     return None
 
 

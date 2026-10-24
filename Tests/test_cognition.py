@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import anthropic
 import httpx
@@ -18,6 +19,7 @@ from pet_daemon.commentary.cognition import (
 )
 from pet_daemon.commentary.model import AnthropicModelClient
 from pet_daemon.commentary.request import INSTRUCTIONS
+from pet_daemon.commentary.story import StoryResponse
 from pet_daemon.config import Config
 from pet_daemon.domain import CareKind, PetState, SessionSource, SpeechReason
 from pet_daemon.identity import SessionIdentity
@@ -933,6 +935,19 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             payload["current_moment"]["reported_progress"], "Checks passed."
         )
 
+    async def test_story_schema_preserves_definitions_and_references_through_sdk(
+        self,
+    ) -> None:
+        await self.generate_commentary()
+        schema = self.story_requests[0][1]["output_config"]["format"]["schema"]
+        self.assertEqual(schema, anthropic.transform_schema(StoryResponse))
+        statement = schema["$defs"]["NarrativeStatement"]
+        self.assertEqual(statement["properties"]["text"]["type"], "string")
+        self.assertEqual(statement["properties"]["sources"]["items"]["type"], "string")
+        self.assertEqual(
+            schema["properties"]["intent"]["$ref"], "#/$defs/NarrativeStatement"
+        )
+
     async def test_story_is_saved_before_commentary_and_reused_for_unchanged_work(
         self,
     ) -> None:
@@ -1001,7 +1016,10 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             }
 
         self.story_response = change_request
-        with self.assertRaises(StoryUnavailable):
+        with (
+            self.assertNoLogs("pet-daemon", level="ERROR"),
+            self.assertRaises(StoryUnavailable),
+        ):
             await self.generate_for_context(
                 self.snapshot(), SpeechReason.ROUTINE, refresh=self.snapshot
             )
@@ -1016,11 +1034,26 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         self.story_response = {"intent": None, "decisions": [], "progress": []}
-        with self.assertRaises(StoryUnavailable):
+        with (
+            self.assertLogs("pet-daemon", level="ERROR") as captured,
+            self.assertRaises(StoryUnavailable) as raised,
+        ):
             await self.generate_commentary()
+        record = captured.records[0]
+        event = cast(dict[str, object], record.msg)
+        self.assertEqual(record.levelname, "ERROR")
+        self.assertEqual(event["event"], "observation.story_failed")
+        self.assertEqual(event["model"], self.config.model)
+        self.assertEqual(
+            event["subject"],
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="worker"),
+        )
+        assert isinstance(record.exc_info, tuple)
+        self.assertIs(record.exc_info[1], raised.exception.__cause__)
         self.assertEqual(self.requests, [])
         self.responses.append(({"speak": "I am here."}, "end_turn"))
-        await self.generate_commentary(SpeechReason.CLICK)
+        with self.assertLogs("pet-daemon", level="ERROR"):
+            await self.generate_commentary(SpeechReason.CLICK)
         payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
         self.assertEqual(payload["current_work"]["request"], "Refactor batch inserts")
         self.assertNotIn("story", payload["current_work"])
