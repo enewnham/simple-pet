@@ -54,7 +54,7 @@ test-python: setup
 	fi; \
 	PET_DESKTOP_CHECK=$$desktop uv run --locked python -m pytest $(if $(strip $(ARGS)),$(ARGS),Tests) -n $(PYTHON_TEST_WORKERS) --dist worksteal -v
 
-lint: lint-python lint-swift
+lint: lint-python lint-swift complexity
 
 lint-python: setup
 	uv run --locked ruff check .
@@ -69,10 +69,10 @@ lint-swift:
 complexity: complexity-python complexity-swift
 
 complexity-python: setup
-	uv run --locked ruff check pet_daemon --select C901,PLR0915 --exit-zero --output-format concise
+	uv run --locked ruff check pet_daemon --select C901,PLR0915 --output-format concise
 
 complexity-swift:
-	swiftlint lint --lenient --no-cache --config .swiftlint-complexity.yml
+	swiftlint lint --strict --no-cache --config .swiftlint-complexity.yml
 
 format: setup
 	uv run --locked ruff format .
