@@ -25,6 +25,17 @@ class GitHubPullRequest(TypedDict, total=False):
     baseRefOid: str
 
 
+class GitHubRepositoryParent(TypedDict, total=False):
+    owner: dict[str, str]
+    name: str
+    nameWithOwner: str
+
+
+class GitHubRepository(TypedDict, total=False):
+    isFork: bool
+    parent: GitHubRepositoryParent | None
+
+
 def pull_request_identity(url: str) -> tuple[RemoteRepository | None, int | None]:
     parsed = urlsplit(url)
     parts = parsed.path.strip("/").split("/")
@@ -129,6 +140,43 @@ async def _stack_links(
         return pr
 
 
+def _query_repository(
+    repository: RemoteRepository, metadata: GitHubRepository
+) -> RemoteRepository:
+    if metadata.get("isFork"):
+        parent = metadata.get("parent") or {}
+        owner = (parent.get("owner") or {}).get("login")
+        name = parent.get("nameWithOwner") or (
+            f"{owner}/{parent['name']}" if owner and parent.get("name") else ""
+        )
+        if name:
+            host = repository.value.split("/", 1)[0]
+            return RemoteRepository(value=f"{host}/{name}".lower())
+    return repository
+
+
+def _select_pull_request(
+    candidates: list[PullRequest], repository: RemoteRepository, branch: str
+) -> PullRequest | None:
+    if any(not item.head_repository or not item.head_branch for item in candidates):
+        raise RuntimeError("Pull request head identity is unavailable")
+    matches = [
+        item
+        for item in candidates
+        if item.head_repository == repository and item.head_branch == branch
+    ]
+    opened = [item for item in matches if item.is_open]
+    if len(opened) > 1:
+        raise RuntimeError(
+            "Multiple open pull requests match the repository and branch"
+        )
+    if not opened and len(matches) > 1:
+        raise RuntimeError(
+            "Multiple historical pull requests match the repository and branch"
+        )
+    return opened[0] if opened else matches[0] if matches else None
+
+
 async def observe(
     path: CommandPath,
     branch: str,
@@ -156,16 +204,7 @@ async def observe(
             "gh", "repo", "view", repository.value, "--json", "isFork,parent", cwd=path
         )
     )
-    query_repository = repository
-    if metadata.get("isFork"):
-        parent = metadata.get("parent") or {}
-        owner = (parent.get("owner") or {}).get("login")
-        name = parent.get("nameWithOwner") or (
-            f"{owner}/{parent['name']}" if owner and parent.get("name") else ""
-        )
-        if name:
-            host = repository.value.split("/", 1)[0]
-            query_repository = RemoteRepository(value=f"{host}/{name}".lower())
+    query_repository = _query_repository(repository, metadata)
     output = await run(
         "gh",
         "pr",
@@ -183,22 +222,7 @@ async def observe(
         cwd=path,
     )
     records = json.loads(output)
-    candidates = [_pull_request(item) for item in records]
-    if any(not item.head_repository or not item.head_branch for item in candidates):
-        raise RuntimeError("Pull request head identity is unavailable")
-    matches = [
-        item
-        for item in candidates
-        if item.head_repository == repository and item.head_branch == branch
-    ]
-    opened = [item for item in matches if item.is_open]
-    if len(opened) > 1:
-        raise RuntimeError(
-            "Multiple open pull requests match the repository and branch"
-        )
-    if not opened and len(matches) > 1:
-        raise RuntimeError(
-            "Multiple historical pull requests match the repository and branch"
-        )
-    pr = opened[0] if opened else matches[0] if matches else None
+    pr = _select_pull_request(
+        [_pull_request(item) for item in records], repository, branch
+    )
     return await _stack_links(pr, path, run) if pr and include_links else pr

@@ -503,13 +503,52 @@ class Behavior:
             self.state = state
             log.info("behavior.state_changed", state=state)
             self.emit({"state": state})
+        blocked = self._is_blocked()
+        self.observation = self._update_observation(sessions, status, now, blocked)
+        if self.nap_until is not None:
+            if sessions.is_engaged or blocked or now >= self.nap_until:
+                self.wake(
+                    "activity_or_interaction"
+                    if sessions.is_engaged or blocked
+                    else "nap_finished"
+                )
+                self._rest()
+                return
+            return
+        if starting:
+            current = self.execution.action
+            if current is None or current.name not in REACTIONS:
+                self.react("start", sessions)
+        current = self.execution.action
+        self._track_pointer(self.observation, status, current, now)
+        if self.execution.advance(now, self.rng.uniform(*self._pause())):
+            if current and current.event is not None:
+                self.clip = None
+            self._rest()
+        if self.execution.phase == ExecutionPhase.SETTLING:
+            self._rest()
+            return
+        if self.execution.phase != ExecutionPhase.IDLE:
+            return
+        if state != PetState.ERROR and self._offer_care(sessions):
+            return
+        candidate = self.policy.select(
+            self.observation,
+            self.execution.last_completed,
+            self.rng,
+            self._is_available,
+        )
+        self._perform(candidate, self.observation, now)
+
+    def _update_observation(
+        self, sessions: Sessions, status: RendererStatus, now: float, blocked: bool
+    ) -> Observation:
         if sessions.is_engaged:
             self.inactive_since = None
             self.next_nap = None
         elif self.inactive_since is None:
             self.inactive_since = now
             self.next_nap = now + self.rng.uniform(*self.config.nap_interval)
-        blocked = self._is_blocked()
         if blocked:
             if not sessions.is_engaged:
                 self.inactive_since = now
@@ -522,7 +561,7 @@ class Behavior:
         inactive_seconds = (
             0 if self.inactive_since is None else now - self.inactive_since
         )
-        self.observation = Observation(
+        return Observation(
             active=sessions.is_engaged,
             working=sessions.is_working,
             investigating=any(
@@ -549,23 +588,16 @@ class Behavior:
             restlessness=min(1, (now - self.last_movement) / 300),
             rest_pressure=min(1, inactive_seconds / 240),
         )
-        if self.nap_until is not None:
-            if sessions.is_engaged or blocked or now >= self.nap_until:
-                self.wake(
-                    "activity_or_interaction"
-                    if sessions.is_engaged or blocked
-                    else "nap_finished"
-                )
-                self._rest()
-                return
-            return
-        if starting:
-            current = self.execution.action
-            if current is None or current.name not in REACTIONS:
-                self.react("start", sessions)
-        current = self.execution.action
+
+    def _track_pointer(
+        self,
+        observation: Observation,
+        status: RendererStatus,
+        current: Action | None,
+        now: float,
+    ) -> None:
         if (
-            self.observation.pointer_recent
+            observation.pointer_recent
             and not status.speech
             and self._gaze_clip()
             and (current is None or current.name in ("rest", "observe"))
@@ -586,23 +618,10 @@ class Behavior:
             else:
                 self._rest(self._gaze_clip())
                 current.until = self.pointer_moved + self.config.gaze_reset_seconds
-        if self.execution.advance(now, self.rng.uniform(*self._pause())):
-            if current and current.event is not None:
-                self.clip = None
-            self._rest()
-        if self.execution.phase == ExecutionPhase.SETTLING:
-            self._rest()
-            return
-        if self.execution.phase != ExecutionPhase.IDLE:
-            return
-        if state != PetState.ERROR and self._offer_care(sessions):
-            return
-        candidate = self.policy.select(
-            self.observation,
-            self.execution.last_completed,
-            self.rng,
-            self._is_available,
-        )
+
+    def _perform(
+        self, candidate: Candidate, observation: Observation, now: float
+    ) -> None:
         if candidate.name == "roam" and self._walk():
             return
         if candidate.name == "nap":
@@ -621,7 +640,7 @@ class Behavior:
         if candidate.name == "focus":
             preferred, fallback = (
                 ("review", "running")
-                if self.observation.investigating
+                if observation.investigating
                 else ("running", "review")
             )
             clip = self._resolve_clip(candidate.role, preferred, fallback)

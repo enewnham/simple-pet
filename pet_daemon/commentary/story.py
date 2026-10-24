@@ -1,4 +1,6 @@
 import json
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import cast
 
 from anthropic import transform_schema
@@ -10,8 +12,18 @@ from ..prose import work_prose
 from ..runtime import PetContext
 from ..storage.memory import Memory
 from ..types import JSONObject, JSONValue
-from ..work.evidence import ExecutionStatus, ReportedProgress, UserIntent
-from ..work.models import ExecutionEvidence, IntentEvidence, ProgressEvidence
+from ..work.evidence import (
+    CommentaryEvidence,
+    ExecutionStatus,
+    ReportedProgress,
+    UserIntent,
+)
+from ..work.models import (
+    ExecutionEvidence,
+    IntentEvidence,
+    ProgressEvidence,
+    SessionReport,
+)
 from ..work.narrative import NarrativeStatement, WorkNarrative, semantic_revision
 from ..work.stories import revision_key
 from .contracts import JSONSchema, ModelRequest, RequestFactory
@@ -49,23 +61,18 @@ class StoryResponse(BaseModel):
     progress: tuple[NarrativeStatement, ...] = Field(max_length=4)
 
 
-def prepare(
-    snapshot: PetContext,
-    selection: AttentionSelection,
-    memory: Memory,
-    make_request: RequestFactory,
-    *,
-    target_bytes: int = 12000,
-) -> WorkNarrativeRequest | None:
-    subject = selection.subject
-    if subject is None:
-        return None
-    excluded = tuple(record.text for record in memory.speech(limit=256))
-    sources: dict[str, JSONObject] = {}
-    latest_sources: dict[tuple[SessionIdentity | None, str], str] = {}
-    latest_request_source = ""
+@dataclass
+class _NarrativeSources:
+    root: SessionIdentity
+    excluded: tuple[str, ...]
+    sources: dict[str, JSONObject] = field(default_factory=dict)
+    latest_sources: dict[tuple[SessionIdentity | None, str], str] = field(
+        default_factory=dict
+    )
+    latest_request_source: str = ""
 
     def add(
+        self,
         kind: str,
         text: str,
         scope: str,
@@ -73,8 +80,7 @@ def prepare(
         origin: SessionIdentity | None = None,
         observed_at: float | None = None,
     ) -> None:
-        nonlocal latest_request_source
-        prose = work_prose(text, limit=1200, excluded=excluded)
+        prose = work_prose(text, limit=1200, excluded=self.excluded)
         source: JSONObject = {"kind": kind, "scope": scope}
         if prose:
             source["text"] = prose
@@ -90,25 +96,34 @@ def prepare(
                 "source": origin.source.value,
                 "native_id": origin.native_id,
             }
-        sources[identifier] = source
-        latest_sources[origin, kind] = identifier
-        if kind == "request" and (origin is None or origin == root):
-            latest_request_source = identifier
+        self.sources[identifier] = source
+        self.latest_sources[origin, kind] = identifier
+        if kind == "request" and (origin is None or origin == self.root):
+            self.latest_request_source = identifier
 
-    reports = memory.narrative_reports(subject.sessions or (subject.id,))
-    aliases = memory.session_aliases()
-    root = aliases.get(subject.id, subject.id)
+
+def _collect_reports(
+    collector: _NarrativeSources,
+    reports: tuple[SessionReport, ...],
+    aliases: dict[SessionIdentity, SessionIdentity],
+) -> None:
     assignments: dict[SessionIdentity, str] = {}
     for report in reports:
         item = report.payload
         identity = aliases.get(item.session, item.session)
         if isinstance(item, IntentEvidence):
-            assignments[identity] = work_prose(item.text, limit=300, excluded=excluded)
+            assignments[identity] = work_prose(
+                item.text, limit=300, excluded=collector.excluded
+            )
         assignment = assignments.get(identity, "")
-        scope = "current task" if identity == root else assignment or "related task"
+        scope = (
+            "current task"
+            if identity == collector.root
+            else assignment or "related task"
+        )
         match item:
             case IntentEvidence(session=_, text=text):
-                add(
+                collector.add(
                     "request",
                     text,
                     scope,
@@ -116,7 +131,7 @@ def prepare(
                     observed_at=report.observed_at,
                 )
             case ProgressEvidence(session=_, text=text):
-                add(
+                collector.add(
                     "reported_progress",
                     text,
                     scope,
@@ -131,7 +146,7 @@ def prepare(
                 "subagent_done",
                 "interrupt",
             }:
-                add(
+                collector.add(
                     "turn_ended",
                     progress or "",
                     scope,
@@ -139,77 +154,62 @@ def prepare(
                     origin=identity,
                     observed_at=report.observed_at,
                 )
-    if not sources:
-        for record in (*subject.story.requests, *subject.story.activity):
-            match record.details:
-                case UserIntent(text=text):
-                    add("request", text, "current task", observed_at=record.observed_at)
-                case ReportedProgress(reported_progress=text):
-                    add(
-                        "reported_progress",
-                        text,
-                        "current task",
-                        observed_at=record.observed_at,
-                    )
-                case ExecutionStatus(
-                    execution="turn ended",
-                    reported_progress=progress,
-                    reported_execution_outcome=outcome,
-                ):
-                    add(
-                        "turn_ended",
-                        progress or "",
-                        "current task",
-                        outcome,
-                        observed_at=record.observed_at,
-                    )
-    if not reports:
-        for child in subject.story.sessions:
-            assignment = work_prose(child.scope, limit=300, excluded=excluded)
-            scope = assignment or "related task"
-            for record in (*child.requests, *child.activity):
-                match record.details:
-                    case UserIntent(text=text):
-                        add(
-                            "request",
-                            text,
-                            scope,
-                            origin=child.session,
-                            observed_at=record.observed_at,
-                        )
-                    case ReportedProgress(reported_progress=text):
-                        add(
-                            "reported_progress",
-                            text,
-                            scope,
-                            origin=child.session,
-                            observed_at=record.observed_at,
-                        )
-                    case ExecutionStatus(
-                        execution="turn ended",
-                        reported_progress=progress,
-                        reported_execution_outcome=outcome,
-                    ):
-                        add(
-                            "turn_ended",
-                            progress or "",
-                            scope,
-                            outcome,
-                            origin=child.session,
-                            observed_at=record.observed_at,
-                        )
-    if not latest_request_source:
-        add("request", subject.story.intent, "current task")
-    if not latest_request_source:
-        return None
-    previous = memory.load_narrative(subject.id)
+
+
+def _collect_records(
+    collector: _NarrativeSources,
+    records: tuple[CommentaryEvidence, ...],
+    scope: str,
+    origin: SessionIdentity | None = None,
+) -> None:
+    for record in records:
+        match record.details:
+            case UserIntent(text=text):
+                collector.add(
+                    "request",
+                    text,
+                    scope,
+                    origin=origin,
+                    observed_at=record.observed_at,
+                )
+            case ReportedProgress(reported_progress=text):
+                collector.add(
+                    "reported_progress",
+                    text,
+                    scope,
+                    origin=origin,
+                    observed_at=record.observed_at,
+                )
+            case ExecutionStatus(
+                execution="turn ended",
+                reported_progress=progress,
+                reported_execution_outcome=outcome,
+            ):
+                collector.add(
+                    "turn_ended",
+                    progress or "",
+                    scope,
+                    outcome,
+                    origin=origin,
+                    observed_at=record.observed_at,
+                )
+
+
+def _retain_sources(
+    collector: _NarrativeSources,
+    previous: WorkNarrative | None,
+    target_bytes: int,
+) -> dict[str, JSONObject]:
+    sources = collector.sources
     root_requests = [
         key
         for key, source in sources.items()
         if source["kind"] == "request"
-        and source.get("origin") in (None, session_data(root))
+        and source.get("origin") in (None, session_data(collector.root))
     ]
-    protected = tuple(dict.fromkeys((latest_request_source, *root_requests[:1])))
+    protected = tuple(
+        dict.fromkeys((collector.latest_request_source, *root_requests[:1]))
+    )
     cited = (
         tuple(
             ref
@@ -224,7 +224,7 @@ def prepare(
         if previous
         else ()
     )
-    latest_ids = set(latest_sources.values())
+    latest_ids = set(collector.latest_sources.values())
     latest = [
         identifier for identifier in reversed(sources) if identifier in latest_ids
     ]
@@ -238,22 +238,33 @@ def prepare(
             or len(json.dumps(candidate, ensure_ascii=False).encode()) <= budget
         ):
             retained_sources = candidate
-    sources = {key: value for key, value in sources.items() if key in retained_sources}
+    return {key: value for key, value in sources.items() if key in retained_sources}
 
-    def evidence(identifier: str, source: JSONObject) -> JSONObject:
-        item = {"id": identifier, **source}
-        observed_at = item.pop("observed_at", None)
-        item.pop("origin", None)
-        if isinstance(observed_at, (int, float)):
-            age = duration(memory.clock() - observed_at)
-            if age:
-                item["age"] = age + " ago"
-        return item
 
+def _evidence(
+    identifier: str, source: JSONObject, clock: Callable[[], float]
+) -> JSONObject:
+    item = {"id": identifier, **source}
+    observed_at = item.pop("observed_at", None)
+    item.pop("origin", None)
+    if isinstance(observed_at, (int, float)):
+        age = duration(clock() - observed_at)
+        if age:
+            item["age"] = age + " ago"
+    return item
+
+
+def _story_payload(
+    collector: _NarrativeSources,
+    sources: dict[str, JSONObject],
+    previous: WorkNarrative | None,
+    clock: Callable[[], float],
+    target_bytes: int,
+) -> JSONObject:
     payload: JSONObject = {
-        "current_work": {"latest_request_source": latest_request_source},
+        "current_work": {"latest_request_source": collector.latest_request_source},
         "current_moment": {
-            "evidence": [evidence(key, value) for key, value in sources.items()]
+            "evidence": [_evidence(key, value, clock) for key, value in sources.items()]
         },
     }
     if previous:
@@ -262,7 +273,7 @@ def prepare(
             {"text": text, "sources": list(value.sources)}
             for value in statements
             if set(value.sources) <= sources.keys()
-            and (text := work_prose(value.text, limit=400, excluded=excluded))
+            and (text := work_prose(value.text, limit=400, excluded=collector.excluded))
         ]
         while (
             retained
@@ -276,6 +287,48 @@ def prepare(
             retained.pop()
         if retained:
             payload["earlier_context"] = retained
+    return payload
+
+
+def prepare(
+    snapshot: PetContext,
+    selection: AttentionSelection,
+    memory: Memory,
+    make_request: RequestFactory,
+    *,
+    target_bytes: int = 12000,
+) -> WorkNarrativeRequest | None:
+    subject = selection.subject
+    if subject is None:
+        return None
+    excluded = tuple(record.text for record in memory.speech(limit=256))
+    reports = memory.narrative_reports(subject.sessions or (subject.id,))
+    aliases = memory.session_aliases()
+    root = aliases.get(subject.id, subject.id)
+    collector = _NarrativeSources(root, excluded)
+    _collect_reports(collector, reports, aliases)
+    if not collector.sources:
+        _collect_records(
+            collector,
+            (*subject.story.requests, *subject.story.activity),
+            "current task",
+        )
+    if not reports:
+        for child in subject.story.sessions:
+            assignment = work_prose(child.scope, limit=300, excluded=excluded)
+            _collect_records(
+                collector,
+                (*child.requests, *child.activity),
+                assignment or "related task",
+                child.session,
+            )
+    if not collector.latest_request_source:
+        collector.add("request", subject.story.intent, "current task")
+    if not collector.latest_request_source:
+        return None
+    previous = memory.load_narrative(subject.id)
+    sources = _retain_sources(collector, previous, target_bytes)
+    payload = _story_payload(collector, sources, previous, memory.clock, target_bytes)
     request = make_request(payload, [{"type": "text", "text": INSTRUCTIONS}])
     request["output_config"]["format"]["schema"] = cast(
         JSONSchema, transform_schema(StoryResponse)
@@ -286,7 +339,7 @@ def prepare(
         revision=semantic_revision(subject.story),
         sources=sources,
         request=request,
-        latest_request_source=latest_request_source,
+        latest_request_source=collector.latest_request_source,
     )
 
 

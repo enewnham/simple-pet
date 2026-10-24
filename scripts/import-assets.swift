@@ -14,6 +14,30 @@ struct Animation {
     let duration: Double
 }
 
+struct Clip {
+    let frames: [String]
+    let fps: Double
+    let role: String
+    let maxRepeats: Int?
+
+    var metadata: [String: Any] {
+        var result: [String: Any] = ["frames": frames, "fps": fps, "role": role]
+        if let maxRepeats { result["max_repeats"] = maxRepeats }
+        return result
+    }
+}
+
+struct ImportedAssets {
+    let clips: [String: Clip]
+    let metadata: [String: Any]
+
+    var manifest: [String: Any] {
+        var result = metadata
+        result["clips"] = clips.mapValues { $0.metadata }
+        return result
+    }
+}
+
 let animations = [
     Animation(id: "idle", role: "rest", row: 0, count: 6, duration: 5.5),
     Animation(id: "running-right", role: "walk-right", row: 1, count: 8, duration: 1.06),
@@ -74,7 +98,7 @@ func resolveFrame(_ path: String, in source: URL) throws -> URL {
 }
 
 func saveClip(_ id: String, images: [CGImage], fps: Double, role: String, staging: URL,
-              maxRepeats: Int? = nil) throws -> [String: Any] {
+              maxRepeats: Int? = nil) throws -> Clip {
     guard safeName(id), !images.isEmpty, fps.isFinite, fps > 0, roles.contains(role),
           maxRepeats == nil || maxRepeats! > 0 else {
         throw AssetError("Invalid clip: \(id)")
@@ -88,15 +112,13 @@ func saveClip(_ id: String, images: [CGImage], fps: Double, role: String, stagin
         try writePNG(image, to: directory.appendingPathComponent(name))
         paths.append("\(relative)/\(name)")
     }
-    var clip: [String: Any] = ["frames": paths, "fps": fps, "role": role]
-    if let maxRepeats { clip["max_repeats"] = maxRepeats }
-    return clip
+    return Clip(frames: paths, fps: fps, role: role, maxRepeats: maxRepeats)
 }
 
-func validateExtras(_ metadata: [String: Any], clips: [String: [String: Any]]) throws {
+func validateExtras(_ metadata: [String: Any], clips: [String: Clip]) throws {
     if let gazeValue = metadata["gaze"] {
         guard let gaze = gazeValue as? [String], gaze.count == 16,
-              gaze.allSatisfy({ clips[$0]?["role"] as? String == "gaze" }) else {
+              gaze.allSatisfy({ clips[$0]?.role == "gaze" }) else {
             throw AssetError("Gaze must reference sixteen gaze clips in clockwise order from up.")
         }
     }
@@ -108,35 +130,102 @@ func validateExtras(_ metadata: [String: Any], clips: [String: [String: Any]]) t
     }
 }
 
-func extract(source: URL, staging: URL) throws -> [String: Any] {
+func extractManifest(source: URL, staging: URL) throws -> ImportedAssets {
+    let manifest = try readObject(source.appendingPathComponent("manifest.json"))
+    guard let declared = manifest["clips"] as? [String: [String: Any]],
+          let rest = manifest["rest"] as? String, !declared.isEmpty else {
+        throw AssetError("A custom manifest must declare clips and a rest clip.")
+    }
+    var clips: [String: Clip] = [:]
+    for (id, clip) in declared {
+        guard let paths = clip["frames"] as? [String], let fps = clip["fps"] as? Double,
+              let role = clip["role"] as? String else { throw AssetError("Invalid clip: \(id)") }
+        var limit: Int?
+        if let value = clip["max_repeats"] {
+            guard let number = value as? NSNumber, number.doubleValue == Double(number.intValue), number.intValue > 0 else {
+                throw AssetError("max_repeats must be a positive integer: \(id)")
+            }
+            limit = number.intValue
+        }
+        let images = try paths.map { try decodeImage(resolveFrame($0, in: source)) }
+        clips[id] = try saveClip(id, images: images, fps: fps, role: role, staging: staging, maxRepeats: limit)
+    }
+    guard clips[rest]?.role == "rest" else { throw AssetError("The rest clip must have the rest role.") }
+    try validateExtras(manifest, clips: clips)
+    return ImportedAssets(clips: clips, metadata: manifest)
+}
+
+func extractSheet(_ sheetURL: URL, pet: [String: Any], staging: URL) throws -> ImportedAssets {
+    var clips: [String: Clip] = [:]
+    var result: [String: Any] = ["rest": "idle"]
+    let image = try decodeImage(sheetURL)
+    if let value = pet["spriteVersionNumber"] {
+        guard let number = value as? Int, number == 2 else { throw AssetError("spriteVersionNumber must be 2 when present.") }
+    }
+    guard image.width == 1536, image.height == 2288 else {
+        throw AssetError("Expected a V2 1536x2288 sheet, got \(image.width)x\(image.height).")
+    }
+    for animation in animations {
+        let images = try (0..<animation.count).map { index -> CGImage in
+            guard let frame = image.cropping(to: CGRect(x: index * 192, y: animation.row * 208, width: 192, height: 208)) else {
+                throw AssetError("Cannot crop \(animation.id) frame \(index).")
+            }
+            return frame
+        }
+        clips[animation.id] = try saveClip(animation.id, images: images, fps: Double(animation.count) / animation.duration,
+                                           role: animation.role, staging: staging)
+    }
+    var gaze: [String] = []
+    for index in 0..<16 {
+        let id = String(format: "gaze-%02d", index)
+        let rect = CGRect(x: (index % 8) * 192, y: (9 + index / 8) * 208, width: 192, height: 208)
+        guard let frame = image.cropping(to: rect) else { throw AssetError("Cannot crop \(id).") }
+        clips[id] = try saveClip(id, images: [frame], fps: 1, role: "gaze", staging: staging, maxRepeats: 1)
+        gaze.append(id)
+    }
+    result["gaze"] = gaze
+    if let anchor = pet["gazeAnchor"] { result["gazeAnchor"] = anchor }
+    try validateExtras(result, clips: clips)
+    return ImportedAssets(clips: clips, metadata: result)
+}
+
+func extractPNGs(source: URL, staging: URL) throws -> ImportedAssets {
+    var clips: [String: Clip] = [:]
+    var result: [String: Any] = [:]
+    for entry in try manager.contentsOfDirectory(at: source, includingPropertiesForKeys: [.isDirectoryKey]) {
+        let name = entry.pathExtension.lowercased() == "png" ? entry.deletingPathExtension().lastPathComponent : entry.lastPathComponent
+        guard let role = aliases[name] else { continue }
+        let candidates: [URL]
+        if try entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true {
+            candidates = try manager.contentsOfDirectory(at: entry, includingPropertiesForKeys: nil)
+                .filter { $0.pathExtension.lowercased() == "png" }
+                .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        } else {
+            candidates = entry.pathExtension.lowercased() == "png" ? [entry] : []
+        }
+        guard !candidates.isEmpty else { continue }
+        guard clips[name] == nil else { throw AssetError("Duplicate static and animated clip: \(name)") }
+        let root = source.resolvingSymlinksInPath().standardizedFileURL
+        let images = try candidates.map { candidate -> CGImage in
+            let frame = candidate.resolvingSymlinksInPath().standardizedFileURL
+            guard frame.path.hasPrefix(root.path + "/") else { throw AssetError("Frame path escapes the pet directory: \(frame.path)") }
+            return try decodeImage(frame)
+        }
+        clips[name] = try saveClip(name, images: images, fps: 8, role: role, staging: staging)
+    }
+    guard let rest = clips.keys.sorted().first(where: { clips[$0]?.role == "rest" }) else {
+        throw AssetError("The pet must supply an idle or rest PNG clip.")
+    }
+    result["rest"] = rest
+    try validateExtras(result, clips: clips)
+    return ImportedAssets(clips: clips, metadata: result)
+}
+
+func extract(source: URL, staging: URL) throws -> ImportedAssets {
     let manifestURL = source.appendingPathComponent("manifest.json")
     if manager.fileExists(atPath: manifestURL.path) {
-        let manifest = try readObject(manifestURL)
-        guard let declared = manifest["clips"] as? [String: [String: Any]],
-              let rest = manifest["rest"] as? String, !declared.isEmpty else {
-            throw AssetError("A custom manifest must declare clips and a rest clip.")
-        }
-        var clips: [String: [String: Any]] = [:]
-        for (id, clip) in declared {
-            guard let paths = clip["frames"] as? [String], let fps = clip["fps"] as? Double,
-                  let role = clip["role"] as? String else { throw AssetError("Invalid clip: \(id)") }
-            var limit: Int?
-            if let value = clip["max_repeats"] {
-                guard let number = value as? NSNumber, number.doubleValue == Double(number.intValue), number.intValue > 0 else {
-                    throw AssetError("max_repeats must be a positive integer: \(id)")
-                }
-                limit = number.intValue
-            }
-            let images = try paths.map { try decodeImage(resolveFrame($0, in: source)) }
-            clips[id] = try saveClip(id, images: images, fps: fps, role: role, staging: staging, maxRepeats: limit)
-        }
-        guard clips[rest]?["role"] as? String == "rest" else { throw AssetError("The rest clip must have the rest role.") }
-        try validateExtras(manifest, clips: clips)
-        var result = manifest
-        result["clips"] = clips
-        return result
+        return try extractManifest(source: source, staging: staging)
     }
-
     let petURL = source.appendingPathComponent("pet.json")
     let pet = manager.fileExists(atPath: petURL.path) ? try readObject(petURL) : [:]
     let sheetURL: URL?
@@ -146,66 +235,10 @@ func extract(source: URL, staging: URL) throws -> [String: Any] {
         sheetURL = ["spritesheet.webp", "spritesheet.png", "default-pet-spritesheet.webp"]
             .map { source.appendingPathComponent($0) }.first { manager.fileExists(atPath: $0.path) }
     }
-    var clips: [String: [String: Any]] = [:]
-    var result: [String: Any] = ["rest": "idle"]
     if let sheetURL {
-        let image = try decodeImage(sheetURL)
-        if let value = pet["spriteVersionNumber"] {
-            guard let number = value as? Int, number == 2 else { throw AssetError("spriteVersionNumber must be 2 when present.") }
-        }
-        guard image.width == 1536, image.height == 2288 else {
-            throw AssetError("Expected a V2 1536x2288 sheet, got \(image.width)x\(image.height).")
-        }
-        for animation in animations {
-            let images = try (0..<animation.count).map { index -> CGImage in
-                guard let frame = image.cropping(to: CGRect(x: index * 192, y: animation.row * 208, width: 192, height: 208)) else {
-                    throw AssetError("Cannot crop \(animation.id) frame \(index).")
-                }
-                return frame
-            }
-            clips[animation.id] = try saveClip(animation.id, images: images, fps: Double(animation.count) / animation.duration,
-                                               role: animation.role, staging: staging)
-        }
-        var gaze: [String] = []
-        for index in 0..<16 {
-            let id = String(format: "gaze-%02d", index)
-            let rect = CGRect(x: (index % 8) * 192, y: (9 + index / 8) * 208, width: 192, height: 208)
-            guard let frame = image.cropping(to: rect) else { throw AssetError("Cannot crop \(id).") }
-            clips[id] = try saveClip(id, images: [frame], fps: 1, role: "gaze", staging: staging, maxRepeats: 1)
-            gaze.append(id)
-        }
-        result["gaze"] = gaze
-        if let anchor = pet["gazeAnchor"] { result["gazeAnchor"] = anchor }
-    } else {
-        for entry in try manager.contentsOfDirectory(at: source, includingPropertiesForKeys: [.isDirectoryKey]) {
-            let name = entry.pathExtension.lowercased() == "png" ? entry.deletingPathExtension().lastPathComponent : entry.lastPathComponent
-            guard let role = aliases[name] else { continue }
-            let candidates: [URL]
-            if try entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true {
-                candidates = try manager.contentsOfDirectory(at: entry, includingPropertiesForKeys: nil)
-                    .filter { $0.pathExtension.lowercased() == "png" }
-                    .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-            } else {
-                candidates = entry.pathExtension.lowercased() == "png" ? [entry] : []
-            }
-            guard !candidates.isEmpty else { continue }
-            guard clips[name] == nil else { throw AssetError("Duplicate static and animated clip: \(name)") }
-            let root = source.resolvingSymlinksInPath().standardizedFileURL
-            let images = try candidates.map { candidate -> CGImage in
-                let frame = candidate.resolvingSymlinksInPath().standardizedFileURL
-                guard frame.path.hasPrefix(root.path + "/") else { throw AssetError("Frame path escapes the pet directory: \(frame.path)") }
-                return try decodeImage(frame)
-            }
-            clips[name] = try saveClip(name, images: images, fps: 8, role: role, staging: staging)
-        }
-        guard let rest = clips.keys.sorted().first(where: { clips[$0]?["role"] as? String == "rest" }) else {
-            throw AssetError("The pet must supply an idle or rest PNG clip.")
-        }
-        result["rest"] = rest
+        return try extractSheet(sheetURL, pet: pet, staging: staging)
     }
-    try validateExtras(result, clips: clips)
-    result["clips"] = clips
-    return result
+    return try extractPNGs(source: source, staging: staging)
 }
 
 func run() throws {
@@ -233,7 +266,8 @@ func run() throws {
     let backup = parent.appendingPathComponent(".pet-backup-\(UUID().uuidString)")
     try manager.createDirectory(at: staging, withIntermediateDirectories: true)
     defer { try? manager.removeItem(at: staging) }
-    var metadata = try extract(source: source, staging: staging)
+    let assets = try extract(source: source, staging: staging)
+    var metadata = assets.manifest
     metadata["pet"] = pet
     let packageURL = source.appendingPathComponent("pet.json")
     let package = manager.fileExists(atPath: packageURL.path) ? try readObject(packageURL) : [:]
@@ -256,11 +290,10 @@ func run() throws {
         throw error
     }
     if manager.fileExists(atPath: backup.path) { try manager.removeItem(at: backup) }
-    // Rely on extract to construct clips with string frame paths.
-    // swiftlint:disable force_cast
-    let clips = metadata["clips"] as! [String: [String: Any]]
-    for id in clips.keys.sorted() { print("\(id): \((clips[id]!["frames"] as! [String]).count) frames (\(clips[id]!["role"]!))") }
-    // swiftlint:enable force_cast
+    for id in assets.clips.keys.sorted() {
+        let clip = assets.clips[id]!
+        print("\(id): \(clip.frames.count) frames (\(clip.role))")
+    }
     print("Assets written to \(output.path)")
 }
 

@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from ..domain import ExecutionOutcome, SessionSource
 from ..prose import work_prose
@@ -84,15 +85,16 @@ def is_failed(value: object) -> bool:
     )
 
 
-def update(source: str, event: str, payload: Mapping[str, object]) -> HookEvent | None:
-    if source == "claude" and payload.get("cursor_version"):
-        return None
-    if event == "Notification" and payload.get("notification_type") not in (
-        "permission_prompt",
-        "elicitation_dialog",
-    ):
-        return None
-    normalized = EVENTS[source][event]
+@dataclass(frozen=True)
+class HookSession:
+    session: str
+    parent: str
+    aliases: tuple[str, ...]
+
+
+def hook_session(
+    source: str, normalized: HookEventKind, payload: Mapping[str, object]
+) -> HookSession:
     parent = ""
     aliases = []
     if source == "cursor":
@@ -117,6 +119,61 @@ def update(source: str, event: str, payload: Mapping[str, object]) -> HookEvent 
         agent = string(payload.get("agent_id"))
         if agent:
             parent, session = session, agent
+    return HookSession(session, parent, tuple(aliases))
+
+
+def execution_result(
+    source: str, normalized: HookEventKind, payload: Mapping[str, object]
+) -> tuple[HookEventKind, ExecutionOutcome | None]:
+    normalized_event = normalized
+    response = payload.get("tool_response")
+    if source == "cursor":
+        output = payload.get("tool_output")
+        response = object_value(output) or output
+    if normalized == HookEventKind.TOOL_DONE and is_failed(response):
+        normalized_event = HookEventKind.TOOL_ERROR
+    status = payload.get("status")
+    if normalized == HookEventKind.TURN_DONE and source == "cursor":
+        if status == "error":
+            normalized_event = HookEventKind.TURN_ERROR
+        elif status == "aborted":
+            normalized_event = HookEventKind.INTERRUPT
+    interrupted = (
+        normalized == HookEventKind.TOOL_ERROR and payload.get("is_interrupt") is True
+    )
+    outcome = None
+    if interrupted:
+        normalized_event = HookEventKind.TOOL_DONE
+        outcome = ExecutionOutcome.CANCELLED
+    if normalized_event in (HookEventKind.TOOL_ERROR, HookEventKind.TURN_ERROR):
+        outcome = ExecutionOutcome.ERROR
+    elif normalized_event == HookEventKind.INTERRUPT:
+        outcome = ExecutionOutcome.CANCELLED
+    elif normalized == HookEventKind.SUBAGENT_DONE and source == "cursor":
+        outcome = {
+            "error": ExecutionOutcome.ERROR,
+            "aborted": ExecutionOutcome.CANCELLED,
+        }.get(string(status), ExecutionOutcome.SUCCESS)
+    elif not interrupted and normalized in (
+        HookEventKind.TOOL_DONE,
+        HookEventKind.TURN_DONE,
+        HookEventKind.SUBAGENT_DONE,
+    ):
+        outcome = ExecutionOutcome.SUCCESS
+    return normalized_event, outcome
+
+
+def update(source: str, event: str, payload: Mapping[str, object]) -> HookEvent | None:
+    if source == "claude" and payload.get("cursor_version"):
+        return None
+    if event == "Notification" and payload.get("notification_type") not in (
+        "permission_prompt",
+        "elicitation_dialog",
+    ):
+        return None
+    normalized = EVENTS[source][event]
+    identity = hook_session(source, normalized, payload)
+    session, parent = identity.session, identity.parent
     if not session:
         return None
     cwd = string(payload.get("cwd"))
@@ -155,7 +212,7 @@ def update(source: str, event: str, payload: Mapping[str, object]) -> HookEvent 
             sentiment_text = sentiment_excerpt(goal)
     elif normalized == HookEventKind.SUBAGENT_START and payload.get("task"):
         goal = string(payload.get("task"))
-    normalized_event = normalized
+    normalized_event, outcome = execution_result(source, normalized, payload)
     if normalized == HookEventKind.TOOL_START and tool_name in INPUT_TOOLS:
         normalized_event = HookEventKind.WAITING
         waiting_kind = WaitingKind.QUESTION
@@ -180,40 +237,6 @@ def update(source: str, event: str, payload: Mapping[str, object]) -> HookEvent 
         waiting_kind = WaitingKind.PERMISSION
     elif normalized == HookEventKind.WAITING:
         waiting_kind = WaitingKind.QUESTION
-    response = payload.get("tool_response")
-    if source == "cursor":
-        output = payload.get("tool_output")
-        response = object_value(output) or output
-    if normalized == HookEventKind.TOOL_DONE and is_failed(response):
-        normalized_event = HookEventKind.TOOL_ERROR
-    status = payload.get("status")
-    if normalized == HookEventKind.TURN_DONE and source == "cursor":
-        if status == "error":
-            normalized_event = HookEventKind.TURN_ERROR
-        elif status == "aborted":
-            normalized_event = HookEventKind.INTERRUPT
-    interrupted = (
-        normalized == HookEventKind.TOOL_ERROR and payload.get("is_interrupt") is True
-    )
-    outcome = None
-    if interrupted:
-        normalized_event = HookEventKind.TOOL_DONE
-        outcome = ExecutionOutcome.CANCELLED
-    if normalized_event in (HookEventKind.TOOL_ERROR, HookEventKind.TURN_ERROR):
-        outcome = ExecutionOutcome.ERROR
-    elif normalized_event == HookEventKind.INTERRUPT:
-        outcome = ExecutionOutcome.CANCELLED
-    elif normalized == HookEventKind.SUBAGENT_DONE and source == "cursor":
-        outcome = {
-            "error": ExecutionOutcome.ERROR,
-            "aborted": ExecutionOutcome.CANCELLED,
-        }.get(string(status), ExecutionOutcome.SUCCESS)
-    elif not interrupted and normalized in (
-        HookEventKind.TOOL_DONE,
-        HookEventKind.TURN_DONE,
-        HookEventKind.SUBAGENT_DONE,
-    ):
-        outcome = ExecutionOutcome.SUCCESS
     if outcome != ExecutionOutcome.ERROR and normalized in (
         HookEventKind.TOOL_DONE,
         HookEventKind.TURN_DONE,
@@ -241,7 +264,7 @@ def update(source: str, event: str, payload: Mapping[str, object]) -> HookEvent 
         branch=string(payload.get("branch")) or None,
         pull_request=string(payload.get("pull_request")) or None,
         parent=parent if parent and parent != session else None,
-        aliases=tuple(aliases),
+        aliases=identity.aliases,
         turn=turn or None,
         call=call or None,
         parent_call=parent_call or None,

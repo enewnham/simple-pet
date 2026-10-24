@@ -61,63 +61,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.view = view
             sender = try SocketSender(path: options.daemonSocket)
             server = try SocketServer(path: options.socket) { [weak self] event in self?.receive(event) }
-            let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 200, height: 160),
-                                 styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-            window.isOpaque = false
-            window.backgroundColor = .clear
-            window.hasShadow = false
-            window.level = .floating
-            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            window.isMovableByWindowBackground = true
-            window.hidesOnDeactivate = false
-            window.isReleasedWhenClosed = false
-            window.contentView = view
-            if let screen = NSScreen.main ?? NSScreen.screens.first {
-                let visible = screen.visibleFrame
-                window.setFrameOrigin(NSPoint(x: visible.maxX - 220, y: visible.minY + 20))
-            }
+            let window = makePanel(view: view)
             panel = window
-            view.onPlayback = { [weak self] id, result in self?.complete("animation", id: id, result: result) }
-            view.onModelChange = { [weak self] in
-                self?.stopIfPaused()
-                self?.status(force: true)
-            }
-            view.onInteraction = { [weak self] dragging, menu in
-                self?.dragging = dragging
-                self?.menu = menu
-                self?.stopIfPaused()
-                self?.status(force: true)
-            }
-            view.onClick = { [weak self] in
-                self?.sender?.send(["kind": "renderer", "event": "click"])
-            }
+            connectCallbacks(view: view)
             window.orderFrontRegardless()
-            let workspaceNotifications = NSWorkspace.shared.notificationCenter
-            workspaceObservers.append(workspaceNotifications.addObserver(
-                forName: NSWorkspace.willSleepNotification, object: nil, queue: .main
-            ) { [weak self] _ in self?.systemSleepChanged(true) })
-            workspaceObservers.append(workspaceNotifications.addObserver(
-                forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
-            ) { [weak self] _ in self?.systemSleepChanged(false) })
-            let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
-                guard let self = self, !self.systemSleeping else { return }
-                self.stopIfPaused()
-                self.status()
-            }
-            RunLoop.main.add(timer, forMode: .common)
-            statusTimer = timer
-            status(force: true)
-            for number in [SIGINT, SIGTERM] {
-                signal(number, SIG_IGN)
-                let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
-                source.setEventHandler { NSApp.terminate(nil) }
-                source.resume()
-                signals.append(source)
-            }
+            startLifecycleMonitoring()
         } catch {
             fputs("pet-overlay: \(error.localizedDescription)\n", stderr)
             server?.stop()
             exit(EXIT_FAILURE)
+        }
+    }
+
+    private func makePanel(view: PetView) -> NSPanel {
+        let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 200, height: 160),
+                             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = false
+        window.level = .floating
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.isMovableByWindowBackground = true
+        window.hidesOnDeactivate = false
+        window.isReleasedWhenClosed = false
+        window.contentView = view
+        if let screen = NSScreen.main ?? NSScreen.screens.first {
+            let visible = screen.visibleFrame
+            window.setFrameOrigin(NSPoint(x: visible.maxX - 220, y: visible.minY + 20))
+        }
+        return window
+    }
+
+    private func connectCallbacks(view: PetView) {
+        view.onPlayback = { [weak self] id, result in self?.complete("animation", id: id, result: result) }
+        view.onModelChange = { [weak self] in
+            self?.stopIfPaused()
+            self?.status(force: true)
+        }
+        view.onInteraction = { [weak self] dragging, menu in
+            self?.dragging = dragging
+            self?.menu = menu
+            self?.stopIfPaused()
+            self?.status(force: true)
+        }
+        view.onClick = { [weak self] in
+            self?.sender?.send(["kind": "renderer", "event": "click"])
+        }
+    }
+
+    private func startLifecycleMonitoring() {
+        let workspaceNotifications = NSWorkspace.shared.notificationCenter
+        workspaceObservers.append(workspaceNotifications.addObserver(
+            forName: NSWorkspace.willSleepNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.systemSleepChanged(true) })
+        workspaceObservers.append(workspaceNotifications.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.systemSleepChanged(false) })
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self = self, !self.systemSleeping else { return }
+            self.stopIfPaused()
+            self.status()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        statusTimer = timer
+        status(force: true)
+        for number in [SIGINT, SIGTERM] {
+            signal(number, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
+            source.setEventHandler { NSApp.terminate(nil) }
+            source.resume()
+            signals.append(source)
         }
     }
 

@@ -8,40 +8,8 @@ public final class SocketServer {
     private let shutdown = DispatchGroup()
 
     public init(path: String, receive: @escaping (PetEvent) -> Void) throws {
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
-        let bytes = Array(path.utf8) + [0]
-        guard !path.isEmpty, !path.utf8.contains(0), bytes.count <= MemoryLayout.size(ofValue: address.sun_path) else {
-            throw SocketError(message: "Socket path is empty or exceeds the UNIX socket limit")
-        }
-        withUnsafeMutableBytes(of: &address.sun_path) { destination in
-            destination.copyBytes(from: bytes)
-        }
-        var existing = stat()
-        if lstat(path, &existing) == 0 {
-            guard existing.st_mode & S_IFMT == S_IFSOCK, existing.st_uid == getuid() else {
-                throw SocketError(message: "Refusing to remove a socket path owned by another user or a regular file")
-            }
-            let probe = socket(AF_UNIX, SOCK_DGRAM, 0)
-            guard probe >= 0 else { throw SocketError.system("socket") }
-            let connected = withUnsafePointer(to: &address) {
-                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    Darwin.connect(probe, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
-                }
-            }
-            let probeError = errno
-            close(probe)
-            guard connected != 0 else {
-                throw SocketError(message: "An overlay is already listening at \(path)")
-            }
-            guard probeError == ECONNREFUSED || probeError == ENOENT else {
-                throw SocketError(message: "Cannot determine whether the existing socket is stale")
-            }
-            guard unlink(path) == 0 || errno == ENOENT else { throw SocketError.system("unlink") }
-        } else if errno != ENOENT {
-            throw SocketError.system("lstat")
-        }
+        var address = try socketAddress(path: path, invalidPath: "Socket path is empty or exceeds the UNIX socket limit")
+        try Self.removeStaleSocket(path: path, address: &address)
         let fd = socket(AF_UNIX, SOCK_DGRAM, 0)
         guard fd >= 0 else { throw SocketError.system("socket") }
         var bound = false
@@ -67,19 +35,7 @@ public final class SocketServer {
             let shutdown = self.shutdown
             let readSource = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
             readSource.setEventHandler {
-                var buffer = [UInt8](repeating: 0, count: Self.maximumMessageBytes + 1)
-                // Limit each drain so sustained producers cannot monopolize the reader.
-                for _ in 0..<64 {
-                    let count = recv(fd, &buffer, buffer.count, 0)
-                    if count < 0 {
-                        if errno == EINTR { continue }
-                        break
-                    }
-                    guard count > 0, count <= Self.maximumMessageBytes else { continue }
-                    let data = Data(buffer.prefix(count))
-                    guard let event = try? PetEvent.decode(data) else { continue }
-                    DispatchQueue.main.async { receive(event) }
-                }
+                Self.drain(fd: fd, receive: receive)
             }
             readSource.setCancelHandler {
                 close(fd)
@@ -99,11 +55,68 @@ public final class SocketServer {
         }
     }
 
+    private static func removeStaleSocket(path: String, address: inout sockaddr_un) throws {
+        var existing = stat()
+        if lstat(path, &existing) == 0 {
+            guard existing.st_mode & S_IFMT == S_IFSOCK, existing.st_uid == getuid() else {
+                throw SocketError(message: "Refusing to remove a socket path owned by another user or a regular file")
+            }
+            let probe = socket(AF_UNIX, SOCK_DGRAM, 0)
+            guard probe >= 0 else { throw SocketError.system("socket") }
+            let connected = withUnsafePointer(to: &address) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    Darwin.connect(probe, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+                }
+            }
+            let probeError = errno
+            close(probe)
+            guard connected != 0 else {
+                throw SocketError(message: "An overlay is already listening at \(path)")
+            }
+            guard probeError == ECONNREFUSED || probeError == ENOENT else {
+                throw SocketError(message: "Cannot determine whether the existing socket is stale")
+            }
+            guard unlink(path) == 0 || errno == ENOENT else { throw SocketError.system("unlink") }
+        } else if errno != ENOENT {
+            throw SocketError.system("lstat")
+        }
+    }
+
+    private static func drain(fd: Int32, receive: @escaping (PetEvent) -> Void) {
+        var buffer = [UInt8](repeating: 0, count: Self.maximumMessageBytes + 1)
+        // Limit each drain so sustained producers cannot monopolize the reader.
+        for _ in 0..<64 {
+            let count = recv(fd, &buffer, buffer.count, 0)
+            if count < 0 {
+                if errno == EINTR { continue }
+                break
+            }
+            guard count > 0, count <= Self.maximumMessageBytes else { continue }
+            let data = Data(buffer.prefix(count))
+            guard let event = try? PetEvent.decode(data) else { continue }
+            DispatchQueue.main.async { receive(event) }
+        }
+    }
+
     public func stop() {
         source?.cancel()
         shutdown.wait()
     }
     deinit { stop() }
+}
+
+private func socketAddress(path: String, invalidPath: String) throws -> sockaddr_un {
+    var address = sockaddr_un()
+    address.sun_family = sa_family_t(AF_UNIX)
+    address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+    let bytes = Array(path.utf8) + [0]
+    guard !path.isEmpty, !path.utf8.contains(0), bytes.count <= MemoryLayout.size(ofValue: address.sun_path) else {
+        throw SocketError(message: invalidPath)
+    }
+    withUnsafeMutableBytes(of: &address.sun_path) { destination in
+        destination.copyBytes(from: bytes)
+    }
+    return address
 }
 
 private struct SocketError: LocalizedError {
@@ -119,14 +132,7 @@ public final class SocketSender {
     private var address: sockaddr_un
 
     public init(path: String) throws {
-        address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
-        let bytes = Array(path.utf8) + [0]
-        guard !path.isEmpty, !path.utf8.contains(0), bytes.count <= MemoryLayout.size(ofValue: address.sun_path) else {
-            throw SocketError(message: "Invalid daemon socket path")
-        }
-        withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: bytes) }
+        address = try socketAddress(path: path, invalidPath: "Invalid daemon socket path")
         fd = socket(AF_UNIX, SOCK_DGRAM, 0)
         guard fd >= 0 else { throw SocketError.system("socket") }
         guard fcntl(fd, F_SETFL, O_NONBLOCK) == 0, fcntl(fd, F_SETFD, FD_CLOEXEC) == 0 else {

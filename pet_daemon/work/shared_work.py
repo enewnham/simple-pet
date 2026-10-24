@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from pydantic import BaseModel
 
 from ..domain import (
@@ -86,8 +88,9 @@ def work_update(agent: SessionRecord, story: WorkStory) -> WorkUpdate:
     )
 
 
-def shared_work(state: WorkFacts, activity: SwarmActivity) -> tuple[WorkSubject, ...]:
-    runtime = {session.id: session for session in activity.sessions}
+def _session_families(
+    state: WorkFacts, runtime: dict[SessionIdentity, AgentSessionStatus]
+) -> dict[SessionIdentity, set[SessionIdentity]]:
     groups: dict[SessionIdentity, set[SessionIdentity]] = {}
     for identifier in (*state.sessions, *runtime):
         root = state.aliases.get(identifier, identifier)
@@ -104,8 +107,39 @@ def shared_work(state: WorkFacts, activity: SwarmActivity) -> tuple[WorkSubject,
             root = min(seen)
         groups.setdefault(root, set()).add(identifier)
 
+    return groups
+
+
+def _merge_artifacts(stories: Iterable[WorkStory]) -> tuple[ArtifactContext, ...]:
+    artifacts: dict[tuple[str, str, RepositoryIdentity | None], ArtifactContext] = {}
+    for story in stories:
+        for artifact in story.artifacts:
+            key = artifact.kind, artifact.ref, artifact.repository
+            previous = artifacts.get(key)
+            if previous:
+                combined = [*previous.evidence]
+                for record in artifact.evidence:
+                    if record not in combined:
+                        combined.append(record)
+                artifact.evidence = tuple(combined)
+            artifacts[key] = artifact
+    return tuple(
+        artifact
+        for _, artifact in sorted(
+            artifacts.items(),
+            key=lambda item: (
+                item[0][0],
+                item[0][1],
+                repository_columns(item[0][2]),
+            ),
+        )
+    )
+
+
+def shared_work(state: WorkFacts, activity: SwarmActivity) -> tuple[WorkSubject, ...]:
+    runtime = {session.id: session for session in activity.sessions}
     subjects = []
-    for root, identifiers in sorted(groups.items()):
+    for root, identifiers in sorted(_session_families(state, runtime).items()):
         stories = {
             identifier: session_work(state, agent)
             for identifier in sorted(identifiers)
@@ -126,20 +160,6 @@ def shared_work(state: WorkFacts, activity: SwarmActivity) -> tuple[WorkSubject,
             for identifier, story in stories.items()
             if identifier != root
         )
-        artifacts: dict[
-            tuple[str, str, RepositoryIdentity | None], ArtifactContext
-        ] = {}
-        for story in stories.values():
-            for artifact in story.artifacts:
-                key = artifact.kind, artifact.ref, artifact.repository
-                previous = artifacts.get(key)
-                if previous:
-                    combined = [*previous.evidence]
-                    for record in artifact.evidence:
-                        if record not in combined:
-                            combined.append(record)
-                    artifact.evidence = tuple(combined)
-                artifacts[key] = artifact
         if len(stories) == 1 and root in stories:
             revision = root_story.revision
         elif stories:
@@ -157,17 +177,7 @@ def shared_work(state: WorkFacts, activity: SwarmActivity) -> tuple[WorkSubject,
         story = root_story.model_copy()
         story.revision = revision
         story.sessions = children
-        story.artifacts = tuple(
-            artifact
-            for _, artifact in sorted(
-                artifacts.items(),
-                key=lambda item: (
-                    item[0][0],
-                    item[0][1],
-                    repository_columns(item[0][2]),
-                ),
-            )
-        )
+        story.artifacts = _merge_artifacts(stories.values())
         names = identifiers | {
             alias for alias, target in state.aliases.items() if target in identifiers
         }

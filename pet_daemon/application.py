@@ -566,6 +566,9 @@ class Application:
             self.reason = None
         if self.suspended or self.task is not None or not self.behavior.status:
             return
+        self._request_commentary(now)
+
+    def _request_commentary(self, now: float) -> None:
         snapshot = self.context()
         check_in = tuple(
             key

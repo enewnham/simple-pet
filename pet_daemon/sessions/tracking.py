@@ -48,6 +48,12 @@ class Failure:
     goal: str
 
 
+@dataclass(frozen=True)
+class EventTransition:
+    failure: bool
+    activity: Activity
+
+
 class SessionUpdate(BaseModel):
     failure: bool
     convergence: bool
@@ -214,6 +220,87 @@ class Sessions:
         identity = SessionIdentity(source=source, native_id=identifier)
         return self.aliases.get(identity, identity)
 
+    def _merge_active_session(self, session: AgentSession, other: AgentSession) -> None:
+        adopt_waiting = other.waiting and (
+            not session.waiting or other.waiting_started >= session.waiting_started
+        )
+        if adopt_waiting:
+            session.waiting = True
+            session.waiting_call = other.waiting_call
+            session.waiting_since = other.waiting_since
+            session.waiting_kind = other.waiting_kind
+            session.waiting_tool = other.waiting_tool
+            session.waiting_prompt = other.waiting_prompt
+            session.last_check_in = other.last_check_in
+        if adopt_waiting or other.last_seen > session.last_seen:
+            if other.phase:
+                session.phase = other.phase
+            session.last_tool = other.last_tool or session.last_tool
+            session.progress = other.progress or session.progress
+        if other.last_seen > session.last_seen:
+            session.last_event = other.last_event
+            session.changed_at = other.changed_at
+        session.last_seen = max(session.last_seen, other.last_seen)
+        for category, failure in other.failures.items():
+            if failure.generation == other.generation:
+                failure.generation = session.generation
+                existing = session.failures.get(category)
+                if existing is None or failure.at > existing.at:
+                    session.failures[category] = failure
+        unresolved = [item for item in session.failures.values() if not item.resolved]
+        if unresolved:
+            session.failure = max(unresolved, key=lambda item: item.at)
+
+    def _merge_session(
+        self, session: AgentSession, old_key: SessionIdentity
+    ) -> AgentSession:
+        key = session.id
+        other = self.by_id.pop(old_key)
+        if not session.active and (
+            other.active or (other.finished and not session.finished)
+        ):
+            session, other = other, session
+            session.id = key
+            self.by_id[key] = session
+        session.calls.update(other.calls)
+        session.active = session.active or other.active
+        session.goal = session.goal or other.goal
+        session.intent_received = session.intent_received or other.intent_received
+        if other.sentiment_seen > session.sentiment_seen:
+            session.user_sentiment = other.user_sentiment
+            session.sentiment_seen = other.sentiment_seen
+            session.sentiment_identity = other.sentiment_identity
+        session.repo = session.repo or other.repo
+        session.owner = session.owner or other.owner
+        if session.owner == other.owner:
+            session.presence = other.presence
+        if other.active:
+            self._merge_active_session(session, other)
+        session.started = min(session.started, other.started)
+        self.aliases = {
+            name: key if target == old_key else target
+            for name, target in self.aliases.items()
+        }
+        self.child_calls = {
+            name: key if target == old_key else target
+            for name, target in self.child_calls.items()
+        }
+        for child in self.by_id.values():
+            if child.parent == old_key:
+                child.parent = key
+        if old_key in self.members:
+            self.members.remove(old_key)
+            self.members.add(key)
+        log.info(
+            "session.merged",
+            session=key,
+            merged_session=old_key,
+            active=session.active,
+            active_calls=list(session.calls),
+            parent=session.parent,
+        )
+        return session
+
     def _session(
         self, event: HookEvent, now: float
     ) -> tuple[SessionIdentity, AgentSession] | None:
@@ -248,83 +335,7 @@ class Sessions:
         for alias in alternate if routed else [identifier, *alternate]:
             old_key = self._key(source, alias)
             if old_key != key and old_key in self.by_id:
-                other = self.by_id.pop(old_key)
-                if not session.active and (
-                    other.active or (other.finished and not session.finished)
-                ):
-                    session, other = other, session
-                    session.id = key
-                    self.by_id[key] = session
-                session.calls.update(other.calls)
-                session.active = session.active or other.active
-                session.goal = session.goal or other.goal
-                session.intent_received = (
-                    session.intent_received or other.intent_received
-                )
-                if other.sentiment_seen > session.sentiment_seen:
-                    session.user_sentiment = other.user_sentiment
-                    session.sentiment_seen = other.sentiment_seen
-                    session.sentiment_identity = other.sentiment_identity
-                session.repo = session.repo or other.repo
-                session.owner = session.owner or other.owner
-                if session.owner == other.owner:
-                    session.presence = other.presence
-                if other.active:
-                    adopt_waiting = other.waiting and (
-                        not session.waiting
-                        or other.waiting_started >= session.waiting_started
-                    )
-                    if adopt_waiting:
-                        session.waiting = True
-                        session.waiting_call = other.waiting_call
-                        session.waiting_since = other.waiting_since
-                        session.waiting_kind = other.waiting_kind
-                        session.waiting_tool = other.waiting_tool
-                        session.waiting_prompt = other.waiting_prompt
-                        session.last_check_in = other.last_check_in
-                    if adopt_waiting or other.last_seen > session.last_seen:
-                        if other.phase:
-                            session.phase = other.phase
-                        session.last_tool = other.last_tool or session.last_tool
-                        session.progress = other.progress or session.progress
-                    if other.last_seen > session.last_seen:
-                        session.last_event = other.last_event
-                        session.changed_at = other.changed_at
-                    session.last_seen = max(session.last_seen, other.last_seen)
-                    for category, failure in other.failures.items():
-                        if failure.generation == other.generation:
-                            failure.generation = session.generation
-                            existing = session.failures.get(category)
-                            if existing is None or failure.at > existing.at:
-                                session.failures[category] = failure
-                    unresolved = [
-                        item for item in session.failures.values() if not item.resolved
-                    ]
-                    if unresolved:
-                        session.failure = max(unresolved, key=lambda item: item.at)
-                session.started = min(session.started, other.started)
-                self.aliases = {
-                    name: key if target == old_key else target
-                    for name, target in self.aliases.items()
-                }
-                self.child_calls = {
-                    name: key if target == old_key else target
-                    for name, target in self.child_calls.items()
-                }
-                for child in self.by_id.values():
-                    if child.parent == old_key:
-                        child.parent = key
-                if old_key in self.members:
-                    self.members.remove(old_key)
-                    self.members.add(key)
-                log.info(
-                    "session.merged",
-                    session=key,
-                    merged_session=old_key,
-                    active=session.active,
-                    active_calls=list(session.calls),
-                    parent=session.parent,
-                )
+                session = self._merge_session(session, old_key)
             alias_key = SessionIdentity(source=source, native_id=alias)
             if alias_key != key and self.aliases.get(alias_key) != key:
                 log.info("session.aliased", session=key, alias=alias_key)
@@ -544,6 +555,245 @@ class Sessions:
             return False
         return previous.version == current.version == 7 and current.time > previous.time
 
+    def _receive_intent(
+        self, key: SessionIdentity, session: AgentSession, event: HookEvent, now: float
+    ) -> EventTransition:
+        kind = event.event
+        event_activity = session.phase or Activity.COMMAND
+        turn = event.turn
+        new_native_turn = kind == HookEventKind.INTENT and not event.manual
+        if (
+            not session.active
+            or new_native_turn
+            or (kind == HookEventKind.INTENT and turn and turn != session.turn)
+        ):
+            self._open(key, session, event, now)
+        if event.goal:
+            request = request_excerpt(prose_text(event.goal))
+            if not session.intent_received:
+                session.goal = request
+            session.intent_received = True
+        elif kind == HookEventKind.SUBAGENT_START and session.parent in self.by_id:
+            session.goal = self.by_id[session.parent].goal
+            session.intent_received = bool(session.goal)
+        return EventTransition(False, event_activity)
+
+    def _start_call(
+        self,
+        key: SessionIdentity,
+        session: AgentSession,
+        event: HookEvent,
+        now: float,
+        resumes_child: bool,
+    ) -> EventTransition | None:
+        turn = event.turn
+        if not event.call:
+            return self._ignored(event, "missing_call", key, session)
+        if session.finished and not event.manual and not resumes_child:
+            return self._ignored(event, "finished_session", key, session)
+        if not session.active:
+            self._open(key, session, event, now)
+        if turn and session.turn is None:
+            session.turn = turn
+        call_id = event.call
+        if call_id in session.calls:
+            return self._ignored(event, "duplicate_call", key, session)
+        tool = event.tool if event.tool is not None else ""
+        event_activity = activity(
+            tool, (event.tool_name if event.tool_name is not None else "")
+        )
+        session.calls[call_id] = Call(tool, now, event_activity)
+        session.last_tool = tool
+        session.phase = event_activity
+        session.progress = event.progress if event.progress is not None else ""
+        return EventTransition(False, event_activity)
+
+    def _complete_call(
+        self, key: SessionIdentity, session: AgentSession, event: HookEvent, now: float
+    ) -> EventTransition | None:
+        kind = event.event
+        waiting_since = session.waiting_since
+        failure = False
+        call = session.calls.pop(event.call, None)
+        if call is None:
+            if session.waiting and event.call and event.call == session.waiting_call:
+                tool = event.tool if event.tool is not None else session.last_tool
+                assert waiting_since is not None
+                call = Call(
+                    tool,
+                    waiting_since,
+                    activity(
+                        tool,
+                        (event.tool_name if event.tool_name is not None else ""),
+                    ),
+                )
+            else:
+                return self._ignored(event, "unknown_call", key, session)
+        event_activity = call.activity
+        session.progress = (
+            ""
+            if kind == HookEventKind.TOOL_ERROR
+            or event.outcome == ExecutionOutcome.ERROR
+            else (event.progress if event.progress is not None else session.progress)
+        )
+        if kind == HookEventKind.TOOL_ERROR or event.outcome == ExecutionOutcome.ERROR:
+            session.failure = self._failure(session, call.activity, now, call.tool)
+            failure = True
+        elif event.outcome == ExecutionOutcome.CANCELLED:
+            session.cancelled = True
+        elif call.activity in session.failures:
+            recovered = session.failures[call.activity]
+            recovered.resolved = True
+            unresolved = [
+                item for item in session.failures.values() if not item.resolved
+            ]
+            session.failure = (
+                max(unresolved, key=lambda item: item.at) if unresolved else recovered
+            )
+        if event.manual and not session.calls:
+            outcome = (
+                ExecutionOutcome.ERROR
+                if self._has_current_failure(session)
+                else ExecutionOutcome.CANCELLED
+                if session.cancelled
+                else ExecutionOutcome.SUCCESS
+            )
+            self._finish(key, session, outcome, now, kind)
+        return EventTransition(failure, event_activity)
+
+    def _end_session(
+        self, key: SessionIdentity, session: AgentSession, event: HookEvent, now: float
+    ) -> EventTransition | None:
+        kind = event.event
+        event_activity = session.phase or Activity.COMMAND
+        if session.last_event == HookEventKind.SESSION_END:
+            return self._ignored(event, "duplicate_session_end", key, session)
+        self._retire(key, session, now, kind)
+        for child_key in self._descendants(key):
+            child = self.by_id[child_key]
+            if child.active:
+                self._retire(child_key, child, now, "parent_session_end")
+        return EventTransition(False, event_activity)
+
+    def _end_turn(
+        self, key: SessionIdentity, session: AgentSession, event: HookEvent, now: float
+    ) -> EventTransition | None:
+        kind = event.event
+        event_activity = session.phase or Activity.COMMAND
+        failure = False
+        if session.finished:
+            return self._ignored(event, "finished_session", key, session)
+        outcome = (
+            event.outcome if event.outcome is not None else ExecutionOutcome.SUCCESS
+        )
+        if kind == HookEventKind.TURN_ERROR or outcome == ExecutionOutcome.ERROR:
+            outcome = ExecutionOutcome.ERROR
+            if kind == HookEventKind.TURN_ERROR or not self._has_current_failure(
+                session
+            ):
+                session.failure = self._failure(session, Activity.SOURCE, now)
+            assert session.failure is not None
+            event_activity = session.failure.activity
+            failure = True
+        elif kind == HookEventKind.INTERRUPT:
+            outcome = event.outcome or (
+                ExecutionOutcome.CANCELLED
+                if session.active
+                else session.outcome or ExecutionOutcome.CANCELLED
+            )
+        elif self._has_current_failure(session):
+            outcome = ExecutionOutcome.ERROR
+        elif session.cancelled:
+            outcome = ExecutionOutcome.CANCELLED
+        if outcome == ExecutionOutcome.ERROR and session.failure:
+            event_activity = session.failure.activity
+        self._finish(key, session, outcome, now, kind)
+        session.progress = (
+            ""
+            if outcome == ExecutionOutcome.ERROR
+            else (event.progress if event.progress is not None else session.progress)
+        )
+        if kind == HookEventKind.INTERRUPT:
+            for child_key in self._descendants(key):
+                child = self.by_id[child_key]
+                if child.active:
+                    self._finish(
+                        child_key,
+                        child,
+                        ExecutionOutcome.CANCELLED,
+                        now,
+                        f"parent_{kind}",
+                    )
+        return EventTransition(failure, event_activity)
+
+    def _receive_progress(
+        self, key: SessionIdentity, session: AgentSession, event: HookEvent, now: float
+    ) -> EventTransition | None:
+        kind = event.event
+        event_activity = session.phase or Activity.COMMAND
+        if session.finished:
+            return self._ignored(event, "finished_session", key, session)
+        if kind == HookEventKind.WAITING and not session.active:
+            self._open(key, session, event, now)
+        if event.waiting_kind != WaitingKind.PERMISSION_CHECK:
+            session.progress = (
+                event.progress if event.progress is not None else session.progress
+            )
+        if kind == HookEventKind.WAITING:
+            if (
+                not session.waiting
+                or session.waiting_call != event.call
+                or session.waiting_kind != event.waiting_kind
+            ):
+                session.waiting_since = now
+            session.waiting = True
+            session.waiting_call = event.call
+            session.waiting_kind = event.waiting_kind
+            session.waiting_tool = event.tool
+            session.waiting_prompt = event.progress
+            session.last_tool = (
+                event.tool if event.tool is not None else session.last_tool
+            )
+        return EventTransition(False, event_activity)
+
+    def _descendants(self, key: SessionIdentity) -> set[SessionIdentity]:
+        descendants = {key}
+        for _ in range(len(self.by_id)):
+            descendants.update(
+                child_key
+                for child_key, child in self.by_id.items()
+                if child.parent in descendants
+            )
+        return descendants - {key}
+
+    def _apply_event(
+        self,
+        key: SessionIdentity,
+        session: AgentSession,
+        event: HookEvent,
+        now: float,
+        resumes_child: bool,
+    ) -> EventTransition | None:
+        match event.event:
+            case HookEventKind.INTENT | HookEventKind.SUBAGENT_START:
+                return self._receive_intent(key, session, event, now)
+            case HookEventKind.TOOL_START:
+                return self._start_call(key, session, event, now, resumes_child)
+            case HookEventKind.TOOL_DONE | HookEventKind.TOOL_ERROR:
+                return self._complete_call(key, session, event, now)
+            case HookEventKind.SESSION_END:
+                return self._end_session(key, session, event, now)
+            case (
+                HookEventKind.TURN_DONE
+                | HookEventKind.SUBAGENT_DONE
+                | HookEventKind.TURN_ERROR
+                | HookEventKind.INTERRUPT
+            ):
+                return self._end_turn(key, session, event, now)
+            case HookEventKind.PROGRESS | HookEventKind.WAITING:
+                return self._receive_progress(key, session, event, now)
+        return EventTransition(False, session.phase or Activity.COMMAND)
+
     def apply(self, event: HookEvent) -> SessionUpdate | None:
         kind = event.event
         now = self.clock()
@@ -588,198 +838,9 @@ class Sessions:
             and session.intent_received
         ):
             return self._ignored(event, "duplicate_subagent_start", key, session)
-        failure = False
-        event_activity = session.phase or Activity.COMMAND
-        if kind in (HookEventKind.INTENT, HookEventKind.SUBAGENT_START):
-            new_native_turn = kind == HookEventKind.INTENT and not event.manual
-            if (
-                not session.active
-                or new_native_turn
-                or (kind == HookEventKind.INTENT and turn and turn != session.turn)
-            ):
-                self._open(key, session, event, now)
-            if event.goal:
-                request = request_excerpt(prose_text(event.goal))
-                if not session.intent_received:
-                    session.goal = request
-                session.intent_received = True
-            elif kind == HookEventKind.SUBAGENT_START and session.parent in self.by_id:
-                session.goal = self.by_id[session.parent].goal
-                session.intent_received = bool(session.goal)
-        elif kind == HookEventKind.TOOL_START:
-            if not event.call:
-                return self._ignored(event, "missing_call", key, session)
-            if session.finished and not event.manual and not resumes_child:
-                return self._ignored(event, "finished_session", key, session)
-            if not session.active:
-                self._open(key, session, event, now)
-            if turn and session.turn is None:
-                session.turn = turn
-            call_id = event.call
-            if call_id in session.calls:
-                return self._ignored(event, "duplicate_call", key, session)
-            tool = event.tool if event.tool is not None else ""
-            event_activity = activity(
-                tool, (event.tool_name if event.tool_name is not None else "")
-            )
-            session.calls[call_id] = Call(tool, now, event_activity)
-            session.last_tool = tool
-            session.phase = event_activity
-            session.progress = event.progress if event.progress is not None else ""
-        elif kind in (HookEventKind.TOOL_DONE, HookEventKind.TOOL_ERROR):
-            call = session.calls.pop(event.call, None)
-            if call is None:
-                if (
-                    session.waiting
-                    and event.call
-                    and event.call == session.waiting_call
-                ):
-                    tool = event.tool if event.tool is not None else session.last_tool
-                    assert waiting_since is not None
-                    call = Call(
-                        tool,
-                        waiting_since,
-                        activity(
-                            tool,
-                            (event.tool_name if event.tool_name is not None else ""),
-                        ),
-                    )
-                else:
-                    return self._ignored(event, "unknown_call", key, session)
-            event_activity = call.activity
-            session.progress = (
-                ""
-                if kind == HookEventKind.TOOL_ERROR
-                or event.outcome == ExecutionOutcome.ERROR
-                else (
-                    event.progress if event.progress is not None else session.progress
-                )
-            )
-            if (
-                kind == HookEventKind.TOOL_ERROR
-                or event.outcome == ExecutionOutcome.ERROR
-            ):
-                session.failure = self._failure(session, call.activity, now, call.tool)
-                failure = True
-            elif event.outcome == ExecutionOutcome.CANCELLED:
-                session.cancelled = True
-            elif call.activity in session.failures:
-                recovered = session.failures[call.activity]
-                recovered.resolved = True
-                unresolved = [
-                    item for item in session.failures.values() if not item.resolved
-                ]
-                session.failure = (
-                    max(unresolved, key=lambda item: item.at)
-                    if unresolved
-                    else recovered
-                )
-            if event.manual and not session.calls:
-                outcome = (
-                    ExecutionOutcome.ERROR
-                    if self._has_current_failure(session)
-                    else ExecutionOutcome.CANCELLED
-                    if session.cancelled
-                    else ExecutionOutcome.SUCCESS
-                )
-                self._finish(key, session, outcome, now, kind)
-        elif kind == HookEventKind.SESSION_END:
-            if session.last_event == HookEventKind.SESSION_END:
-                return self._ignored(event, "duplicate_session_end", key, session)
-            self._retire(key, session, now, kind)
-            descendants = {key}
-            for _ in range(len(self.by_id)):
-                descendants.update(
-                    child_key
-                    for child_key, child in self.by_id.items()
-                    if child.parent in descendants
-                )
-            for child_key in descendants - {key}:
-                child = self.by_id[child_key]
-                if child.active:
-                    self._retire(child_key, child, now, "parent_session_end")
-        elif kind in (
-            HookEventKind.TURN_DONE,
-            HookEventKind.SUBAGENT_DONE,
-            HookEventKind.TURN_ERROR,
-            HookEventKind.INTERRUPT,
-        ):
-            if session.finished:
-                return self._ignored(event, "finished_session", key, session)
-            outcome = (
-                event.outcome if event.outcome is not None else ExecutionOutcome.SUCCESS
-            )
-            if kind == HookEventKind.TURN_ERROR or outcome == ExecutionOutcome.ERROR:
-                outcome = ExecutionOutcome.ERROR
-                if kind == HookEventKind.TURN_ERROR or not self._has_current_failure(
-                    session
-                ):
-                    session.failure = self._failure(session, Activity.SOURCE, now)
-                assert session.failure is not None
-                event_activity = session.failure.activity
-                failure = True
-            elif kind == HookEventKind.INTERRUPT:
-                outcome = event.outcome or (
-                    ExecutionOutcome.CANCELLED
-                    if session.active
-                    else session.outcome or ExecutionOutcome.CANCELLED
-                )
-            elif self._has_current_failure(session):
-                outcome = ExecutionOutcome.ERROR
-            elif session.cancelled:
-                outcome = ExecutionOutcome.CANCELLED
-            if outcome == ExecutionOutcome.ERROR and session.failure:
-                event_activity = session.failure.activity
-            self._finish(key, session, outcome, now, kind)
-            session.progress = (
-                ""
-                if outcome == ExecutionOutcome.ERROR
-                else (
-                    event.progress if event.progress is not None else session.progress
-                )
-            )
-            if kind == HookEventKind.INTERRUPT:
-                descendants = {key}
-                for _ in range(len(self.by_id)):
-                    descendants.update(
-                        child_key
-                        for child_key, child in self.by_id.items()
-                        if child.parent in descendants
-                    )
-                for child_key in descendants - {key}:
-                    child = self.by_id[child_key]
-                    if child.active:
-                        self._finish(
-                            child_key,
-                            child,
-                            ExecutionOutcome.CANCELLED,
-                            now,
-                            f"parent_{kind}",
-                        )
-        elif kind in (HookEventKind.PROGRESS, HookEventKind.WAITING):
-            if session.finished:
-                return self._ignored(event, "finished_session", key, session)
-            if kind == HookEventKind.WAITING and not session.active:
-                self._open(key, session, event, now)
-            if event.waiting_kind != WaitingKind.PERMISSION_CHECK:
-                session.progress = (
-                    event.progress if event.progress is not None else session.progress
-                )
-            if kind == HookEventKind.WAITING:
-                if (
-                    not session.waiting
-                    or session.waiting_call != event.call
-                    or session.waiting_kind != event.waiting_kind
-                ):
-                    session.waiting_since = now
-                session.waiting = True
-                session.waiting_call = event.call
-                session.waiting_kind = event.waiting_kind
-                session.waiting_tool = event.tool
-                session.waiting_prompt = event.progress
-                session.last_tool = (
-                    event.tool if event.tool is not None else session.last_tool
-                )
+        transition = self._apply_event(key, session, event, now, resumes_child)
+        if transition is None:
+            return None
         if kind in (
             HookEventKind.TOOL_START,
             HookEventKind.TOOL_DONE,
@@ -816,10 +877,10 @@ class Sessions:
                 if member in self.by_id
             )
         return SessionUpdate(
-            failure=failure,
+            failure=transition.failure,
             convergence=convergence,
             session=key,
-            activity=event_activity,
+            activity=transition.activity,
             observation=self._observation(
                 key,
                 session,

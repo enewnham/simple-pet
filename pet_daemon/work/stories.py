@@ -100,6 +100,215 @@ def report_record(state: WorkFacts, report: SessionReport) -> EvidenceRecord:
     return record
 
 
+def _commentary_evidence(
+    records: tuple[EvidenceRecord, ...],
+) -> tuple[CommentaryEvidence, ...]:
+    return tuple(
+        value
+        for record in records
+        if (value := commentary_evidence(record)) is not None
+    )
+
+
+class _StoryArtifacts:
+    def __init__(self, state: WorkFacts) -> None:
+        self.state = state
+        self.artifacts: dict[
+            tuple[str, str, RepositoryIdentity | None], ArtifactReference
+        ] = {}
+        self.records: dict[
+            tuple[str, str, RepositoryIdentity | None], tuple[EvidenceRecord, ...]
+        ] = {}
+
+    def add(
+        self, value: ArtifactReference, records: tuple[EvidenceRecord, ...]
+    ) -> None:
+        key = value.kind, value.ref, value.repository
+        previous = self.artifacts.get(key)
+        if previous:
+            value = value.model_copy()
+            value.revision = value.revision or previous.revision
+            value.checkout = value.checkout or previous.checkout
+            value.title = value.title or previous.title
+        self.artifacts[key] = value
+        combined = [*self.records.get(key, ())]
+        for record in records:
+            if record not in combined:
+                combined.append(record)
+        self.records[key] = tuple(combined)
+
+    def add_pr(
+        self,
+        ref: str,
+        relationship: EvidenceRecord | None = None,
+        *,
+        stack: bool = True,
+    ) -> None:
+        observed = self.state.pull_requests.get(ref)
+        pr = observed.pr if observed else None
+        value = normalize_reference(
+            ArtifactReference(
+                kind=ArtifactKind.PULL_REQUEST,
+                ref=ref,
+                revision=pr.head or None if pr else None,
+                title=pr.title or None if pr else None,
+            )
+        )
+        records = (relationship,) if relationship else ()
+        if observed:
+            if observed.last_success_at is not None:
+                records += (
+                    EvidenceRecord(
+                        payload=GitHubEvidence(pr=pr, repository=value.repository),
+                        observed_at=observed.last_success_at,
+                    ),
+                )
+            if observed.error or pr and pr.related_links_error:
+                records += (
+                    EvidenceRecord(
+                        payload=AvailabilityEvidence(
+                            local_error=None,
+                            github_error=observed.error
+                            or (pr.related_links_error if pr else None),
+                        ),
+                        observed_at=observed.checked_at,
+                    ),
+                )
+        self.add(value, records)
+        if not pr:
+            return
+        for explicit in references(pr.title + "\n" + pr.body):
+            if explicit.kind == ArtifactKind.TICKET:
+                self.add(
+                    explicit,
+                    (
+                        EvidenceRecord(
+                            payload=ReferenceAssociation(
+                                ref=explicit.ref, source=EvidenceSource.PR_REFERENCE
+                            )
+                        ),
+                    ),
+                )
+        if stack:
+            for link in pr.related_links:
+                if (
+                    link.kind == ArtifactKind.PULL_REQUEST
+                    and link.relationship == LinkRelationship.STACK_ENTRY
+                ):
+                    self.add_pr(
+                        link.ref,
+                        EvidenceRecord(
+                            payload=StackAssociation(link=link, from_ref=ref),
+                            observed_at=observed.last_success_at if observed else None,
+                        ),
+                        stack=False,
+                    )
+
+    def add_context(self, context: ReportContext, current: bool) -> None:
+        context = resolve_report_pull_request(self.state, context)
+        if context.repository and context.branch:
+            records = (
+                EvidenceRecord(
+                    payload=CheckoutAssociation(
+                        checkout=context.checkout, branch=context.branch
+                    )
+                ),
+            )
+            checkout = self.state.checkouts.get(context.checkout) if current else None
+            if checkout and checkout.local:
+                records += (
+                    EvidenceRecord(
+                        payload=checkout.local, observed_at=checkout.last_success_at
+                    ),
+                )
+            branch = self.state.branches.get((context.repository, context.branch))
+            if (
+                branch
+                and branch.pr is None
+                and not branch.error
+                and (current or not context.pull_request)
+            ):
+                records += (
+                    EvidenceRecord(
+                        payload=GitHubEvidence(pr=None, repository=context.repository),
+                        observed_at=branch.last_success_at,
+                    ),
+                )
+            if checkout and (checkout.error or not checkout.available):
+                records += (
+                    EvidenceRecord(
+                        payload=AvailabilityEvidence(
+                            local_error=checkout.error or "Checkout unavailable",
+                            github_error=None,
+                        ),
+                        observed_at=checkout.checked_at,
+                    ),
+                )
+            if branch and branch.error:
+                records += (
+                    EvidenceRecord(
+                        payload=AvailabilityEvidence(
+                            local_error=None, github_error=branch.error
+                        ),
+                        observed_at=branch.checked_at,
+                    ),
+                )
+            self.add(
+                ArtifactReference(
+                    kind=ArtifactKind.BRANCH,
+                    ref=context.branch,
+                    repository=context.repository,
+                    revision=checkout.local.head or None
+                    if checkout and checkout.local
+                    else None,
+                    checkout=context.checkout or None,
+                ),
+                records,
+            )
+            ref = context.pull_request
+            if ref:
+                self.add_pr(
+                    ref,
+                    EvidenceRecord(
+                        payload=PullRequestAssociation(
+                            checkout=context.checkout, branch=context.branch
+                        )
+                    ),
+                )
+        elif context.pull_request:
+            self.add_pr(context.pull_request)
+        for explicit in context.references:
+            relationship = EvidenceRecord(
+                payload=ReferenceAssociation(
+                    ref=explicit.ref, source=EvidenceSource.AGENT_REFERENCE
+                )
+            )
+            if explicit.kind == ArtifactKind.PULL_REQUEST:
+                self.add_pr(explicit.ref, relationship)
+            else:
+                self.add(explicit, (relationship,))
+
+    def contexts(self) -> tuple[ArtifactContext, ...]:
+        return tuple(
+            ArtifactContext(
+                kind=value.kind,
+                ref=value.ref,
+                title=" ".join(value.title.split())[:240] if value.title else "",
+                repository=value.repository,
+                revision=value.revision or "",
+                evidence=_commentary_evidence(self.records[key]),
+            )
+            for key, value in sorted(
+                self.artifacts.items(),
+                key=lambda item: (
+                    item[0][0],
+                    item[0][1],
+                    repository_columns(item[0][2]),
+                ),
+            )
+        )
+
+
 def session_work(state: WorkFacts, agent: SessionRecord) -> WorkStory:
     request_reports = tuple(
         report for report in agent.reports if isinstance(report.payload, IntentEvidence)
@@ -135,179 +344,9 @@ def session_work(state: WorkFacts, agent: SessionRecord) -> WorkStory:
     contexts.extend((report.context, False) for report in agent.reports)
     if agent.execution:
         contexts.append((agent.execution.context, False))
-    artifacts: dict[tuple[str, str, RepositoryIdentity | None], ArtifactReference] = {}
-    artifact_records: dict[
-        tuple[str, str, RepositoryIdentity | None], tuple[EvidenceRecord, ...]
-    ] = {}
-
-    def evidence(records: tuple[EvidenceRecord, ...]) -> tuple[CommentaryEvidence, ...]:
-        return tuple(
-            value
-            for record in records
-            if (value := commentary_evidence(record)) is not None
-        )
-
-    def add(value: ArtifactReference, records: tuple[EvidenceRecord, ...]) -> None:
-        key = value.kind, value.ref, value.repository
-        previous = artifacts.get(key)
-        if previous:
-            value = value.model_copy()
-            value.revision = value.revision or previous.revision
-            value.checkout = value.checkout or previous.checkout
-            value.title = value.title or previous.title
-        artifacts[key] = value
-        combined = [*artifact_records.get(key, ())]
-        for record in records:
-            if record not in combined:
-                combined.append(record)
-        artifact_records[key] = tuple(combined)
-
-    def add_pr(
-        ref: str, relationship: EvidenceRecord | None = None, *, stack: bool = True
-    ) -> None:
-        observed = state.pull_requests.get(ref)
-        pr = observed.pr if observed else None
-        value = normalize_reference(
-            ArtifactReference(
-                kind=ArtifactKind.PULL_REQUEST,
-                ref=ref,
-                revision=pr.head or None if pr else None,
-                title=pr.title or None if pr else None,
-            )
-        )
-        records = (relationship,) if relationship else ()
-        if observed:
-            if observed.last_success_at is not None:
-                records += (
-                    EvidenceRecord(
-                        payload=GitHubEvidence(pr=pr, repository=value.repository),
-                        observed_at=observed.last_success_at,
-                    ),
-                )
-            if observed.error or pr and pr.related_links_error:
-                records += (
-                    EvidenceRecord(
-                        payload=AvailabilityEvidence(
-                            local_error=None,
-                            github_error=observed.error
-                            or (pr.related_links_error if pr else None),
-                        ),
-                        observed_at=observed.checked_at,
-                    ),
-                )
-        add(value, records)
-        if not pr:
-            return
-        for explicit in references(pr.title + "\n" + pr.body):
-            if explicit.kind == ArtifactKind.TICKET:
-                add(
-                    explicit,
-                    (
-                        EvidenceRecord(
-                            payload=ReferenceAssociation(
-                                ref=explicit.ref, source=EvidenceSource.PR_REFERENCE
-                            )
-                        ),
-                    ),
-                )
-        if stack:
-            for link in pr.related_links:
-                if (
-                    link.kind == ArtifactKind.PULL_REQUEST
-                    and link.relationship == LinkRelationship.STACK_ENTRY
-                ):
-                    add_pr(
-                        link.ref,
-                        EvidenceRecord(
-                            payload=StackAssociation(link=link, from_ref=ref),
-                            observed_at=observed.last_success_at if observed else None,
-                        ),
-                        stack=False,
-                    )
-
+    artifacts = _StoryArtifacts(state)
     for context, current in contexts:
-        context = resolve_report_pull_request(state, context)
-        if context.repository and context.branch:
-            records = (
-                EvidenceRecord(
-                    payload=CheckoutAssociation(
-                        checkout=context.checkout, branch=context.branch
-                    )
-                ),
-            )
-            checkout = state.checkouts.get(context.checkout) if current else None
-            if checkout and checkout.local:
-                records += (
-                    EvidenceRecord(
-                        payload=checkout.local, observed_at=checkout.last_success_at
-                    ),
-                )
-            branch = state.branches.get((context.repository, context.branch))
-            if (
-                branch
-                and branch.pr is None
-                and not branch.error
-                and (current or not context.pull_request)
-            ):
-                records += (
-                    EvidenceRecord(
-                        payload=GitHubEvidence(pr=None, repository=context.repository),
-                        observed_at=branch.last_success_at,
-                    ),
-                )
-            if checkout and (checkout.error or not checkout.available):
-                records += (
-                    EvidenceRecord(
-                        payload=AvailabilityEvidence(
-                            local_error=checkout.error or "Checkout unavailable",
-                            github_error=None,
-                        ),
-                        observed_at=checkout.checked_at,
-                    ),
-                )
-            if branch and branch.error:
-                records += (
-                    EvidenceRecord(
-                        payload=AvailabilityEvidence(
-                            local_error=None, github_error=branch.error
-                        ),
-                        observed_at=branch.checked_at,
-                    ),
-                )
-            add(
-                ArtifactReference(
-                    kind=ArtifactKind.BRANCH,
-                    ref=context.branch,
-                    repository=context.repository,
-                    revision=checkout.local.head or None
-                    if checkout and checkout.local
-                    else None,
-                    checkout=context.checkout or None,
-                ),
-                records,
-            )
-            ref = context.pull_request
-            if ref:
-                add_pr(
-                    ref,
-                    EvidenceRecord(
-                        payload=PullRequestAssociation(
-                            checkout=context.checkout, branch=context.branch
-                        )
-                    ),
-                )
-        elif context.pull_request:
-            add_pr(context.pull_request)
-        for explicit in context.references:
-            relationship = EvidenceRecord(
-                payload=ReferenceAssociation(
-                    ref=explicit.ref, source=EvidenceSource.AGENT_REFERENCE
-                )
-            )
-            if explicit.kind == ArtifactKind.PULL_REQUEST:
-                add_pr(explicit.ref, relationship)
-            else:
-                add(explicit, (relationship,))
+        artifacts.add_context(context, current)
 
     def report_facts(report: SessionReport) -> tuple[object, ...]:
         return (
@@ -325,26 +364,9 @@ def session_work(state: WorkFacts, agent: SessionRecord) -> WorkStory:
         id=agent.id,
         intent=agent.goal,
         revision=revision,
-        requests=evidence(requests),
-        activity=evidence(tuple(activity)),
-        artifacts=tuple(
-            ArtifactContext(
-                kind=value.kind,
-                ref=value.ref,
-                title=" ".join(value.title.split())[:240] if value.title else "",
-                repository=value.repository,
-                revision=value.revision or "",
-                evidence=evidence(artifact_records[key]),
-            )
-            for key, value in sorted(
-                artifacts.items(),
-                key=lambda item: (
-                    item[0][0],
-                    item[0][1],
-                    repository_columns(item[0][2]),
-                ),
-            )
-        ),
+        requests=_commentary_evidence(requests),
+        activity=_commentary_evidence(tuple(activity)),
+        artifacts=artifacts.contexts(),
     )
 
 
