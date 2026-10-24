@@ -14,6 +14,8 @@ from anthropic import AsyncAnthropic
 from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.config import Config
 from pet_daemon.daemon import Daemon
+from pet_daemon.domain import SessionSource
+from pet_daemon.identity import SessionIdentity
 from pet_daemon.runtime import OverlayPacket
 from pet_daemon.sources import RepositoryTracker
 from pet_daemon.sources.git import CommandOptions, command
@@ -289,11 +291,11 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             for item in value:
                 self.assert_human_context(item)
 
-    async def native_work(self) -> str:
+    async def native_work(self) -> SessionIdentity:
         self.send(
             {
                 "kind": "event",
-                "harness": "codex",
+                "source": "codex",
                 "session": "persistence",
                 "event": "intent",
                 "turn": "implementation",
@@ -302,7 +304,10 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         await self.wait_for(
-            lambda: "codex:persistence" in self.daemon.application.sessions.by_id
+            lambda: (
+                SessionIdentity(SessionSource.CODEX, "persistence")
+                in self.daemon.application.sessions.by_id
+            )
         )
         await self.wait_for(
             lambda: any(
@@ -314,7 +319,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.send(
             {
                 "kind": "event",
-                "harness": "codex",
+                "source": "codex",
                 "session": "persistence",
                 "event": "turn_done",
                 "turn": "implementation",
@@ -325,7 +330,9 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.wait_for(
             lambda: (
-                self.daemon.application.sessions.by_id["codex:persistence"].outcome
+                self.daemon.application.sessions.by_id[
+                    SessionIdentity(SessionSource.CODEX, "persistence")
+                ].outcome
                 == "success"
             )
         )
@@ -344,7 +351,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         return next(
             subject.id
             for subject in self.daemon.application.context().work
-            if "codex:persistence" in subject.sessions
+            if SessionIdentity(SessionSource.CODEX, "persistence") in subject.sessions
         )
 
     async def test_native_agent_report_reaches_commentary_without_publication_details(
@@ -402,7 +409,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.send(
             {
                 "kind": "event",
-                "harness": "codex",
+                "source": "codex",
                 "session": "persistence",
                 "event": "intent",
                 "turn": "documentation",
@@ -412,7 +419,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.send(
             {
                 "kind": "event",
-                "harness": "codex",
+                "source": "codex",
                 "session": "persistence",
                 "event": "progress",
                 "turn": "documentation",
@@ -422,7 +429,9 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: (
                 "update the examples"
-                in self.daemon.application.sessions.by_id["codex:persistence"].progress
+                in self.daemon.application.sessions.by_id[
+                    SessionIdentity(SessionSource.CODEX, "persistence")
+                ].progress
             )
         )
         self.daemon.application.attention.pending = None
@@ -443,7 +452,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.send(
             {
                 "kind": "event",
-                "harness": "codex",
+                "source": "codex",
                 "session": "persistence",
                 "event": "intent",
                 "turn": "documentation",
@@ -453,7 +462,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.send(
             {
                 "kind": "event",
-                "harness": "codex",
+                "source": "codex",
                 "session": "persistence",
                 "event": "progress",
                 "turn": "documentation",
@@ -463,7 +472,9 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: (
                 "different approach"
-                in self.daemon.application.sessions.by_id["codex:persistence"].progress
+                in self.daemon.application.sessions.by_id[
+                    SessionIdentity(SessionSource.CODEX, "persistence")
+                ].progress
             )
         )
         self.release.set()

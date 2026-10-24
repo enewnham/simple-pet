@@ -2,6 +2,8 @@ import json
 import sqlite3
 from contextlib import AbstractContextManager
 
+from ..identity import SessionIdentity
+from ..repository_identity import RepositoryIdentity, repository_columns
 from ..work.association import TERMINAL_EVENTS
 from ..work.models import (
     ExecutionEvidence,
@@ -21,6 +23,13 @@ from ..work.observations import (
 )
 from ..work.serialization import report_data, report_from_data
 from ..work.validation import canonical
+from .identities import (
+    optional_session_from_row,
+    optional_session_values,
+    session_from_row,
+    session_parameters,
+    session_values,
+)
 from .transactions import transaction
 
 TABLES = (
@@ -41,28 +50,28 @@ class SQLiteWorkRepository:
     def transaction(self) -> AbstractContextManager[None]:
         return transaction(self.db)
 
-    def aliases(self) -> dict[str, str]:
+    def aliases(self) -> dict[SessionIdentity, SessionIdentity]:
         return {
-            row["alias"]: row["session"]
+            session_from_row(row, "alias_"): session_from_row(row)
             for row in self.db.execute(
-                "SELECT alias,session FROM work_aliases WHERE pet=?", (self.pet,)
+                "SELECT * FROM work_aliases WHERE pet=?", (self.pet,)
             )
         }
 
-    def session_location(self, session: str) -> str:
+    def session_location(self, session: SessionIdentity) -> str:
         row = self.db.execute(
-            "SELECT location FROM work_sessions WHERE pet=? AND session=?",
-            (self.pet, session),
+            "SELECT location FROM work_sessions WHERE pet=? AND source=? AND session=?",
+            (self.pet, *session_values(session)),
         ).fetchone()
         return row["location"] if row else ""
 
     def save_session(self, observation: SessionObservation, now: float) -> None:
         identity = observation.session
         identities = (identity, *observation.aliases)
-        placeholders = ",".join("?" for _ in identities)
+        placeholders, values = session_parameters(identities)
         records = self.db.execute(
-            f"SELECT parent,location,location_at FROM work_sessions WHERE pet=? AND session IN ({placeholders}) ORDER BY location_at DESC",
-            (self.pet, *identities),
+            f"SELECT parent_source,parent_session,location,location_at FROM work_sessions WHERE pet=? AND (source,session) IN ({placeholders}) ORDER BY location_at DESC",
+            (self.pet, *values),
         ).fetchall()
         location = next((row["location"] for row in records if row["location"]), "")
         location_at = next(
@@ -71,28 +80,39 @@ class SQLiteWorkRepository:
         if observation.location is not None and observation.location != location:
             location, location_at = observation.location, now
         parent = observation.parent or next(
-            (row["parent"] for row in records if row["parent"]), None
+            (
+                optional_session_from_row(row, "parent_")
+                for row in records
+                if row["parent_source"] is not None
+            ),
+            None,
         )
         self.db.execute(
-            "INSERT INTO work_sessions(pet,session,parent,location,location_at) VALUES (?,?,?,?,?) "
-            "ON CONFLICT(pet,session) DO UPDATE SET "
-            "parent=excluded.parent,location=excluded.location,location_at=excluded.location_at",
-            (self.pet, identity, parent, location, location_at),
+            "INSERT INTO work_sessions(pet,source,session,parent_source,parent_session,location,location_at) VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(pet,source,session) DO UPDATE SET "
+            "parent_source=excluded.parent_source,parent_session=excluded.parent_session,location=excluded.location,location_at=excluded.location_at",
+            (
+                self.pet,
+                *session_values(identity),
+                *optional_session_values(parent),
+                location,
+                location_at,
+            ),
         )
         for alias in observation.aliases:
             if alias == identity:
                 continue
             self.db.execute(
-                "UPDATE work_aliases SET session=? WHERE pet=? AND session=?",
-                (identity, self.pet, alias),
+                "UPDATE work_aliases SET source=?,session=? WHERE pet=? AND source=? AND session=?",
+                (*session_values(identity), self.pet, *session_values(alias)),
             )
             self.db.execute(
-                "UPDATE work_sessions SET parent=? WHERE pet=? AND parent=?",
-                (identity, self.pet, alias),
+                "UPDATE work_sessions SET parent_source=?,parent_session=? WHERE pet=? AND parent_source=? AND parent_session=?",
+                (*session_values(identity), self.pet, *session_values(alias)),
             )
             self.db.execute(
-                "DELETE FROM work_sessions WHERE pet=? AND session=?",
-                (self.pet, alias),
+                "DELETE FROM work_sessions WHERE pet=? AND source=? AND session=?",
+                (self.pet, *session_values(alias)),
             )
             self.bind_alias(alias, identity)
 
@@ -103,13 +123,13 @@ class SQLiteWorkRepository:
             session,
             *(alias for alias, target in self.aliases().items() if target == session),
         )
-        placeholders = ",".join("?" for _ in identities)
+        placeholders, values = session_parameters(identities)
         if isinstance(
             report.payload, ExecutionEvidence
         ) and report.payload.event in TERMINAL_EVENTS - {"session_end"}:
             rows = self.db.execute(
-                f"SELECT data FROM work_reports WHERE pet=? AND session IN ({placeholders}) AND kind=? ORDER BY id DESC",
-                (self.pet, *identities, kind),
+                f"SELECT data FROM work_reports WHERE pet=? AND (source,session) IN ({placeholders}) AND kind=? ORDER BY id DESC",
+                (self.pet, *values, kind),
             )
             for row in rows:
                 previous = report_from_data(json.loads(row["data"]))
@@ -122,8 +142,8 @@ class SQLiteWorkRepository:
                         return False
                     break
         row = self.db.execute(
-            f"SELECT data FROM work_reports WHERE pet=? AND session IN ({placeholders}) AND kind=? ORDER BY id DESC LIMIT 1",
-            (self.pet, *identities, kind),
+            f"SELECT data FROM work_reports WHERE pet=? AND (source,session) IN ({placeholders}) AND kind=? ORDER BY id DESC LIMIT 1",
+            (self.pet, *values, kind),
         ).fetchone()
         if row and not isinstance(report.payload, IntentEvidence):
             recorded = report_from_data(json.loads(row["data"]))
@@ -133,10 +153,10 @@ class SQLiteWorkRepository:
             ):
                 return False
         self.db.execute(
-            "INSERT INTO work_reports(pet,session,kind,data,observed_at) VALUES (?,?,?,?,?)",
+            "INSERT INTO work_reports(pet,source,session,kind,data,observed_at) VALUES (?,?,?,?,?,?)",
             (
                 self.pet,
-                session,
+                *session_values(session),
                 kind,
                 canonical(report_data(report)),
                 report.observed_at,
@@ -144,10 +164,10 @@ class SQLiteWorkRepository:
         )
         return True
 
-    def bind_alias(self, alias: str, session: str) -> None:
+    def bind_alias(self, alias: SessionIdentity, session: SessionIdentity) -> None:
         self.db.execute(
-            "INSERT INTO work_aliases VALUES (?,?,?) ON CONFLICT(pet,alias) DO UPDATE SET session=excluded.session",
-            (self.pet, alias, session),
+            "INSERT INTO work_aliases VALUES (?,?,?,?,?) ON CONFLICT(pet,alias_source,alias_session) DO UPDATE SET source=excluded.source,session=excluded.session",
+            (self.pet, *session_values(alias), *session_values(session)),
         )
 
     def get_checkout(
@@ -165,9 +185,13 @@ class SQLiteWorkRepository:
         assert value is None or isinstance(value, CheckoutObservation)
         return value
 
-    def get_branch(self, repository: str, branch: str) -> BranchObservation | None:
+    def get_branch(
+        self, repository: RepositoryIdentity, branch: str
+    ) -> BranchObservation | None:
         value = self._observation(
-            "work_branches", "repository=? AND branch=?", (repository, branch)
+            "work_branches",
+            "repository_kind=? AND repository_value=? AND branch=?",
+            (*repository_columns(repository), branch),
         )
         assert value is None or isinstance(value, BranchObservation)
         return value
@@ -178,7 +202,7 @@ class SQLiteWorkRepository:
         return value
 
     def _observation(
-        self, table: str, where: str, values: tuple[str, ...]
+        self, table: str, where: str, values: tuple[str | None, ...]
     ) -> RepositoryObservation | None:
         row = self.db.execute(
             f"SELECT data FROM {table} WHERE pet=? AND {where}", (self.pet, *values)
@@ -199,8 +223,13 @@ class SQLiteWorkRepository:
                 )
             case BranchObservation():
                 self.db.execute(
-                    "INSERT INTO work_branches VALUES (?,?,?,?) ON CONFLICT(pet,repository,branch) DO UPDATE SET data=excluded.data",
-                    (self.pet, observation.repository, observation.branch, data),
+                    "INSERT INTO work_branches VALUES (?,?,?,?,?) ON CONFLICT(pet,repository_kind,repository_value,branch) DO UPDATE SET data=excluded.data",
+                    (
+                        self.pet,
+                        *repository_columns(observation.repository),
+                        observation.branch,
+                        data,
+                    ),
                 )
             case PullRequestObservation():
                 self.db.execute(
@@ -209,15 +238,15 @@ class SQLiteWorkRepository:
                 )
 
     def _session(self, row: sqlite3.Row) -> SessionRecord:
-        identity = row["session"]
+        identity = session_from_row(row)
         identities = (
             identity,
             *(alias for alias, target in self.aliases().items() if target == identity),
         )
-        placeholders = ",".join("?" for _ in identities)
+        placeholders, values = session_parameters(identities)
         records = self.db.execute(
-            f"SELECT data FROM work_reports WHERE pet=? AND session IN ({placeholders}) ORDER BY id",
-            (self.pet, *identities),
+            f"SELECT data FROM work_reports WHERE pet=? AND (source,session) IN ({placeholders}) ORDER BY id",
+            (self.pet, *values),
         )
         reports = tuple(
             report_from_data(json.loads(record["data"])) for record in records
@@ -247,7 +276,7 @@ class SQLiteWorkRepository:
         return SessionRecord(
             id=identity,
             goal=intent,
-            parent=row["parent"],
+            parent=optional_session_from_row(row, "parent_"),
             location=row["location"],
             location_at=row["location_at"],
             reports=authored,
@@ -271,13 +300,13 @@ class SQLiteWorkRepository:
     def load(self) -> WorkFacts:
         state = WorkFacts()
         state.aliases = {
-            row["alias"]: row["session"]
+            session_from_row(row, "alias_"): session_from_row(row)
             for row in self.db.execute(
                 "SELECT * FROM work_aliases WHERE pet=?", (self.pet,)
             )
         }
         state.sessions = {
-            row["session"]: self._session(row)
+            session_from_row(row): self._session(row)
             for row in self.db.execute(
                 "SELECT * FROM work_sessions WHERE pet=?", (self.pet,)
             )

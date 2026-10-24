@@ -15,7 +15,8 @@ from anthropic import AsyncAnthropic
 from pet_daemon.commentary.context import SITUATIONS
 from pet_daemon.config import Config
 from pet_daemon.daemon import Daemon
-from pet_daemon.domain import SpeechSituation
+from pet_daemon.domain import SessionSource, SpeechSituation
+from pet_daemon.identity import SessionIdentity
 from pet_daemon.types import JSONObject
 from Tests.fixtures import require, story_response
 
@@ -131,7 +132,7 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(await process.wait(), 0)
 
                 async def hook(
-                    harness: str,
+                    source: str,
                     event: str,
                     payload: JSONObject,
                     expected: JSONObject | None = None,
@@ -139,7 +140,7 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                     process = await asyncio.create_subprocess_exec(
                         sys.executable,
                         str(root / "scripts/pet-hook"),
-                        harness,
+                        source,
                         event,
                         env=env,
                         stdin=asyncio.subprocess.PIPE,
@@ -235,7 +236,11 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(entered.wait(), 2)
                     await cli("--session", "build", "--status", "done")
                     await wait_for(
-                        lambda: daemon.application.sessions.by_id["cli:build"].finished
+                        lambda: (
+                            daemon.application.sessions.by_id[
+                                SessionIdentity(SessionSource.COMMAND, "build")
+                            ].finished
+                        )
                     )
                     self.assertTrue(daemon.application.sessions.working)
                     await hook(

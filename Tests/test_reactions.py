@@ -1,8 +1,14 @@
 import unittest
 from typing import Unpack
 
-from pet_daemon.runtime import HookPacket, HookTextFields
-from pet_daemon.sessions.reactions import SessionReaction, SessionReactions
+from pet_daemon.domain import SessionSource
+from pet_daemon.identity import SessionIdentity
+from pet_daemon.runtime import HookPacket, HookTextFields, WaitingKind
+from pet_daemon.sessions.reactions import (
+    ReactionKind,
+    SessionReaction,
+    SessionReactions,
+)
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources.hooks import normalize_hook
 from Tests.fixtures import require
@@ -24,7 +30,7 @@ class ReactionTests(unittest.TestCase):
         packet: HookPacket = {
             "event": event,
             "session": session,
-            "harness": "claude",
+            "source": "claude",
             **extra,
         }
         hook = require(normalize_hook(packet))
@@ -42,7 +48,7 @@ class ReactionTests(unittest.TestCase):
             for index in range(5)
             for reaction in self.fail_tool(str(index))
         ]
-        self.assertEqual(kinds.count("trouble"), 1)
+        self.assertEqual(kinds.count(ReactionKind.TROUBLE), 1)
         self.event("tool_start", call="retry", tool="pytest")
         self.assertEqual(
             [item.kind for item in self.event("tool_done", call="retry")], ["recovery"]
@@ -52,13 +58,15 @@ class ReactionTests(unittest.TestCase):
             for index in range(3)
             for reaction in self.fail_tool(f"again-{index}")
         ]
-        self.assertEqual(kinds.count("trouble"), 1)
+        self.assertEqual(kinds.count(ReactionKind.TROUBLE), 1)
 
     def test_session_closure_does_not_create_a_terminal_reaction(self) -> None:
         self.event("intent", goal="Build it")
         self.assertEqual(self.event("session_end"), [])
         self.assertEqual(self.event("session_end"), [])
-        self.assertIsNone(self.sessions.by_id["claude:one"].outcome)
+        self.assertIsNone(
+            self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "one")].outcome
+        )
 
     def test_closure_keeps_the_existing_terminal_reaction_relevant(self) -> None:
         self.event("intent", goal="Build it")
@@ -112,6 +120,39 @@ class ReactionTests(unittest.TestCase):
         self.event("waiting")
         self.assertFalse(self.reactions.relevant(captured, self.sessions))
 
+    def test_wait_kind_changes_restart_timing_and_replace_the_reaction(self) -> None:
+        self.event("intent", goal="Inspect checks")
+        internal = self.event(
+            "waiting", call="check", waiting_kind=WaitingKind.PERMISSION_CHECK
+        )[0]
+        self.now += 10
+        permission = self.event(
+            "waiting", call="check", waiting_kind=WaitingKind.PERMISSION
+        )[0]
+        session = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "one")]
+        self.assertTrue(session.waiting_for_input)
+        self.assertEqual(session.waiting_since, self.now)
+        self.assertFalse(self.reactions.relevant(internal, self.sessions))
+        self.assertTrue(self.reactions.relevant(permission, self.sessions))
+        self.now += 10
+        self.assertEqual(
+            self.event("waiting", call="check", waiting_kind=WaitingKind.PERMISSION), []
+        )
+        self.assertEqual(session.waiting_since, self.now - 10)
+        question = self.event(
+            "waiting", call="check", waiting_kind=WaitingKind.QUESTION
+        )[0]
+        self.assertEqual(session.waiting_since, self.now)
+        self.assertFalse(self.reactions.relevant(permission, self.sessions))
+        self.assertTrue(self.reactions.relevant(question, self.sessions))
+        check = self.event(
+            "waiting", call="check", waiting_kind=WaitingKind.PERMISSION_CHECK
+        )[0]
+        self.assertTrue(session.waiting)
+        self.assertFalse(session.waiting_for_input)
+        self.assertFalse(self.reactions.relevant(question, self.sessions))
+        self.assertTrue(self.reactions.relevant(check, self.sessions))
+
     def test_alias_merge_preserves_promoted_failure(self) -> None:
         self.event("intent", session="temporary", goal="Fix checks")
         promoted = None
@@ -149,7 +190,7 @@ class ReactionTests(unittest.TestCase):
             for index in range(3)
             for item in self.fail_tool(f"new-{index}", session="native")
         ]
-        self.assertEqual(reactions.count("trouble"), 1)
+        self.assertEqual(reactions.count(ReactionKind.TROUBLE), 1)
         self.assertEqual(len(self.reactions.states), 1)
 
     def test_replacing_a_question_starts_a_new_waiting_reaction(self) -> None:
@@ -171,7 +212,7 @@ class ReactionTests(unittest.TestCase):
         self.assertEqual(
             self.event("session_start", session="native", aliases=["temporary"]), []
         )
-        lane = self.sessions.by_id["claude:native"]
+        lane = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "native")]
         self.assertTrue(lane.waiting)
         self.assertEqual(lane.waiting_call, "question")
         captured = waiting

@@ -23,7 +23,7 @@ def _parse_process(line: str) -> ProcessRow | None:
     started = " ".join(fields[2:7])
     try:
         stat = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
-        started = f"proc:{stat[19]}"
+        started = stat[19]
     except OSError, IndexError:
         pass
     return ProcessIdentity(pid, started), parent, fields[7], fields[8]
@@ -55,7 +55,7 @@ def _processes(pid: int | None = None) -> dict[int, ProcessRow]:
 
 
 def discover_owner(
-    harness: SessionSource, pid: int | None = None
+    source: SessionSource, pid: int | None = None
 ) -> ProcessIdentity | None:
     try:
         rows = _processes()
@@ -88,10 +88,10 @@ def discover_owner(
             continue
         executable = Path(argv[0]).name if argv else ""
         if (
-            harness in (SessionSource.CLAUDE, SessionSource.CODEX)
-            and executable == harness
+            source in (SessionSource.CLAUDE, SessionSource.CODEX)
+            and executable == source
         ):
-            if harness == SessionSource.CODEX and "app-server" in argv[1:]:
+            if source == SessionSource.CODEX and "app-server" in argv[1:]:
                 continue
             return identity
     return None

@@ -10,9 +10,11 @@ from pet_daemon.domain import (
     CareKind,
     ExecutionOutcome,
     ProcessStatus,
+    SessionSource,
     SpeechReason,
     WorkSubjectKind,
 )
+from pet_daemon.identity import SessionIdentity
 from pet_daemon.runtime import (
     CareTrigger,
     FailureSnapshot,
@@ -21,7 +23,7 @@ from pet_daemon.runtime import (
     SessionContext,
     SessionTrigger,
 )
-from pet_daemon.sessions.reactions import SessionReaction
+from pet_daemon.sessions.reactions import ReactionKind, SessionReaction
 from pet_daemon.work import WorkStory, WorkSubject
 from pet_daemon.work.views import SessionContribution, WorkUpdate
 from Tests.fixtures import (
@@ -64,9 +66,12 @@ class AttentionTests(unittest.TestCase):
     def test_completed_update_expires_at_its_original_deadline_without_runtime(
         self,
     ) -> None:
-        update = WorkUpdate("cli:root", "result", 10, 10)
+        update = WorkUpdate(
+            SessionIdentity(SessionSource.COMMAND, "root"), "result", 10, 10
+        )
         snapshot = self.update_snapshot(
-            session_snapshot(id="cli:root"), updates=(update,)
+            session_snapshot(id=SessionIdentity(SessionSource.COMMAND, "root")),
+            updates=(update,),
         )
         snapshot = replace(snapshot, sessions=())
         self.now = 309
@@ -79,9 +84,12 @@ class AttentionTests(unittest.TestCase):
         self.assertFalse(self.attention.selection_eligible(selected, snapshot))
 
     def test_click_consideration_keeps_pending_member_updates_eligible(self) -> None:
-        update = WorkUpdate("cli:root", "result", 10, 10)
+        update = WorkUpdate(
+            SessionIdentity(SessionSource.COMMAND, "root"), "result", 10, 10
+        )
         snapshot = self.update_snapshot(
-            session_snapshot(id="cli:root"), updates=(update,)
+            session_snapshot(id=SessionIdentity(SessionSource.COMMAND, "root")),
+            updates=(update,),
         )
         self.attention.mark_considered(snapshot.work[0])
         self.assertTrue(self.attention.routine_eligible(snapshot.work[0], snapshot))
@@ -89,19 +97,30 @@ class AttentionTests(unittest.TestCase):
         self.assertFalse(self.attention.routine_eligible(snapshot.work[0], snapshot))
 
     def test_consumed_result_follows_a_session_alias(self) -> None:
-        old = WorkUpdate("cli:old", "result", 10, 10)
-        subject = self.snapshot(session_snapshot(id="cli:old")).work[0]
+        old = WorkUpdate(
+            SessionIdentity(SessionSource.COMMAND, "old"), "result", 10, 10
+        )
+        subject = self.snapshot(
+            session_snapshot(id=SessionIdentity(SessionSource.COMMAND, "old"))
+        ).work[0]
         self.attention.mark_considered(subject, old)
-        renamed = replace(old, session="cli:root", aliases=("cli:old",))
+        renamed = replace(
+            old,
+            session=SessionIdentity(SessionSource.COMMAND, "root"),
+            aliases=(SessionIdentity(SessionSource.COMMAND, "old"),),
+        )
         snapshot = self.update_snapshot(
-            session_snapshot(id="cli:root"), updates=(renamed,)
+            session_snapshot(id=SessionIdentity(SessionSource.COMMAND, "root")),
+            updates=(renamed,),
         )
         self.assertFalse(self.attention.routine_eligible(snapshot.work[0], snapshot))
 
     def test_active_update_uses_owner_or_recent_hooks_beyond_five_minutes(self) -> None:
-        update = WorkUpdate("cli:root", "progress", 0)
+        update = WorkUpdate(
+            SessionIdentity(SessionSource.COMMAND, "root"), "progress", 0
+        )
         session = session_snapshot(
-            id="cli:root",
+            id=SessionIdentity(SessionSource.COMMAND, "root"),
             turn_active=True,
             last_hook_at=0,
             presence=ProcessStatus.ALIVE,
@@ -124,20 +143,37 @@ class AttentionTests(unittest.TestCase):
     def test_live_child_selects_its_assignment_after_parent_result_is_consumed(
         self,
     ) -> None:
-        parent = WorkUpdate("cli:root", "result", 10, 10)
-        child = WorkUpdate("cli:child", "assignment", 20)
+        parent = WorkUpdate(
+            SessionIdentity(SessionSource.COMMAND, "root"), "result", 10, 10
+        )
+        child = WorkUpdate(
+            SessionIdentity(SessionSource.COMMAND, "child"), "assignment", 20
+        )
         snapshot = self.update_snapshot(
-            session_snapshot(id="cli:root", outcome=ExecutionOutcome.SUCCESS),
-            session_snapshot(id="cli:child", parent="cli:root", turn_active=True),
+            session_snapshot(
+                id=SessionIdentity(SessionSource.COMMAND, "root"),
+                outcome=ExecutionOutcome.SUCCESS,
+            ),
+            session_snapshot(
+                id=SessionIdentity(SessionSource.COMMAND, "child"),
+                parent=SessionIdentity(SessionSource.COMMAND, "root"),
+                turn_active=True,
+            ),
             updates=(parent, child),
         )
         self.attention.mark_considered(snapshot.work[0], parent)
         selected = self.attention.select(snapshot)
         self.assertEqual(selected.update, child)
-        self.assertEqual(require(selected.focus_session).id, "cli:child")
+        self.assertEqual(
+            require(selected.focus_session).id,
+            SessionIdentity(SessionSource.COMMAND, "child"),
+        )
         self.attention.mark_considered(snapshot.work[0], child)
         self.assertFalse(self.attention.routine_eligible(snapshot.work[0], snapshot))
-        targeted = replace(snapshot, trigger=SessionTrigger("cli:root"))
+        targeted = replace(
+            snapshot,
+            trigger=SessionTrigger(SessionIdentity(SessionSource.COMMAND, "root")),
+        )
         self.assertFalse(
             self.attention.selection_eligible(
                 self.attention.select(targeted, SpeechReason.COMPLETION), targeted
@@ -145,18 +181,29 @@ class AttentionTests(unittest.TestCase):
         )
 
     def test_live_parent_does_not_revive_consumed_child_result(self) -> None:
-        parent = WorkUpdate("cli:root", "assignment", 10)
-        child = WorkUpdate("cli:child", "result", 20, 20)
+        parent = WorkUpdate(
+            SessionIdentity(SessionSource.COMMAND, "root"), "assignment", 10
+        )
+        child = WorkUpdate(
+            SessionIdentity(SessionSource.COMMAND, "child"), "result", 20, 20
+        )
         snapshot = self.update_snapshot(
-            session_snapshot(id="cli:root", turn_active=True),
             session_snapshot(
-                id="cli:child", parent="cli:root", outcome=ExecutionOutcome.SUCCESS
+                id=SessionIdentity(SessionSource.COMMAND, "root"), turn_active=True
+            ),
+            session_snapshot(
+                id=SessionIdentity(SessionSource.COMMAND, "child"),
+                parent=SessionIdentity(SessionSource.COMMAND, "root"),
+                outcome=ExecutionOutcome.SUCCESS,
             ),
             updates=(parent, child),
         )
         self.attention.mark_considered(snapshot.work[0], child)
         self.assertEqual(self.attention.select(snapshot).update, parent)
-        targeted = replace(snapshot, trigger=SessionTrigger("cli:child"))
+        targeted = replace(
+            snapshot,
+            trigger=SessionTrigger(SessionIdentity(SessionSource.COMMAND, "child")),
+        )
         self.assertFalse(
             self.attention.selection_eligible(
                 self.attention.select(targeted, SpeechReason.COMPLETION), targeted
@@ -164,9 +211,14 @@ class AttentionTests(unittest.TestCase):
         )
 
     def test_check_ins_require_live_work_even_after_an_update_is_consumed(self) -> None:
-        update = WorkUpdate("cli:root", "progress", 10)
+        update = WorkUpdate(
+            SessionIdentity(SessionSource.COMMAND, "root"), "progress", 10
+        )
         snapshot = self.update_snapshot(
-            session_snapshot(id="cli:root", turn_active=True), updates=(update,)
+            session_snapshot(
+                id=SessionIdentity(SessionSource.COMMAND, "root"), turn_active=True
+            ),
+            updates=(update,),
         )
         self.attention.mark_considered(snapshot.work[0], update)
         routine = self.attention.select(snapshot)
@@ -180,15 +232,31 @@ class AttentionTests(unittest.TestCase):
 
     def test_rotates_within_a_tier_before_preferring_recency(self) -> None:
         snapshot = self.snapshot(
-            session_snapshot(id="cli:older", turn_active=True, changed_at=10),
-            session_snapshot(id="cli:newer", turn_active=True, changed_at=20),
+            session_snapshot(
+                id=SessionIdentity(SessionSource.COMMAND, "older"),
+                turn_active=True,
+                changed_at=10,
+            ),
+            session_snapshot(
+                id=SessionIdentity(SessionSource.COMMAND, "newer"),
+                turn_active=True,
+                changed_at=20,
+            ),
         )
         chosen = []
         for _ in range(4):
             selected = self.attention.select(snapshot)
             chosen.append(selected.id)
             self.attention.scheduled(selected.id)
-        self.assertEqual(chosen, ["cli:newer", "cli:older", "cli:newer", "cli:older"])
+        self.assertEqual(
+            chosen,
+            [
+                SessionIdentity(SessionSource.COMMAND, "newer"),
+                SessionIdentity(SessionSource.COMMAND, "older"),
+                SessionIdentity(SessionSource.COMMAND, "newer"),
+                SessionIdentity(SessionSource.COMMAND, "older"),
+            ],
+        )
 
     def connected_snapshot(self, *sessions: SessionContext) -> PetContext:
         root, *children = sessions
@@ -201,7 +269,10 @@ class AttentionTests(unittest.TestCase):
                 root.id,
                 "Complete the request",
                 "one",
-                sessions=tuple(SessionContribution(child.goal) for child in children),
+                sessions=tuple(
+                    SessionContribution(child.goal, session=child.id)
+                    for child in children
+                ),
             ),
             tuple(session.id for session in sessions),
         )
@@ -211,20 +282,34 @@ class AttentionTests(unittest.TestCase):
         self,
     ) -> None:
         snapshot = self.connected_snapshot(
-            session_snapshot(id="cli:root", quiet_seconds=60),
             session_snapshot(
-                id="cli:child", parent="cli:root", turn_active=True, goal="Review code"
+                id=SessionIdentity(SessionSource.COMMAND, "root"), quiet_seconds=60
             ),
             session_snapshot(
-                id="cli:nested", parent="cli:child", turn_active=True, goal="Run tests"
+                id=SessionIdentity(SessionSource.COMMAND, "child"),
+                parent=SessionIdentity(SessionSource.COMMAND, "root"),
+                turn_active=True,
+                goal="Review code",
+            ),
+            session_snapshot(
+                id=SessionIdentity(SessionSource.COMMAND, "nested"),
+                parent=SessionIdentity(SessionSource.COMMAND, "child"),
+                turn_active=True,
+                goal="Run tests",
             ),
         )
         selected = self.attention.select(snapshot)
-        self.assertEqual(require(selected.focus_session).id, "cli:root")
+        self.assertEqual(
+            require(selected.focus_session).id,
+            SessionIdentity(SessionSource.COMMAND, "root"),
+        )
         self.assertFalse(require(selected.focus_session).turn_active)
         self.assertEqual(
             {session.id for session in selected.context_sessions},
-            {"cli:child", "cli:nested"},
+            {
+                SessionIdentity(SessionSource.COMMAND, "child"),
+                SessionIdentity(SessionSource.COMMAND, "nested"),
+            },
         )
         self.assertEqual(
             [item.scope for item in require(selected.subject).story.sessions],
@@ -234,12 +319,26 @@ class AttentionTests(unittest.TestCase):
 
     def test_click_follows_active_descendants_with_a_finished_root(self) -> None:
         snapshot = self.connected_snapshot(
-            session_snapshot(id="cli:root", outcome=ExecutionOutcome.SUCCESS),
-            session_snapshot(id="cli:child", parent="cli:root", turn_active=True),
-            session_snapshot(id="cli:nested", parent="cli:child", turn_active=True),
+            session_snapshot(
+                id=SessionIdentity(SessionSource.COMMAND, "root"),
+                outcome=ExecutionOutcome.SUCCESS,
+            ),
+            session_snapshot(
+                id=SessionIdentity(SessionSource.COMMAND, "child"),
+                parent=SessionIdentity(SessionSource.COMMAND, "root"),
+                turn_active=True,
+            ),
+            session_snapshot(
+                id=SessionIdentity(SessionSource.COMMAND, "nested"),
+                parent=SessionIdentity(SessionSource.COMMAND, "child"),
+                turn_active=True,
+            ),
         )
         selected = self.attention.select(snapshot, SpeechReason.CLICK)
-        self.assertEqual(require(selected.focus_session).id, "cli:root")
+        self.assertEqual(
+            require(selected.focus_session).id,
+            SessionIdentity(SessionSource.COMMAND, "root"),
+        )
         self.assertEqual(selected.situation, "click_working")
         self.assertFalse(require(selected.focus_session).turn_active)
         self.assertEqual(
@@ -259,52 +358,75 @@ class AttentionTests(unittest.TestCase):
 
     def test_click_focuses_the_oldest_waiting_descendant(self) -> None:
         snapshot = self.connected_snapshot(
-            session_snapshot(id="cli:root", turn_active=True),
             session_snapshot(
-                id="cli:child",
-                parent="cli:root",
+                id=SessionIdentity(SessionSource.COMMAND, "root"), turn_active=True
+            ),
+            session_snapshot(
+                id=SessionIdentity(SessionSource.COMMAND, "child"),
+                parent=SessionIdentity(SessionSource.COMMAND, "root"),
                 waiting_for_input=True,
                 waiting_seconds=30,
             ),
             session_snapshot(
-                id="cli:nested",
-                parent="cli:child",
+                id=SessionIdentity(SessionSource.COMMAND, "nested"),
+                parent=SessionIdentity(SessionSource.COMMAND, "child"),
                 waiting_for_input=True,
                 waiting_seconds=5,
             ),
         )
-        self.attention.scheduled("cli:child")
+        self.attention.scheduled(SessionIdentity(SessionSource.COMMAND, "child"))
         selected = self.attention.select(snapshot, SpeechReason.CLICK)
-        self.assertEqual(require(selected.focus_session).id, "cli:child")
+        self.assertEqual(
+            require(selected.focus_session).id,
+            SessionIdentity(SessionSource.COMMAND, "child"),
+        )
         self.assertEqual(selected.situation, "click_waiting")
         self.assertTrue(selected.supported(snapshot))
-        targeted = replace(snapshot, trigger=SessionTrigger("cli:nested"))
+        targeted = replace(
+            snapshot,
+            trigger=SessionTrigger(SessionIdentity(SessionSource.COMMAND, "nested")),
+        )
         selected = self.attention.select(targeted, SpeechReason.CHECK_IN)
-        self.assertEqual(require(selected.focus_session).id, "cli:nested")
+        self.assertEqual(
+            require(selected.focus_session).id,
+            SessionIdentity(SessionSource.COMMAND, "nested"),
+        )
         self.assertEqual(selected.situation, "check_in_waiting")
 
     def test_check_in_retains_descendant_context_for_an_eligible_root(self) -> None:
         snapshot = self.connected_snapshot(
-            session_snapshot(id="cli:root", turn_active=True),
             session_snapshot(
-                id="cli:child",
-                parent="cli:root",
+                id=SessionIdentity(SessionSource.COMMAND, "root"), turn_active=True
+            ),
+            session_snapshot(
+                id=SessionIdentity(SessionSource.COMMAND, "child"),
+                parent=SessionIdentity(SessionSource.COMMAND, "root"),
                 waiting_for_input=True,
                 waiting_seconds=30,
             ),
         )
         selected = self.attention.select(
-            snapshot, SpeechReason.CHECK_IN, eligible=("cli:root",)
+            snapshot,
+            SpeechReason.CHECK_IN,
+            eligible=(SessionIdentity(SessionSource.COMMAND, "root"),),
         )
-        self.assertEqual(require(selected.focus_session).id, "cli:root")
         self.assertEqual(
-            [session.id for session in selected.context_sessions], ["cli:child"]
+            require(selected.focus_session).id,
+            SessionIdentity(SessionSource.COMMAND, "root"),
+        )
+        self.assertEqual(
+            [session.id for session in selected.context_sessions],
+            [SessionIdentity(SessionSource.COMMAND, "child")],
         )
 
     def test_an_unavailable_parent_does_not_promote_child_activity_to_focus(
         self,
     ) -> None:
-        child = session_snapshot(id="cli:child", parent="cli:missing", turn_active=True)
+        child = session_snapshot(
+            id=SessionIdentity(SessionSource.COMMAND, "child"),
+            parent=SessionIdentity(SessionSource.COMMAND, "missing"),
+            turn_active=True,
+        )
         snapshot = capture_snapshot(sessions_snapshot(child))
         self.assertIsNone(self.attention.select(snapshot).focus_session)
         self.assertEqual(
@@ -313,23 +435,32 @@ class AttentionTests(unittest.TestCase):
         waiting = replace(child, waiting_for_input=True, waiting_seconds=10)
         snapshot = replace(snapshot, sessions=(waiting,))
         self.assertEqual(
-            require(self.attention.select(snapshot).focus_session).id, "cli:child"
+            require(self.attention.select(snapshot).focus_session).id,
+            SessionIdentity(SessionSource.COMMAND, "child"),
         )
 
     def test_explicit_input_precedes_active_work(self) -> None:
         waiting = session_snapshot(
-            id="cli:input", turn_active=True, waiting_for_input=True, waiting_seconds=0
+            id=SessionIdentity(SessionSource.COMMAND, "input"),
+            turn_active=True,
+            waiting_for_input=True,
+            waiting_seconds=0,
         )
         snapshot = self.snapshot(
             waiting,
-            session_snapshot(id="cli:active", turn_active=True),
+            session_snapshot(
+                id=SessionIdentity(SessionSource.COMMAND, "active"), turn_active=True
+            ),
         )
-        self.assertEqual(self.attention.select(snapshot).id, "cli:input")
+        self.assertEqual(
+            self.attention.select(snapshot).id,
+            SessionIdentity(SessionSource.COMMAND, "input"),
+        )
 
     def test_tool_failure_alone_does_not_outrank_an_active_session(self) -> None:
         snapshot = self.snapshot(
             session_snapshot(
-                id="cli:failed",
+                id=SessionIdentity(SessionSource.COMMAND, "failed"),
                 failure=FailureSnapshot(
                     activity=Activity.TESTING,
                     count=1,
@@ -341,21 +472,41 @@ class AttentionTests(unittest.TestCase):
                 outcome=ExecutionOutcome.ERROR,
                 changed_at=20,
             ),
-            session_snapshot(id="cli:active", turn_active=True, changed_at=1),
+            session_snapshot(
+                id=SessionIdentity(SessionSource.COMMAND, "active"),
+                turn_active=True,
+                changed_at=1,
+            ),
         )
-        self.assertEqual(self.attention.select(snapshot).id, "cli:active")
+        self.assertEqual(
+            self.attention.select(snapshot).id,
+            SessionIdentity(SessionSource.COMMAND, "active"),
+        )
 
     def test_event_target_keeps_its_focus_and_direction(self) -> None:
         snapshot = self.snapshot(
-            session_snapshot(id="cli:finished", outcome=ExecutionOutcome.SUCCESS),
+            session_snapshot(
+                id=SessionIdentity(SessionSource.COMMAND, "finished"),
+                outcome=ExecutionOutcome.SUCCESS,
+            ),
         )
-        snapshot = replace(snapshot, trigger=SessionTrigger("cli:finished"))
+        snapshot = replace(
+            snapshot,
+            trigger=SessionTrigger(SessionIdentity(SessionSource.COMMAND, "finished")),
+        )
         selected = self.attention.select(snapshot, SpeechReason.COMPLETION)
-        self.assertEqual(require(selected.focus_session).id, "cli:finished")
+        self.assertEqual(
+            require(selected.focus_session).id,
+            SessionIdentity(SessionSource.COMMAND, "finished"),
+        )
         self.assertEqual(selected.situation, "completion")
 
     def test_manual_context_and_care_do_not_select_work(self) -> None:
-        snapshot = self.snapshot(session_snapshot(id="cli:active", turn_active=True))
+        snapshot = self.snapshot(
+            session_snapshot(
+                id=SessionIdentity(SessionSource.COMMAND, "active"), turn_active=True
+            )
+        )
         explicit = self.attention.select(snapshot, context="Inspect the result")
         self.assertIsNone(explicit.subject)
         self.assertIsNone(explicit.focus_session)
@@ -369,26 +520,42 @@ class AttentionTests(unittest.TestCase):
     def test_click_prioritizes_the_oldest_explicit_input_wait(self) -> None:
         snapshot = self.snapshot(
             session_snapshot(
-                id="cli:recent",
+                id=SessionIdentity(SessionSource.COMMAND, "recent"),
                 waiting_for_input=True,
                 waiting_seconds=5,
                 changed_at=20,
             ),
             session_snapshot(
-                id="cli:old", waiting_for_input=True, waiting_seconds=30, changed_at=10
+                id=SessionIdentity(SessionSource.COMMAND, "old"),
+                waiting_for_input=True,
+                waiting_seconds=30,
+                changed_at=10,
             ),
         )
         selected = self.attention.select(snapshot, SpeechReason.CLICK)
-        self.assertEqual(require(selected.focus_session).id, "cli:old")
+        self.assertEqual(
+            require(selected.focus_session).id,
+            SessionIdentity(SessionSource.COMMAND, "old"),
+        )
         self.assertEqual(selected.situation, "click_waiting")
 
     def test_pending_failure_survives_a_lower_priority_prompt(self) -> None:
-        self.attention.queue(SpeechReason.FAILURE, SessionTrigger("cli:failed"))
         self.attention.queue(
-            SpeechReason.PROMPT, SessionTrigger("cli:working"), failed=True
+            SpeechReason.FAILURE,
+            SessionTrigger(SessionIdentity(SessionSource.COMMAND, "failed")),
+        )
+        self.attention.queue(
+            SpeechReason.PROMPT,
+            SessionTrigger(SessionIdentity(SessionSource.COMMAND, "working")),
+            failed=True,
         )
         self.assertEqual(
-            self.attention.pending, ("failure", 1, SessionTrigger("cli:failed"))
+            self.attention.pending,
+            (
+                "failure",
+                1,
+                SessionTrigger(SessionIdentity(SessionSource.COMMAND, "failed")),
+            ),
         )
 
     def test_cooldown_preserves_waiting_and_user_requests(self) -> None:
@@ -400,8 +567,8 @@ class AttentionTests(unittest.TestCase):
                 SpeechReason.CHECK_IN,
                 ReactionTrigger(
                     SessionReaction(
-                        kind="waiting",
-                        session="cli:parser",
+                        kind=ReactionKind.WAITING,
+                        session=SessionIdentity(SessionSource.COMMAND, "parser"),
                         generation=1,
                         activity=Activity.COMMAND,
                         serial=1,
@@ -413,7 +580,11 @@ class AttentionTests(unittest.TestCase):
         self.assertTrue(self.attention.allowed(SpeechReason.ROUTINE))
 
     def test_considered_subjects_stay_quiet_after_restoring_history(self) -> None:
-        snapshot = self.snapshot(session_snapshot(id="cli:parser", turn_active=True))
+        snapshot = self.snapshot(
+            session_snapshot(
+                id=SessionIdentity(SessionSource.COMMAND, "parser"), turn_active=True
+            )
+        )
         selected = self.attention.select(snapshot)
         self.attention.scheduled(selected.id)
         self.attention.mark_considered(require(selected.subject))
@@ -428,7 +599,11 @@ class AttentionTests(unittest.TestCase):
         self,
     ) -> None:
         self.attention.queue(SpeechReason.PROMPT)
-        snapshot = self.snapshot(session_snapshot(id="cli:active", turn_active=True))
+        snapshot = self.snapshot(
+            session_snapshot(
+                id=SessionIdentity(SessionSource.COMMAND, "active"), turn_active=True
+            )
+        )
         self.assertEqual(
             require(
                 self.attention.request(
@@ -443,21 +618,34 @@ class AttentionTests(unittest.TestCase):
         self.assertEqual(require(self.attention.request(snapshot)).reason, "prompt")
 
     def test_session_presence_without_work_does_not_request_commentary(self) -> None:
-        snapshot = self.snapshot(session_snapshot(id="cli:present", turn_active=False))
+        snapshot = self.snapshot(
+            session_snapshot(
+                id=SessionIdentity(SessionSource.COMMAND, "present"), turn_active=False
+            )
+        )
         self.now = 30
         self.assertIsNone(self.attention.request(snapshot))
 
     def test_nap_pauses_automatic_requests_and_preserves_the_pending_trigger(
         self,
     ) -> None:
-        snapshot = self.snapshot(session_snapshot(id="cli:parser", turn_active=True))
+        snapshot = self.snapshot(
+            session_snapshot(
+                id=SessionIdentity(SessionSource.COMMAND, "parser"), turn_active=True
+            )
+        )
         snapshot = replace(snapshot, sleeping=True)
         self.now = 60
-        self.attention.queue(SpeechReason.PROMPT, SessionTrigger("cli:parser"))
+        self.attention.queue(
+            SpeechReason.PROMPT,
+            SessionTrigger(SessionIdentity(SessionSource.COMMAND, "parser")),
+        )
         pending = self.attention.pending
         self.assertIsNone(
             self.attention.request(
-                snapshot, check_in=("cli:parser",), care=CareKind.EXERCISE
+                snapshot,
+                check_in=(SessionIdentity(SessionSource.COMMAND, "parser"),),
+                care=CareKind.EXERCISE,
             )
         )
         self.assertEqual(self.attention.pending, pending)
@@ -478,25 +666,41 @@ class AttentionTests(unittest.TestCase):
 
     def test_check_in_keeps_the_eligible_sessions(self) -> None:
         snapshot = self.snapshot(
-            session_snapshot(id="cli:first", turn_active=True),
-            session_snapshot(id="cli:second", turn_active=True),
+            session_snapshot(
+                id=SessionIdentity(SessionSource.COMMAND, "first"), turn_active=True
+            ),
+            session_snapshot(
+                id=SessionIdentity(SessionSource.COMMAND, "second"), turn_active=True
+            ),
         )
-        request = self.attention.request(snapshot, check_in=("cli:second",))
+        request = self.attention.request(
+            snapshot, check_in=(SessionIdentity(SessionSource.COMMAND, "second"),)
+        )
         selected = self.attention.select(
             snapshot, require(request).reason, eligible=require(request).eligible
         )
-        self.assertEqual(require(selected.focus_session).id, "cli:second")
+        self.assertEqual(
+            require(selected.focus_session).id,
+            SessionIdentity(SessionSource.COMMAND, "second"),
+        )
 
     def test_pending_delivery_preserves_every_automatic_request(self) -> None:
-        snapshot = self.snapshot(session_snapshot(id="cli:parser", turn_active=True))
+        snapshot = self.snapshot(
+            session_snapshot(
+                id=SessionIdentity(SessionSource.COMMAND, "parser"), turn_active=True
+            )
+        )
         self.now = 60
-        self.attention.queue(SpeechReason.PROMPT, SessionTrigger("cli:parser"))
+        self.attention.queue(
+            SpeechReason.PROMPT,
+            SessionTrigger(SessionIdentity(SessionSource.COMMAND, "parser")),
+        )
         pending = self.attention.pending
         next_observation = self.attention.next_observation
         self.assertIsNone(
             self.attention.request(
                 snapshot,
-                check_in=("cli:parser",),
+                check_in=(SessionIdentity(SessionSource.COMMAND, "parser"),),
                 care=CareKind.EXERCISE,
                 delivery_pending=True,
             )
@@ -520,7 +724,11 @@ class AttentionTests(unittest.TestCase):
         self.assertEqual(require(self.attention.request(snapshot)).reason, "prompt")
 
     def test_pending_delivery_preserves_due_observation_and_care(self) -> None:
-        snapshot = self.snapshot(session_snapshot(id="cli:parser", turn_active=True))
+        snapshot = self.snapshot(
+            session_snapshot(
+                id=SessionIdentity(SessionSource.COMMAND, "parser"), turn_active=True
+            )
+        )
         self.now = 60
         next_observation = self.attention.next_observation
         self.assertIsNone(self.attention.request(snapshot, delivery_pending=True))

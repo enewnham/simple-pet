@@ -11,6 +11,8 @@ from ..domain import (
     LinkRelationship,
     PullRequestState,
 )
+from ..identity import SessionIdentity
+from ..repository_identity import RepositoryIdentity
 
 if TYPE_CHECKING:
     from .observations import (
@@ -41,7 +43,7 @@ class RelatedLink:
 class ArtifactReference:
     kind: ArtifactKind
     ref: str
-    repository: str = ""
+    repository: RepositoryIdentity | None = None
     revision: str | None = None
     checkout: str | None = None
     title: str | None = None
@@ -52,25 +54,25 @@ class IntentEvidence:
     source: ClassVar[EvidenceSource] = EvidenceSource.USER
     kind: ClassVar[EvidenceKind] = EvidenceKind.INTENT
 
-    session: str
+    session: SessionIdentity
     text: str
 
 
 @dataclass(frozen=True)
 class ProgressEvidence:
-    source: ClassVar[EvidenceSource] = EvidenceSource.HARNESS
+    source: ClassVar[EvidenceSource] = EvidenceSource.SOURCE
     kind: ClassVar[EvidenceKind] = EvidenceKind.PROGRESS
 
-    session: str
+    session: SessionIdentity
     text: str
 
 
 @dataclass(frozen=True)
 class ExecutionEvidence:
-    source: ClassVar[EvidenceSource] = EvidenceSource.HARNESS
+    source: ClassVar[EvidenceSource] = EvidenceSource.SOURCE
     kind: ClassVar[EvidenceKind] = EvidenceKind.EXECUTION
 
-    session: str
+    session: SessionIdentity
     event: str
     outcome: ExecutionOutcome | None
     tool_name: str | None
@@ -79,7 +81,7 @@ class ExecutionEvidence:
 
 @dataclass(frozen=True)
 class CheckoutAssociation:
-    source: ClassVar[EvidenceSource] = EvidenceSource.HARNESS
+    source: ClassVar[EvidenceSource] = EvidenceSource.SOURCE
     kind: ClassVar[EvidenceKind] = EvidenceKind.RELATIONSHIP
 
     checkout: str
@@ -118,7 +120,7 @@ class GitHubEvidence:
     kind: ClassVar[EvidenceKind] = EvidenceKind.OBSERVATION
 
     pr: PullRequest | None
-    repository: str
+    repository: RepositoryIdentity | None
 
 
 @dataclass(frozen=True)
@@ -162,7 +164,7 @@ class EvidenceRecord:
 @dataclass(frozen=True)
 class ReportContext:
     checkout: str = ""
-    repository: str = ""
+    repository: RepositoryIdentity | None = None
     branch: str = ""
     pull_request: str = ""
     references: tuple[ArtifactReference, ...] = ()
@@ -182,22 +184,24 @@ class SessionReport:
 
 @dataclass(frozen=True)
 class SessionRecord:
-    id: str
+    id: SessionIdentity
     goal: str = ""
-    parent: str | None = None
+    parent: SessionIdentity | None = None
     location: str = ""
     location_at: float = 0
     reports: tuple[SessionReport, ...] = ()
     execution: SessionReport | None = None
     changed_at: float = 0
-    aliases: tuple[str, ...] = ()
+    aliases: tuple[SessionIdentity, ...] = ()
     closure: SessionReport | None = None
 
 
 @dataclass
 class WorkFacts:
-    aliases: dict[str, str] = field(default_factory=dict)
-    sessions: dict[str, SessionRecord] = field(default_factory=dict)
+    aliases: dict[SessionIdentity, SessionIdentity] = field(default_factory=dict)
+    sessions: dict[SessionIdentity, SessionRecord] = field(default_factory=dict)
     checkouts: dict[str, CheckoutObservation] = field(default_factory=dict)
-    branches: dict[tuple[str, str], BranchObservation] = field(default_factory=dict)
+    branches: dict[tuple[RepositoryIdentity, str], BranchObservation] = field(
+        default_factory=dict
+    )
     pull_requests: dict[str, PullRequestObservation] = field(default_factory=dict)

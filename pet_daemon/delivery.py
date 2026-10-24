@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypedDict
 
 from .domain import DeliveryStatus, SpeechReason
+from .identity import SessionIdentity
 
 if TYPE_CHECKING:
     from .application import MessageSupport
@@ -24,7 +25,7 @@ class SpeechMessage:
     ttl: float
     reason: SpeechReason
     selection_id: str
-    subject_id: str | None = None
+    subject_id: SessionIdentity | None = None
     revision: str | None = None
     history_epoch: int = 0
     message_id: str = field(default_factory=lambda: str(uuid.uuid4()))

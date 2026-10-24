@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, NotRequired, Protocol, TypedDict
+from enum import StrEnum
+from typing import TYPE_CHECKING, NotRequired, Protocol, TypedDict
 
 from .domain import (
     Activity,
@@ -12,8 +13,29 @@ from .domain import (
     ProcessStatus,
     SessionSource,
 )
+from .identity import SessionIdentity
 
-type WaitingKind = Literal["permission", "question"]
+
+class HookEventKind(StrEnum):
+    SESSION_START = "session_start"
+    SESSION_END = "session_end"
+    INTENT = "intent"
+    TOOL_START = "tool_start"
+    TOOL_DONE = "tool_done"
+    TOOL_ERROR = "tool_error"
+    TURN_DONE = "turn_done"
+    TURN_ERROR = "turn_error"
+    INTERRUPT = "interrupt"
+    SUBAGENT_START = "subagent_start"
+    SUBAGENT_DONE = "subagent_done"
+    PROGRESS = "progress"
+    WAITING = "waiting"
+
+
+class WaitingKind(StrEnum):
+    PERMISSION_CHECK = "permission_check"
+    PERMISSION = "permission"
+    QUESTION = "question"
 
 
 class ProcessPacket(TypedDict):
@@ -22,7 +44,7 @@ class ProcessPacket(TypedDict):
 
 
 class HookTextFields(TypedDict, total=False):
-    waiting_kind: WaitingKind
+    waiting_kind: str
     parent: str
     parent_call: str
     call: str
@@ -40,7 +62,7 @@ class HookTextFields(TypedDict, total=False):
 
 
 class HookPacket(HookTextFields):
-    harness: str
+    source: str
     session: str
     event: str
     kind: NotRequired[str]
@@ -82,12 +104,12 @@ class Point:
 
 @dataclass(frozen=True)
 class SessionTrigger:
-    session_id: str
+    session_id: SessionIdentity
 
 
 @dataclass(frozen=True)
 class SubjectTrigger:
-    subject_id: str
+    subject_id: SessionIdentity
 
 
 @dataclass(frozen=True)
@@ -117,7 +139,7 @@ class UserSentiment:
 
 @dataclass(frozen=True)
 class ConvergenceItem:
-    id: str
+    id: SessionIdentity
     outcome: ExecutionOutcome | None
 
 
@@ -144,9 +166,9 @@ class ProcessIdentity:
 
 @dataclass(frozen=True)
 class HookEvent:
-    harness: SessionSource
+    source: SessionSource
     session: str
-    event: str
+    event: HookEventKind
     aliases: tuple[str, ...] = ()
     parent: str | None = None
     parent_call: str | None = None
@@ -168,24 +190,20 @@ class HookEvent:
     waiting_kind: WaitingKind | None = None
 
     @property
-    def source(self) -> str:
-        return f"hook:{self.harness}"
-
-    @property
-    def subject(self) -> str:
-        return f"{self.harness}:{self.session}"
+    def subject(self) -> SessionIdentity:
+        return SessionIdentity(self.source, self.session)
 
     def packet(self) -> HookPacket:
         packet: HookPacket = {
             "kind": "event",
-            "harness": self.harness.value,
+            "source": self.source.value,
             "session": self.session,
-            "event": self.event,
+            "event": self.event.value,
         }
         if self.parent is not None:
             packet["parent"] = self.parent
         if self.waiting_kind is not None:
-            packet["waiting_kind"] = self.waiting_kind
+            packet["waiting_kind"] = self.waiting_kind.value
         if self.parent_call is not None:
             packet["parent_call"] = self.parent_call
         if self.call is not None:
@@ -211,7 +229,7 @@ class HookEvent:
         if self.sentiment_text is not None:
             packet["sentiment_text"] = self.sentiment_text
         if self.outcome is not None:
-            packet["outcome"] = self.outcome
+            packet["outcome"] = self.outcome.value
         if self.manual is not None:
             packet["manual"] = self.manual
         if self.exit_code is not None:
@@ -248,9 +266,9 @@ class FailureSnapshot:
 
 @dataclass(frozen=True)
 class SessionContext:
-    id: str
+    id: SessionIdentity
     changed_at: float
-    parent: str | None
+    parent: SessionIdentity | None
     goal: str
     repo: str
     phase: Activity | None

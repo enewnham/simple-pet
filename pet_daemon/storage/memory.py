@@ -8,8 +8,14 @@ from pathlib import Path
 from typing import TypedDict
 
 from ..domain import DeliveryStatus, SpeechReason
+from ..identity import SessionIdentity
 from ..logging import get_logger
 from ..prompts import select_prompt
+from ..repository_identity import (
+    RepositoryIdentity,
+    repository_columns,
+    repository_from_columns,
+)
 from ..runtime import SwarmActivity
 from ..work import WorkIngestion
 from ..work.history import HistoryDetails, RecallQuery, SessionEntry
@@ -21,8 +27,14 @@ from ..work.observations import (
     SessionObservation,
 )
 from ..work.serialization import report_from_data
-from ..work.validation import repository_identity
 from ..work.views import WorkSubject, collection_targets, connected_work
+from .identities import (
+    optional_session_from_row,
+    optional_session_values,
+    session_from_row,
+    session_parameters,
+    session_values,
+)
 from .migrations import migrate
 from .transactions import transaction
 from .work import SQLiteWorkRepository
@@ -40,9 +52,9 @@ class HistoryRecord:
 @dataclass(frozen=True)
 class EventRecord:
     id: int
-    session: str
+    session: SessionIdentity
     working_directory: str
-    repository: str
+    repository: RepositoryIdentity | None
     event_type: str
     details: HistoryDetails
     goal: str
@@ -72,7 +84,7 @@ class MessageOutcome:
     outcome: DeliveryStatus
     text: str
     reason: SpeechReason
-    subject_id: str | None
+    subject_id: SessionIdentity | None
     revision: str | None
     timestamp: float
 
@@ -121,19 +133,19 @@ class Memory:
         )
         self.prune()
 
-    def session_aliases(self) -> dict[str, str]:
+    def session_aliases(self) -> dict[SessionIdentity, SessionIdentity]:
         return self._work_repository.aliases()
 
     def transaction(self) -> AbstractContextManager[None]:
         return transaction(self.db)
 
-    def load_attention_history(self) -> dict[str, HistoryRecord]:
+    def load_attention_history(self) -> dict[SessionIdentity, HistoryRecord]:
         rows = self.db.execute(
-            "SELECT subject,last_selected,considered_subject_revision,considered_session_revision FROM attention_history WHERE pet=?",
+            "SELECT subject_source,subject_session,last_selected,considered_subject_revision,considered_session_revision FROM attention_history WHERE pet=?",
             (self.pet,),
         ).fetchall()
         return {
-            row["subject"]: HistoryRecord(
+            session_from_row(row, "subject_"): HistoryRecord(
                 last_selected=row["last_selected"],
                 considered_subject_revision=row["considered_subject_revision"],
                 considered_session_revision=row["considered_session_revision"],
@@ -141,10 +153,10 @@ class Memory:
             for row in rows
         }
 
-    def load_narrative(self, subject_id: str) -> WorkNarrative | None:
+    def load_narrative(self, subject_id: SessionIdentity) -> WorkNarrative | None:
         row = self.db.execute(
-            "SELECT data FROM work_narratives WHERE pet=? AND subject=?",
-            (self.pet, subject_id),
+            "SELECT data FROM work_narratives WHERE pet=? AND subject_source=? AND subject_session=?",
+            (self.pet, *session_values(subject_id)),
         ).fetchone()
         if row is None:
             return None
@@ -165,18 +177,20 @@ class Memory:
     def save_narrative(self, narrative: WorkNarrative) -> None:
         with self.transaction():
             self.db.execute(
-                """INSERT INTO work_narratives VALUES (?,?,?,?)
-                ON CONFLICT(pet,subject) DO UPDATE SET
+                """INSERT INTO work_narratives VALUES (?,?,?,?,?)
+                ON CONFLICT(pet,subject_source,subject_session) DO UPDATE SET
                 data=excluded.data,updated_at=excluded.updated_at""",
                 (
                     self.pet,
-                    narrative.subject_id,
+                    *session_values(narrative.subject_id),
                     json.dumps(asdict(narrative), ensure_ascii=False),
                     self.clock(),
                 ),
             )
 
-    def narrative_reports(self, sessions: Sequence[str]) -> tuple[SessionReport, ...]:
+    def narrative_reports(
+        self, sessions: Sequence[SessionIdentity]
+    ) -> tuple[SessionReport, ...]:
         aliases = self.session_aliases()
         identities = {aliases.get(identifier, identifier) for identifier in sessions}
         identities.update(
@@ -184,24 +198,26 @@ class Memory:
         )
         if not identities:
             return ()
-        placeholders = ",".join("?" for _ in identities)
+        placeholders, values = session_parameters(tuple(sorted(identities)))
         rows = self.db.execute(
-            f"SELECT data FROM work_reports WHERE pet=? AND session IN ({placeholders}) ORDER BY observed_at,id",
-            (self.pet, *sorted(identities)),
+            f"SELECT data FROM work_reports WHERE pet=? AND (source,session) IN ({placeholders}) ORDER BY observed_at,id",
+            (self.pet, *values),
         )
         return tuple(report_from_data(json.loads(row["data"])) for row in rows)
 
-    def save_attention_history(self, subject_id: str, history: HistoryRecord) -> None:
+    def save_attention_history(
+        self, subject_id: SessionIdentity, history: HistoryRecord
+    ) -> None:
         with self.transaction():
             self.db.execute(
-                """INSERT INTO attention_history VALUES (?,?,?,?,?,?) ON CONFLICT(pet,subject) DO UPDATE SET
+                """INSERT INTO attention_history VALUES (?,?,?,?,?,?,?) ON CONFLICT(pet,subject_source,subject_session) DO UPDATE SET
                 last_selected=excluded.last_selected,
                 considered_subject_revision=excluded.considered_subject_revision,
                 considered_session_revision=excluded.considered_session_revision,
                 updated_at=excluded.updated_at""",
                 (
                     self.pet,
-                    subject_id,
+                    *session_values(subject_id),
                     history.last_selected,
                     history.considered_subject_revision,
                     history.considered_session_revision,
@@ -214,7 +230,7 @@ class Memory:
         message_id: str,
         text: str,
         reason: SpeechReason,
-        subject_id: str | None = None,
+        subject_id: SessionIdentity | None = None,
         revision: str | None = None,
         history: HistoryRecord | None = None,
     ) -> bool:
@@ -228,17 +244,17 @@ class Memory:
             timestamp = self.clock()
             self.db.execute(
                 """INSERT INTO message_outcomes
-                (pet,message_id,outcome,text,reason,subject_id,revision,timestamp)
-                VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(pet,message_id) DO UPDATE SET
+                (pet,message_id,outcome,text,reason,subject_source,subject_session,revision,timestamp)
+                VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(pet,message_id) DO UPDATE SET
                 outcome=excluded.outcome,text=excluded.text,reason=excluded.reason,
-                subject_id=excluded.subject_id,revision=excluded.revision,timestamp=excluded.timestamp""",
+                subject_source=excluded.subject_source,subject_session=excluded.subject_session,revision=excluded.revision,timestamp=excluded.timestamp""",
                 (
                     self.pet,
                     message_id,
                     DeliveryStatus.ACCEPTED,
                     text,
                     reason,
-                    subject_id,
+                    *optional_session_values(subject_id),
                     revision,
                     timestamp,
                 ),
@@ -257,22 +273,22 @@ class Memory:
         message_id: str,
         reason: SpeechReason,
         text: str = "",
-        subject_id: str | None = None,
+        subject_id: SessionIdentity | None = None,
         revision: str | None = None,
         history: HistoryRecord | None = None,
     ) -> bool:
         with self.transaction():
             result = self.db.execute(
                 """INSERT OR IGNORE INTO message_outcomes
-                (pet,message_id,outcome,text,reason,subject_id,revision,timestamp)
-                VALUES (?,?,?,?,?,?,?,?)""",
+                (pet,message_id,outcome,text,reason,subject_source,subject_session,revision,timestamp)
+                VALUES (?,?,?,?,?,?,?,?,?)""",
                 (
                     self.pet,
                     message_id,
                     DeliveryStatus.FAILED,
                     text,
                     reason,
-                    subject_id,
+                    *optional_session_values(subject_id),
                     revision,
                     self.clock(),
                 ),
@@ -283,7 +299,7 @@ class Memory:
 
     def message_outcome(self, message_id: str) -> MessageOutcome | None:
         row = self.db.execute(
-            "SELECT message_id,outcome,text,reason,subject_id,revision,timestamp FROM message_outcomes WHERE pet=? AND message_id=?",
+            "SELECT message_id,outcome,text,reason,subject_source,subject_session,revision,timestamp FROM message_outcomes WHERE pet=? AND message_id=?",
             (self.pet, message_id),
         ).fetchone()
         return (
@@ -292,7 +308,7 @@ class Memory:
                 outcome=DeliveryStatus(row["outcome"]),
                 text=row["text"],
                 reason=SpeechReason(row["reason"]),
-                subject_id=row["subject_id"],
+                subject_id=optional_session_from_row(row, "subject_"),
                 revision=row["revision"],
                 timestamp=row["timestamp"],
             )
@@ -345,8 +361,8 @@ class Memory:
         details = json.dumps(asdict(record.details), ensure_ascii=False)
         if record.event_type in {"progress", "waiting", "session_start"}:
             previous = self.db.execute(
-                "SELECT event_type,details FROM events WHERE pet=? AND session=? AND working_directory=? ORDER BY id DESC LIMIT 1",
-                (self.pet, record.session, record.working_directory),
+                "SELECT event_type,details FROM events WHERE pet=? AND source=? AND session=? AND working_directory=? ORDER BY id DESC LIMIT 1",
+                (self.pet, *session_values(record.session), record.working_directory),
             ).fetchone()
             if (
                 previous
@@ -359,19 +375,18 @@ class Memory:
             if record.working_directory
             else None
         )
-        repository = repository_identity(
-            record.repository
-            or (checkout.local.repository if checkout and checkout.local else "")
+        repository = record.repository or (
+            checkout.local.repository if checkout and checkout.local else None
         )
         timestamp = self.clock()
         with self.transaction():
             cursor = self.db.execute(
-                "INSERT INTO events(pet,session,working_directory,repository,event_type,details,goal,timestamp) VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO events(pet,source,session,working_directory,repository_kind,repository_value,event_type,details,goal,timestamp) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (
                     self.pet,
-                    record.session,
+                    *session_values(record.session),
                     record.working_directory,
-                    repository,
+                    *repository_columns(repository),
                     record.event_type,
                     details,
                     record.goal,
@@ -403,15 +418,15 @@ class Memory:
         self,
         limit: int = 5,
         *,
-        session: str | None = None,
+        session: SessionIdentity | None = None,
         working_directory: str | None = None,
         event_types: Iterable[str] | None = None,
     ) -> list[EventRecord]:
         filters = ["pet=?"]
         values = [self.pet]
         if session is not None:
-            filters.append("session=?")
-            values.append(session)
+            filters.append("source=? AND session=?")
+            values.extend(session_values(session))
         if working_directory is not None:
             filters.append("working_directory=?")
             values.append(working_directory)
@@ -425,17 +440,19 @@ class Memory:
         where = " AND ".join(filters)
         rows = self.db.execute(
             f"""WITH ranked AS (
-            SELECT *, ROW_NUMBER() OVER (PARTITION BY session ORDER BY id DESC) AS rank FROM events WHERE {where}
-        ) SELECT id, session, working_directory, repository, event_type, details, goal, timestamp
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY source,session ORDER BY id DESC) AS rank FROM events WHERE {where}
+        ) SELECT id, source, session, working_directory, repository_kind, repository_value, event_type, details, goal, timestamp
           FROM ranked ORDER BY rank=1 DESC, id DESC LIMIT ?""",
             (*values, limit),
         ).fetchall()
         return [
             EventRecord(
                 id=row["id"],
-                session=row["session"],
+                session=session_from_row(row),
                 working_directory=row["working_directory"],
-                repository=row["repository"],
+                repository=repository_from_columns(
+                    row["repository_kind"], row["repository_value"]
+                ),
                 event_type=row["event_type"],
                 details=HistoryDetails.from_data(json.loads(row["details"])),
                 goal=row["goal"],
@@ -452,16 +469,25 @@ class Memory:
         placeholders = ",".join("?" for _ in excluded)
         rows = self.db.execute(
             f"""SELECT e.* FROM events_fts JOIN events e ON e.id=events_fts.rowid
-            WHERE events_fts MATCH ? AND e.pet=? AND e.repository=? AND e.id NOT IN ({placeholders})
-            ORDER BY e.session=? DESC, bm25(events_fts), e.id DESC LIMIT ?""",
-            (query, self.pet, request.repository, *excluded, request.session, limit),
+            WHERE events_fts MATCH ? AND e.pet=? AND e.repository_kind=? AND e.repository_value=? AND e.id NOT IN ({placeholders})
+            ORDER BY (e.source=? AND e.session=?) DESC, bm25(events_fts), e.id DESC LIMIT ?""",
+            (
+                query,
+                self.pet,
+                *repository_columns(request.repository),
+                *excluded,
+                *session_values(request.session),
+                limit,
+            ),
         ).fetchall()
         return [
             EventRecord(
                 id=row["id"],
-                session=row["session"],
+                session=session_from_row(row),
                 working_directory=row["working_directory"],
-                repository=row["repository"],
+                repository=repository_from_columns(
+                    row["repository_kind"], row["repository_value"]
+                ),
                 event_type=row["event_type"],
                 details=HistoryDetails.from_data(json.loads(row["details"])),
                 goal=row["goal"],
@@ -488,10 +514,10 @@ class Memory:
                 )
         return result
 
-    def context(self, session: str) -> ContextRecord | None:
+    def context(self, session: SessionIdentity) -> ContextRecord | None:
         row = self.db.execute(
-            "SELECT first_prompt,session_context,recent_requests,request_count,first_summary_attempted FROM contexts WHERE pet=? AND session=?",
-            (self.pet, session),
+            "SELECT first_prompt,session_context,recent_requests,request_count,first_summary_attempted FROM contexts WHERE pet=? AND source=? AND session=?",
+            (self.pet, *session_values(session)),
         ).fetchone()
         if row is None:
             return None
@@ -520,7 +546,8 @@ class Memory:
             count += other.request_count
             attempted = attempted or other.first_summary_attempted
             self.db.execute(
-                "DELETE FROM contexts WHERE pet=? AND session=?", (self.pet, alias)
+                "DELETE FROM contexts WHERE pet=? AND source=? AND session=?",
+                (self.pet, *session_values(alias)),
             )
         for report in observation.reports:
             if isinstance(report, IntentEvidence):
@@ -540,7 +567,7 @@ class Memory:
 
     def save_context(
         self,
-        session: str,
+        session: SessionIdentity,
         initial_request: str,
         summary: str | None,
         recent_requests: Sequence[str],
@@ -551,13 +578,13 @@ class Memory:
         count = len(requests) if request_count is None else request_count
         with self.transaction():
             self.db.execute(
-                """INSERT INTO contexts VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(pet,session) DO UPDATE SET
+                """INSERT INTO contexts VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(pet,source,session) DO UPDATE SET
                 first_prompt=excluded.first_prompt, session_context=excluded.session_context,
                 recent_requests=excluded.recent_requests, timestamp=excluded.timestamp,
                 request_count=excluded.request_count, first_summary_attempted=excluded.first_summary_attempted""",
                 (
                     self.pet,
-                    session,
+                    *session_values(session),
                     select_prompt(initial_request),
                     summary or "",
                     json.dumps(requests),

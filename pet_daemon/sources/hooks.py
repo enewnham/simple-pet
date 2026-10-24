@@ -2,25 +2,14 @@ from collections.abc import Mapping
 from typing import cast
 
 from ..domain import ExecutionOutcome, SessionSource
-from ..runtime import HookEvent, HookTextFields, ProcessIdentity
-
-EVENTS = frozenset(
-    {
-        "session_start",
-        "session_end",
-        "intent",
-        "tool_start",
-        "tool_done",
-        "tool_error",
-        "turn_done",
-        "turn_error",
-        "interrupt",
-        "subagent_start",
-        "subagent_done",
-        "progress",
-        "waiting",
-    }
+from ..runtime import (
+    HookEvent,
+    HookEventKind,
+    HookTextFields,
+    ProcessIdentity,
+    WaitingKind,
 )
+
 TEXT_FIELDS = (
     "parent",
     "parent_call",
@@ -41,32 +30,33 @@ TEXT_FIELDS = (
 def normalize_hook(packet: object) -> HookEvent | None:
     if not isinstance(packet, Mapping):
         return None
-    harness, event, session = (
-        packet.get("harness"),
+    source, event, session = (
+        packet.get("source"),
         packet.get("event"),
         packet.get("session"),
     )
     if (
-        not isinstance(harness, str)
+        not isinstance(source, str)
         or not isinstance(event, str)
-        or event not in EVENTS
         or not isinstance(session, str)
         or not session
     ):
         return None
     try:
-        session_source = SessionSource(harness)
+        session_source = SessionSource(source)
+        event_kind = HookEventKind(event)
     except ValueError:
         return None
     if any(
         name in packet and not isinstance(packet[name], str) for name in TEXT_FIELDS
     ):
         return None
-    if "waiting_kind" in packet and packet["waiting_kind"] not in (
-        "permission",
-        "question",
-    ):
-        return None
+    waiting_kind = None
+    if "waiting_kind" in packet:
+        try:
+            waiting_kind = WaitingKind(packet["waiting_kind"])
+        except ValueError, TypeError:
+            return None
     aliases = packet.get("aliases", [])
     if not isinstance(aliases, list) or not all(
         isinstance(alias, str) and alias for alias in aliases
@@ -87,7 +77,7 @@ def normalize_hook(packet: object) -> HookEvent | None:
     return HookEvent(
         session_source,
         session,
-        event,
+        event_kind,
         aliases=tuple(aliases),
         parent=validated.get("parent"),
         parent_call=validated.get("parent_call"),
@@ -106,5 +96,5 @@ def normalize_hook(packet: object) -> HookEvent | None:
         manual=bool(packet["manual"]) if "manual" in packet else None,
         owner=ProcessIdentity.parse(packet.get("owner")),
         exit_code=code if type(code) is int else None,
-        waiting_kind=validated.get("waiting_kind"),
+        waiting_kind=waiting_kind,
     )

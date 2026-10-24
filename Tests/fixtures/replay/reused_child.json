@@ -5,20 +5,20 @@
     {
       "packets": [
         {
-          "harness": "codex",
+          "source": "codex",
           "session": "root",
           "event": "intent",
           "goal": "Audit the tests."
         },
         {
-          "harness": "codex",
+          "source": "codex",
           "session": "child",
           "event": "subagent_start",
           "parent": "root",
           "goal": "Audit test assertions."
         },
         {
-          "harness": "codex",
+          "source": "codex",
           "session": "child",
           "event": "subagent_done",
           "parent": "root",
@@ -29,13 +29,13 @@
     {
       "packets": [
         {
-          "harness": "codex",
+          "source": "codex",
           "session": "root",
           "event": "intent",
           "goal": "Build an explorer."
         },
         {
-          "harness": "codex",
+          "source": "codex",
           "session": "child",
           "event": "subagent_start",
           "parent": "root",

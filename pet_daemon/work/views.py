@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 
 from ..domain import (
     ArtifactKind,
@@ -12,6 +12,12 @@ from ..domain import (
     LinkRelationship,
     PullRequestState,
     WorkSubjectKind,
+)
+from ..identity import SessionIdentity
+from ..repository_identity import (
+    RemoteRepository,
+    RepositoryIdentity,
+    repository_columns,
 )
 from ..runtime import SessionContext, SwarmActivity
 from .association import TERMINAL_EVENTS, enclosing_checkout, references, report_context
@@ -34,7 +40,7 @@ from .models import (
 )
 from .observations import GitObservation, RepositoryTarget
 from .serialization import payload_record
-from .validation import canonical, normalize_reference, repository_identity
+from .validation import canonical, normalize_reference
 
 
 @dataclass(frozen=True)
@@ -118,7 +124,7 @@ class ArtifactContext:
     kind: ArtifactKind
     ref: str
     title: str = ""
-    repository: str = ""
+    repository: RepositoryIdentity | None = None
     revision: str = ""
     evidence: tuple[EvidenceView, ...] = ()
 
@@ -129,12 +135,12 @@ class SessionContribution:
     requests: tuple[EvidenceView, ...] = ()
     activity: tuple[EvidenceView, ...] = ()
     context: ReportContext | None = None
-    session: str = ""
+    session: SessionIdentity = field(kw_only=True)
 
 
 @dataclass(frozen=True)
 class WorkStory:
-    id: str
+    id: SessionIdentity
     intent: str
     revision: str
     requests: tuple[EvidenceView, ...] = ()
@@ -145,21 +151,21 @@ class WorkStory:
 
 @dataclass(frozen=True)
 class WorkUpdate:
-    session: str
+    session: SessionIdentity
     revision: str
     observed_at: float
     ended_at: float | None = None
-    aliases: tuple[str, ...] = ()
+    aliases: tuple[SessionIdentity, ...] = ()
 
 
 @dataclass(frozen=True)
 class WorkSubject:
-    id: str
+    id: SessionIdentity
     kind: WorkSubjectKind
     changed_at: float
     revision: str
     story: WorkStory
-    sessions: tuple[str, ...] = ()
+    sessions: tuple[SessionIdentity, ...] = ()
     updates: tuple[WorkUpdate, ...] = ()
 
 
@@ -169,8 +175,8 @@ def project_evidence(record: EvidenceRecord) -> EvidenceView | None:
     match payload:
         case GitObservation():
             details = GitEvidenceView(
-                payload.repository
-                if not payload.repository.startswith("local:")
+                payload.repository.value
+                if isinstance(payload.repository, RemoteRepository)
                 else None,
                 payload.branch,
                 bool(
@@ -199,7 +205,7 @@ def project_evidence(record: EvidenceRecord) -> EvidenceView | None:
                 "session_end",
             }
             execution = (
-                "input requested"
+                "waiting"
                 if payload.event == "waiting"
                 else "turn ended"
                 if ended
@@ -252,11 +258,7 @@ def current_context(state: WorkFacts, agent: SessionRecord) -> ReportContext:
         return resolve_context(state, agent.execution.context)
     checkout = enclosing_checkout(state.checkouts, agent.location)
     local = checkout.local if checkout else None
-    branch = (
-        state.branches.get((repository_identity(local.repository), local.branch))
-        if local
-        else None
-    )
+    branch = state.branches.get((local.repository, local.branch)) if local else None
     return report_context(agent.location, checkout, branch)
 
 
@@ -310,8 +312,10 @@ def session_work(state: WorkFacts, agent: SessionRecord) -> WorkStory:
     contexts.extend((report.context, False) for report in agent.reports)
     if agent.execution:
         contexts.append((agent.execution.context, False))
-    artifacts: dict[tuple[str, str, str], ArtifactReference] = {}
-    artifact_records: dict[tuple[str, str, str], tuple[EvidenceRecord, ...]] = {}
+    artifacts: dict[tuple[str, str, RepositoryIdentity | None], ArtifactReference] = {}
+    artifact_records: dict[
+        tuple[str, str, RepositoryIdentity | None], tuple[EvidenceRecord, ...]
+    ] = {}
 
     def evidence(records: tuple[EvidenceRecord, ...]) -> tuple[EvidenceView, ...]:
         return tuple(
@@ -490,14 +494,21 @@ def session_work(state: WorkFacts, agent: SessionRecord) -> WorkStory:
                 value.revision or "",
                 evidence(artifact_records[key]),
             )
-            for key, value in sorted(artifacts.items())
+            for key, value in sorted(
+                artifacts.items(),
+                key=lambda item: (
+                    item[0][0],
+                    item[0][1],
+                    repository_columns(item[0][2]),
+                ),
+            )
         ),
     )
 
 
 def collection_targets(state: WorkFacts) -> tuple[RepositoryTarget, ...]:
     targets = {
-        ("checkout", agent.location, ""): RepositoryTarget(
+        ("checkout", agent.location, None): RepositoryTarget(
             CollectionKind.CHECKOUT, agent.location
         )
         for agent in state.sessions.values()
@@ -523,7 +534,12 @@ def collection_targets(state: WorkFacts) -> tuple[RepositoryTarget, ...]:
                         CollectionKind.PULL_REQUEST, artifact.ref, artifact.repository
                     )
                 )
-    return tuple(targets[key] for key in sorted(targets))
+    return tuple(
+        targets[key]
+        for key in sorted(
+            targets, key=lambda key: (key[0], key[1], repository_columns(key[2]))
+        )
+    )
 
 
 def runtime_revision(
@@ -575,10 +591,10 @@ def connected_work(
     state: WorkFacts, activity: SwarmActivity
 ) -> tuple[WorkSubject, ...]:
     runtime = {session.id: session for session in activity.sessions}
-    groups: dict[str, set[str]] = {}
+    groups: dict[SessionIdentity, set[SessionIdentity]] = {}
     for identifier in (*state.sessions, *runtime):
         root = state.aliases.get(identifier, identifier)
-        seen: set[str] = set()
+        seen: set[SessionIdentity] = set()
         while root not in seen:
             seen.add(root)
             agent = state.sessions.get(root)
@@ -608,12 +624,14 @@ def connected_work(
                 story.requests,
                 story.activity,
                 current_context(state, state.sessions[identifier]),
-                identifier,
+                session=identifier,
             )
             for identifier, story in stories.items()
             if identifier != root
         )
-        artifacts: dict[tuple[str, str, str], ArtifactContext] = {}
+        artifacts: dict[
+            tuple[str, str, RepositoryIdentity | None], ArtifactContext
+        ] = {}
         for story in stories.values():
             for artifact in story.artifacts:
                 key = artifact.kind, artifact.ref, artifact.repository
@@ -646,7 +664,17 @@ def connected_work(
             root_story,
             revision=revision,
             sessions=children,
-            artifacts=tuple(artifact for _, artifact in sorted(artifacts.items())),
+            artifacts=tuple(
+                artifact
+                for _, artifact in sorted(
+                    artifacts.items(),
+                    key=lambda item: (
+                        item[0][0],
+                        item[0][1],
+                        repository_columns(item[0][2]),
+                    ),
+                )
+            ),
         )
         names = identifiers | {
             alias for alias, target in state.aliases.items() if target in identifiers

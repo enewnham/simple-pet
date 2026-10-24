@@ -1,10 +1,14 @@
 import asyncio
-import re
 from collections.abc import Coroutine
 from pathlib import Path
 from typing import Protocol, TypedDict
-from urllib.parse import urlsplit
 
+from ..repository_identity import (
+    LocalRepository,
+    RemoteRepository,
+    RepositoryIdentity,
+    parse_remote_repository,
+)
 from ..work.observations import GitObservation
 
 type CommandPath = str | Path | None
@@ -63,28 +67,13 @@ async def command(*args: str, cwd: CommandPath = None, timeout: float = 10) -> s
     return stdout.decode(errors="replace")
 
 
-def canonical_repository(value: str) -> str:
-    value = value.strip().rstrip("/")
-    if not value or value.startswith("local:"):
-        return value
-    if "://" in value:
-        parsed = urlsplit(value)
-        if not parsed.hostname:
-            return ""
-        host, path = parsed.hostname, parsed.path
-    else:
-        match = re.fullmatch(r"(?:[^@/]+@)?([^/:]+):(.+)", value)
-        if match:
-            host, path = match.groups()
-        elif "/" in value and not value.startswith(("/", ".")):
-            host, path = value.split("/", 1)
-        else:
-            return ""
-    path = path.strip("/").removesuffix(".git")
-    return f"{host}/{path}".lower() if path else ""
+def canonical_repository(value: str) -> RemoteRepository | None:
+    return parse_remote_repository(value)
 
 
-async def repository_identity(path: CommandPath, run: RunCommand = command) -> str:
+async def repository_identity(
+    path: CommandPath, run: RunCommand = command
+) -> RepositoryIdentity:
     remotes = (await run("git", "remote", cwd=path)).splitlines()
     if remotes:
         remote = "origin" if "origin" in remotes else min(remotes)
@@ -97,7 +86,7 @@ async def repository_identity(path: CommandPath, run: RunCommand = command) -> s
             "git", "rev-parse", "--path-format=absolute", "--git-common-dir", cwd=path
         )
     ).strip()
-    return "local:" + str(Path(common).resolve())
+    return LocalRepository(str(Path(common).resolve()))
 
 
 async def discover(path: CommandPath, run: RunCommand = command) -> str:

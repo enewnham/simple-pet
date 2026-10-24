@@ -26,7 +26,7 @@ pet_lifecycle() {
   python3 - "$pet_notify" "$pet_session" "$1" "$pet_outcome" <<'PY_EVENT'
 import runpy, sys
 client = runpy.run_path(sys.argv[1])
-payload = {"kind": "event", "harness": "cli", "session": sys.argv[2],
+payload = {"kind": "event", "source": "cli", "session": sys.argv[2],
            "event": sys.argv[3], "outcome": sys.argv[4], "manual": True}
 owner = client["discover_owner"]("cli")
 if owner:

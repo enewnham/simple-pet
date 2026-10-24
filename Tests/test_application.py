@@ -29,7 +29,15 @@ from pet_daemon.domain import (
     SessionSource,
     SpeechReason,
 )
-from pet_daemon.runtime import HookEvent, OverlayPacket, ProcessIdentity, SessionTrigger
+from pet_daemon.identity import SessionIdentity
+from pet_daemon.repository_identity import RemoteRepository
+from pet_daemon.runtime import (
+    HookEvent,
+    HookEventKind,
+    OverlayPacket,
+    ProcessIdentity,
+    SessionTrigger,
+)
 from pet_daemon.sessions.processes import ProcessTracker
 from pet_daemon.sessions.reactions import SessionReactions
 from pet_daemon.sessions.tracking import Sessions
@@ -176,7 +184,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         hook = normalize_hook(
             {
                 "kind": "event",
-                "harness": "codex",
+                "source": "codex",
                 "session": "parser",
                 "event": "intent",
                 "goal": "Improve quoted-field parsing",
@@ -197,12 +205,12 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 "origin/main",
                 1,
                 0,
-                "example.test/team/parser",
+                RemoteRepository("example.test/team/parser"),
             ),
             self.now,
         )
         self.observation = BranchObservation(
-            "example.test/team/parser",
+            RemoteRepository("example.test/team/parser"),
             "parser",
             PullRequest(
                 23,
@@ -210,9 +218,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 PullRequestState.OPEN,
                 None,
                 head="head-one",
-                head_repository="example.test/team/parser",
+                head_repository=RemoteRepository("example.test/team/parser"),
                 head_branch="parser",
-                repository="example.test/team/parser",
+                repository=RemoteRepository("example.test/team/parser"),
                 title="Handle quoted fields",
             ),
             self.now,
@@ -228,7 +236,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
 
     def report(self, text: str, *, session: str = "parser") -> None:
         self.provider.publish(
-            HookEvent(SessionSource.CODEX, session, "progress", progress=text)
+            HookEvent(
+                SessionSource.CODEX, session, HookEventKind.PROGRESS, progress=text
+            )
         )
 
     async def submit_commentary(self) -> tuple[SpeechPacket, AttentionSelection]:
@@ -261,7 +271,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         snapshot = self.app.context()
         selection = self.attention.select(snapshot)
-        self.provider.publish(HookEvent(SessionSource.CODEX, "parser", "session_end"))
+        self.provider.publish(
+            HookEvent(SessionSource.CODEX, "parser", HookEventKind.SESSION_END)
+        )
         await self.app.comment(
             SpeechReason.ROUTINE, snapshot=snapshot, selection=selection
         )
@@ -276,7 +288,10 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.config.behavior.automatic_speech_cooldown_seconds = 0
         self.provider.publish(
             HookEvent(
-                SessionSource.CODEX, "parser", "waiting", progress="Choose a format"
+                SessionSource.CODEX,
+                "parser",
+                HookEventKind.WAITING,
+                progress="Choose a format",
             )
         )
         self.attention.pending = None
@@ -284,7 +299,10 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.app.tick()
         self.assertEqual(self.app.reason, SpeechReason.CHECK_IN)
         self.assertEqual(
-            self.app.sessions.by_id["codex:parser"].last_check_in, self.now
+            self.app.sessions.by_id[
+                SessionIdentity(SessionSource.CODEX, "parser")
+            ].last_check_in,
+            self.now,
         )
         await require(self.app.task)
         if self.packets and "delivery_id" in self.packets[-1]:
@@ -308,30 +326,34 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             HookEvent(
                 SessionSource.CODEX,
                 "examples",
-                "subagent_start",
+                HookEventKind.SUBAGENT_START,
                 parent="parser",
                 goal="Document quoted-field examples",
             ),
             HookEvent(
                 SessionSource.CODEX,
                 "examples",
-                "tool_start",
+                HookEventKind.TOOL_START,
                 call="check",
                 tool="pytest",
             ),
-            HookEvent(SessionSource.CODEX, "examples", "tool_error", call="check"),
+            HookEvent(
+                SessionSource.CODEX, "examples", HookEventKind.TOOL_ERROR, call="check"
+            ),
             HookEvent(
                 SessionSource.CODEX,
                 "examples",
-                "tool_start",
+                HookEventKind.TOOL_START,
                 call="retry",
                 tool="pytest",
             ),
-            HookEvent(SessionSource.CODEX, "examples", "tool_done", call="retry"),
+            HookEvent(
+                SessionSource.CODEX, "examples", HookEventKind.TOOL_DONE, call="retry"
+            ),
             HookEvent(
                 SessionSource.CODEX,
                 "examples",
-                "subagent_done",
+                HookEventKind.SUBAGENT_DONE,
                 progress="Documented escaped delimiter examples.",
             ),
         ):
@@ -339,14 +361,25 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(self.attention.pending)
         self.assertFalse(any("animation" in packet for packet in self.packets))
         self.assertEqual(self.app.agent_activity.activity(), "working")
-        self.assertTrue(self.app.sessions.by_id["codex:parser"].active)
-        child = self.app.sessions.by_id["codex:examples"]
+        self.assertTrue(
+            self.app.sessions.by_id[
+                SessionIdentity(SessionSource.CODEX, "parser")
+            ].active
+        )
+        child = self.app.sessions.by_id[
+            SessionIdentity(SessionSource.CODEX, "examples")
+        ]
         self.assertTrue(child.finished)
         self.assertEqual(child.outcome, ExecutionOutcome.SUCCESS)
-        reports = self.memory.recent(session="codex:examples", limit=10)
+        reports = self.memory.recent(
+            session=SessionIdentity(SessionSource.CODEX, "examples"), limit=10
+        )
         self.assertTrue(any(row.event_type == "subagent_done" for row in reports))
         _, selection = await self.submit_commentary()
-        self.assertEqual(require(selection.focus_session).id, "codex:parser")
+        self.assertEqual(
+            require(selection.focus_session).id,
+            SessionIdentity(SessionSource.CODEX, "parser"),
+        )
         payload = json.loads(self.model.requests[-1][0]["messages"][0]["content"])
         self.assertIn("Documented escaped delimiter examples.", json.dumps(payload))
 
@@ -355,14 +388,17 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         self.provider.publish(
             HookEvent(
-                SessionSource.CODEX, "examples", "subagent_start", parent="parser"
+                SessionSource.CODEX,
+                "examples",
+                HookEventKind.SUBAGENT_START,
+                parent="parser",
             )
         )
         self.provider.publish(
             HookEvent(
                 SessionSource.CODEX,
                 "examples",
-                "waiting",
+                HookEventKind.WAITING,
                 call="question",
                 progress="Which quoted-field examples should I document?",
             )
@@ -387,7 +423,12 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.attention.next_observation = self.now + 3600
         for child in ("examples", "escapes"):
             self.provider.publish(
-                HookEvent(SessionSource.CODEX, child, "subagent_start", parent="parser")
+                HookEvent(
+                    SessionSource.CODEX,
+                    child,
+                    HookEventKind.SUBAGENT_START,
+                    parent="parser",
+                )
             )
         self.now += 6
         self.report("Reviewing the delegated findings.")
@@ -399,10 +440,17 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         await require(self.app.task)
         self.assertEqual(self.model.requests[-1][1], SpeechReason.CHECK_IN)
         self.assertEqual(
-            self.app.sessions.by_id["codex:parser"].last_check_in, self.now
+            self.app.sessions.by_id[
+                SessionIdentity(SessionSource.CODEX, "parser")
+            ].last_check_in,
+            self.now,
         )
         for child in ("examples", "escapes"):
-            self.assertIsNone(self.app.sessions.by_id[f"codex:{child}"].last_check_in)
+            self.assertIsNone(
+                self.app.sessions.by_id[
+                    SessionIdentity(SessionSource.CODEX, child)
+                ].last_check_in
+            )
 
     async def test_failed_intent_write_keeps_the_original_story_after_the_next_report(
         self,
@@ -416,7 +464,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 HookEvent(
                     SessionSource.CODEX,
                     "parser",
-                    "intent",
+                    HookEventKind.INTENT,
                     goal=failed_intent,
                     repo="/fixture/rejected-parser",
                 )
@@ -440,7 +488,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             HookEvent(
                 SessionSource.CODEX,
                 "parser",
-                "turn_done",
+                HookEventKind.TURN_DONE,
                 outcome=ExecutionOutcome.SUCCESS,
                 progress="The parser changes are ready.",
             )
@@ -604,7 +652,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             HookEvent(
                 SessionSource.CODEX,
                 "examples",
-                "subagent_start",
+                HookEventKind.SUBAGENT_START,
                 parent="parser",
                 goal="Document quoted-field examples",
                 repo="/fixture/parser-examples",
@@ -634,7 +682,13 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.report(child_report, session="examples")
         subjects = self.app.context().work
         self.assertEqual(len(subjects), 1)
-        self.assertEqual(subjects[0].sessions, ("codex:examples", "codex:parser"))
+        self.assertEqual(
+            subjects[0].sessions,
+            (
+                SessionIdentity(SessionSource.CODEX, "examples"),
+                SessionIdentity(SessionSource.CODEX, "parser"),
+            ),
+        )
         self.assertIsInstance(subjects[0].story, WorkStory)
         self.assertEqual(subjects[0].story.intent, "Improve quoted-field parsing")
         artifact_titles = {artifact.title for artifact in subjects[0].story.artifacts}
@@ -658,7 +712,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         child_sources = [
             item
             for item in story_payload["current_moment"]["evidence"]
-            if item["scope"] == "child assignment: Document quoted-field examples"
+            if item["scope"] == "Document quoted-field examples"
         ]
         self.assertIn(child_report, json.dumps(child_sources))
         self.assertNotIn(parent_report, json.dumps(child_sources))
@@ -685,30 +739,42 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         self.provider.publish(
             HookEvent(
-                SessionSource.CODEX, "parser", "progress", aliases=("parser-alias",)
+                SessionSource.CODEX,
+                "parser",
+                HookEventKind.PROGRESS,
+                aliases=("parser-alias",),
             )
         )
         self.provider.publish(
             HookEvent(
                 SessionSource.CODEX,
                 "examples",
-                "subagent_start",
+                HookEventKind.SUBAGENT_START,
                 parent="parser-alias",
                 goal="Document quoted-field examples",
             )
         )
         self.assertEqual(
-            self.app.sessions.by_id["codex:examples"].repo, "/fixture/parser"
+            self.app.sessions.by_id[
+                SessionIdentity(SessionSource.CODEX, "examples")
+            ].repo,
+            "/fixture/parser",
         )
         subject = self.app.context().work[0]
-        self.assertEqual(subject.id, "codex:parser")
-        self.assertTrue({"codex:examples", "codex:parser"} <= set(subject.sessions))
+        self.assertEqual(subject.id, SessionIdentity(SessionSource.CODEX, "parser"))
+        self.assertTrue(
+            {
+                SessionIdentity(SessionSource.CODEX, "examples"),
+                SessionIdentity(SessionSource.CODEX, "parser"),
+            }
+            <= set(subject.sessions)
+        )
         self.assertEqual(require(subject.story.sessions[0].context).checkout, "")
         self.provider.publish(
             HookEvent(
                 SessionSource.CODEX,
                 "examples",
-                "progress",
+                HookEventKind.PROGRESS,
                 repo="/fixture/parser-examples",
                 progress="Documented the quoted-field examples.",
             )
@@ -722,7 +788,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             HookEvent(
                 SessionSource.CODEX,
                 session,
-                "turn_done",
+                HookEventKind.TURN_DONE,
                 outcome=ExecutionOutcome.SUCCESS,
             )
         )
@@ -755,7 +821,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.now += 10
-        self.provider.publish(HookEvent(SessionSource.CODEX, "parser", "session_end"))
+        self.provider.publish(
+            HookEvent(SessionSource.CODEX, "parser", HookEventKind.SESSION_END)
+        )
         snapshot = self.app.context()
         self.assertFalse(self.attention.routine_eligible(snapshot.work[0], snapshot))
         await self.app.comment(SpeechReason.COMPLETION)
@@ -778,7 +846,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         selection = self.attention.select(snapshot)
         self.assertIsNotNone(selection.update)
         self.assertTrue(self.attention.selection_eligible(selection, snapshot))
-        self.provider.publish(HookEvent(SessionSource.CODEX, "parser", "session_end"))
+        self.provider.publish(
+            HookEvent(SessionSource.CODEX, "parser", HookEventKind.SESSION_END)
+        )
         self.now += 1
         await self.app.comment(SpeechReason.ROUTINE)
         self.assertEqual(self.model.story_requests, [])
@@ -792,7 +862,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             HookEvent(
                 SessionSource.CODEX,
                 "parser",
-                "progress",
+                HookEventKind.PROGRESS,
                 progress="Checking parser cases",
                 owner=owner,
             )
@@ -888,18 +958,25 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             HookEvent(
                 SessionSource.CODEX,
                 "child",
-                "subagent_start",
+                HookEventKind.SUBAGENT_START,
                 parent="parser",
                 goal="Check examples",
             )
         )
-        snapshot = self.app.context(SessionTrigger("codex:parser"))
+        snapshot = self.app.context(
+            SessionTrigger(SessionIdentity(SessionSource.CODEX, "parser"))
+        )
         selection = self.attention.select(snapshot, SpeechReason.COMPLETION)
         self.assertIsNone(selection.update)
         self.assertFalse(self.attention.selection_eligible(selection, snapshot))
-        child_snapshot = self.app.context(SessionTrigger("codex:child"))
+        child_snapshot = self.app.context(
+            SessionTrigger(SessionIdentity(SessionSource.CODEX, "child"))
+        )
         child_selection = self.attention.select(child_snapshot, SpeechReason.PROMPT)
-        self.assertEqual(require(child_selection.update).session, "codex:child")
+        self.assertEqual(
+            require(child_selection.update).session,
+            SessionIdentity(SessionSource.CODEX, "child"),
+        )
         self.assertTrue(
             self.attention.selection_eligible(child_selection, child_snapshot)
         )
@@ -909,7 +986,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             HookEvent(
                 SessionSource.CODEX,
                 "child",
-                "subagent_start",
+                HookEventKind.SUBAGENT_START,
                 parent="parser",
                 goal="Check examples",
             )
@@ -917,10 +994,13 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.complete_turn("child")
         self.model.text = None
         await self.app.comment(
-            SpeechReason.COMPLETION, trigger=SessionTrigger("codex:child")
+            SpeechReason.COMPLETION,
+            trigger=SessionTrigger(SessionIdentity(SessionSource.CODEX, "child")),
         )
         self.report("The parent is still checking the parser")
-        snapshot = self.app.context(SessionTrigger("codex:child"))
+        snapshot = self.app.context(
+            SessionTrigger(SessionIdentity(SessionSource.CODEX, "child"))
+        )
         selection = self.attention.select(snapshot, SpeechReason.COMPLETION)
         self.assertIsNone(selection.update)
         self.assertFalse(self.attention.selection_eligible(selection, snapshot))
@@ -934,7 +1014,10 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         await self.submit_commentary()
         self.provider.publish(
             HookEvent(
-                SessionSource.CODEX, "other", "intent", goal="Document the renderer"
+                SessionSource.CODEX,
+                "other",
+                HookEventKind.INTENT,
+                goal="Document the renderer",
             )
         )
         self.app.queue(SpeechReason.PROMPT)

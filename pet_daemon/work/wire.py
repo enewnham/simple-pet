@@ -1,5 +1,7 @@
 from typing import TypedDict
 
+from ..repository_identity import RepositoryData
+
 
 class RelatedLinkData(TypedDict):
     kind: str
@@ -22,9 +24,9 @@ class PullRequestData(TypedDict):
     merged_at: str | None
     is_draft: bool | None
     head: str
-    head_repository: str
+    head_repository: RepositoryData | None
     head_branch: str
-    repository: str
+    repository: RepositoryData | None
     title: str
     body: str
     base_branch: str

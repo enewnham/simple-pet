@@ -13,6 +13,8 @@ from pet_daemon.domain import (
     CollectionKind,
     SessionSource,
 )
+from pet_daemon.identity import SessionIdentity
+from pet_daemon.repository_identity import LocalRepository, RemoteRepository
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources import RepositoryTarget, RepositoryTracker, git, github
 from pet_daemon.sources.git import CommandOptions
@@ -124,7 +126,7 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pr.number, 1)
         self.assertEqual(pr.url, "https://example.test/team/repo/pull/1")
         self.assertEqual(pr.head, self.pr["headRefOid"])
-        self.assertEqual(pr.repository, "example.test/team/repo")
+        self.assertEqual(pr.repository, RemoteRepository("example.test/team/repo"))
         self.assertEqual(pr.title, "Improve parser")
         for item in self.tracker.snapshot():
             self.assertEqual(repository_observation_from_mapping(item.packet()), item)
@@ -183,7 +185,13 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         await self.refresh()
         self.assertEqual(
             set(self.tracker.subscriptions),
-            {("branch", "example.test/team/repo:another")},
+            {
+                (
+                    CollectionKind.BRANCH,
+                    RemoteRepository("example.test/team/repo"),
+                    "another",
+                )
+            },
         )
         another = next(
             item
@@ -197,7 +205,9 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.tracker.reconcile_targets(
             (
                 RepositoryTarget(
-                    CollectionKind.BRANCH, "feature", "example.test/team/repo"
+                    CollectionKind.BRANCH,
+                    "feature",
+                    RemoteRepository("example.test/team/repo"),
                 ),
             )
         )
@@ -213,7 +223,9 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.tracker.reconcile_targets(
             (
                 RepositoryTarget(
-                    CollectionKind.BRANCH, "feature", "example.test/team/repo"
+                    CollectionKind.BRANCH,
+                    "feature",
+                    RemoteRepository("example.test/team/repo"),
                 ),
             )
         )
@@ -235,7 +247,9 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.tracker.reconcile_targets(
             (
                 RepositoryTarget(
-                    CollectionKind.BRANCH, "feature", "example.test/team/repo"
+                    CollectionKind.BRANCH,
+                    "feature",
+                    RemoteRepository("example.test/team/repo"),
                 ),
             )
         )
@@ -548,21 +562,30 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
             return await self.command(*args, **kwargs)
 
         observed = await github.observe(
-            None, "feature", run=listing, repository="example.test/team/repo"
+            None,
+            "feature",
+            run=listing,
+            repository=RemoteRepository("example.test/team/repo"),
         )
         assert observed is not None
         self.assertEqual(observed.number, 1)
         candidates.append({**self.pr, "number": 3})
         with self.assertRaisesRegex(RuntimeError, "Multiple open"):
             await github.observe(
-                None, "feature", run=listing, repository="example.test/team/repo"
+                None,
+                "feature",
+                run=listing,
+                repository=RemoteRepository("example.test/team/repo"),
             )
 
     async def test_incomplete_head_identity_keeps_branch_lookup_uncertain(self) -> None:
         self.pr["headRepository"] = None
         with self.assertRaisesRegex(RuntimeError, "head identity is unavailable"):
             await github.observe(
-                None, "feature", run=self.command, repository="example.test/team/repo"
+                None,
+                "feature",
+                run=self.command,
+                repository=RemoteRepository("example.test/team/repo"),
             )
 
     async def test_fork_discovers_upstream_pull_request_using_its_head_identity(
@@ -583,10 +606,15 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
             return await self.command(*args, **kwargs)
 
         observed = await github.observe(
-            None, "feature", run=forked, repository="example.test/fork-owner/repo"
+            None,
+            "feature",
+            run=forked,
+            repository=RemoteRepository("example.test/fork-owner/repo"),
         )
         assert observed is not None
-        self.assertEqual(observed.head_repository, "example.test/fork-owner/repo")
+        self.assertEqual(
+            observed.head_repository, RemoteRepository("example.test/fork-owner/repo")
+        )
         self.assertIn(
             (
                 "gh",
@@ -710,11 +738,11 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         self.assertEqual(
             git.canonical_repository("ssh://git@EXAMPLE.test/Team/Repo.git/"),
-            "example.test/team/repo",
+            RemoteRepository("example.test/team/repo"),
         )
         self.assertEqual(
             git.canonical_repository("https://EXAMPLE.test/Team/Repo.git"),
-            "example.test/team/repo",
+            RemoteRepository("example.test/team/repo"),
         )
         self.git("remote", "remove", "origin")
         linked = self.path.parent / "linked"
@@ -723,7 +751,7 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         other = await git.observe(str(linked))
         self.assertEqual(original.repository, other.repository)
         self.assertEqual(
-            original.repository, "local:" + str((self.path / ".git").resolve())
+            original.repository, LocalRepository(str((self.path / ".git").resolve()))
         )
 
     async def test_cancelled_subprocess_startup_terminates_the_spawned_process(
@@ -793,26 +821,26 @@ class HookObservationTests(unittest.TestCase):
         self,
     ) -> None:
         for kind in SessionSource:
-            with self.subTest(harness=kind):
+            with self.subTest(source=kind):
                 hook = normalize_hook(
-                    {"harness": kind.value, "session": "one", "event": "intent"}
+                    {"source": kind.value, "session": "one", "event": "intent"}
                 )
                 assert hook is not None
-                self.assertIs(hook.harness, kind)
+                self.assertIs(hook.source, kind)
                 packet = hook.packet()
-                self.assertIs(type(packet["harness"]), str)
-                self.assertEqual(packet["harness"], kind.value)
-                self.assertEqual(hook.subject, f"{kind.value}:one")
+                self.assertIs(type(packet["source"]), str)
+                self.assertEqual(packet["source"], kind.value)
+                self.assertEqual(hook.subject, SessionIdentity(kind, "one"))
                 sessions = Sessions(lambda: 1000)
                 update = sessions.apply(hook)
                 assert update is not None
                 self.assertEqual(update.session, hook.subject)
-                self.assertIs(sessions.by_id[update.session].harness, kind)
+                self.assertIs(sessions.by_id[update.session].source, kind)
 
     def test_hook_preserves_session_routing_and_tool_metadata(self) -> None:
         packet = {
             "kind": "event",
-            "harness": "codex",
+            "source": "codex",
             "session": "child",
             "event": "tool_done",
             "aliases": ["native", "transcript"],
@@ -835,7 +863,8 @@ class HookObservationTests(unittest.TestCase):
         self.assertIsInstance(observed, HookEvent)
         assert observed is not None
         self.assertEqual(
-            (observed.source, observed.subject), ("hook:codex", "codex:child")
+            (observed.source, observed.subject),
+            (SessionSource.CODEX, SessionIdentity(SessionSource.CODEX, "child")),
         )
         self.assertEqual(observed.packet(), packet)
         packet["aliases"].append("later")
@@ -843,14 +872,14 @@ class HookObservationTests(unittest.TestCase):
 
     def test_hook_retains_absent_fields_and_empty_text(self) -> None:
         event = normalize_hook(
-            {"harness": "claude", "session": "one", "event": "intent", "goal": ""}
+            {"source": "claude", "session": "one", "event": "intent", "goal": ""}
         )
         assert event is not None
         self.assertEqual(
             event.packet(),
             {
                 "kind": "event",
-                "harness": "claude",
+                "source": "claude",
                 "session": "one",
                 "event": "intent",
                 "goal": "",
@@ -859,12 +888,12 @@ class HookObservationTests(unittest.TestCase):
         self.assertIsNone(event.outcome)
 
     def test_hook_rejects_invalid_routing_and_event_values(self) -> None:
-        base = {"harness": "cursor", "session": "one", "event": "progress"}
+        base = {"source": "cursor", "session": "one", "event": "progress"}
         for changes in (
             {"aliases": [""]},
             {"parent_call": 2},
             {"event": "unknown"},
-            {"harness": "unknown"},
+            {"source": "unknown"},
             {"repo": "/repo\0"},
             {"outcome": "unknown"},
         ):

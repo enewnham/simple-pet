@@ -4,7 +4,8 @@ import unittest
 from dataclasses import asdict
 from pathlib import Path
 
-from pet_daemon.domain import Activity, ExecutionOutcome, PetState
+from pet_daemon.domain import Activity, ExecutionOutcome, PetState, SessionSource
+from pet_daemon.identity import SessionIdentity
 from pet_daemon.runtime import ConvergenceItem, SwarmActivity
 from pet_daemon.sessions.tracking import Sessions, SessionUpdate
 from pet_daemon.storage import Memory
@@ -41,10 +42,10 @@ class SessionsTests(unittest.TestCase):
         self.addCleanup(self.memory.close)
 
     def event(
-        self, event: str, session: str = "main", harness: str = "claude", **data: object
+        self, event: str, session: str = "main", source: str = "claude", **data: object
     ) -> SessionUpdate | None:
         result = self.sessions.handle(
-            {"event": event, "session": session, "harness": harness, **data}
+            {"event": event, "session": session, "source": source, **data}
         )
         if result:
             with self.memory.transaction():
@@ -52,9 +53,33 @@ class SessionsTests(unittest.TestCase):
                 self.memory.observe_session_context(result.observation)
         return result
 
+    def test_native_session_ids_preserve_colons_and_source_scope(self) -> None:
+        self.event("intent", source="codex", session="child", goal="Inspect parser")
+        self.event(
+            "intent", source="codex", session="codex:child", goal="Inspect renderer"
+        )
+        self.event("intent", source="claude", session="child", goal="Inspect hooks")
+
+        identities = {
+            SessionIdentity(SessionSource.CODEX, "child"),
+            SessionIdentity(SessionSource.CODEX, "codex:child"),
+            SessionIdentity(SessionSource.CLAUDE, "child"),
+        }
+        self.assertEqual(set(self.sessions.by_id), identities)
+        self.assertEqual(
+            {session.id: session.goal for session in self.sessions.by_id.values()},
+            {
+                SessionIdentity(SessionSource.CODEX, "child"): "Inspect parser",
+                SessionIdentity(SessionSource.CODEX, "codex:child"): "Inspect renderer",
+                SessionIdentity(SessionSource.CLAUDE, "child"): "Inspect hooks",
+            },
+        )
+        stored = self.memory.connected_work(self.sessions.activity_view())
+        self.assertEqual({subject.id for subject in stored}, identities)
+
     def test_hook_values_become_domain_members(self) -> None:
         self.event("intent", goal="Check the parser")
-        session = self.sessions.by_id["claude:main"]
+        session = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")]
         self.assertIsNone(session.phase)
         self.event("tool_start", call="checks", tool="pytest")
         self.assertIs(session.phase, Activity.TESTING)
@@ -67,7 +92,7 @@ class SessionsTests(unittest.TestCase):
         before = self.sessions.activity_view()
         aliases = dict(self.sessions.aliases)
         for invalid in (
-            {"harness": []},
+            {"source": []},
             {"event": {}},
             {"session": []},
             {"aliases": "alternate"},
@@ -84,7 +109,7 @@ class SessionsTests(unittest.TestCase):
         ):
             with self.subTest(invalid=invalid):
                 packet = {
-                    "harness": "claude",
+                    "source": "claude",
                     "event": "intent",
                     "session": "new",
                     **invalid,
@@ -101,7 +126,7 @@ class SessionsTests(unittest.TestCase):
             "intent", goal="Preserve parser behavior", repo="/parser", turn="current"
         )
         before = self.memory.connected_work(SwarmActivity(PetState.IDLE, ()))
-        context = self.memory.context("claude:main")
+        context = self.memory.context(SessionIdentity(SessionSource.CLAUDE, "main"))
         result = self.event(
             "tool_done",
             call="unknown",
@@ -114,7 +139,9 @@ class SessionsTests(unittest.TestCase):
         self.assertEqual(
             self.memory.connected_work(SwarmActivity(PetState.IDLE, ())), before
         )
-        self.assertEqual(self.memory.context("claude:main"), context)
+        self.assertEqual(
+            self.memory.context(SessionIdentity(SessionSource.CLAUDE, "main")), context
+        )
 
     def test_terminal_observation_uses_the_outcome_of_the_accepted_turn(self) -> None:
         self.event("intent", goal="Run parser checks")
@@ -130,19 +157,22 @@ class SessionsTests(unittest.TestCase):
         )
         self.assertEqual(execution.outcome, "error")
         self.assertEqual(execution.progress, "Checks need repair")
-        self.assertEqual(self.sessions.by_id["claude:main"].progress, "")
+        self.assertEqual(
+            self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")].progress,
+            "",
+        )
 
     def test_tracks_parallel_work_until_each_turn_finishes(self) -> None:
         self.event("intent", goal="Refactor batch inserts", turn="turn-1")
         self.event("tool_start", call="edit", tool="Edit", turn="turn-1")
         self.event("tool_start", call="test", tool="cargo test", turn="turn-1")
-        self.event("tool_start", harness="codex", call="build", tool="cargo build")
-        self.event("tool_start", harness="cursor", call="lint", tool="lint")
+        self.event("tool_start", source="codex", call="build", tool="cargo build")
+        self.event("tool_start", source="cursor", call="lint", tool="lint")
         self.assertEqual(len(self.sessions.by_id), 3)
         self.assertTrue(self.sessions.working)
         self.event("tool_done", call="edit")
-        self.event("tool_done", harness="codex", call="build")
-        self.event("tool_done", harness="cursor", call="lint")
+        self.event("tool_done", source="codex", call="build")
+        self.event("tool_done", source="cursor", call="lint")
         self.assertTrue(self.sessions.working)
         self.event("tool_done", call="test")
         self.assertTrue(self.sessions.working)
@@ -151,29 +181,35 @@ class SessionsTests(unittest.TestCase):
         self.clock.advance(30)
         self.assertEqual(self.sessions.activity_view().activity, "working")
         self.event("turn_done")
-        self.event("turn_done", harness="codex")
+        self.event("turn_done", source="codex")
         self.assertTrue(self.sessions.working)
-        self.event("turn_done", harness="cursor")
+        self.event("turn_done", source="cursor")
         self.assertFalse(self.sessions.working)
         self.assertEqual(self.sessions.activity_view().activity, "idle")
 
     def test_finishing_one_parallel_turn_does_not_claim_convergence(self) -> None:
-        for name, harness in [("one", "claude"), ("two", "codex")]:
-            self.event("intent", session=name, harness=harness, goal=name)
+        for name, source in [("one", "claude"), ("two", "codex")]:
+            self.event("intent", session=name, source=source, goal=name)
             self.event(
-                "tool_start", session=name, harness=harness, call="test", tool="test"
+                "tool_start", session=name, source=source, call="test", tool="test"
             )
-            self.event("tool_done", session=name, harness=harness, call="test")
+            self.event("tool_done", session=name, source=source, call="test")
         first = self.event("turn_done", session="one")
         self.assertFalse(require(first).convergence)
-        last = self.event("turn_done", session="two", harness="codex")
+        last = self.event("turn_done", session="two", source="codex")
         self.assertTrue(require(last).convergence)
         self.assertTrue(self.sessions.clean_convergence)
         self.assertEqual(
             self.sessions.convergence,
             (
-                ConvergenceItem(id="claude:one", outcome=ExecutionOutcome.SUCCESS),
-                ConvergenceItem(id="codex:two", outcome=ExecutionOutcome.SUCCESS),
+                ConvergenceItem(
+                    id=SessionIdentity(SessionSource.CLAUDE, "one"),
+                    outcome=ExecutionOutcome.SUCCESS,
+                ),
+                ConvergenceItem(
+                    id=SessionIdentity(SessionSource.CODEX, "two"),
+                    outcome=ExecutionOutcome.SUCCESS,
+                ),
             ),
         )
 
@@ -191,11 +227,13 @@ class SessionsTests(unittest.TestCase):
             call="test",
             tool="pytest",
         )
-        child = self.sessions.by_id["claude:child"]
+        child = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "child")]
         self.assertEqual(child.goal, "Refactor batch inserts")
-        self.assertEqual(child.parent, "claude:main")
+        self.assertEqual(child.parent, SessionIdentity(SessionSource.CLAUDE, "main"))
         self.assertIn("test", child.calls)
-        self.assertFalse(self.sessions.by_id["claude:main"].calls)
+        self.assertFalse(
+            self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")].calls
+        )
         self.event(
             "progress",
             session="child",
@@ -225,10 +263,39 @@ class SessionsTests(unittest.TestCase):
             progress="Reading the API",
         )
         self.assertEqual(len(self.sessions.by_id), 2)
-        self.assertIn("read", self.sessions.by_id["claude:child"].calls)
+        self.assertIn(
+            "read",
+            self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "child")].calls,
+        )
         self.event("tool_done", session="child-thread", call="read")
         self.assertTrue(self.sessions.working)
-        self.assertFalse(self.sessions.by_id["claude:child"].calls)
+        self.assertFalse(
+            self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "child")].calls
+        )
+
+    def test_alias_merge_keeps_the_canonical_identity_when_adopting_active_work(
+        self,
+    ) -> None:
+        self.event("session_start", session="native")
+        self.event("intent", session="temporary", goal="Inspect the parser")
+        self.event("tool_start", session="temporary", call="read", tool="Read")
+        self.event("progress", session="temporary", progress="Checking escaped quotes")
+        temporary = self.sessions.by_id[
+            SessionIdentity(SessionSource.CLAUDE, "temporary")
+        ]
+
+        self.event("session_start", session="native", aliases=["temporary"])
+
+        identity = SessionIdentity(SessionSource.CLAUDE, "native")
+        retained = self.sessions.by_id[identity]
+        self.assertIs(retained, temporary)
+        self.assertEqual(retained.id, identity)
+        self.assertEqual(set(self.sessions.by_id), {identity})
+        self.assertEqual(retained.goal, "Inspect the parser")
+        self.assertEqual(retained.progress, "Checking escaped quotes")
+        self.assertEqual(set(retained.calls), {"read"})
+        self.event("tool_done", session="temporary", call="read")
+        self.assertFalse(retained.calls)
 
     def test_alias_merge_preserves_the_latest_unanswered_question(self) -> None:
         self.event("intent", session="native", goal="Choose a strategy")
@@ -242,10 +309,12 @@ class SessionsTests(unittest.TestCase):
         self.event(
             "waiting", session="temporary", call="second", progress="Choose a target"
         )
-        temporary = self.sessions.by_id["claude:temporary"]
+        temporary = self.sessions.by_id[
+            SessionIdentity(SessionSource.CLAUDE, "temporary")
+        ]
         temporary.last_check_in = self.clock()
         self.event("session_start", session="native", aliases=["temporary"])
-        lane = self.sessions.by_id["claude:native"]
+        lane = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "native")]
         self.assertTrue(lane.waiting)
         self.assertFalse(lane.working)
         self.assertEqual(lane.waiting_call, "second")
@@ -270,7 +339,7 @@ class SessionsTests(unittest.TestCase):
             aliases=["child-thread"],
             goal="Check parser",
         )
-        child = self.sessions.by_id["claude:child"]
+        child = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "child")]
         self.assertTrue(child.active)
         self.assertTrue(self.sessions.failed)
         self.assertEqual(require(child.failure).activity, "testing")
@@ -283,15 +352,23 @@ class SessionsTests(unittest.TestCase):
         self.event("tool_start", session="child-thread", call="tests", tool="pytest")
         self.event("tool_error", session="child-thread", call="tests")
         self.event("turn_done", session="child-thread")
-        self.assertEqual(self.sessions.by_id["claude:child-thread"].outcome, "error")
+        self.assertEqual(
+            self.sessions.by_id[
+                SessionIdentity(SessionSource.CLAUDE, "child-thread")
+            ].outcome,
+            "error",
+        )
         self.event("subagent_done", session="child", aliases=["child-thread"])
-        child = self.sessions.by_id["claude:child"]
+        child = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "child")]
         self.assertTrue(child.finished)
         self.assertEqual(child.outcome, "error")
         self.assertEqual(require(child.failure).activity, "testing")
         self.assertEqual(require(child.failure).generation, child.generation)
         snapshot = self.sessions.activity_view().sessions
-        self.assertEqual([lane.id for lane in snapshot], ["claude:child"])
+        self.assertEqual(
+            [lane.id for lane in snapshot],
+            [SessionIdentity(SessionSource.CLAUDE, "child")],
+        )
         self.assertEqual(snapshot[0].outcome, "error")
         self.assertFalse(self.sessions.clean_convergence)
 
@@ -313,7 +390,9 @@ class SessionsTests(unittest.TestCase):
                     tool=path,
                     tool_name=name,
                 )
-                lane = self.sessions.by_id[f"claude:{session}"]
+                lane = self.sessions.by_id[
+                    SessionIdentity(SessionSource.CLAUDE, session)
+                ]
                 self.assertEqual(lane.calls["file"].activity, expected)
                 self.event("tool_error", session=session, call="file")
                 self.assertEqual(require(lane.failure).activity, expected)
@@ -350,7 +429,9 @@ class SessionsTests(unittest.TestCase):
                     tool=command,
                     tool_name="exec_command",
                 )
-                lane = self.sessions.by_id[f"claude:{session}"]
+                lane = self.sessions.by_id[
+                    SessionIdentity(SessionSource.CLAUDE, session)
+                ]
                 self.assertEqual(lane.phase, "editing")
                 self.event("tool_error", session=session, call="shell")
                 self.assertEqual(require(lane.failure).activity, "editing")
@@ -380,7 +461,10 @@ class SessionsTests(unittest.TestCase):
                     tool_name="exec_command",
                 )
                 self.assertEqual(
-                    self.sessions.by_id[f"claude:{session}"].phase, expected
+                    self.sessions.by_id[
+                        SessionIdentity(SessionSource.CLAUDE, session)
+                    ].phase,
+                    expected,
                 )
 
     def test_terminal_failure_closes_pending_calls_without_diagnostic_progress(
@@ -398,10 +482,10 @@ class SessionsTests(unittest.TestCase):
         self.assertFalse(self.sessions.working)
         self.assertFalse(self.sessions.active)
         self.assertFalse(self.sessions.clean_convergence)
-        lane = self.sessions.by_id["claude:main"]
+        lane = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")]
         self.assertEqual(lane.outcome, "error")
         self.assertEqual(lane.progress, "")
-        self.assertEqual(require(lane.failure).activity, "harness")
+        self.assertEqual(require(lane.failure).activity, "source")
         self.assertIsNone(self.event("tool_done", call="test"))
         self.assertIsNone(self.event("tool_start", call="late", tool="Read"))
 
@@ -416,58 +500,66 @@ class SessionsTests(unittest.TestCase):
         )
         self.assertTrue(self.sessions.working)
         self.assertEqual(
-            require(self.memory.context("claude:main")).recent_requests[-1],
+            require(
+                self.memory.context(SessionIdentity(SessionSource.CLAUDE, "main"))
+            ).recent_requests[-1],
             "Second goal",
         )
 
     def test_completed_codex_child_resumes_with_a_newer_tool_turn(self) -> None:
         first_turn = "01a164f8-cc78-7db0-9431-d81a5bcdf270"
         next_turn = "01a16500-0096-7432-8fa1-05603ac2a0e2"
-        self.event("intent", harness="codex", goal="Review the changes", turn="parent")
-        self.event("subagent_start", harness="codex", session="child", parent="main")
+        self.event("intent", source="codex", goal="Review the changes", turn="parent")
+        self.event("subagent_start", source="codex", session="child", parent="main")
         self.event(
             "tool_start",
-            harness="codex",
+            source="codex",
             session="child",
             turn=first_turn,
             call="first",
         )
         self.event(
-            "tool_done", harness="codex", session="child", turn=first_turn, call="first"
+            "tool_done", source="codex", session="child", turn=first_turn, call="first"
         )
-        self.event("subagent_done", harness="codex", session="child", parent="main")
-        child = self.sessions.by_id["codex:child"]
+        self.event("subagent_done", source="codex", session="child", parent="main")
+        child = self.sessions.by_id[SessionIdentity(SessionSource.CODEX, "child")]
         generation = child.generation
         result = self.event(
-            "tool_start", harness="codex", session="child", turn=next_turn, call="next"
+            "tool_start", source="codex", session="child", turn=next_turn, call="next"
         )
         self.assertIn(
-            ExecutionEvidence("codex:child", "resumed", None, None, None),
+            ExecutionEvidence(
+                SessionIdentity(SessionSource.CODEX, "child"),
+                "resumed",
+                None,
+                None,
+                None,
+            ),
             require(result).observation.reports,
         )
         self.assertTrue(child.working)
         self.assertEqual(child.turn, next_turn)
         self.assertEqual(child.generation, generation + 1)
-        parent = self.sessions.by_id["codex:main"]
+        parent = self.sessions.by_id[SessionIdentity(SessionSource.CODEX, "main")]
         self.assertEqual(parent.turn, "parent")
         self.assertTrue(parent.active)
-        self.assertEqual(child.parent, "codex:main")
+        self.assertEqual(child.parent, SessionIdentity(SessionSource.CODEX, "main"))
         self.assertEqual(child.goal, "Review the changes")
         self.assertEqual(set(child.calls), {"next"})
         self.assertIsNone(
-            self.event("turn_done", harness="codex", session="child", turn=first_turn)
+            self.event("turn_done", source="codex", session="child", turn=first_turn)
         )
         self.assertIsNotNone(
             self.event(
                 "tool_done",
-                harness="codex",
+                source="codex",
                 session="child",
                 turn=next_turn,
                 call="next",
             )
         )
         result = require(
-            self.event("subagent_done", harness="codex", session="child", parent="main")
+            self.event("subagent_done", source="codex", session="child", parent="main")
         )
         execution = next(
             report
@@ -480,7 +572,7 @@ class SessionsTests(unittest.TestCase):
         self.assertIsNone(
             self.event(
                 "tool_start",
-                harness="codex",
+                source="codex",
                 session="child",
                 turn=first_turn,
                 call="late",
@@ -505,27 +597,29 @@ class SessionsTests(unittest.TestCase):
             ("codex", "", first_turn, next_turn),
             ("claude", "main", first_turn, next_turn),
         )
-        for index, (harness, parent, previous, incoming) in enumerate(cases):
-            with self.subTest(harness=harness, parent=parent, incoming=incoming):
+        for index, (source, parent, previous, incoming) in enumerate(cases):
+            with self.subTest(source=source, parent=parent, incoming=incoming):
                 subject = f"subject-{index}"
                 self.event(
                     "intent",
-                    harness=harness,
+                    source=source,
                     session=subject,
                     parent=parent,
                     turn=previous,
                 )
-                self.event("turn_done", harness=harness, session=subject, turn=previous)
+                self.event("turn_done", source=source, session=subject, turn=previous)
                 self.assertIsNone(
                     self.event(
                         "tool_start",
-                        harness=harness,
+                        source=source,
                         session=subject,
                         turn=incoming,
                         call="late",
                     )
                 )
-                session = self.sessions.by_id[f"{harness}:{subject}"]
+                session = self.sessions.by_id[
+                    SessionIdentity(SessionSource(source), subject)
+                ]
                 self.assertFalse(session.active)
                 self.assertEqual(session.turn, previous)
 
@@ -533,7 +627,7 @@ class SessionsTests(unittest.TestCase):
         self.event("tool_start", call="checks", tool="pytest")
         result = self.event("tool_done", call="checks", outcome="error")
         self.assertTrue(require(result).failure)
-        lane = self.sessions.by_id["claude:main"]
+        lane = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")]
         self.assertEqual(require(lane.failure).activity, "testing")
         self.assertFalse(require(lane.failure).resolved)
         self.event("turn_done")
@@ -550,7 +644,13 @@ class SessionsTests(unittest.TestCase):
         self.event("tool_start", call="retry", tool="pytest")
         self.event("tool_done", call="retry", progress="Twenty tests passed")
         self.assertFalse(self.sessions.failed)
-        self.assertTrue(require(self.sessions.by_id["claude:main"].failure).resolved)
+        self.assertTrue(
+            require(
+                self.sessions.by_id[
+                    SessionIdentity(SessionSource.CLAUDE, "main")
+                ].failure
+            ).resolved
+        )
         self.event("turn_done")
         self.assertTrue(self.sessions.clean_convergence)
 
@@ -564,7 +664,9 @@ class SessionsTests(unittest.TestCase):
                 detail=f"SECRET {index}",
                 error_signature=f"HASH {index}",
             )
-        failure = self.sessions.by_id["claude:main"].failure
+        failure = self.sessions.by_id[
+            SessionIdentity(SessionSource.CLAUDE, "main")
+        ].failure
         self.assertEqual(require(failure).activity, "testing")
         self.assertEqual(require(failure).count, 2)
         self.assertFalse(hasattr(require(failure), "detail"))
@@ -572,19 +674,52 @@ class SessionsTests(unittest.TestCase):
         self.event("tool_start", call="build", tool="cargo build")
         self.event("tool_error", call="build")
         self.assertEqual(
-            require(self.sessions.by_id["claude:main"].failure).activity, "building"
+            require(
+                self.sessions.by_id[
+                    SessionIdentity(SessionSource.CLAUDE, "main")
+                ].failure
+            ).activity,
+            "building",
         )
-        self.assertEqual(require(self.sessions.by_id["claude:main"].failure).count, 1)
+        self.assertEqual(
+            require(
+                self.sessions.by_id[
+                    SessionIdentity(SessionSource.CLAUDE, "main")
+                ].failure
+            ).count,
+            1,
+        )
         self.event("tool_start", call="test-again", tool="pytest")
         self.event("tool_error", call="test-again")
-        self.assertEqual(require(self.sessions.by_id["claude:main"].failure).count, 3)
+        self.assertEqual(
+            require(
+                self.sessions.by_id[
+                    SessionIdentity(SessionSource.CLAUDE, "main")
+                ].failure
+            ).count,
+            3,
+        )
         self.event("tool_start", session="other", call="test", tool="pytest")
         self.event("tool_error", session="other", call="test")
-        self.assertEqual(require(self.sessions.by_id["claude:other"].failure).count, 1)
+        self.assertEqual(
+            require(
+                self.sessions.by_id[
+                    SessionIdentity(SessionSource.CLAUDE, "other")
+                ].failure
+            ).count,
+            1,
+        )
         self.event("intent", goal="Check another task", turn="second")
         self.event("tool_start", call="fresh", tool="pytest")
         self.event("tool_error", call="fresh")
-        self.assertEqual(require(self.sessions.by_id["claude:main"].failure).count, 1)
+        self.assertEqual(
+            require(
+                self.sessions.by_id[
+                    SessionIdentity(SessionSource.CLAUDE, "main")
+                ].failure
+            ).count,
+            1,
+        )
 
     def test_success_clears_only_its_matching_activity(self) -> None:
         self.event("intent", goal="Validate changes")
@@ -599,23 +734,36 @@ class SessionsTests(unittest.TestCase):
         self.event("tool_done", call="build-retry")
         self.assertFalse(self.sessions.failed)
 
-    def test_command_and_harness_failures_remain_broad_and_cancellation_is_separate(
+    def test_command_and_source_failures_remain_broad_and_cancellation_is_separate(
         self,
     ) -> None:
         self.event("tool_start", call="script", tool="./release.sh")
         self.event("tool_error", call="script", detail="SECRET script diagnostics")
         self.assertEqual(
-            require(self.sessions.by_id["claude:main"].failure).activity, "command"
+            require(
+                self.sessions.by_id[
+                    SessionIdentity(SessionSource.CLAUDE, "main")
+                ].failure
+            ).activity,
+            "command",
         )
-        self.event("turn_error", detail="SECRET harness diagnostics")
+        self.event("turn_error", detail="SECRET source diagnostics")
         self.assertEqual(
-            require(self.sessions.by_id["claude:main"].failure).activity, "harness"
+            require(
+                self.sessions.by_id[
+                    SessionIdentity(SessionSource.CLAUDE, "main")
+                ].failure
+            ).activity,
+            "source",
         )
         self.assertNotIn("SECRET", json.dumps(asdict(self.sessions.activity_view())))
         self.event("intent", goal="Fresh task", turn="fresh")
         self.event("interrupt")
         self.assertFalse(self.sessions.failed)
-        self.assertEqual(self.sessions.by_id["claude:main"].outcome, "cancelled")
+        self.assertEqual(
+            self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")].outcome,
+            "cancelled",
+        )
 
     def test_first_prompt_survives_followups_and_recent_requests_keep_four(
         self,
@@ -639,18 +787,24 @@ class SessionsTests(unittest.TestCase):
         self,
     ) -> None:
         self.event("intent", goal="Compress the workflow", turn="native-turn")
-        generation = self.sessions.by_id["claude:main"].generation
+        generation = self.sessions.by_id[
+            SessionIdentity(SessionSource.CLAUDE, "main")
+        ].generation
         result = self.event(
             "intent", goal="Explain the counter limits", turn="native-turn"
         )
         self.assertIsNotNone(result)
-        lane = self.sessions.by_id["claude:main"]
+        lane = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")]
         self.assertEqual(
-            require(self.memory.context("claude:main")).initial_request,
+            require(
+                self.memory.context(SessionIdentity(SessionSource.CLAUDE, "main"))
+            ).initial_request,
             "Compress the workflow",
         )
         self.assertEqual(
-            require(self.memory.context("claude:main")).recent_requests,
+            require(
+                self.memory.context(SessionIdentity(SessionSource.CLAUDE, "main"))
+            ).recent_requests,
             ["Compress the workflow", "Explain the counter limits"],
         )
         self.assertGreater(lane.generation, generation)
@@ -672,7 +826,7 @@ class SessionsTests(unittest.TestCase):
             for lane in capture_snapshot(
                 self.sessions.activity_view(), memory=self.memory
             ).sessions
-            if lane.id == "claude:child"
+            if lane.id == SessionIdentity(SessionSource.CLAUDE, "child")
         )
         self.assertEqual(child.initial_request, "Inspect parser behavior")
         self.assertIn("Check edge cases", child.recent_requests)
@@ -704,16 +858,20 @@ class SessionsTests(unittest.TestCase):
         self.event("subagent_start", session="grandchild", parent="child")
         self.event("tool_start", session="grandchild", call="test", tool="test")
         self.event(
-            "tool_start", session="other", harness="cursor", call="build", tool="build"
+            "tool_start", session="other", source="cursor", call="build", tool="build"
         )
         result = self.event("interrupt")
         self.assertFalse(require(result).convergence)
         self.assertTrue(self.sessions.working)
-        for key in ["claude:main", "claude:child", "claude:grandchild"]:
+        for key in [
+            SessionIdentity(SessionSource.CLAUDE, "main"),
+            SessionIdentity(SessionSource.CLAUDE, "child"),
+            SessionIdentity(SessionSource.CLAUDE, "grandchild"),
+        ]:
             self.assertEqual(self.sessions.by_id[key].outcome, "cancelled")
             self.assertFalse(self.sessions.by_id[key].calls)
-        self.event("tool_done", session="other", harness="cursor", call="build")
-        result = self.event("turn_done", session="other", harness="cursor")
+        self.event("tool_done", session="other", source="cursor", call="build")
+        result = self.event("turn_done", session="other", source="cursor")
         self.assertTrue(require(result).convergence)
         self.assertFalse(self.sessions.clean_convergence)
 
@@ -726,7 +884,7 @@ class SessionsTests(unittest.TestCase):
             self.event(
                 "tool_start",
                 session=session,
-                harness="cli",
+                source="cli",
                 call="command",
                 tool="build",
                 manual=True,
@@ -735,13 +893,18 @@ class SessionsTests(unittest.TestCase):
             result = self.event(
                 kind,
                 session=session,
-                harness="cli",
+                source="cli",
                 call="command",
                 manual=True,
                 outcome=outcome,
             )
             self.assertTrue(require(result).convergence)
-            self.assertEqual(self.sessions.by_id[f"cli:{session}"].outcome, outcome)
+            self.assertEqual(
+                self.sessions.by_id[
+                    SessionIdentity(SessionSource.COMMAND, session)
+                ].outcome,
+                outcome,
+            )
             self.assertEqual(self.sessions.clean_convergence, outcome == "success")
 
     def test_native_prompt_without_turn_id_resets_cancelled_turn_before_stop(
@@ -750,7 +913,7 @@ class SessionsTests(unittest.TestCase):
         self.event("intent", goal="Try the build")
         self.event("tool_start", call="first", tool="cargo build")
         self.event("tool_done", call="first", outcome="cancelled")
-        lane = self.sessions.by_id["claude:main"]
+        lane = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")]
         generation = lane.generation
         self.assertTrue(lane.active)
         self.assertTrue(lane.cancelled)
@@ -758,10 +921,15 @@ class SessionsTests(unittest.TestCase):
         self.assertGreater(lane.generation, generation)
         self.assertFalse(lane.cancelled)
         self.assertEqual(
-            require(self.memory.context("claude:main")).initial_request, "Try the build"
+            require(
+                self.memory.context(SessionIdentity(SessionSource.CLAUDE, "main"))
+            ).initial_request,
+            "Try the build",
         )
         self.assertEqual(
-            require(self.memory.context("claude:main")).recent_requests[-1],
+            require(
+                self.memory.context(SessionIdentity(SessionSource.CLAUDE, "main"))
+            ).recent_requests[-1],
             "Try the build again",
         )
         self.event("tool_start", call="retry", tool="cargo build")
@@ -783,7 +951,7 @@ class SessionsTests(unittest.TestCase):
         self.event(
             "tool_start", session="child", call="test", tool="pytest", turn="child-turn"
         )
-        child = self.sessions.by_id["claude:child"]
+        child = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "child")]
         generation = child.generation
         self.event(
             "subagent_start",
@@ -798,7 +966,10 @@ class SessionsTests(unittest.TestCase):
         self.assertTrue(self.sessions.working)
         self.event("tool_done", session="child", call="test", turn="child-turn")
         self.assertFalse(child.calls)
-        self.assertEqual(self.sessions.by_id["claude:main"].turn, "parent-turn")
+        self.assertEqual(
+            self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")].turn,
+            "parent-turn",
+        )
 
     def test_unknown_tool_result_preserves_waiting_and_matching_reply_resumes(
         self,
@@ -821,7 +992,9 @@ class SessionsTests(unittest.TestCase):
         )
         self.assertFalse(require(result).failure)
         self.assertFalse(require(result).convergence)
-        self.assertEqual(require(result).session, "claude:main")
+        self.assertEqual(
+            require(result).session, SessionIdentity(SessionSource.CLAUDE, "main")
+        )
         snapshot = self.sessions.activity_view()
         self.assertFalse(snapshot.sessions[0].waiting_for_input)
         self.assertEqual(snapshot.sessions[0].progress, "Developer chose batching")
@@ -833,7 +1006,7 @@ class SessionsTests(unittest.TestCase):
         self.event("intent", goal="Build it")
         self.clock.advance(10)
         self.event("turn_done", outcome="success", progress="Checks pass")
-        session = self.sessions.by_id["claude:main"]
+        session = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")]
         ended, changed_at = session.ended, session.changed_at
         self.clock.advance(30)
         self.event("session_end")
@@ -850,7 +1023,7 @@ class SessionsTests(unittest.TestCase):
         self.event("intent", goal="Build it")
         self.event("tool_start", call="build", tool="build")
         self.event("session_end")
-        session = self.sessions.by_id["claude:main"]
+        session = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")]
         self.assertFalse(session.active)
         self.assertFalse(session.calls)
         self.assertIsNone(session.outcome)
@@ -866,7 +1039,9 @@ class SessionsTests(unittest.TestCase):
         self.assertTrue(self.sessions.prune())
         self.assertFalse(self.sessions.working)
         self.assertFalse(self.sessions.active)
-        self.assertIsNone(self.sessions.by_id["claude:main"].outcome)
+        self.assertIsNone(
+            self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")].outcome
+        )
         self.assertIsNone(self.sessions.convergence)
         self.clock.now += 120
         self.sessions.prune()
@@ -877,15 +1052,24 @@ class SessionsTests(unittest.TestCase):
         self.event("tool_start", call="build", tool="Build")
         self.clock.advance(299)
         self.event(
-            "tool_start", session="other", harness="codex", call="lint", tool="Lint"
+            "tool_start", session="other", source="codex", call="lint", tool="Lint"
         )
         self.assertEqual(self.sessions.check_in_due(300), [])
         self.clock.advance(1)
-        self.assertEqual(self.sessions.check_in_due(300), ["claude:main"])
+        self.assertEqual(
+            self.sessions.check_in_due(300),
+            [SessionIdentity(SessionSource.CLAUDE, "main")],
+        )
         snapshots = {lane.id: lane for lane in self.sessions.activity_view().sessions}
-        self.assertEqual(snapshots["claude:main"].quiet_seconds, 300)
-        self.assertEqual(snapshots["codex:other"].quiet_seconds, 1)
-        self.assertIsNone(snapshots["claude:main"].waiting_seconds)
+        self.assertEqual(
+            snapshots[SessionIdentity(SessionSource.CLAUDE, "main")].quiet_seconds, 300
+        )
+        self.assertEqual(
+            snapshots[SessionIdentity(SessionSource.CODEX, "other")].quiet_seconds, 1
+        )
+        self.assertIsNone(
+            snapshots[SessionIdentity(SessionSource.CLAUDE, "main")].waiting_seconds
+        )
         self.event("progress", progress="Build still running")
         self.assertEqual(self.sessions.check_in_due(300), [])
 
@@ -911,7 +1095,10 @@ class SessionsTests(unittest.TestCase):
         self.event("waiting", call="question", tool="AskUserQuestion")
         self.assertEqual(self.sessions.check_in_due(300), [])
         self.clock.advance(1)
-        self.assertEqual(self.sessions.check_in_due(300), ["claude:main"])
+        self.assertEqual(
+            self.sessions.check_in_due(300),
+            [SessionIdentity(SessionSource.CLAUDE, "main")],
+        )
         snapshot = capture_snapshot(
             self.sessions.activity_view(), memory=self.memory
         ).sessions[0]
@@ -929,7 +1116,10 @@ class SessionsTests(unittest.TestCase):
         self.assertEqual(self.sessions.check_in_due(300), [])
         self.assertEqual(self.sessions.activity_view().sessions[0].waiting_seconds, 1)
         self.clock.advance(299)
-        self.assertEqual(self.sessions.check_in_due(300), ["claude:main"])
+        self.assertEqual(
+            self.sessions.check_in_due(300),
+            [SessionIdentity(SessionSource.CLAUDE, "main")],
+        )
 
     def test_accepted_activity_resumes_waiting_without_matching_the_question(
         self,
@@ -954,7 +1144,7 @@ class SessionsTests(unittest.TestCase):
                 snapshot = next(
                     item
                     for item in self.sessions.activity_view().sessions
-                    if item.id == f"claude:{kind}"
+                    if item.id == SessionIdentity(SessionSource.CLAUDE, kind)
                 )
                 self.assertFalse(snapshot.waiting_for_input)
                 self.assertIsNone(snapshot.waiting_seconds)
@@ -999,19 +1189,28 @@ class SessionsTests(unittest.TestCase):
         self.event("intent", turn="first", goal="Run checks")
         self.event("tool_start", turn="first", call="checks", tool="pytest")
         self.clock.advance(300)
-        self.assertEqual(self.sessions.check_in_due(300), ["claude:main"])
-        lane = self.sessions.by_id["claude:main"]
+        self.assertEqual(
+            self.sessions.check_in_due(300),
+            [SessionIdentity(SessionSource.CLAUDE, "main")],
+        )
+        lane = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")]
         lane.last_check_in = self.clock()
         self.clock.advance(299)
         self.assertEqual(self.sessions.check_in_due(300), [])
         self.clock.advance(1)
-        self.assertEqual(self.sessions.check_in_due(300), ["claude:main"])
+        self.assertEqual(
+            self.sessions.check_in_due(300),
+            [SessionIdentity(SessionSource.CLAUDE, "main")],
+        )
         self.event("intent", turn="second", goal="Run another build")
         self.event("tool_start", turn="second", call="build", tool="make")
         self.assertIsNone(lane.last_check_in)
         self.assertEqual(self.sessions.check_in_due(300), [])
         self.clock.advance(300)
-        self.assertEqual(self.sessions.check_in_due(300), ["claude:main"])
+        self.assertEqual(
+            self.sessions.check_in_due(300),
+            [SessionIdentity(SessionSource.CLAUDE, "main")],
+        )
 
     def test_idle_completed_cancelled_and_stale_sessions_do_not_get_check_ins(
         self,
@@ -1025,7 +1224,9 @@ class SessionsTests(unittest.TestCase):
         self.event("tool_start", session="stale", call="build", tool="Build")
         self.clock.advance(60)
         self.sessions.prune()
-        self.assertIsNone(self.sessions.by_id["claude:stale"].outcome)
+        self.assertIsNone(
+            self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "stale")].outcome
+        )
         self.assertEqual(self.sessions.check_in_due(30), [])
 
 

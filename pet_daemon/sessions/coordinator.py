@@ -4,8 +4,9 @@ from dataclasses import asdict
 from ..behavior.controller import Behavior
 from ..config import Config
 from ..domain import PetState, SpeechReason
+from ..identity import SessionIdentity
 from ..logging import get_logger
-from ..runtime import HookEvent, RandomSource, ReactionTrigger, Trigger
+from ..runtime import HookEvent, HookEventKind, RandomSource, ReactionTrigger, Trigger
 from ..sentiment import (
     COOLDOWN_SECONDS,
     DUPLICATE_SECONDS,
@@ -14,7 +15,7 @@ from ..sentiment import (
     analyzer,
     sentiment_score,
 )
-from .reactions import SessionReaction, SessionReactions
+from .reactions import ReactionKind, SessionReaction, SessionReactions
 from .tracking import AgentSession, Sessions, SessionUpdate
 
 log = get_logger("pet-daemon")
@@ -64,12 +65,12 @@ class ActivityCoordinator:
             key = result.session
             session = self.sessions.by_id[key]
             for reaction in self.reactions.handle(packet, result, self.sessions):
-                if session.parent and reaction.kind != "waiting":
+                if session.parent and reaction.kind != ReactionKind.WAITING:
                     continue
                 if not sleeping:
                     self.behavior.react(reaction.kind, self.sessions, key)
                 self.queue_reaction(reaction, packet)
-            if packet.event == "intent" and not session.parent:
+            if packet.event == HookEventKind.INTENT and not session.parent:
                 self.react_to_sentiment(packet, key, session, sleeping)
             if not sleeping:
                 self.behavior.tick(self.activity(), self.sessions)
@@ -84,18 +85,31 @@ class ActivityCoordinator:
 
     def queue_reaction(self, reaction: SessionReaction, hook: HookEvent) -> None:
         trigger = ReactionTrigger(reaction)
-        if reaction.kind in ("trouble", "failure"):
+        if reaction.kind in (ReactionKind.TROUBLE, ReactionKind.FAILURE):
             self.error_until = self.clock() + self.config.behavior.error_seconds
             self.queue(SpeechReason.FAILURE, trigger)
-        elif reaction.kind == "start" and hook.event in ("intent", "subagent_start"):
+        elif reaction.kind == ReactionKind.START and hook.event in (
+            HookEventKind.INTENT,
+            HookEventKind.SUBAGENT_START,
+        ):
             self.queue(SpeechReason.PROMPT, trigger)
-        elif reaction.kind == "waiting":
-            self.queue(SpeechReason.CHECK_IN, trigger)
-        elif reaction.kind in ("success", "cancelled", "recovery"):
+        elif reaction.kind == ReactionKind.WAITING:
+            session = self.sessions.by_id[reaction.session]
+            if session.waiting_for_input:
+                self.queue(SpeechReason.CHECK_IN, trigger)
+        elif reaction.kind in (
+            ReactionKind.SUCCESS,
+            ReactionKind.CANCELLED,
+            ReactionKind.RECOVERY,
+        ):
             self.queue(SpeechReason.COMPLETION, trigger)
 
     def react_to_sentiment(
-        self, packet: HookEvent, key: str, session: AgentSession, sleeping: bool
+        self,
+        packet: HookEvent,
+        key: SessionIdentity,
+        session: AgentSession,
+        sleeping: bool,
     ) -> None:
         if not self.config.behavior.sentiment_reactions:
             return

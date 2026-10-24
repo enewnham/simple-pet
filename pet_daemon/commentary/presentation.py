@@ -9,6 +9,7 @@ from ..domain import (
     ExecutionOutcome,
     PullRequestState,
 )
+from ..identity import SessionIdentity
 from ..work.models import ReportContext
 from ..work.views import (
     AssociationView,
@@ -83,7 +84,7 @@ class WorkRecord(TypedDict):
 
 
 class AgentSessionRecord(TypedDict):
-    session: str
+    session: SessionIdentity
     scope: str
     requests: tuple[PresentedEvidence, ...]
     activity: tuple[PresentedEvidence, ...]

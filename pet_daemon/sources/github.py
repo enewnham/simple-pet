@@ -4,6 +4,7 @@ from typing import Required, TypedDict
 from urllib.parse import urlsplit
 
 from ..domain import ArtifactKind, EvidenceSource, LinkRelationship, PullRequestState
+from ..repository_identity import RemoteRepository, RepositoryIdentity
 from ..work.models import RelatedLink
 from ..work.observations import PullRequest
 from .git import CommandPath, RunCommand, canonical_repository, command
@@ -25,7 +26,7 @@ class GitHubPullRequest(TypedDict, total=False):
     baseRefOid: str
 
 
-def pull_request_identity(url: str) -> tuple[str, int | None]:
+def pull_request_identity(url: str) -> tuple[RemoteRepository | None, int | None]:
     parsed = urlsplit(url)
     parts = parsed.path.strip("/").split("/")
     if (
@@ -37,18 +38,20 @@ def pull_request_identity(url: str) -> tuple[str, int | None]:
         return canonical_repository(f"{parsed.hostname}/{parts[0]}/{parts[1]}"), int(
             parts[3]
         )
-    return "", None
+    return None, None
 
 
 def _pull_request(data: GitHubPullRequest) -> PullRequest:
     repository, _ = pull_request_identity(data["url"])
+    if repository is None:
+        raise ValueError("Pull request URL does not identify a repository")
     owner = data.get("headRepositoryOwner") or {}
     head_repository = data.get("headRepository") or {}
     name = head_repository.get("nameWithOwner")
     if not name and owner.get("login") and head_repository.get("name"):
         name = f"{owner['login']}/{head_repository['name']}"
     host = urlsplit(data["url"]).hostname
-    head_identity = canonical_repository(f"{host}/{name}") if name and host else ""
+    head_identity = canonical_repository(f"{host}/{name}") if name and host else None
     return PullRequest(
         number=data["number"],
         url=data["url"],
@@ -69,7 +72,7 @@ def _pull_request(data: GitHubPullRequest) -> PullRequest:
 async def _stack_links(
     pr: PullRequest, path: CommandPath, run: RunCommand
 ) -> PullRequest:
-    host, slug = pr.repository.split("/", 1)
+    host, slug = pr.repository.value.split("/", 1)
     try:
         output = await run(
             "gh",
@@ -102,7 +105,7 @@ async def _stack_links(
             links.append(
                 RelatedLink(
                     kind=ArtifactKind.PULL_REQUEST,
-                    ref=f"https://{pr.repository}/pull/{item['number']}",
+                    ref=f"https://{pr.repository.value}/pull/{item['number']}",
                     relationship=LinkRelationship.STACK_ENTRY,
                     source=EvidenceSource.GITHUB_STACK,
                     stack=stack["number"],
@@ -130,7 +133,7 @@ async def observe(
     branch: str,
     number: int | None = None,
     run: RunCommand = command,
-    repository: str = "",
+    repository: RepositoryIdentity | None = None,
     url: str = "",
     include_links: bool = True,
 ) -> PullRequest | None:
@@ -140,15 +143,17 @@ async def observe(
     )
     if number is not None or url:
         args = ["gh", "pr", "view", url or str(number), "--json", fields]
-        if not url and repository and not repository.startswith("local:"):
-            args.extend(("--repo", repository))
+        if not url and isinstance(repository, RemoteRepository):
+            args.extend(("--repo", repository.value))
         data = json.loads(await run(*args, cwd=path))
         pr = _pull_request(data)
         return await _stack_links(pr, path, run) if include_links else pr
-    if not repository or repository.startswith("local:"):
-        raise RuntimeError("GitHub repository identity is unavailable")
+    if not isinstance(repository, RemoteRepository):
+        raise TypeError("GitHub repository identity is unavailable")
     metadata = json.loads(
-        await run("gh", "repo", "view", repository, "--json", "isFork,parent", cwd=path)
+        await run(
+            "gh", "repo", "view", repository.value, "--json", "isFork,parent", cwd=path
+        )
     )
     query_repository = repository
     if metadata.get("isFork"):
@@ -158,8 +163,8 @@ async def observe(
             f"{owner}/{parent['name']}" if owner and parent.get("name") else ""
         )
         if name:
-            host = repository.split("/", 1)[0]
-            query_repository = canonical_repository(f"{host}/{name}")
+            host = repository.value.split("/", 1)[0]
+            query_repository = RemoteRepository(f"{host}/{name}".lower())
     output = await run(
         "gh",
         "pr",
@@ -171,7 +176,7 @@ async def observe(
         "--limit",
         "100",
         "--repo",
-        query_repository,
+        query_repository.value,
         "--json",
         fields,
         cwd=path,

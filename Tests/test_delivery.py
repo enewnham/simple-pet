@@ -8,7 +8,8 @@ from pet_daemon.delivery import (
     SpeechMessage,
     SpeechPacket,
 )
-from pet_daemon.domain import SpeechReason
+from pet_daemon.domain import SessionSource, SpeechReason
+from pet_daemon.identity import SessionIdentity
 
 
 class DeliveryTests(unittest.TestCase):
@@ -28,7 +29,7 @@ class DeliveryTests(unittest.TestCase):
             10,
             SpeechReason.ROUTINE,
             "selection",
-            "work",
+            SessionIdentity(SessionSource.COMMAND, "work"),
             "one",
         )
 
@@ -58,7 +59,7 @@ class DeliveryTests(unittest.TestCase):
                 (item.message.subject_id, item.message.revision, item.status)
                 for item in self.outcomes
             ],
-            [("work", "one", "accepted")],
+            [(SessionIdentity(SessionSource.COMMAND, "work"), "one", "accepted")],
         )
 
     def test_missing_acknowledgment_retries_the_same_message_once(self) -> None:

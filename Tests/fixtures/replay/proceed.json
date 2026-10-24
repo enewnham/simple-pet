@@ -5,7 +5,7 @@
     {
       "packets": [
         {
-          "harness": "codex",
+          "source": "codex",
           "session": "root",
           "event": "intent",
           "goal": "Build a local commentary explorer."
@@ -15,7 +15,7 @@
     {
       "packets": [
         {
-          "harness": "codex",
+          "source": "codex",
           "session": "root",
           "event": "intent",
           "goal": "Proceed."

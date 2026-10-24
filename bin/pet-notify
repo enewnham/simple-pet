@@ -124,7 +124,7 @@ def main() -> None:
     elif args.command == "intent":
         payload = {
             "kind": "event",
-            "harness": "cli",
+            "source": "cli",
             "session": args.session,
             "event": "intent",
             "goal": args.text,
@@ -135,7 +135,7 @@ def main() -> None:
             parser.error("--session and --status are required for tool events")
         payload = {
             "kind": "event",
-            "harness": "cli",
+            "source": "cli",
             "session": args.session,
             "event": {
                 "start": "tool_start",

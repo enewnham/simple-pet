@@ -1,14 +1,25 @@
 import asyncio
 import json
+import runpy
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from pet_daemon.domain import DeliveryStatus, ProcessStatus, SpeechReason
+from pet_daemon.domain import (
+    DeliveryStatus,
+    ExecutionOutcome,
+    ProcessStatus,
+    SessionSource,
+    SpeechReason,
+)
+from pet_daemon.identity import SessionIdentity
 from pet_daemon.replay import FixtureModel, ReplayClock, ReplayHarness
-from pet_daemon.runtime import ProcessIdentity
+from pet_daemon.runtime import HookEvent, ProcessIdentity, WaitingKind
+from pet_daemon.work.models import ExecutionEvidence, ProgressEvidence
+from pet_daemon.work.views import ExecutionView
 
 
 def test_scheduler_persists_only_renderer_accepted_speech() -> None:
@@ -20,7 +31,7 @@ def test_scheduler_persists_only_renderer_accepted_speech() -> None:
             )
             replay.ingest(
                 {
-                    "harness": "codex",
+                    "source": "codex",
                     "session": "parser",
                     "event": "intent",
                     "goal": "Check how the parser handles escaped delimiters.",
@@ -97,7 +108,7 @@ def test_process_evidence_is_injected_without_host_probes() -> None:
             replay.processes.statuses[identity] = ProcessStatus.ALIVE
             replay.ingest(
                 {
-                    "harness": "codex",
+                    "source": "codex",
                     "session": "parser",
                     "event": "intent",
                     "goal": "Check the parser",
@@ -110,18 +121,24 @@ def test_process_evidence_is_injected_without_host_probes() -> None:
             ):
                 await replay.advance(0)
                 assert (
-                    replay.app.sessions.by_id["codex:parser"].presence
+                    replay.app.sessions.by_id[
+                        SessionIdentity(SessionSource.CODEX, "parser")
+                    ].presence
                     == ProcessStatus.ALIVE
                 )
                 replay.processes.statuses[identity] = ProcessStatus.EXITED
                 await replay.advance(1)
                 assert (
-                    replay.app.sessions.by_id["codex:parser"].presence
+                    replay.app.sessions.by_id[
+                        SessionIdentity(SessionSource.CODEX, "parser")
+                    ].presence
                     == ProcessStatus.ALIVE
                 )
                 await replay.advance(replay.config.process_probe_seconds - 1)
                 assert (
-                    replay.app.sessions.by_id["codex:parser"].presence
+                    replay.app.sessions.by_id[
+                        SessionIdentity(SessionSource.CODEX, "parser")
+                    ].presence
                     == ProcessStatus.EXITED
                 )
 
@@ -205,3 +222,327 @@ def test_invalid_clock_steps_fail_before_mutating_time() -> None:
         with pytest.raises(ValueError):
             clock.advance(seconds)
         assert clock() == 1000
+
+
+@pytest.fixture
+def claude_hook() -> Callable[[str, Mapping[str, object]], HookEvent]:
+    adapter = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "scripts" / "pet-hook")
+    )
+
+    def update(event: str, payload: Mapping[str, object]) -> HookEvent:
+        hook = adapter["update"]("claude", event, payload)
+        assert isinstance(hook, HookEvent)
+        return hook
+
+    return update
+
+
+@pytest.mark.parametrize(
+    ("event", "extra", "waiting_kind", "moment_kind"),
+    [
+        ("PermissionRequest", {}, WaitingKind.PERMISSION_CHECK, "work_update"),
+        (
+            "Notification",
+            {"notification_type": "permission_prompt"},
+            WaitingKind.PERMISSION,
+            "permission_request",
+        ),
+        (
+            "PreToolUse",
+            {
+                "tool_name": "AskUserQuestion",
+                "tool_input": {
+                    "questions": [{"question": "Which parser should I check?"}]
+                },
+            },
+            WaitingKind.QUESTION,
+            "input_requested",
+        ),
+    ],
+)
+def test_wait_kind_controls_scheduled_and_clicked_commentary(
+    claude_hook: Callable[[str, Mapping[str, object]], HookEvent],
+    event: str,
+    extra: Mapping[str, object],
+    waiting_kind: WaitingKind,
+    moment_kind: str,
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        async with ReplayHarness() as replay:
+            replay.config.idle_message_seconds = 10
+            replay.config.observation_seconds = (1000, 1000)
+            replay.config.behavior.automatic_speech_cooldown_seconds = 0
+            replay.config.behavior.care = False
+            replay.config.behavior.naps = False
+            replay.config.behavior.roaming = False
+            await replay.restart()
+            replay.ingest(
+                claude_hook(
+                    "UserPromptSubmit",
+                    {"session_id": "parser", "prompt": "Check parser behavior"},
+                ).packet()
+            )
+            replay.ingest(
+                claude_hook(
+                    "PreToolUse",
+                    {
+                        "session_id": "parser",
+                        "tool_use_id": "check",
+                        "tool_name": "Bash",
+                        "tool_input": {"command": "pytest Tests/test_parser.py"},
+                    },
+                ).packet()
+            )
+            await replay.advance(0)
+            calls_before_wait = len(replay.model.calls)
+            replay.ingest(
+                claude_hook(
+                    event,
+                    {
+                        "session_id": "parser",
+                        "tool_use_id": "check",
+                        "tool_name": "Bash",
+                        "tool_input": {"command": "pytest Tests/test_parser.py"},
+                        **extra,
+                    },
+                ).packet()
+            )
+            await replay.advance(0)
+            session = replay.app.sessions.by_id[
+                SessionIdentity(SessionSource.CLAUDE, "parser")
+            ]
+            assert session.waiting
+            assert not session.working
+            assert session.waiting_kind == waiting_kind
+            assert session.waiting_for_input == (
+                waiting_kind != WaitingKind.PERMISSION_CHECK
+            )
+            assert any(
+                packet.get("animation", {}).get("id") == "waiting"
+                for packet in replay.packets
+            )
+            if waiting_kind == WaitingKind.PERMISSION_CHECK:
+                assert len(replay.model.calls) == calls_before_wait
+            else:
+                assert replay.model.calls[-1]["purpose"] == "check_in"
+                payload = json.loads(
+                    replay.model.calls[-1]["request"]["messages"][0]["content"]
+                )
+                assert payload["current_moment"]["kind"] == moment_kind
+            replay.receive({"kind": "renderer", "event": "click"})
+            await replay.advance(0)
+            assert replay.model.calls[-1]["purpose"] == "click"
+            payload = json.loads(
+                replay.model.calls[-1]["request"]["messages"][0]["content"]
+            )
+            assert payload["current_moment"]["kind"] == moment_kind
+            await replay.advance(10, tick_seconds=1)
+            assert replay.model.calls[-1]["purpose"] == "check_in"
+            payload = json.loads(
+                replay.model.calls[-1]["request"]["messages"][0]["content"]
+            )
+            assert payload["current_moment"]["kind"] == moment_kind
+            if waiting_kind == WaitingKind.QUESTION:
+                assert (
+                    payload["current_moment"]["reported_progress"]
+                    == "Which parser should I check?"
+                )
+            activity = replay.app.context().work[0].story.activity
+            assert any(
+                isinstance(item.details, ExecutionView)
+                and item.details.execution == "waiting"
+                for item in activity
+            ) == (waiting_kind != WaitingKind.PERMISSION_CHECK)
+            replay.ingest(
+                claude_hook(
+                    "PostToolUse",
+                    {
+                        "session_id": "parser",
+                        "tool_use_id": "check",
+                        "tool_name": "Bash",
+                    },
+                ).packet()
+            )
+            assert not session.waiting
+            reports = replay.memory.narrative_reports(
+                (SessionIdentity(SessionSource.CLAUDE, "parser"),)
+            )
+            transitions = [
+                report.payload.event
+                for report in reports
+                if isinstance(report.payload, ExecutionEvidence)
+            ]
+            assert ("waiting" in transitions) == (
+                waiting_kind != WaitingKind.PERMISSION_CHECK
+            )
+            assert ("resumed" in transitions) == (
+                waiting_kind != WaitingKind.PERMISSION_CHECK
+            )
+            replay.ingest(
+                claude_hook(
+                    "Stop",
+                    {
+                        "session_id": "parser",
+                        "last_assistant_message": "Checked parser behavior and confirmed escaped delimiters.",
+                    },
+                ).packet()
+            )
+            await replay.advance(1)
+            assert session.outcome == ExecutionOutcome.SUCCESS
+            assert replay.model.calls[-1]["purpose"] == "completion"
+            payload = json.loads(
+                replay.model.calls[-1]["request"]["messages"][0]["content"]
+            )
+            assert payload["current_moment"]["kind"] == "turn_ended"
+            assert payload["current_moment"]["outcome"] == "success"
+            reports = replay.memory.narrative_reports(
+                (SessionIdentity(SessionSource.CLAUDE, "parser"),)
+            )
+            assert any(
+                isinstance(report.payload, ProgressEvidence)
+                and report.payload.text
+                == "Checked parser behavior and confirmed escaped delimiters."
+                for report in reports
+            )
+            (tmp_path / "replay.json").write_text(json.dumps(replay.result(), indent=2))
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("internal_check", [True, False])
+def test_child_check_ins_follow_requests_for_input(
+    claude_hook: Callable[[str, Mapping[str, object]], HookEvent],
+    internal_check: bool,
+) -> None:
+    async def scenario() -> None:
+        async with ReplayHarness() as replay:
+            replay.config.idle_message_seconds = 10
+            replay.config.observation_seconds = (1000, 1000)
+            replay.config.behavior.automatic_speech_cooldown_seconds = 0
+            replay.config.behavior.care = False
+            replay.config.behavior.naps = False
+            await replay.restart()
+            replay.ingest(
+                claude_hook(
+                    "UserPromptSubmit",
+                    {"session_id": "parser", "prompt": "Check parser behavior"},
+                ).packet()
+            )
+            await replay.advance(0)
+            replay.ingest(
+                claude_hook(
+                    "SubagentStart",
+                    {
+                        "session_id": "parser",
+                        "agent_id": "examples",
+                        "task": "Check escaped delimiters",
+                    },
+                ).packet()
+            )
+            replay.ingest(
+                claude_hook(
+                    "PermissionRequest" if internal_check else "Notification",
+                    {
+                        "session_id": "parser",
+                        "agent_id": "examples",
+                        "tool_use_id": "check",
+                        "tool_name": "Bash",
+                        "notification_type": "permission_prompt",
+                    },
+                ).packet()
+            )
+            await replay.advance(0)
+            calls_after_wait = len(replay.model.calls)
+            await replay.advance(9, tick_seconds=1)
+            replay.ingest(
+                claude_hook(
+                    "PreToolUse",
+                    {
+                        "session_id": "parser",
+                        "tool_use_id": "parent-check",
+                        "tool_name": "Bash",
+                    },
+                ).packet()
+            )
+            await replay.advance(1)
+            child = replay.app.sessions.by_id[
+                SessionIdentity(SessionSource.CLAUDE, "examples")
+            ]
+            if internal_check:
+                assert len(replay.model.calls) == calls_after_wait
+                assert child.last_check_in is None
+            else:
+                assert replay.model.calls[-1]["purpose"] == "check_in"
+                assert child.last_check_in == replay.clock()
+                payload = json.loads(
+                    replay.model.calls[-1]["request"]["messages"][0]["content"]
+                )
+                assert payload["current_moment"]["kind"] == "permission_request"
+                assert payload["current_work"]["request"] == "Check escaped delimiters"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_internal_checks_retain_terminal_results_and_runtime_evidence(
+    claude_hook: Callable[[str, Mapping[str, object]], HookEvent],
+    failure: bool,
+) -> None:
+    async def scenario() -> None:
+        async with ReplayHarness() as replay:
+            replay.config.behavior.automatic_speech_cooldown_seconds = 0
+            replay.ingest(
+                claude_hook(
+                    "UserPromptSubmit",
+                    {"session_id": "parser", "prompt": "Check parser behavior"},
+                ).packet()
+            )
+            await replay.advance(0)
+            replay.ingest(
+                claude_hook(
+                    "PermissionRequest",
+                    {
+                        "session_id": "parser",
+                        "tool_use_id": "check",
+                        "tool_name": "Bash",
+                    },
+                ).packet()
+            )
+            await replay.advance(3)
+            replay.ingest(
+                claude_hook(
+                    "StopFailure" if failure else "Stop",
+                    {
+                        "session_id": "parser",
+                        "last_assistant_message": "Checked parser behavior.",
+                    },
+                ).packet()
+            )
+            await replay.advance(1)
+            session = replay.app.sessions.by_id[
+                SessionIdentity(SessionSource.CLAUDE, "parser")
+            ]
+            assert not session.waiting
+            assert session.outcome == (
+                ExecutionOutcome.ERROR if failure else ExecutionOutcome.SUCCESS
+            )
+            assert replay.model.calls[-1]["purpose"] == (
+                "failure" if failure else "completion"
+            )
+            reports = replay.memory.narrative_reports(
+                (SessionIdentity(SessionSource.CLAUDE, "parser"),)
+            )
+            transitions = [
+                report.payload
+                for report in reports
+                if isinstance(report.payload, ExecutionEvidence)
+            ]
+            assert all(
+                report.event not in ("waiting", "resumed") for report in transitions
+            )
+            assert transitions[-1].outcome == session.outcome
+            assert any(event["event"] == "session.waiting" for event in replay.events)
+
+    asyncio.run(scenario())

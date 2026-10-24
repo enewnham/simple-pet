@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 
+from ..identity import SessionIdentity
 from ..types import JSONObject
 from .views import (
     EvidenceView,
@@ -19,7 +20,7 @@ class NarrativeStatement:
 
 @dataclass(frozen=True)
 class WorkNarrative:
-    subject_id: str
+    subject_id: SessionIdentity
     revision: str
     intent: NarrativeStatement
     decisions: tuple[NarrativeStatement, ...] = ()

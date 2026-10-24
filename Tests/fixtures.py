@@ -4,7 +4,14 @@ from pathlib import Path
 from typing import TypedDict, Unpack
 
 from pet_daemon.commentary.contracts import ModelRequest
-from pet_daemon.domain import Activity, ExecutionOutcome, PetState, ProcessStatus
+from pet_daemon.domain import (
+    Activity,
+    ExecutionOutcome,
+    PetState,
+    ProcessStatus,
+    SessionSource,
+)
+from pet_daemon.identity import SessionIdentity
 from pet_daemon.runtime import (
     ActiveTool,
     FailureSnapshot,
@@ -88,9 +95,9 @@ class BehaviorOptions(TypedDict, total=False):
 
 
 class SessionOptions(TypedDict, total=False):
-    id: str
+    id: SessionIdentity
     changed_at: float
-    parent: str | None
+    parent: SessionIdentity | None
     goal: str
     repo: str
     phase: Activity | None
@@ -121,12 +128,12 @@ class SessionOptions(TypedDict, total=False):
 
 
 def session_snapshot(**values: Unpack[SessionOptions]) -> SessionContext:
-    identity = values.get("id", "cli:fixture")
-    harness, name = identity.split(":", 1)
+    identity = values.get("id", SessionIdentity(SessionSource.COMMAND, "fixture"))
+    source, name = identity.source.value, identity.native_id
     sessions = Sessions(lambda: 1000)
-    sessions.handle({"event": "session_start", "harness": harness, "session": name})
+    sessions.handle({"event": "session_start", "source": source, "session": name})
     if values.get("waiting_for_input"):
-        sessions.handle({"event": "waiting", "harness": harness, "session": name})
+        sessions.handle({"event": "waiting", "source": source, "session": name})
     snapshot = sessions.activity_view().sessions[0]
     return replace(snapshot, **values)
 

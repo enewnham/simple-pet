@@ -5,6 +5,7 @@ from typing import TypeGuard
 
 from ..config import BehaviorConfig
 from ..domain import ActionKind, Activity, CareKind, ExecutionPhase, PetState
+from ..identity import SessionIdentity
 from ..logging import get_logger
 from ..runtime import OverlayPacket, Point, RandomSource
 from ..sessions.tracking import Sessions
@@ -337,7 +338,7 @@ class Behavior:
         name: str,
         kind: ActionKind,
         seconds: float,
-        session: str | None = None,
+        session: SessionIdentity | None = None,
     ) -> None:
         repeats = max(1, math.ceil(seconds / clip.seconds))
         if clip.max_repeats is not None:
@@ -396,7 +397,10 @@ class Behavior:
         return self._resolve_clip(spec.role, spec.preferred, spec.fallback)
 
     def react(
-        self, kind: str, sessions: Sessions | None = None, key: str | None = None
+        self,
+        kind: str,
+        sessions: Sessions | None = None,
+        key: SessionIdentity | None = None,
     ) -> bool:
         clip = self._reaction_clip(kind)
         if (

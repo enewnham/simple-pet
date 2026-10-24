@@ -5,7 +5,7 @@
     {
       "packets": [
         {
-          "harness": "codex",
+          "source": "codex",
           "session": "root",
           "event": "intent",
           "goal": "Inspect commentary prompts."
@@ -17,7 +17,7 @@
     {
       "packets": [
         {
-          "harness": "codex",
+          "source": "codex",
           "session": "root",
           "event": "progress",
           "progress": "Found a bad remark.\n> My mail is haunted.\nChecked the inputs."

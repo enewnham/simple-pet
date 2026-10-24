@@ -9,7 +9,16 @@ from pet_daemon.commentary.cognition import Cognition
 from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.commentary.story import PreparedStory, prepare, validate
 from pet_daemon.config import Config
-from pet_daemon.domain import ExecutionOutcome, SpeechReason, SpeechSituation
+from pet_daemon.domain import (
+    EvidenceKind,
+    EvidenceSource,
+    ExecutionOutcome,
+    SessionSource,
+    SpeechReason,
+    SpeechSituation,
+    WorkSubjectKind,
+)
+from pet_daemon.identity import SessionIdentity, session_data
 from pet_daemon.storage import Memory
 from pet_daemon.work.models import ExecutionEvidence, IntentEvidence, ProgressEvidence
 from pet_daemon.work.narrative import (
@@ -18,6 +27,13 @@ from pet_daemon.work.narrative import (
     semantic_revision,
 )
 from pet_daemon.work.observations import SessionObservation
+from pet_daemon.work.views import (
+    EvidenceView,
+    IntentView,
+    SessionContribution,
+    WorkStory,
+    WorkSubject,
+)
 from Tests.fixtures import (
     capture_snapshot,
     require,
@@ -46,15 +62,20 @@ class StoryTests(unittest.TestCase):
     def add(
         self,
         *reports: IntentEvidence | ProgressEvidence | ExecutionEvidence,
-        session: str = "codex:root",
-        parent: str | None = None,
+        session: SessionIdentity | None = None,
+        parent: SessionIdentity | None = None,
     ) -> None:
+        identity = (
+            session
+            if session is not None
+            else SessionIdentity(SessionSource.CODEX, "root")
+        )
         self.memory.work.record_session(
-            SessionObservation(session, parent=parent, reports=reports)
+            SessionObservation(identity, parent=parent, reports=reports)
         )
 
     def prepared(self, *, target_bytes: int = 12000) -> PreparedStory:
-        focus = session_snapshot(id="codex:root")
+        focus = session_snapshot(id=SessionIdentity(SessionSource.CODEX, "root"))
         swarm = sessions_snapshot(focus)
         subject = self.memory.connected_work(swarm)[0]
         snapshot = capture_snapshot(swarm, work=(subject,))
@@ -75,9 +96,17 @@ class StoryTests(unittest.TestCase):
         self,
     ) -> None:
         self.memory.work.clock = lambda: 700
-        self.add(IntentEvidence("codex:root", "Inspect parser"))
+        self.add(
+            IntentEvidence(
+                SessionIdentity(SessionSource.CODEX, "root"), "Inspect parser"
+            )
+        )
         self.memory.work.clock = lambda: 880
-        self.add(ProgressEvidence("codex:root", "Parser checks passed"))
+        self.add(
+            ProgressEvidence(
+                SessionIdentity(SessionSource.CODEX, "root"), "Parser checks passed"
+            )
+        )
         self.memory.clock = lambda: 1000
         first = self.prepared()
         report = next(
@@ -86,7 +115,9 @@ class StoryTests(unittest.TestCase):
             if source["kind"] == "reported_progress"
         )
         self.assertEqual(report["observed_at"], 880)
-        self.assertEqual(report["origin"], "codex:root")
+        self.assertEqual(
+            report["origin"], session_data(SessionIdentity(SessionSource.CODEX, "root"))
+        )
         payload = json.loads(first.request["messages"][0]["content"])
         evidence = payload["current_moment"]["evidence"]
         self.assertEqual(evidence[-1]["age"], "2 minutes ago")
@@ -100,7 +131,12 @@ class StoryTests(unittest.TestCase):
         self.assertEqual(first.revision, later.revision)
 
     def test_latest_followup_keeps_original_intent_beyond_recent_requests(self) -> None:
-        self.add(IntentEvidence("codex:root", "Implement quoted-field parsing"))
+        self.add(
+            IntentEvidence(
+                SessionIdentity(SessionSource.CODEX, "root"),
+                "Implement quoted-field parsing",
+            )
+        )
         for text in (
             "Keep quotes",
             "Also escapes",
@@ -108,7 +144,7 @@ class StoryTests(unittest.TestCase):
             "Test it",
             "Proceed",
         ):
-            self.add(IntentEvidence("codex:root", text))
+            self.add(IntentEvidence(SessionIdentity(SessionSource.CODEX, "root"), text))
         prepared = self.prepared()
         payload = json.loads(prepared.request["messages"][0]["content"])
         self.assertIn("Implement quoted-field parsing", json.dumps(payload))
@@ -118,10 +154,14 @@ class StoryTests(unittest.TestCase):
 
     def test_speech_quotes_code_and_tables_do_not_become_work_evidence(self) -> None:
         self.memory.record_speech("Mail's in. Quiet now.", SpeechReason.ROUTINE)
-        self.add(IntentEvidence("codex:root", "Review commentary"))
+        self.add(
+            IntentEvidence(
+                SessionIdentity(SessionSource.CODEX, "root"), "Review commentary"
+            )
+        )
         self.add(
             ProgressEvidence(
-                "codex:root",
+                SessionIdentity(SessionSource.CODEX, "root"),
                 "Checked the parser.\n\n> Mail's in. Quiet now.\n\n```python\nsecret_table = 1\n```\n\n| status | note |\n|---|---|\n| bad | invented |",
             )
         )
@@ -134,9 +174,16 @@ class StoryTests(unittest.TestCase):
     def test_established_decision_survives_a_long_session_within_the_prompt_budget(
         self,
     ) -> None:
-        self.add(IntentEvidence("codex:root", "Implement the parser"))
         self.add(
-            IntentEvidence("codex:root", "Keep the public parser interface compatible")
+            IntentEvidence(
+                SessionIdentity(SessionSource.CODEX, "root"), "Implement the parser"
+            )
+        )
+        self.add(
+            IntentEvidence(
+                SessionIdentity(SessionSource.CODEX, "root"),
+                "Keep the public parser interface compatible",
+            )
         )
         initial = self.prepared()
         decision = NarrativeStatement(
@@ -156,12 +203,14 @@ class StoryTests(unittest.TestCase):
         for index in range(50):
             self.add(
                 ProgressEvidence(
-                    "codex:root",
+                    SessionIdentity(SessionSource.CODEX, "root"),
                     f"Inspected case {index}. "
                     + "Each nested escaped quote needs a separate case. " * 10,
                 )
             )
-        self.add(IntentEvidence("codex:root", "Proceed"))
+        self.add(
+            IntentEvidence(SessionIdentity(SessionSource.CODEX, "root"), "Proceed")
+        )
         prepared = self.prepared()
         payload = json.loads(prepared.request["messages"][0]["content"])
         self.assertIn(initial.latest_request_source, prepared.sources)
@@ -173,7 +222,12 @@ class StoryTests(unittest.TestCase):
     def test_spoken_story_paraphrases_are_excluded_from_later_story_inputs(
         self,
     ) -> None:
-        self.add(IntentEvidence("codex:root", "Review quoted-field parsing"))
+        self.add(
+            IntentEvidence(
+                SessionIdentity(SessionSource.CODEX, "root"),
+                "Review quoted-field parsing",
+            )
+        )
         prepared = self.prepared()
         spoken = "I am inspecting the parser's quoted fields."
         self.memory.save_narrative(
@@ -185,7 +239,11 @@ class StoryTests(unittest.TestCase):
             )
         )
         self.memory.record_speech(spoken, SpeechReason.ROUTINE)
-        self.add(IntentEvidence("codex:root", "Check escaped quotes too"))
+        self.add(
+            IntentEvidence(
+                SessionIdentity(SessionSource.CODEX, "root"), "Check escaped quotes too"
+            )
+        )
         payload = json.loads(self.prepared().request["messages"][0]["content"])
         self.assertNotIn(spoken, json.dumps(payload))
         self.assertNotIn("earlier_context", payload)
@@ -194,11 +252,15 @@ class StoryTests(unittest.TestCase):
         for budget, count in ((12000, 8), (16000, 11)):
             with self.subTest(budget=budget):
                 self.memory.clear()
-                self.add(IntentEvidence("codex:root", "Implement parser"))
+                self.add(
+                    IntentEvidence(
+                        SessionIdentity(SessionSource.CODEX, "root"), "Implement parser"
+                    )
+                )
                 for index in range(count):
                     self.add(
                         ProgressEvidence(
-                            "codex:root",
+                            SessionIdentity(SessionSource.CODEX, "root"),
                             f"Inspected case {index}. "
                             + "Each nested escaped quote needs a separate case. " * 25,
                         )
@@ -228,7 +290,7 @@ class StoryTests(unittest.TestCase):
                 )
                 self.add(
                     ProgressEvidence(
-                        "codex:root",
+                        SessionIdentity(SessionSource.CODEX, "root"),
                         "Critical regression in the latest parser case. "
                         + "A newly found failure needs investigation. " * 30,
                     )
@@ -239,64 +301,186 @@ class StoryTests(unittest.TestCase):
                 self.assertLessEqual(len(payload.encode()), budget)
 
     def test_child_alias_keeps_assignment_at_report_time(self) -> None:
-        self.add(IntentEvidence("codex:root", "Improve parser"))
         self.add(
-            IntentEvidence("codex:old", "Audit escapes"),
-            session="codex:old",
-            parent="codex:root",
-        )
-        self.memory.work.record_session(
-            SessionObservation(
-                "codex:native",
-                aliases=("codex:old",),
-                reports=(ProgressEvidence("codex:native", "Escape checks passed"),),
+            IntentEvidence(
+                SessionIdentity(SessionSource.CODEX, "root"), "Improve parser"
             )
         )
         self.add(
-            IntentEvidence("codex:native", "Audit cancellation"),
-            ProgressEvidence("codex:native", "Cancellation checks passed"),
-            session="codex:native",
+            IntentEvidence(
+                SessionIdentity(SessionSource.CODEX, "old"), "Audit escapes"
+            ),
+            session=SessionIdentity(SessionSource.CODEX, "old"),
+            parent=SessionIdentity(SessionSource.CODEX, "root"),
+        )
+        self.memory.work.record_session(
+            SessionObservation(
+                SessionIdentity(SessionSource.CODEX, "native"),
+                aliases=(SessionIdentity(SessionSource.CODEX, "old"),),
+                reports=(
+                    ProgressEvidence(
+                        SessionIdentity(SessionSource.CODEX, "native"),
+                        "Escape checks passed",
+                    ),
+                ),
+            )
+        )
+        self.add(
+            IntentEvidence(
+                SessionIdentity(SessionSource.CODEX, "native"), "Audit cancellation"
+            ),
+            ProgressEvidence(
+                SessionIdentity(SessionSource.CODEX, "native"),
+                "Cancellation checks passed",
+            ),
+            session=SessionIdentity(SessionSource.CODEX, "native"),
         )
         reports = {
             source["text"]: source["scope"]
             for source in self.prepared().sources.values()
             if source["kind"] == "reported_progress"
         }
-        self.assertEqual(
-            reports["Escape checks passed"], "child assignment: Audit escapes"
-        )
+        self.assertEqual(reports["Escape checks passed"], "Audit escapes")
         self.assertEqual(
             reports["Cancellation checks passed"],
-            "child assignment: Audit cancellation",
+            "Audit cancellation",
         )
 
     def test_child_report_keeps_assignment_and_failed_outcome(self) -> None:
-        self.add(IntentEvidence("codex:root", "Improve parser"))
         self.add(
-            IntentEvidence("codex:child", "Audit escaped quotes"),
-            session="codex:child",
-            parent="codex:root",
+            IntentEvidence(
+                SessionIdentity(SessionSource.CODEX, "root"), "Improve parser"
+            )
+        )
+        self.add(
+            IntentEvidence(
+                SessionIdentity(SessionSource.CODEX, "child"), "Audit escaped quotes"
+            ),
+            session=SessionIdentity(SessionSource.CODEX, "child"),
+            parent=SessionIdentity(SessionSource.CODEX, "root"),
         )
         self.add(
             ExecutionEvidence(
-                "codex:child",
+                SessionIdentity(SessionSource.CODEX, "child"),
                 "turn_error",
                 ExecutionOutcome.ERROR,
                 None,
                 "Found one failing escaped quote case",
             ),
-            session="codex:child",
-            parent="codex:root",
+            session=SessionIdentity(SessionSource.CODEX, "child"),
+            parent=SessionIdentity(SessionSource.CODEX, "root"),
         )
         sources = list(self.prepared().sources.values())
         report = next(source for source in sources if source["kind"] == "turn_ended")
         self.assertIn("Audit escaped quotes", str(report["scope"]))
         self.assertEqual(report["outcome"], "error")
 
+    def test_related_task_without_an_assignment_keeps_its_result_scoped(self) -> None:
+        self.add(
+            IntentEvidence(
+                SessionIdentity(SessionSource.CODEX, "root"), "Improve parser"
+            )
+        )
+        self.add(
+            ProgressEvidence(
+                SessionIdentity(SessionSource.CODEX, "child"), "Escape checks passed"
+            ),
+            session=SessionIdentity(SessionSource.CODEX, "child"),
+            parent=SessionIdentity(SessionSource.CODEX, "root"),
+        )
+        prepared = self.prepared()
+        report = next(
+            source
+            for source in prepared.sources.values()
+            if source["kind"] == "reported_progress"
+        )
+        self.assertEqual(report["scope"], "related task")
+        payload = json.loads(prepared.request["messages"][0]["content"])
+        self.assertEqual(
+            {source["scope"] for source in payload["current_moment"]["evidence"]},
+            {"current task", "related task"},
+        )
+
+    def test_related_assignment_name_does_not_select_the_current_request(self) -> None:
+        self.add(
+            IntentEvidence(
+                SessionIdentity(SessionSource.CODEX, "root"), "Improve parser"
+            )
+        )
+        self.add(
+            IntentEvidence(
+                SessionIdentity(SessionSource.CODEX, "child"), "current task"
+            ),
+            session=SessionIdentity(SessionSource.CODEX, "child"),
+            parent=SessionIdentity(SessionSource.CODEX, "root"),
+        )
+        prepared = self.prepared()
+        self.assertEqual(
+            prepared.sources[prepared.latest_request_source]["text"], "Improve parser"
+        )
+        self.assertEqual(
+            prepared.sources[prepared.latest_request_source]["origin"],
+            session_data(SessionIdentity(SessionSource.CODEX, "root")),
+        )
+        child_request = next(
+            source
+            for source in prepared.sources.values()
+            if source.get("text") == "current task"
+        )
+        self.assertEqual(child_request["scope"], "current task")
+
+    def test_related_task_view_keeps_the_current_request_selected(self) -> None:
+        root = SessionIdentity(SessionSource.CODEX, "root")
+        story = WorkStory(
+            root,
+            "Improve parser",
+            "fallback",
+            requests=(
+                EvidenceView(
+                    EvidenceSource.USER,
+                    EvidenceKind.INTENT,
+                    IntentView("Improve parser"),
+                ),
+            ),
+            sessions=(
+                SessionContribution(
+                    "Audit escapes",
+                    session=SessionIdentity(SessionSource.CODEX, "coverage"),
+                    requests=(
+                        EvidenceView(
+                            EvidenceSource.USER,
+                            EvidenceKind.INTENT,
+                            IntentView("Audit escapes"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        subject = WorkSubject(root, WorkSubjectKind.SESSION, 1000, "fallback", story)
+        focus = session_snapshot(id=root)
+        snapshot = capture_snapshot(sessions_snapshot(focus), work=(subject,))
+        selection = AttentionSelection(
+            subject, focus, (), SpeechReason.ROUTINE, SpeechSituation.ROUTINE
+        )
+        prepared = require(
+            prepare(snapshot, selection, self.memory, self.cognition.request)
+        )
+        self.assertEqual(
+            prepared.sources[prepared.latest_request_source]["text"], "Improve parser"
+        )
+        self.assertTrue(
+            any(
+                source.get("text") == "Audit escapes"
+                for source in prepared.sources.values()
+            )
+        )
+
     def test_validation_rejects_unknown_sources_and_stale_intent(self) -> None:
         self.add(
-            IntentEvidence("codex:root", "Improve parser"),
-            IntentEvidence("codex:root", "Proceed"),
+            IntentEvidence(
+                SessionIdentity(SessionSource.CODEX, "root"), "Improve parser"
+            ),
+            IntentEvidence(SessionIdentity(SessionSource.CODEX, "root"), "Proceed"),
         )
         prepared = self.prepared()
         old = next(
@@ -330,9 +514,21 @@ class StoryTests(unittest.TestCase):
     def test_repository_refresh_and_running_events_do_not_change_story_revision(
         self,
     ) -> None:
-        self.add(IntentEvidence("codex:root", "Improve parser"))
+        self.add(
+            IntentEvidence(
+                SessionIdentity(SessionSource.CODEX, "root"), "Improve parser"
+            )
+        )
         original = self.memory.connected_work(sessions_snapshot())[0].story
-        self.add(ExecutionEvidence("codex:root", "tool_start", None, "Bash", None))
+        self.add(
+            ExecutionEvidence(
+                SessionIdentity(SessionSource.CODEX, "root"),
+                "tool_start",
+                None,
+                "Bash",
+                None,
+            )
+        )
         running = self.memory.connected_work(sessions_snapshot())[0].story
         self.assertEqual(semantic_revision(original), semantic_revision(running))
         self.assertEqual(
@@ -343,7 +539,7 @@ class StoryTests(unittest.TestCase):
         )
         self.add(
             ExecutionEvidence(
-                "codex:root",
+                SessionIdentity(SessionSource.CODEX, "root"),
                 "turn_done",
                 ExecutionOutcome.SUCCESS,
                 None,

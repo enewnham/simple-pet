@@ -7,13 +7,16 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from ..domain import Activity, ExecutionOutcome, PetState, ProcessStatus, SessionSource
+from ..identity import SessionIdentity
 from ..logging import get_logger
 from ..prompts import select_prompt
 from ..prose import prose_text
+from ..repository_identity import parse_remote_repository
 from ..runtime import (
     ActiveTool,
     ConvergenceItem,
     FailureSnapshot,
+    HookEventKind,
     ProcessIdentity,
     SessionContext,
     SwarmActivity,
@@ -47,7 +50,7 @@ class Failure:
 class SessionUpdate:
     failure: bool
     convergence: bool
-    session: str
+    session: SessionIdentity
     activity: Activity
     observation: SessionObservation
 
@@ -61,15 +64,14 @@ class Call:
 
 @dataclass
 class AgentSession:
-    harness: SessionSource
-    id: str
+    id: SessionIdentity
     started: float
     last_seen: float
     changed_at: float = field(default_factory=time.time)
     last_hook_at: float = 0
     retired: bool = False
-    last_event: str | None = None
-    parent: str | None = None
+    last_event: HookEventKind | None = None
+    parent: SessionIdentity | None = None
     goal: str = ""
     intent_received: bool = False
     user_sentiment: float | None = None
@@ -103,6 +105,14 @@ class AgentSession:
     activity_uncertain: bool = False
 
     @property
+    def source(self) -> SessionSource:
+        return self.id.source
+
+    @property
+    def waiting_for_input(self) -> bool:
+        return self.waiting and self.waiting_kind != WaitingKind.PERMISSION_CHECK
+
+    @property
     def waiting_started(self) -> float:
         assert self.waiting_since is not None
         return self.waiting_since
@@ -133,10 +143,10 @@ class Sessions:
         self.quiet_seconds = fresh_seconds
         self.stale_seconds = stale_seconds
         self.retention_seconds = retention_seconds
-        self.by_id: dict[str, AgentSession] = {}
-        self.aliases: dict[str, str] = {}
-        self.child_calls: dict[tuple[SessionSource, str, str], str] = {}
-        self.members: set[str] = set()
+        self.by_id: dict[SessionIdentity, AgentSession] = {}
+        self.aliases: dict[SessionIdentity, SessionIdentity] = {}
+        self.child_calls: dict[tuple[SessionIdentity, str], SessionIdentity] = {}
+        self.members: set[SessionIdentity] = set()
         self.convergence: tuple[ConvergenceItem, ...] | None = None
 
     @property
@@ -197,49 +207,50 @@ class Sessions:
             )
         )
 
-    def _key(self, harness: SessionSource, identifier: str) -> str:
-        key = (
-            identifier
-            if identifier.startswith(f"{harness}:")
-            else f"{harness}:{identifier}"
-        )
-        return self.aliases.get(key, key)
+    def _key(self, source: SessionSource, identifier: str) -> SessionIdentity:
+        identity = SessionIdentity(source, identifier)
+        return self.aliases.get(identity, identity)
 
-    def _session(self, event: HookEvent, now: float) -> tuple[str, AgentSession] | None:
-        harness = event.harness
+    def _session(
+        self, event: HookEvent, now: float
+    ) -> tuple[SessionIdentity, AgentSession] | None:
+        source = event.source
         identifier = event.session
-        key = self._key(harness, identifier)
+        key = self._key(source, identifier)
         routed = False
         parent_call = event.parent_call
         if parent_call and event.event in (
-            "tool_start",
-            "tool_done",
-            "tool_error",
-            "waiting",
+            HookEventKind.TOOL_START,
+            HookEventKind.TOOL_DONE,
+            HookEventKind.TOOL_ERROR,
+            HookEventKind.WAITING,
         ):
-            target = self.child_calls.get((harness, identifier, parent_call))
+            target = self.child_calls.get(
+                (SessionIdentity(source, identifier), parent_call)
+            )
             if target and target != key:
                 key = target
                 routed = True
         alternate = event.aliases
-        matches = [self._key(harness, alias) for alias in alternate]
+        matches = [self._key(source, alias) for alias in alternate]
         if key not in self.by_id:
             key = next((match for match in matches if match in self.by_id), key)
         parent = event.parent
-        if parent and self._key(harness, parent) in {key, *matches}:
+        if parent and self._key(source, parent) in {key, *matches}:
             return self._ignored(event, "invalid_parent")
         created = key not in self.by_id
         session = self.by_id.setdefault(
-            key, AgentSession(harness, identifier, now, now, self.wall_clock())
+            key, AgentSession(key, now, now, self.wall_clock())
         )
         for alias in alternate if routed else [identifier, *alternate]:
-            old_key = self._key(harness, alias)
+            old_key = self._key(source, alias)
             if old_key != key and old_key in self.by_id:
                 other = self.by_id.pop(old_key)
                 if not session.active and (
                     other.active or (other.finished and not session.finished)
                 ):
                     session, other = other, session
+                    session.id = key
                     self.by_id[key] = session
                 session.calls.update(other.calls)
                 session.active = session.active or other.active
@@ -311,16 +322,14 @@ class Sessions:
                     active_calls=list(session.calls),
                     parent=session.parent,
                 )
-            alias_key = (
-                alias if alias.startswith(f"{harness}:") else f"{harness}:{alias}"
-            )
+            alias_key = SessionIdentity(source, alias)
             if alias_key != key and self.aliases.get(alias_key) != key:
                 log.info("session.aliased", session=key, alias=alias_key)
             self.aliases[alias_key] = key
         if parent:
-            session.parent = self._key(harness, parent)
+            session.parent = self._key(source, parent)
             if parent_call:
-                self.child_calls[(harness, parent, parent_call)] = key
+                self.child_calls[(SessionIdentity(source, parent), parent_call)] = key
             parent_session = self.by_id.get(session.parent)
             if parent_session and not session.goal:
                 session.goal = parent_session.goal
@@ -341,7 +350,7 @@ class Sessions:
         return key, session
 
     def _open(
-        self, key: str, session: AgentSession, event: HookEvent, now: float
+        self, key: SessionIdentity, session: AgentSession, event: HookEvent, now: float
     ) -> None:
         previous_turn = session.turn
         replaced_calls = list(session.calls)
@@ -357,7 +366,9 @@ class Sessions:
         session.ended = None
         session.generation += 1
         session.failures.clear()
-        session.turn = None if event.event == "subagent_start" else event.turn
+        session.turn = (
+            None if event.event == HookEventKind.SUBAGENT_START else event.turn
+        )
         session.started = now
         session.calls.clear()
         session.last_tool = ""
@@ -386,7 +397,7 @@ class Sessions:
 
     def _finish(
         self,
-        key: str,
+        key: SessionIdentity,
         session: AgentSession,
         outcome: ExecutionOutcome,
         now: float,
@@ -426,7 +437,9 @@ class Sessions:
         session.waiting_tool = None
         session.waiting_prompt = None
 
-    def _retire(self, key: str, session: AgentSession, now: float, reason: str) -> None:
+    def _retire(
+        self, key: SessionIdentity, session: AgentSession, now: float, reason: str
+    ) -> None:
         log.info("session.activity_closed", session=key, reason=reason)
         session.active = False
         session.finished = True
@@ -439,13 +452,13 @@ class Sessions:
         session.waiting_kind = None
         session.waiting_tool = None
         session.waiting_prompt = None
-        session.retired |= reason != "session_end"
+        session.retired |= reason != HookEventKind.SESSION_END
 
     def _ignored(
         self,
         event: HookEvent,
         reason: str,
-        key: str | None = None,
+        key: SessionIdentity | None = None,
         session: AgentSession | None = None,
     ) -> None:
         log.debug(
@@ -458,11 +471,13 @@ class Sessions:
             call=event.call,
         )
 
-    def _accepted(self, key: str, session: AgentSession, event: HookEvent) -> None:
+    def _accepted(
+        self, key: SessionIdentity, session: AgentSession, event: HookEvent
+    ) -> None:
         session.activity_uncertain = False
         session.last_event = event.event
         session.last_hook_at = self.wall_clock()
-        if event.event not in ("session_end", "session_start"):
+        if event.event not in (HookEventKind.SESSION_END, HookEventKind.SESSION_START):
             session.changed_at = session.last_hook_at
         log.debug(
             "session.event_accepted",
@@ -481,7 +496,7 @@ class Sessions:
 
     def _resumed(
         self,
-        key: str,
+        key: SessionIdentity,
         session: AgentSession,
         event: HookEvent,
         now: float,
@@ -509,10 +524,10 @@ class Sessions:
     @staticmethod
     def _resumes_codex_child(session: AgentSession, event: HookEvent) -> bool:
         if not (
-            session.harness == SessionSource.CODEX
+            session.source == SessionSource.CODEX
             and session.parent
             and session.finished
-            and event.event == "tool_start"
+            and event.event == HookEventKind.TOOL_START
             and event.call
             and event.turn
             and session.turn
@@ -541,11 +556,11 @@ class Sessions:
             and not resumes_child
             and kind
             not in (
-                "intent",
-                "session_start",
-                "subagent_start",
-                "subagent_done",
-                "session_end",
+                HookEventKind.INTENT,
+                HookEventKind.SESSION_START,
+                HookEventKind.SUBAGENT_START,
+                HookEventKind.SUBAGENT_DONE,
+                HookEventKind.SESSION_END,
             )
         ):
             return self._ignored(event, "turn_mismatch", key, session)
@@ -557,20 +572,25 @@ class Sessions:
             session.owner_last_alive = None
         waiting_since = session.waiting_since
         waiting_call = session.waiting_call
+        waiting_kind = session.waiting_kind
         was_active = session.active
         was_finished = session.finished
         if event.repo:
             session.repo = event.repo
-        if kind == "subagent_start" and session.active and session.intent_received:
+        if (
+            kind == HookEventKind.SUBAGENT_START
+            and session.active
+            and session.intent_received
+        ):
             return self._ignored(event, "duplicate_subagent_start", key, session)
         failure = False
         event_activity = session.phase or Activity.COMMAND
-        if kind in ("intent", "subagent_start"):
-            new_native_turn = kind == "intent" and not event.manual
+        if kind in (HookEventKind.INTENT, HookEventKind.SUBAGENT_START):
+            new_native_turn = kind == HookEventKind.INTENT and not event.manual
             if (
                 not session.active
                 or new_native_turn
-                or (kind == "intent" and turn and turn != session.turn)
+                or (kind == HookEventKind.INTENT and turn and turn != session.turn)
             ):
                 self._open(key, session, event, now)
             if event.goal:
@@ -578,10 +598,10 @@ class Sessions:
                 if not session.intent_received:
                     session.goal = request
                 session.intent_received = True
-            elif kind == "subagent_start" and session.parent in self.by_id:
+            elif kind == HookEventKind.SUBAGENT_START and session.parent in self.by_id:
                 session.goal = self.by_id[session.parent].goal
                 session.intent_received = bool(session.goal)
-        elif kind == "tool_start":
+        elif kind == HookEventKind.TOOL_START:
             if not event.call:
                 return self._ignored(event, "missing_call", key, session)
             if session.finished and not event.manual and not resumes_child:
@@ -601,7 +621,7 @@ class Sessions:
             session.last_tool = tool
             session.phase = event_activity
             session.progress = event.progress if event.progress is not None else ""
-        elif kind in ("tool_done", "tool_error"):
+        elif kind in (HookEventKind.TOOL_DONE, HookEventKind.TOOL_ERROR):
             call = session.calls.pop(event.call, None)
             if call is None:
                 if (
@@ -624,12 +644,16 @@ class Sessions:
             event_activity = call.activity
             session.progress = (
                 ""
-                if kind == "tool_error" or event.outcome == ExecutionOutcome.ERROR
+                if kind == HookEventKind.TOOL_ERROR
+                or event.outcome == ExecutionOutcome.ERROR
                 else (
                     event.progress if event.progress is not None else session.progress
                 )
             )
-            if kind == "tool_error" or event.outcome == ExecutionOutcome.ERROR:
+            if (
+                kind == HookEventKind.TOOL_ERROR
+                or event.outcome == ExecutionOutcome.ERROR
+            ):
                 session.failure = self._failure(session, call.activity, now, call.tool)
                 failure = True
             elif event.outcome == ExecutionOutcome.CANCELLED:
@@ -654,8 +678,8 @@ class Sessions:
                     else ExecutionOutcome.SUCCESS
                 )
                 self._finish(key, session, outcome, now, kind)
-        elif kind == "session_end":
-            if session.last_event == "session_end":
+        elif kind == HookEventKind.SESSION_END:
+            if session.last_event == HookEventKind.SESSION_END:
                 return self._ignored(event, "duplicate_session_end", key, session)
             self._retire(key, session, now, kind)
             descendants = {key}
@@ -670,24 +694,26 @@ class Sessions:
                 if child.active:
                     self._retire(child_key, child, now, "parent_session_end")
         elif kind in (
-            "turn_done",
-            "subagent_done",
-            "turn_error",
-            "interrupt",
+            HookEventKind.TURN_DONE,
+            HookEventKind.SUBAGENT_DONE,
+            HookEventKind.TURN_ERROR,
+            HookEventKind.INTERRUPT,
         ):
             if session.finished:
                 return self._ignored(event, "finished_session", key, session)
             outcome = (
                 event.outcome if event.outcome is not None else ExecutionOutcome.SUCCESS
             )
-            if kind == "turn_error" or outcome == ExecutionOutcome.ERROR:
+            if kind == HookEventKind.TURN_ERROR or outcome == ExecutionOutcome.ERROR:
                 outcome = ExecutionOutcome.ERROR
-                if kind == "turn_error" or not self._current_failure(session):
-                    session.failure = self._failure(session, Activity.HARNESS, now)
+                if kind == HookEventKind.TURN_ERROR or not self._current_failure(
+                    session
+                ):
+                    session.failure = self._failure(session, Activity.SOURCE, now)
                 assert session.failure is not None
                 event_activity = session.failure.activity
                 failure = True
-            elif kind == "interrupt":
+            elif kind == HookEventKind.INTERRUPT:
                 outcome = event.outcome or (
                     ExecutionOutcome.CANCELLED
                     if session.active
@@ -707,7 +733,7 @@ class Sessions:
                     event.progress if event.progress is not None else session.progress
                 )
             )
-            if kind == "interrupt":
+            if kind == HookEventKind.INTERRUPT:
                 descendants = {key}
                 for _ in range(len(self.by_id)):
                     descendants.update(
@@ -725,16 +751,21 @@ class Sessions:
                             now,
                             f"parent_{kind}",
                         )
-        elif kind in ("progress", "waiting"):
+        elif kind in (HookEventKind.PROGRESS, HookEventKind.WAITING):
             if session.finished:
                 return self._ignored(event, "finished_session", key, session)
-            if kind == "waiting" and not session.active:
+            if kind == HookEventKind.WAITING and not session.active:
                 self._open(key, session, event, now)
-            session.progress = (
-                event.progress if event.progress is not None else session.progress
-            )
-            if kind == "waiting":
-                if not session.waiting or session.waiting_call != event.call:
+            if event.waiting_kind != WaitingKind.PERMISSION_CHECK:
+                session.progress = (
+                    event.progress if event.progress is not None else session.progress
+                )
+            if kind == HookEventKind.WAITING:
+                if (
+                    not session.waiting
+                    or session.waiting_call != event.call
+                    or session.waiting_kind != event.waiting_kind
+                ):
                     session.waiting_since = now
                 session.waiting = True
                 session.waiting_call = event.call
@@ -744,7 +775,12 @@ class Sessions:
                 session.last_tool = (
                     event.tool if event.tool is not None else session.last_tool
                 )
-        if kind in ("tool_start", "tool_done", "tool_error", "progress"):
+        if kind in (
+            HookEventKind.TOOL_START,
+            HookEventKind.TOOL_DONE,
+            HookEventKind.TOOL_ERROR,
+            HookEventKind.PROGRESS,
+        ):
             session.waiting = False
             session.waiting_call = None
             session.waiting_since = None
@@ -783,7 +819,13 @@ class Sessions:
                 key,
                 session,
                 event,
-                resumed=(waiting_since is not None or was_finished)
+                resumed=(
+                    (
+                        waiting_since is not None
+                        and waiting_kind != WaitingKind.PERMISSION_CHECK
+                    )
+                    or was_finished
+                )
                 and session.active
                 and not session.waiting,
                 opened=not was_active and session.active,
@@ -792,7 +834,7 @@ class Sessions:
 
     def _observation(
         self,
-        key: str,
+        key: SessionIdentity,
         session: AgentSession,
         event: HookEvent,
         *,
@@ -808,12 +850,17 @@ class Sessions:
                 ExecutionEvidence(key, kind, session.outcome, None, event.progress)
             )
         elif session.waiting:
-            reports.append(ExecutionEvidence(key, "waiting", None, None, None))
+            if session.waiting_for_input:
+                reports.append(ExecutionEvidence(key, "waiting", None, None, None))
         elif resumed:
             reports.append(ExecutionEvidence(key, "resumed", None, None, None))
         elif opened or event.event in ("intent", "subagent_start"):
             reports.append(ExecutionEvidence(key, "turn_start", None, None, None))
-        if event.progress and not event.event.startswith("tool_"):
+        if (
+            event.progress
+            and not event.event.startswith("tool_")
+            and event.waiting_kind != WaitingKind.PERMISSION_CHECK
+        ):
             reports.append(ProgressEvidence(key, event.progress))
         return SessionObservation(
             session=key,
@@ -827,7 +874,9 @@ class Sessions:
             parent=session.parent,
             location=event.repo,
             reports=tuple(reports),
-            repository=event.repository,
+            repository=parse_remote_repository(event.repository)
+            if event.repository
+            else None,
             branch=event.branch,
             pull_request=event.pull_request,
         )
@@ -851,7 +900,7 @@ class Sessions:
 
     def apply_process_status(
         self, results: Mapping[ProcessIdentity, ProcessStatus]
-    ) -> list[str]:
+    ) -> list[SessionIdentity]:
         now = self.clock()
         retired = []
         for key, session in self.by_id.items():
@@ -951,7 +1000,7 @@ class Sessions:
             self.convergence = None
         return changed
 
-    def check_in_due(self, seconds: float) -> list[str]:
+    def check_in_due(self, seconds: float) -> list[SessionIdentity]:
         self._refresh_activity()
         now = self.clock()
         return [
@@ -969,7 +1018,9 @@ class Sessions:
             >= seconds
         ]
 
-    def activity_view(self, keys: Collection[str] | None = None) -> SwarmActivity:
+    def activity_view(
+        self, keys: Collection[SessionIdentity] | None = None
+    ) -> SwarmActivity:
         self._refresh_activity()
         now = self.clock()
         members = [
@@ -1014,7 +1065,7 @@ class Sessions:
                     if session.owner_last_alive is None
                     else round(now - session.owner_last_alive),
                     activity_uncertain=session.activity_uncertain,
-                    waiting_for_input=session.waiting,
+                    waiting_for_input=session.waiting_for_input,
                     waiting_seconds=None
                     if session.waiting_since is None
                     else round(now - session.waiting_since),

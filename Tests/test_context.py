@@ -26,7 +26,16 @@ from pet_daemon.domain import (
     SpeechReason,
     SpeechSituation,
 )
-from pet_daemon.runtime import ActiveTool, CareTrigger, HookEvent, PetContext
+from pet_daemon.identity import SessionIdentity
+from pet_daemon.repository_identity import RemoteRepository
+from pet_daemon.runtime import (
+    ActiveTool,
+    CareTrigger,
+    HookEvent,
+    HookEventKind,
+    PetContext,
+    WaitingKind,
+)
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.storage import Memory
 from pet_daemon.work import WorkSubject
@@ -82,7 +91,7 @@ class ContextTests(unittest.TestCase):
         self.attention = Attention(self.config, lambda: 1000, random.Random(0))
         self.snapshot = sessions_snapshot(
             session_snapshot(
-                id="cli:parser",
+                id=SessionIdentity(SessionSource.COMMAND, "parser"),
                 turn_active=True,
                 generation=1,
                 recent_requests=(
@@ -127,7 +136,7 @@ class ContextTests(unittest.TestCase):
         self,
     ) -> None:
         narrative = WorkNarrative(
-            "cli:parser",
+            SessionIdentity(SessionSource.COMMAND, "parser"),
             "revision",
             NarrativeStatement("Preserve parser compatibility.", ("intent",)),
             (NarrativeStatement("Keep the public API stable.", ("decision",)),),
@@ -162,7 +171,7 @@ class ContextTests(unittest.TestCase):
         self,
     ) -> None:
         narrative = WorkNarrative(
-            "cli:parser",
+            SessionIdentity(SessionSource.COMMAND, "parser"),
             "revision",
             NarrativeStatement("Preserve parser compatibility.", ("request",)),
             progress=(NarrativeStatement("Parser checks passed.", ("report",)),),
@@ -172,7 +181,9 @@ class ContextTests(unittest.TestCase):
             },
         )
         self.memory.save_narrative(narrative)
-        cached = self.memory.load_narrative("cli:parser")
+        cached = self.memory.load_narrative(
+            SessionIdentity(SessionSource.COMMAND, "parser")
+        )
         snapshot = self.current_snapshot()
         selection = self.attention.select(snapshot, SpeechReason.ROUTINE)
         prepared = self.cognition.prompts.prepare(
@@ -187,7 +198,12 @@ class ContextTests(unittest.TestCase):
         report = self.payload(later)["earlier_context"][-1]
         self.assertEqual(report["age"], "2 hours ago")
         self.assertEqual(prepared.support, later.support)
-        self.assertEqual(cached, self.memory.load_narrative("cli:parser"))
+        self.assertEqual(
+            cached,
+            self.memory.load_narrative(
+                SessionIdentity(SessionSource.COMMAND, "parser")
+            ),
+        )
 
     def test_changed_older_story_evidence_invalidates_speech_outside_raw_projection(
         self,
@@ -244,7 +260,11 @@ class ContextTests(unittest.TestCase):
         utterance = "I checked the parser."
         statement = NarrativeStatement(utterance, ("source",))
         narrative = WorkNarrative(
-            "cli:parser", "revision", statement, (statement,), (statement,)
+            SessionIdentity(SessionSource.COMMAND, "parser"),
+            "revision",
+            statement,
+            (statement,),
+            (statement,),
         )
         snapshot = self.current_snapshot()
         selection = self.attention.select(snapshot, SpeechReason.ROUTINE)
@@ -339,7 +359,9 @@ class ContextTests(unittest.TestCase):
             sessions=(
                 *self.snapshot.sessions,
                 session_snapshot(
-                    id="cli:renderer", turn_active=True, progress="Checking layout"
+                    id=SessionIdentity(SessionSource.COMMAND, "renderer"),
+                    turn_active=True,
+                    progress="Checking layout",
                 ),
             ),
         )
@@ -381,7 +403,7 @@ class ContextTests(unittest.TestCase):
             HookEvent(
                 SessionSource.COMMAND,
                 "parser",
-                "intent",
+                HookEventKind.INTENT,
                 goal="Preserve parser compatibility",
             )
         )
@@ -434,12 +456,15 @@ class ContextTests(unittest.TestCase):
         state: PullRequestState = PullRequestState.OPEN,
         is_draft: bool = True,
     ) -> None:
-        if not self.memory.recent(session="cli:parser", event_types=("intent",)):
+        if not self.memory.recent(
+            session=SessionIdentity(SessionSource.COMMAND, "parser"),
+            event_types=("intent",),
+        ):
             self.record_hook(
                 HookEvent(
                     SessionSource.COMMAND,
                     "parser",
-                    "intent",
+                    HookEventKind.INTENT,
                     goal="Make session tracking survive restarts",
                 )
             )
@@ -457,17 +482,22 @@ class ContextTests(unittest.TestCase):
                     "",
                     0,
                     0,
-                    "example.test/team/parser",
+                    RemoteRepository("example.test/team/parser"),
                 ),
                 1000,
             )
         )
         self.record_hook(
-            HookEvent(SessionSource.COMMAND, "parser", "session_start", repo="/parser")
+            HookEvent(
+                SessionSource.COMMAND,
+                "parser",
+                HookEventKind.SESSION_START,
+                repo="/parser",
+            )
         )
         self.memory.work.observe(
             BranchObservation(
-                "example.test/team/parser",
+                RemoteRepository("example.test/team/parser"),
                 "persistence",
                 PullRequest(
                     42,
@@ -477,8 +507,9 @@ class ContextTests(unittest.TestCase):
                     is_draft=is_draft,
                     title="Persist coding session context",
                     head=head,
-                    head_repository="example.test/team/parser",
+                    head_repository=RemoteRepository("example.test/team/parser"),
                     head_branch="persistence",
+                    repository=RemoteRepository("example.test/team/parser"),
                 ),
                 1000,
             )
@@ -492,7 +523,7 @@ class ContextTests(unittest.TestCase):
         encoded = json.dumps(self.payload(self.prepare()))
         self.assertNotIn('"checkout"', encoded)
         self.assertNotIn('"/parser"', encoded)
-        self.assertNotIn("cli:parser", encoded)
+        self.assertNotIn("native_id", encoded)
         self.assertNotIn("https://example.test/team/parser/pull/42", encoded)
 
     def test_head_metadata_does_not_invalidate_the_agent_story(self) -> None:
@@ -517,6 +548,7 @@ class ContextTests(unittest.TestCase):
             PullRequestState.MERGED,
             "2026-10-21T00:00:00Z",
             title="Persist coding session context",
+            repository=RemoteRepository("example.test/team/parser"),
         )
         self.memory.work.observe(PullRequestObservation(pr.url, pr, 1001))
         self.work = self.memory.connected_work(self.snapshot)
@@ -628,7 +660,7 @@ class ContextTests(unittest.TestCase):
                     ),
                     activity=(
                         EvidenceView(
-                            EvidenceSource.HARNESS,
+                            EvidenceSource.SOURCE,
                             EvidenceKind.PROGRESS,
                             ProgressView("Finished simplifying log labels"),
                             800,
@@ -637,9 +669,10 @@ class ContextTests(unittest.TestCase):
                     sessions=(
                         SessionContribution(
                             "Audit tests",
+                            session=SessionIdentity(SessionSource.COMMAND, "audit"),
                             requests=(
                                 EvidenceView(
-                                    EvidenceSource.HARNESS,
+                                    EvidenceSource.SOURCE,
                                     EvidenceKind.INTENT,
                                     IntentView("Audit tests"),
                                     750,
@@ -647,7 +680,7 @@ class ContextTests(unittest.TestCase):
                             ),
                             activity=(
                                 EvidenceView(
-                                    EvidenceSource.HARNESS,
+                                    EvidenceSource.SOURCE,
                                     EvidenceKind.PROGRESS,
                                     ProgressView("Found two redundant assertions"),
                                     850,
@@ -682,7 +715,7 @@ class ContextTests(unittest.TestCase):
         self.update_session(
             waiting_for_input=True,
             waiting_seconds=5,
-            waiting_kind="question",
+            waiting_kind=WaitingKind.QUESTION,
             waiting_prompt="Which examples should I use?",
             progress="Finished an older task",
         )
@@ -690,7 +723,7 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(moment["kind"], "input_requested")
         self.assertEqual(moment["reported_progress"], "Which examples should I use?")
         self.update_session(
-            waiting_kind="permission",
+            waiting_kind=WaitingKind.PERMISSION,
             waiting_prompt=None,
             waiting_tool="Run the local browser check",
         )
@@ -725,7 +758,7 @@ class ContextTests(unittest.TestCase):
             subject.story,
             activity=(
                 EvidenceView(
-                    EvidenceSource.HARNESS,
+                    EvidenceSource.SOURCE,
                     EvidenceKind.EXECUTION,
                     ExecutionView("turn ended", None, ExecutionOutcome.ERROR),
                     1000,
@@ -754,7 +787,7 @@ class ContextTests(unittest.TestCase):
             subject.story,
             activity=(
                 EvidenceView(
-                    EvidenceSource.HARNESS,
+                    EvidenceSource.SOURCE,
                     EvidenceKind.EXECUTION,
                     ExecutionView(
                         "turn ended", "Parser checks passed", ExecutionOutcome.SUCCESS
@@ -788,7 +821,7 @@ class ContextTests(unittest.TestCase):
             subject.story,
             activity=(
                 EvidenceView(
-                    EvidenceSource.HARNESS,
+                    EvidenceSource.SOURCE,
                     EvidenceKind.EXECUTION,
                     ExecutionView(
                         "turn ended", "Parent checks passed", ExecutionOutcome.SUCCESS
@@ -799,10 +832,10 @@ class ContextTests(unittest.TestCase):
             sessions=(
                 SessionContribution(
                     "Inspect the parser",
-                    session="cli:child",
+                    session=SessionIdentity(SessionSource.COMMAND, "child"),
                     activity=(
                         EvidenceView(
-                            EvidenceSource.HARNESS,
+                            EvidenceSource.SOURCE,
                             EvidenceKind.PROGRESS,
                             ProgressView("Child is inspecting escape handling"),
                             940,
@@ -816,7 +849,12 @@ class ContextTests(unittest.TestCase):
         selection = replace(
             self.attention.select(snapshot, SpeechReason.ROUTINE),
             subject=self.work[0],
-            update=WorkUpdate("cli:child", "child-revision", 940, None),
+            update=WorkUpdate(
+                SessionIdentity(SessionSource.COMMAND, "child"),
+                "child-revision",
+                940,
+                None,
+            ),
         )
         payload = self.cognition.prompts.prompt(snapshot, selection)
         self.assertEqual(payload["current_work"]["request"], "Inspect the parser")
@@ -833,25 +871,99 @@ class ContextTests(unittest.TestCase):
             )
         )
 
+    def test_selected_related_task_preserves_the_scope_of_broader_results(self) -> None:
+        self.output()
+        subject = self.work[0]
+        related = SessionIdentity(SessionSource.COMMAND, "coverage")
+        story = replace(
+            subject.story,
+            intent="Build parser",
+            activity=(
+                EvidenceView(
+                    EvidenceSource.SOURCE,
+                    EvidenceKind.PROGRESS,
+                    ProgressView("Parser compatibility checks passed"),
+                    700,
+                ),
+            ),
+            sessions=(
+                SessionContribution(
+                    "current task",
+                    session=related,
+                    activity=(
+                        EvidenceView(
+                            EvidenceSource.SOURCE,
+                            EvidenceKind.PROGRESS,
+                            ProgressView("Escape checks passed"),
+                            940,
+                        ),
+                    ),
+                ),
+            ),
+        )
+        self.work = (replace(subject, story=story),)
+        snapshot = self.current_snapshot()
+        selection = replace(
+            self.attention.select(snapshot, SpeechReason.ROUTINE),
+            update=WorkUpdate(related, "coverage-result", 940),
+        )
+        narrative = WorkNarrative(
+            subject.id,
+            semantic_revision(story),
+            NarrativeStatement("I am building the parser", ("request",)),
+            progress=(
+                NarrativeStatement("I checked parser compatibility", ("parser",)),
+                NarrativeStatement("I checked escapes", ("coverage",)),
+            ),
+            sources={
+                "request": {
+                    "scope": "current task",
+                    "origin": {"source": "cli", "native_id": "parser"},
+                },
+                "parser": {
+                    "scope": "current task",
+                    "origin": {"source": "cli", "native_id": "parser"},
+                },
+                "coverage": {
+                    "scope": "current task",
+                    "origin": {"source": "cli", "native_id": "coverage"},
+                },
+            },
+        )
+        payload = self.cognition.prompts.prompt(snapshot, selection, narrative)
+        self.assertEqual(payload["current_work"]["request"], "current task")
+        self.assertEqual(
+            payload["current_moment"]["reported_progress"], "Escape checks passed"
+        )
+        history = {
+            item.get("request", item.get("reported_progress")): item.get("scope")
+            for item in payload["earlier_context"]
+        }
+        self.assertEqual(history["Parser compatibility checks passed"], "Build parser")
+        self.assertEqual(history["I am building the parser"], "Build parser")
+        self.assertEqual(history["I checked parser compatibility"], "Build parser")
+        self.assertEqual(history["I checked escapes"], "current task")
+
     def test_child_report_keeps_the_assignment_observed_before_its_result(self) -> None:
         self.output()
         report = EvidenceView(
-            EvidenceSource.HARNESS,
+            EvidenceSource.SOURCE,
             EvidenceKind.PROGRESS,
             ProgressView("Found two redundant assertions"),
             850,
         )
         earlier_assignment = EvidenceView(
-            EvidenceSource.HARNESS, EvidenceKind.INTENT, IntentView("Audit tests"), 800
+            EvidenceSource.SOURCE, EvidenceKind.INTENT, IntentView("Audit tests"), 800
         )
         current_assignment = EvidenceView(
-            EvidenceSource.HARNESS,
+            EvidenceSource.SOURCE,
             EvidenceKind.INTENT,
             IntentView("Check the explorer website"),
             900,
         )
         child = SessionContribution(
             "Check the explorer website",
+            session=SessionIdentity(SessionSource.COMMAND, "explorer"),
             requests=(earlier_assignment, current_assignment),
             activity=(report,),
         )
@@ -874,7 +986,7 @@ class ContextTests(unittest.TestCase):
             for subject in self.work
         )
         payload = self.payload(self.prepare())
-        self.assertEqual(payload["earlier_context"][-1]["scope"], "child assignment")
+        self.assertEqual(payload["earlier_context"][-1]["scope"], "related task")
 
     def test_cancelled_routine_work_preserves_the_terminal_outcome(self) -> None:
         self.update_session(
@@ -915,13 +1027,13 @@ class ContextTests(unittest.TestCase):
     ) -> None:
         self.output()
         progress = EvidenceView(
-            EvidenceSource.HARNESS,
+            EvidenceSource.SOURCE,
             EvidenceKind.PROGRESS,
             ProgressView("Checked parser compatibility"),
             800,
         )
         ended = EvidenceView(
-            EvidenceSource.HARNESS,
+            EvidenceSource.SOURCE,
             EvidenceKind.EXECUTION,
             ExecutionView(
                 "turn ended", "Checked parser compatibility", ExecutionOutcome.CANCELLED
@@ -942,7 +1054,11 @@ class ContextTests(unittest.TestCase):
                     requests=(request,),
                     activity=(progress, ended),
                     sessions=(
-                        SessionContribution("Audit tests", activity=(ended, progress)),
+                        SessionContribution(
+                            "Audit tests",
+                            session=SessionIdentity(SessionSource.COMMAND, "audit"),
+                            activity=(ended, progress),
+                        ),
                     ),
                 ),
             )
@@ -952,7 +1068,7 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(len(earlier), 2)
         self.assertEqual(earlier[0]["outcome"], "cancelled")
         self.assertEqual(earlier[1]["outcome"], "cancelled")
-        self.assertEqual(earlier[1]["scope"], "child assignment")
+        self.assertEqual(earlier[1]["scope"], "related task")
 
     def test_followup_keeps_its_prior_request_ahead_of_optional_child_reports(
         self,
@@ -970,9 +1086,10 @@ class ContextTests(unittest.TestCase):
         children = tuple(
             SessionContribution(
                 f"Assignment {index}",
+                session=SessionIdentity(SessionSource.COMMAND, f"child-{index}"),
                 activity=(
                     EvidenceView(
-                        EvidenceSource.HARNESS,
+                        EvidenceSource.SOURCE,
                         EvidenceKind.PROGRESS,
                         ProgressView(
                             f"Report {index}: " + "Checked parser behavior. " * 8

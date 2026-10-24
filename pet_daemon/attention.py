@@ -12,6 +12,7 @@ from .domain import (
     SpeechSituation,
     WorkSubjectKind,
 )
+from .identity import SessionIdentity
 from .logging import get_logger
 from .runtime import (
     CareTrigger,
@@ -23,7 +24,7 @@ from .runtime import (
     SubjectTrigger,
     Trigger,
 )
-from .sessions.reactions import SessionReaction
+from .sessions.reactions import ReactionKind, SessionReaction
 from .storage.memory import HistoryRecord
 from .work import WorkSubject
 from .work.views import WorkUpdate
@@ -39,7 +40,7 @@ class AttentionRequest:
     context: str | None = None
     ttl: float | None = None
     trigger: Trigger | None = None
-    eligible: frozenset[str] | None = None
+    eligible: frozenset[SessionIdentity] | None = None
 
 
 @dataclass(frozen=True)
@@ -78,7 +79,7 @@ class AttentionSelection:
     update: WorkUpdate | None = None
 
     @property
-    def id(self) -> str | None:
+    def id(self) -> SessionIdentity | None:
         return (
             self.subject.id
             if self.subject is not None
@@ -150,7 +151,7 @@ def _session_tier(session: SessionContext) -> int:
     return 5
 
 
-def _target_session(trigger: Trigger | None) -> str | None:
+def _target_session(trigger: Trigger | None) -> SessionIdentity | None:
     if isinstance(trigger, SessionTrigger):
         return trigger.session_id
     if isinstance(trigger, ReactionTrigger):
@@ -164,7 +165,7 @@ class Attention:
         config: Config,
         clock: Callable[[], float],
         rng: RandomSource,
-        history: Mapping[str, HistoryRecord] | None = None,
+        history: Mapping[SessionIdentity, HistoryRecord] | None = None,
         *,
         wall_clock: Callable[[], float] = time.time,
     ) -> None:
@@ -175,7 +176,7 @@ class Attention:
         self.pending: tuple[SpeechReason, float, Trigger | None] | None = None
         self.last_attempt = float("-inf")
         self.next_observation = clock() + rng.uniform(*config.observation_seconds)
-        self.histories: dict[str, HistoryRecord] = {}
+        self.histories: dict[SessionIdentity, HistoryRecord] = {}
         self.sequence: float = 0
         if history:
             self.restore(history)
@@ -303,7 +304,7 @@ class Attention:
         snapshot: PetContext,
         reason: SpeechReason = SpeechReason.ROUTINE,
         context: str | None = None,
-        eligible: Collection[str] | None = None,
+        eligible: Collection[SessionIdentity] | None = None,
     ) -> AttentionSelection:
         trigger = snapshot.trigger
         subject = None
@@ -329,7 +330,7 @@ class Attention:
                 or self.routine_eligible(subject, snapshot)
             ]
             candidates = []
-            updates: dict[str, WorkUpdate] = {}
+            updates: dict[SessionIdentity, WorkUpdate] = {}
             for item in subjects:
                 sessions = _sessions(item, snapshot)
                 if automatic and item.updates:
@@ -545,7 +546,7 @@ class Attention:
         self,
         snapshot: PetContext,
         *,
-        check_in: Collection[str] = (),
+        check_in: Collection[SessionIdentity] = (),
         manual: tuple[str, float | None] | None = None,
         clicked: bool = False,
         care: CareKind | None = None,
@@ -582,7 +583,7 @@ class Attention:
             return AttentionRequest(SpeechReason.CARE, trigger=CareTrigger(care))
         return None
 
-    def restore(self, history: Mapping[str, HistoryRecord]) -> None:
+    def restore(self, history: Mapping[SessionIdentity, HistoryRecord]) -> None:
         self.histories = dict(history)
         self.sequence = max((row.last_selected for row in history.values()), default=0)
 
@@ -591,7 +592,7 @@ class Attention:
 
     def consideration(
         self, subject: WorkSubject | None, update: WorkUpdate | None = None
-    ) -> dict[str, HistoryRecord]:
+    ) -> dict[SessionIdentity, HistoryRecord]:
         records = {}
         if subject:
             records[subject.id] = replace(
@@ -609,10 +610,10 @@ class Attention:
     ) -> None:
         self.histories.update(self.consideration(subject, update))
 
-    def history(self, identifier: str) -> HistoryRecord:
+    def history(self, identifier: SessionIdentity) -> HistoryRecord:
         return self.histories.get(identifier, HistoryRecord())
 
-    def mark_selected(self, subject_id: str) -> None:
+    def mark_selected(self, subject_id: SessionIdentity) -> None:
         self.sequence = max(self.clock(), self.sequence + 0.000001)
         self.histories[subject_id] = replace(
             self.history(subject_id), last_selected=self.sequence
@@ -623,7 +624,7 @@ class Attention:
         if (
             reason in (SpeechReason.CLICK, SpeechReason.EXPLICIT)
             or isinstance(trigger, ReactionTrigger)
-            and trigger.reaction.kind == "waiting"
+            and trigger.reaction.kind == ReactionKind.WAITING
         ):
             return True
         return (
@@ -631,7 +632,7 @@ class Attention:
             >= self.config.behavior.automatic_speech_cooldown_seconds
         )
 
-    def scheduled(self, subject_id: str | None = None) -> None:
+    def scheduled(self, subject_id: SessionIdentity | None = None) -> None:
         self.last_attempt = self.clock()
         self.next_observation = self.last_attempt + self.rng.uniform(
             *self.config.observation_seconds

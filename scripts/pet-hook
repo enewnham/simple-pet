@@ -7,30 +7,32 @@ import os
 import runpy
 import sys
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from pet_daemon.domain import SessionSource
+from pet_daemon.domain import ExecutionOutcome, SessionSource
 from pet_daemon.prose import work_prose
+from pet_daemon.runtime import HookEvent, HookEventKind, WaitingKind
 from pet_daemon.sessions.processes import discover_owner
 from pet_daemon.user_text import sentiment_excerpt
 
 CLIENT = runpy.run_path(str(Path(__file__).resolve().parents[1] / "bin" / "pet-notify"))
 COMMON_EVENTS = {
-    "SessionStart": "session_start",
-    "SessionEnd": "session_end",
-    "UserPromptSubmit": "intent",
-    "PreToolUse": "tool_start",
-    "PostToolUse": "tool_done",
-    "PostToolUseFailure": "tool_error",
-    "Stop": "turn_done",
-    "StopFailure": "turn_error",
-    "Interrupt": "interrupt",
-    "SubagentStart": "subagent_start",
-    "SubagentStop": "subagent_done",
-    "PermissionRequest": "waiting",
-    "Elicitation": "waiting",
-    "Notification": "waiting",
+    "SessionStart": HookEventKind.SESSION_START,
+    "SessionEnd": HookEventKind.SESSION_END,
+    "UserPromptSubmit": HookEventKind.INTENT,
+    "PreToolUse": HookEventKind.TOOL_START,
+    "PostToolUse": HookEventKind.TOOL_DONE,
+    "PostToolUseFailure": HookEventKind.TOOL_ERROR,
+    "Stop": HookEventKind.TURN_DONE,
+    "StopFailure": HookEventKind.TURN_ERROR,
+    "Interrupt": HookEventKind.INTERRUPT,
+    "SubagentStart": HookEventKind.SUBAGENT_START,
+    "SubagentStop": HookEventKind.SUBAGENT_DONE,
+    "PermissionRequest": HookEventKind.WAITING,
+    "Elicitation": HookEventKind.WAITING,
+    "Notification": HookEventKind.WAITING,
 }
 EVENTS = {
     "claude": {
@@ -43,17 +45,17 @@ EVENTS = {
         not in ("PostToolUseFailure", "StopFailure", "Elicitation", "Notification")
     },
     "cursor": {
-        "sessionStart": "session_start",
-        "sessionEnd": "session_end",
-        "beforeSubmitPrompt": "intent",
-        "preToolUse": "tool_start",
-        "postToolUse": "tool_done",
-        "postToolUseFailure": "tool_error",
-        "stop": "turn_done",
-        "subagentStart": "subagent_start",
-        "subagentStop": "subagent_done",
-        "afterAgentResponse": "progress",
-        "afterAgentThought": "progress",
+        "sessionStart": HookEventKind.SESSION_START,
+        "sessionEnd": HookEventKind.SESSION_END,
+        "beforeSubmitPrompt": HookEventKind.INTENT,
+        "preToolUse": HookEventKind.TOOL_START,
+        "postToolUse": HookEventKind.TOOL_DONE,
+        "postToolUseFailure": HookEventKind.TOOL_ERROR,
+        "stop": HookEventKind.TURN_DONE,
+        "subagentStart": HookEventKind.SUBAGENT_START,
+        "subagentStop": HookEventKind.SUBAGENT_DONE,
+        "afterAgentResponse": HookEventKind.PROGRESS,
+        "afterAgentThought": HookEventKind.PROGRESS,
     },
 }
 INPUT_TOOLS = ("AskUserQuestion", "request_user_input", "RequestUserInput")
@@ -87,22 +89,20 @@ def failed(value: object) -> bool:
     )
 
 
-def update(
-    harness: str, event: str, payload: Mapping[str, object]
-) -> dict[str, object] | None:
-    if harness == "claude" and payload.get("cursor_version"):
+def update(source: str, event: str, payload: Mapping[str, object]) -> HookEvent | None:
+    if source == "claude" and payload.get("cursor_version"):
         return None
     if event == "Notification" and payload.get("notification_type") not in (
         "permission_prompt",
         "elicitation_dialog",
     ):
         return None
-    normalized = EVENTS[harness][event]
+    normalized = EVENTS[source][event]
     parent = ""
     aliases = []
-    if harness == "cursor":
+    if source == "cursor":
         session = string(payload.get("conversation_id"))
-        if normalized in ("subagent_start", "subagent_done"):
+        if normalized in (HookEventKind.SUBAGENT_START, HookEventKind.SUBAGENT_DONE):
             parent = string(payload.get("parent_conversation_id"), session)
             aliases = list(
                 dict.fromkeys(
@@ -124,36 +124,23 @@ def update(
             parent, session = session, agent
     if not session:
         return None
-    result: dict[str, object] = {
-        "kind": "event",
-        "harness": harness,
-        "session": session,
-        "event": normalized,
-    }
     cwd = string(payload.get("cwd"))
-    if cwd:
-        result["repo"] = os.path.normpath(cwd)
-    for field in ("repository", "branch", "pull_request"):
-        if value := string(payload.get(field)):
-            result[field] = value
-    if parent and parent != session:
-        result["parent"] = parent
-    if aliases:
-        result["aliases"] = aliases
+    repo = os.path.normpath(cwd) if cwd else None
     turn = string(payload.get("generation_id"), payload.get("turn_id"))
-    if turn and normalized not in ("subagent_start", "subagent_done"):
-        result["turn"] = turn
+    if normalized in (HookEventKind.SUBAGENT_START, HookEventKind.SUBAGENT_DONE):
+        turn = ""
     call = string(payload.get("tool_use_id"), payload.get("tool_call_id"))
-    if call and normalized in ("tool_start", "tool_done", "tool_error", "waiting"):
-        result["call"] = call
+    if normalized not in (
+        HookEventKind.TOOL_START,
+        HookEventKind.TOOL_DONE,
+        HookEventKind.TOOL_ERROR,
+        HookEventKind.WAITING,
+    ):
+        call = ""
     parent_call = string(payload.get("parent_tool_call_id"))
-    if normalized in ("subagent_start", "subagent_done"):
+    if normalized in (HookEventKind.SUBAGENT_START, HookEventKind.SUBAGENT_DONE):
         parent_call = string(parent_call, payload.get("tool_call_id"))
-    if parent_call:
-        result["parent_call"] = parent_call
     tool_name = string(payload.get("tool_name"))
-    if tool_name:
-        result["tool_name"] = tool_name
     tool_input = object_value(payload.get("tool_input"))
     command = string(
         tool_input.get("command"),
@@ -163,89 +150,122 @@ def update(
         tool_input.get("description"),
     )
     tool = excerpt(command, tool_name, limit=160)
-    if tool:
-        result["tool"] = tool
-    if normalized == "intent":
-        result["goal"] = string(payload.get("prompt"))
+    goal = None
+    sentiment_text = None
+    progress = None
+    waiting_kind = None
+    if normalized == HookEventKind.INTENT:
+        goal = string(payload.get("prompt"))
         if not parent:
-            result["sentiment_text"] = sentiment_excerpt(string(result["goal"]))
-    elif normalized == "subagent_start" and payload.get("task"):
-        result["goal"] = string(payload.get("task"))
-    if normalized == "tool_start" and tool_name in INPUT_TOOLS:
-        result["event"] = "waiting"
-        result["waiting_kind"] = "question"
+            sentiment_text = sentiment_excerpt(goal)
+    elif normalized == HookEventKind.SUBAGENT_START and payload.get("task"):
+        goal = string(payload.get("task"))
+    normalized_event = normalized
+    if normalized == HookEventKind.TOOL_START and tool_name in INPUT_TOOLS:
+        normalized_event = HookEventKind.WAITING
+        waiting_kind = WaitingKind.QUESTION
         questions = tool_input.get("questions")
         if isinstance(questions, list):
-            question_text = excerpt(
-                " ".join(
-                    string(question.get("question"), question.get("title"))
-                    for question in questions
-                    if isinstance(question, dict)
+            progress = (
+                excerpt(
+                    " ".join(
+                        string(question.get("question"), question.get("title"))
+                        for question in questions
+                        if isinstance(question, dict)
+                    )
                 )
+                or None
             )
-            if question_text:
-                result["progress"] = question_text
-    elif event == "PermissionRequest" or (
+    elif event == "PermissionRequest":
+        waiting_kind = WaitingKind.PERMISSION_CHECK
+    elif (
         event == "Notification"
         and payload.get("notification_type") == "permission_prompt"
     ):
-        result["waiting_kind"] = "permission"
-    elif normalized == "waiting":
-        result["waiting_kind"] = "question"
+        waiting_kind = WaitingKind.PERMISSION
+    elif normalized == HookEventKind.WAITING:
+        waiting_kind = WaitingKind.QUESTION
     response = payload.get("tool_response")
-    if harness == "cursor":
+    if source == "cursor":
         output = payload.get("tool_output")
         response = object_value(output) or output
-    if normalized == "tool_done" and failed(response):
-        result["event"] = "tool_error"
+    if normalized == HookEventKind.TOOL_DONE and failed(response):
+        normalized_event = HookEventKind.TOOL_ERROR
     status = payload.get("status")
-    if normalized == "turn_done" and harness == "cursor":
+    if normalized == HookEventKind.TURN_DONE and source == "cursor":
         if status == "error":
-            result["event"] = "turn_error"
+            normalized_event = HookEventKind.TURN_ERROR
         elif status == "aborted":
-            result["event"] = "interrupt"
-    interrupted = normalized == "tool_error" and payload.get("is_interrupt") is True
+            normalized_event = HookEventKind.INTERRUPT
+    interrupted = (
+        normalized == HookEventKind.TOOL_ERROR and payload.get("is_interrupt") is True
+    )
+    outcome = None
     if interrupted:
-        result["event"] = "tool_done"
-        result["outcome"] = "cancelled"
-    if result["event"] in ("tool_error", "turn_error"):
-        result["outcome"] = "error"
-    elif result["event"] == "interrupt":
-        result["outcome"] = "cancelled"
-    elif normalized == "subagent_done" and harness == "cursor":
-        result["outcome"] = {"error": "error", "aborted": "cancelled"}.get(
-            string(status), "success"
-        )
-    elif not interrupted and normalized in ("tool_done", "turn_done", "subagent_done"):
-        result["outcome"] = "success"
-    if result.get("outcome") != "error" and normalized in (
-        "tool_done",
-        "turn_done",
-        "subagent_done",
-        "progress",
+        normalized_event = HookEventKind.TOOL_DONE
+        outcome = ExecutionOutcome.CANCELLED
+    if normalized_event in (HookEventKind.TOOL_ERROR, HookEventKind.TURN_ERROR):
+        outcome = ExecutionOutcome.ERROR
+    elif normalized_event == HookEventKind.INTERRUPT:
+        outcome = ExecutionOutcome.CANCELLED
+    elif normalized == HookEventKind.SUBAGENT_DONE and source == "cursor":
+        outcome = {
+            "error": ExecutionOutcome.ERROR,
+            "aborted": ExecutionOutcome.CANCELLED,
+        }.get(string(status), ExecutionOutcome.SUCCESS)
+    elif not interrupted and normalized in (
+        HookEventKind.TOOL_DONE,
+        HookEventKind.TURN_DONE,
+        HookEventKind.SUBAGENT_DONE,
     ):
-        progress = work_prose(string(payload.get("last_assistant_message")))
-        if normalized != "tool_done":
-            progress = work_prose(
+        outcome = ExecutionOutcome.SUCCESS
+    if outcome != ExecutionOutcome.ERROR and normalized in (
+        HookEventKind.TOOL_DONE,
+        HookEventKind.TURN_DONE,
+        HookEventKind.SUBAGENT_DONE,
+        HookEventKind.PROGRESS,
+    ):
+        reported = work_prose(string(payload.get("last_assistant_message")))
+        if normalized != HookEventKind.TOOL_DONE:
+            reported = work_prose(
                 string(
-                    progress,
+                    reported,
                     payload.get("text"),
                     payload.get("response"),
                     payload.get("thought"),
                     payload.get("summary"),
                 )
             )
-        if progress:
-            result["progress"] = progress
-    return result
+        progress = reported or None
+    return HookEvent(
+        source=SessionSource(source),
+        session=session,
+        event=normalized_event,
+        repo=repo,
+        repository=string(payload.get("repository")) or None,
+        branch=string(payload.get("branch")) or None,
+        pull_request=string(payload.get("pull_request")) or None,
+        parent=parent if parent and parent != session else None,
+        aliases=tuple(aliases),
+        turn=turn or None,
+        call=call or None,
+        parent_call=parent_call or None,
+        tool_name=tool_name or None,
+        tool=tool or None,
+        goal=goal,
+        sentiment_text=sentiment_text,
+        progress=progress,
+        waiting_kind=waiting_kind,
+        outcome=outcome,
+    )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("harness", choices=EVENTS)
+    parser.add_argument("source", choices=EVENTS)
     parser.add_argument("event")
     args = parser.parse_args()
-    if args.event not in EVENTS[args.harness]:
+    if args.event not in EVENTS[args.source]:
         parser.error("unsupported hook event")
     try:
         payload = json.load(sys.stdin)
@@ -253,15 +273,14 @@ def main() -> None:
         payload = {}
     if not isinstance(payload, dict):
         payload = {}
-    result = update(args.harness, args.event, payload)
-    if result:
-        owner = discover_owner(SessionSource(args.harness))
-        if owner:
-            result["owner"] = owner.packet()
-        CLIENT["send"](result)
+    hook = update(args.source, args.event, payload)
+    if hook is not None:
+        owner = discover_owner(hook.source)
+        hook = replace(hook, owner=owner)
+        CLIENT["send"](hook.packet())
     response = (
         {"continue": True}
-        if args.harness == "cursor" and args.event == "beforeSubmitPrompt"
+        if args.source == "cursor" and args.event == "beforeSubmitPrompt"
         else {}
     )
     print(json.dumps(response))

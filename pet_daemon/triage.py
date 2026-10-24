@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .identity import SessionIdentity, session_data
+
 
 @dataclass(frozen=True)
 class LogEntry:
@@ -93,7 +95,7 @@ def select_logs(
     *,
     run_id: str | None = None,
     observation_id: str | None = None,
-    session: str | None = None,
+    session: SessionIdentity | None = None,
     event: str | None = None,
     packet: Mapping[str, object] | None = None,
     start: str | datetime | None = None,
@@ -109,7 +111,7 @@ def select_logs(
             continue
         if observation_id is not None and data.get("observation_id") != observation_id:
             continue
-        if session is not None and data.get("session") != session:
+        if session is not None and data.get("session") != session_data(session):
             continue
         if event is not None and data.get("event") != event:
             continue

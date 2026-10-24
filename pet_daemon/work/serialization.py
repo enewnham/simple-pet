@@ -2,6 +2,8 @@ from dataclasses import asdict
 from typing import TypedDict
 
 from ..domain import ArtifactKind, EvidenceKind, ExecutionOutcome
+from ..identity import SessionData, session_data, session_from_data
+from ..repository_identity import RepositoryData, repository_data, repository_from_data
 from .models import (
     ArtifactReference,
     AvailabilityEvidence,
@@ -25,7 +27,7 @@ from .observations import (
 
 
 class StoredPayload(TypedDict, total=False):
-    session: str
+    session: SessionData
     text: str
     event: str
     outcome: str | None
@@ -36,7 +38,7 @@ class StoredPayload(TypedDict, total=False):
 class StoredArtifactReference(TypedDict):
     kind: str
     ref: str
-    repository: str
+    repository: RepositoryData | None
     revision: str | None
     checkout: str | None
     title: str | None
@@ -44,7 +46,7 @@ class StoredArtifactReference(TypedDict):
 
 class StoredContext(TypedDict):
     checkout: str
-    repository: str
+    repository: RepositoryData | None
     branch: str
     pull_request: str
     references: list[StoredArtifactReference]
@@ -62,10 +64,10 @@ class StoredSessionReport(TypedDict):
 def payload_record(payload: EvidencePayload) -> dict[str, object]:
     match payload:
         case IntentEvidence() | ProgressEvidence():
-            return {"session": payload.session, "text": payload.text}
+            return {"session": session_data(payload.session), "text": payload.text}
         case ExecutionEvidence():
             return {
-                "session": payload.session,
+                "session": session_data(payload.session),
                 "event": payload.event,
                 "outcome": payload.outcome,
                 "tool_name": payload.tool_name,
@@ -98,7 +100,7 @@ def payload_record(payload: EvidencePayload) -> dict[str, object]:
         case GitHubEvidence():
             return {
                 "pr": payload.pr.data() if payload.pr else None,
-                "repository": payload.repository,
+                "repository": repository_data(payload.repository),
             }
         case AvailabilityEvidence():
             return {
@@ -112,12 +114,12 @@ def report_payload(
 ) -> IntentEvidence | ProgressEvidence | ExecutionEvidence:
     match kind:
         case EvidenceKind.INTENT:
-            return IntentEvidence(data["session"], data["text"])
+            return IntentEvidence(session_from_data(data["session"]), data["text"])
         case EvidenceKind.PROGRESS:
-            return ProgressEvidence(data["session"], data["text"])
+            return ProgressEvidence(session_from_data(data["session"]), data["text"])
         case EvidenceKind.EXECUTION:
             return ExecutionEvidence(
-                data["session"],
+                session_from_data(data["session"]),
                 data["event"],
                 ExecutionOutcome(data["outcome"])
                 if data["outcome"] is not None
@@ -139,7 +141,21 @@ def evidence_record(record: EvidenceRecord) -> dict[str, object]:
 
 
 def report_data(value: SessionReport) -> dict[str, object]:
-    return {**evidence_record(value.record()), "context": asdict(value.context)}
+    context = value.context
+    return {
+        **evidence_record(value.record()),
+        "context": {
+            "checkout": context.checkout,
+            "repository": repository_data(context.repository),
+            "branch": context.branch,
+            "pull_request": context.pull_request,
+            "references": [
+                {**asdict(item), "repository": repository_data(item.repository)}
+                for item in context.references
+            ],
+            "branch_resolution": context.branch_resolution,
+        },
+    }
 
 
 def report_from_data(value: StoredSessionReport) -> SessionReport:
@@ -148,14 +164,14 @@ def report_from_data(value: StoredSessionReport) -> SessionReport:
         report_payload(EvidenceKind(value["kind"]), value["data"]),
         ReportContext(
             context["checkout"],
-            context["repository"],
+            repository_from_data(context["repository"]),
             context["branch"],
             context["pull_request"],
             tuple(
                 ArtifactReference(
                     kind=ArtifactKind(item["kind"]),
                     ref=item["ref"],
-                    repository=item["repository"],
+                    repository=repository_from_data(item["repository"]),
                     revision=item.get("revision"),
                     checkout=item.get("checkout"),
                     title=item.get("title"),

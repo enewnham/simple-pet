@@ -13,7 +13,7 @@ from .observations import (
     PullRequestObservation,
     RepositoryObservation,
 )
-from .validation import normalize_reference, repository_identity
+from .validation import normalize_reference
 
 
 def references(prose: str) -> tuple[ArtifactReference, ...]:
@@ -47,7 +47,7 @@ def report_context(
     local = checkout.local if checkout else None
     return ReportContext(
         checkout.worktree if checkout else location,
-        repository_identity(local.repository) if local else "",
+        local.repository if local else None,
         local.branch if local else "",
         branch.pr.url if branch and branch.pr else "",
         references(prose),

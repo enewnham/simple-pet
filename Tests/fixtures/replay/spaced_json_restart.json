@@ -5,13 +5,13 @@
     {
       "packets": [
         {
-          "harness": "codex",
+          "source": "codex",
           "session": "root",
           "event": "intent",
           "goal": "Accept JSON packets with spaces in the hook reader."
         },
         {
-          "harness": "codex",
+          "source": "codex",
           "session": "root",
           "event": "turn_done",
           "progress": "Updated the hook reader to accept spaced JSON and verified the packet replay."
@@ -32,7 +32,7 @@
       "after_seconds": 30,
       "packets": [
         {
-          "harness": "codex",
+          "source": "codex",
           "session": "root",
           "event": "session_end"
         }
@@ -44,7 +44,7 @@
       "after_seconds": 1,
       "packets": [
         {
-          "harness": "codex",
+          "source": "codex",
           "session": "root",
           "event": "session_end"
         }

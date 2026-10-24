@@ -15,7 +15,7 @@ class Activity(StrEnum):
     BUILDING = "building"
     CHECKING = "checking"
     COMMAND = "command"
-    HARNESS = "harness"
+    SOURCE = "source"
 
 
 class ExecutionOutcome(StrEnum):
@@ -124,7 +124,7 @@ class ArtifactKind(StrEnum):
 class EvidenceSource(StrEnum):
     PR_REFERENCE = "pr_reference"
     USER = "user"
-    HARNESS = "harness"
+    SOURCE = "source"
     GIT = "git"
     GITHUB = "github"
     OBSERVER = "observer"

@@ -5,13 +5,13 @@
     {
       "packets": [
         {
-          "harness": "codex",
+          "source": "codex",
           "session": "root",
           "event": "intent",
           "goal": "Check the explorer."
         },
         {
-          "harness": "codex",
+          "source": "codex",
           "session": "root",
           "event": "turn_done",
           "progress": "Checked the explorer interactions."

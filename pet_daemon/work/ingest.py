@@ -7,6 +7,8 @@ from dataclasses import replace
 from typing import Protocol
 
 from ..domain import ArtifactKind
+from ..identity import SessionIdentity
+from ..repository_identity import RepositoryIdentity
 from .association import TERMINAL_EVENTS, decide_observation, report_context
 from .models import ArtifactReference, ExecutionEvidence, ReportContext, SessionReport
 from .observations import (
@@ -16,18 +18,20 @@ from .observations import (
     RepositoryObservation,
     SessionObservation,
 )
-from .validation import normalize_reference, repository_identity
+from .validation import normalize_reference
 
 
 class WorkRepository(Protocol):
     def transaction(self) -> AbstractContextManager[None]: ...
     def save_session(self, observation: SessionObservation, now: float) -> None: ...
     def append_report(self, report: SessionReport) -> bool: ...
-    def session_location(self, session: str) -> str: ...
+    def session_location(self, session: SessionIdentity) -> str: ...
     def get_checkout(
         self, path: str, *, enclosing: bool = False
     ) -> CheckoutObservation | None: ...
-    def get_branch(self, repository: str, branch: str) -> BranchObservation | None: ...
+    def get_branch(
+        self, repository: RepositoryIdentity, branch: str
+    ) -> BranchObservation | None: ...
     def get_pull_request(self, ref: str) -> PullRequestObservation | None: ...
     def put_observation(self, observation: RepositoryObservation) -> None: ...
     def clear(self) -> None: ...
@@ -45,7 +49,7 @@ class WorkIngestion:
         location: str,
         prose: str = "",
         *,
-        repository: str | None = None,
+        repository: RepositoryIdentity | None = None,
         branch: str | None = None,
         pull_request: str | None = None,
     ) -> ReportContext:
@@ -57,7 +61,7 @@ class WorkIngestion:
             self.repository.get_checkout(location, enclosing=True) if location else None
         )
         local = checkout.local if checkout else None
-        repo = repository_identity(repository or (local.repository if local else ""))
+        repo = repository or (local.repository if local else None)
         branch_name = branch or (local.branch if local else "")
         observed = (
             self.repository.get_branch(repo, branch_name)
@@ -122,9 +126,6 @@ class WorkIngestion:
                 case CheckoutObservation():
                     record = self.repository.get_checkout(collected.worktree)
                 case BranchObservation():
-                    collected = replace(
-                        collected, repository=repository_identity(collected.repository)
-                    )
                     record = self.repository.get_branch(
                         collected.repository, collected.branch
                     )

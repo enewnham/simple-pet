@@ -109,7 +109,11 @@ class Cognition:
         if prepared is None:
             return None
         existing = self.memory.load_narrative(prepared.subject_id)
-        if existing is not None and existing.revision == prepared.revision:
+        if (
+            existing is not None
+            and existing.revision == prepared.revision
+            and prepared.latest_request_source in existing.intent.sources
+        ):
             return existing
         try:
             raw = await self.complete(prepared.request, ModelPurpose.STORY)

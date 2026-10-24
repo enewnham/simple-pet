@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from pet_daemon.domain import ProcessStatus, SessionSource
+from pet_daemon.identity import SessionIdentity
 from pet_daemon.sessions.processes import (
     ProcessIdentity,
     ProcessTracker,
@@ -28,7 +29,7 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
             sessions.handle(
                 {
                     "event": "intent",
-                    "harness": "claude",
+                    "source": "claude",
                     "session": "main",
                     "owner": owner.packet(),
                 }
@@ -45,7 +46,9 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
                 await tracker.refresh(sessions.process_owners())
             )
             self.assertFalse(sessions.active)
-            self.assertIsNone(sessions.by_id["claude:main"].outcome)
+            self.assertIsNone(
+                sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")].outcome
+            )
         finally:
             if child.returncode is None:
                 child.kill()
@@ -61,15 +64,19 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
             sessions.handle(
                 {
                     "event": "intent",
-                    "harness": "claude",
+                    "source": "claude",
                     "session": name,
                     "owner": identity.packet(),
                 }
             )
         tracker = ProcessTracker()
         sessions.apply_process_status(await tracker.refresh(sessions.process_owners()))
-        self.assertTrue(sessions.by_id["claude:current"].active)
-        self.assertFalse(sessions.by_id["claude:old"].active)
+        self.assertTrue(
+            sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "current")].active
+        )
+        self.assertFalse(
+            sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "old")].active
+        )
         self.assertEqual(await tracker.refresh(sessions.process_owners()), {})
 
     async def test_failed_probe_leaves_a_session_active_with_unknown_presence(
@@ -81,7 +88,7 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
         sessions.handle(
             {
                 "event": "intent",
-                "harness": "claude",
+                "source": "claude",
                 "session": "main",
                 "owner": owner.packet(),
             }
@@ -93,7 +100,10 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
             results = await ProcessTracker().refresh(sessions.process_owners())
         sessions.apply_process_status(results)
         self.assertTrue(sessions.active)
-        self.assertEqual(sessions.by_id["claude:main"].presence, "unknown")
+        self.assertEqual(
+            sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")].presence,
+            "unknown",
+        )
 
     def test_ancestry_crosses_shells_and_ignores_shared_hosts(self) -> None:
         def row(
@@ -145,7 +155,7 @@ class FreshnessTests(unittest.TestCase):
 
     def event(self, kind: str, **fields: object) -> SessionUpdate | None:
         return self.sessions.handle(
-            {"event": kind, "harness": "claude", "session": "main", **fields}
+            {"event": kind, "source": "claude", "session": "main", **fields}
         )
 
     def test_verified_owner_keeps_quiet_work_live_through_stale_timeout(self) -> None:
@@ -180,7 +190,7 @@ class FreshnessTests(unittest.TestCase):
         owner = ProcessIdentity(42, "owner-start")
         self.event("intent", owner=owner.packet())
         self.event("turn_done", outcome="success")
-        session = self.sessions.by_id["claude:main"]
+        session = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")]
         original_time = session.changed_at
         self.now += 10
         self.sessions.apply_process_status({owner: ProcessStatus.EXITED})
@@ -208,12 +218,15 @@ class FreshnessTests(unittest.TestCase):
         self.sessions.handle(
             {
                 "event": "subagent_start",
-                "harness": "claude",
+                "source": "claude",
                 "session": "child",
                 "parent": "main",
             }
         )
-        self.assertEqual(self.sessions.by_id["claude:child"].owner, owner)
+        self.assertEqual(
+            self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "child")].owner,
+            owner,
+        )
         self.sessions.apply_process_status({owner: ProcessStatus.EXITED})
         self.assertFalse(self.sessions.active)
         self.assertFalse(self.sessions.clean_convergence)
@@ -223,4 +236,6 @@ class FreshnessTests(unittest.TestCase):
         self.now += 3600
         self.sessions.prune()
         self.assertFalse(self.sessions.active)
-        self.assertIsNone(self.sessions.by_id["claude:main"].outcome)
+        self.assertIsNone(
+            self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")].outcome
+        )

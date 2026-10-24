@@ -1,9 +1,10 @@
 import json
 import re
-from dataclasses import replace
+from dataclasses import asdict, replace
 from urllib.parse import urlsplit
 
 from ..domain import ArtifactKind
+from ..repository_identity import parse_remote_repository
 from .models import ArtifactReference
 
 
@@ -14,18 +15,8 @@ def canonical(value: object) -> str:
         sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
+        default=asdict,
     )
-
-
-def repository_identity(value: str) -> str:
-    if not value or value.startswith("local:"):
-        return value
-    if "://" in value:
-        parsed = urlsplit(value)
-        value = (parsed.hostname or "") + parsed.path
-    else:
-        value = re.sub(r"^(?:[^/@]+@)?([^/:]+):(.+)$", r"\1/\2", value)
-    return value.removesuffix("/").removesuffix(".git").lower()
 
 
 def text(value: object, name: str, *, optional: bool = False) -> str:
@@ -41,9 +32,6 @@ def normalize_reference(value: ArtifactReference) -> ArtifactReference:
         value,
         kind=ArtifactKind(value.kind),
         ref=text(value.ref, "artifact.ref"),
-        repository=text(value.repository, "artifact.repository")
-        if value.repository
-        else "",
         revision=text(value.revision, "artifact.revision")
         if value.revision is not None
         else None,
@@ -56,7 +44,6 @@ def normalize_reference(value: ArtifactReference) -> ArtifactReference:
         raise ValueError(
             "artifact.checkout must be a filesystem path without NUL characters"
         )
-    result = replace(result, repository=repository_identity(result.repository))
     if result.kind == ArtifactKind.BRANCH and not result.repository:
         raise ValueError("branch artifacts require repository")
     if result.kind == ArtifactKind.PULL_REQUEST and not re.match(
@@ -69,7 +56,7 @@ def normalize_reference(value: ArtifactReference) -> ArtifactReference:
         result = replace(
             result,
             ref=ref,
-            repository=repository_identity(
+            repository=parse_remote_repository(
                 parsed.netloc + parsed.path.rsplit("/pull/", 1)[0]
             ),
         )

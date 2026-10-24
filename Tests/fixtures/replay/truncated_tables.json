@@ -5,13 +5,13 @@
     {
       "packets": [
         {
-          "harness": "codex",
+          "source": "codex",
           "session": "root",
           "event": "intent",
           "goal": "Explain API message types."
         },
         {
-          "harness": "codex",
+          "source": "codex",
           "session": "root",
           "event": "turn_done",
           "progress": "Identified two request types.\n| Request | Response |\n| --- | --- |\n| Commentary | Silence |\nChecked both request builders."

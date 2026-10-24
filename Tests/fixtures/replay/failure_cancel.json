@@ -5,13 +5,13 @@
     {
       "packets": [
         {
-          "harness": "codex",
+          "source": "codex",
           "session": "root",
           "event": "intent",
           "goal": "Check explorer interactions."
         },
         {
-          "harness": "codex",
+          "source": "codex",
           "session": "root",
           "event": "turn_error",
           "progress": "Checked navigation. Browser checks failed.",
@@ -23,13 +23,13 @@
     {
       "packets": [
         {
-          "harness": "codex",
+          "source": "codex",
           "session": "root",
           "event": "intent",
           "goal": "Stop the checks."
         },
         {
-          "harness": "codex",
+          "source": "codex",
           "session": "root",
           "event": "interrupt",
           "progress": "Stopped before the remaining checks.",

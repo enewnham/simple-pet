@@ -5,10 +5,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..domain import Activity, ExecutionOutcome
+from ..identity import SessionIdentity
 from ..prompts import bounded
 from ..prose import work_prose
+from ..repository_identity import RepositoryIdentity, parse_remote_repository
+from ..runtime import WaitingKind
 from ..sessions.activity import activity
-from .validation import repository_identity
 
 if TYPE_CHECKING:
     from ..runtime import HookEvent
@@ -43,9 +45,9 @@ HISTORY_SEARCH_STOP_WORDS = {
 
 @dataclass(frozen=True)
 class SessionEntry:
-    session: str
+    session: SessionIdentity
     working_directory: str
-    repository: str
+    repository: RepositoryIdentity | None
     event_type: str
     details: HistoryDetails
     goal: str
@@ -54,14 +56,14 @@ class SessionEntry:
 
 @dataclass(frozen=True)
 class RecallQuery:
-    repository: str
-    session: str
+    repository: RepositoryIdentity | None
+    session: SessionIdentity
     terms: tuple[str, ...]
 
 
 @dataclass(frozen=True)
 class SessionContext:
-    session_id: str
+    session_id: SessionIdentity
     working_directory: str
     goal: str
     last_tool: str
@@ -73,7 +75,10 @@ def build_session_entry(
     event: HookEvent, context: SessionContext | None = None
 ) -> SessionEntry | None:
     kind = event.event
-    if kind in {"tool_start", "tool_done", "tool_error"}:
+    if (
+        kind in {"tool_start", "tool_done", "tool_error"}
+        or event.waiting_kind == WaitingKind.PERMISSION_CHECK
+    ):
         return None
     progress = work_prose(event.progress)
     if kind == "progress" and not progress:
@@ -81,9 +86,7 @@ def build_session_entry(
     working_directory = bounded(
         event.repo or (context.working_directory if context else None), 1024
     )
-    session_id = bounded(
-        context.session_id if context else f"{event.harness}:{event.session}", 256
-    )
+    session_id = context.session_id if context else event.subject
     explicit_goal = bounded(event.goal)
     goal = explicit_goal or bounded(context.goal if context else None)
     terminal = kind in {
@@ -110,7 +113,9 @@ def build_session_entry(
     return SessionEntry(
         session=session_id,
         working_directory=working_directory,
-        repository=repository_identity(bounded(event.repository, 1024)),
+        repository=parse_remote_repository(event.repository)
+        if event.repository
+        else None,
         event_type=kind,
         details=details,
         goal=goal,
@@ -119,7 +124,7 @@ def build_session_entry(
 
 
 def build_recall_query(
-    event: HookEvent | None, *, repository: str
+    event: HookEvent | None, *, repository: RepositoryIdentity | None
 ) -> RecallQuery | None:
     if not event or event.event != "intent" or not repository or not event.goal:
         return None
@@ -134,7 +139,7 @@ def build_recall_query(
     if not search_terms:
         return None
     return RecallQuery(
-        repository=repository_identity(bounded(repository, 1024)),
-        session=bounded(f"{event.harness}:{event.session}", 256),
+        repository=repository,
+        session=event.subject,
         terms=search_terms,
     )

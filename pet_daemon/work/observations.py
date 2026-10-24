@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar, Literal, TypedDict
 
 from ..domain import (
@@ -11,18 +11,27 @@ from ..domain import (
     LinkRelationship,
     PullRequestState,
 )
+from ..identity import SessionIdentity
+from ..repository_identity import (
+    RemoteRepository,
+    RepositoryData,
+    RepositoryIdentity,
+    remote_repository_from_data,
+    repository_data,
+    repository_from_data,
+)
 from .models import ExecutionEvidence, IntentEvidence, ProgressEvidence, RelatedLink
 from .wire import PullRequestData, RelatedLinkData
 
 
 @dataclass(frozen=True)
 class SessionObservation:
-    session: str
-    aliases: tuple[str, ...] = ()
-    parent: str | None = None
+    session: SessionIdentity
+    aliases: tuple[SessionIdentity, ...] = ()
+    parent: SessionIdentity | None = None
     location: str | None = None
     reports: tuple[IntentEvidence | ProgressEvidence | ExecutionEvidence, ...] = ()
-    repository: str | None = None
+    repository: RepositoryIdentity | None = None
     branch: str | None = None
     pull_request: str | None = None
 
@@ -42,7 +51,7 @@ class GitObservation:
     upstream: str
     ahead: int
     behind: int
-    repository: str = ""
+    repository: RepositoryIdentity
 
     def data(self) -> GitObservationData:
         return {
@@ -56,7 +65,7 @@ class GitObservation:
             "upstream": self.upstream,
             "ahead": self.ahead,
             "behind": self.behind,
-            "repository": self.repository,
+            "repository": repository_data(self.repository),
         }
 
     @property
@@ -78,9 +87,9 @@ class PullRequest:
     merged_at: str | None
     is_draft: bool | None = None
     head: str = ""
-    head_repository: str = ""
+    head_repository: RepositoryIdentity | None = None
     head_branch: str = ""
-    repository: str = ""
+    repository: RemoteRepository = field(kw_only=True)
     title: str = ""
     body: str = ""
     base_branch: str = ""
@@ -96,9 +105,9 @@ class PullRequest:
             "merged_at": self.merged_at,
             "is_draft": self.is_draft,
             "head": self.head,
-            "head_repository": self.head_repository,
+            "head_repository": repository_data(self.head_repository),
             "head_branch": self.head_branch,
-            "repository": self.repository,
+            "repository": repository_data(self.repository),
             "title": self.title,
             "body": self.body,
             "base_branch": self.base_branch,
@@ -137,7 +146,7 @@ class CheckoutObservation:
 
 @dataclass(frozen=True)
 class BranchObservation:
-    repository: str
+    repository: RepositoryIdentity
     branch: str
     pr: PullRequest | None
     checked_at: float
@@ -149,7 +158,7 @@ class BranchObservation:
     def packet(self) -> BranchObservationData:
         return {
             "kind": "branch",
-            "repository": self.repository,
+            "repository": repository_data(self.repository),
             "branch": self.branch,
             "pr": self.pr.data() if self.pr else None,
             "checked_at": self.checked_at,
@@ -187,7 +196,7 @@ type RepositoryObservation = (
 class RepositoryTarget:
     kind: CollectionKind
     ref: str
-    repository: str = ""
+    repository: RepositoryIdentity | None = None
     checkout: str = ""
     include_links: bool = True
 
@@ -203,7 +212,7 @@ class GitObservationData(TypedDict):
     upstream: str
     ahead: int
     behind: int
-    repository: str
+    repository: RepositoryData
 
 
 class CheckoutObservationData(TypedDict):
@@ -218,7 +227,7 @@ class CheckoutObservationData(TypedDict):
 
 class BranchObservationData(TypedDict):
     kind: Literal["branch"]
-    repository: str
+    repository: RepositoryData
     branch: str
     pr: PullRequestData | None
     checked_at: float
@@ -241,6 +250,22 @@ type RepositoryObservationData = (
 )
 
 
+def git_observation_from_data(data: GitObservationData) -> GitObservation:
+    return GitObservation(
+        worktree=data["worktree"],
+        branch=data["branch"],
+        head=data["head"],
+        staged=data["staged"],
+        unstaged=data["unstaged"],
+        untracked=data["untracked"],
+        conflicts=data["conflicts"],
+        upstream=data["upstream"],
+        ahead=data["ahead"],
+        behind=data["behind"],
+        repository=repository_from_data(data["repository"]),
+    )
+
+
 def repository_observation_from_mapping(
     data: RepositoryObservationData,
 ) -> RepositoryObservation:
@@ -248,7 +273,7 @@ def repository_observation_from_mapping(
         local = data["local"]
         return CheckoutObservation(
             data["worktree"],
-            GitObservation(**local) if local else None,
+            git_observation_from_data(local) if local else None,
             data["checked_at"],
             data["error"],
             data["available"],
@@ -258,7 +283,7 @@ def repository_observation_from_mapping(
     observed_pr = pull_request_from_data(pr) if pr else None
     if data["kind"] == "branch":
         return BranchObservation(
-            data["repository"],
+            repository_from_data(data["repository"]),
             data["branch"],
             observed_pr,
             data["checked_at"],
@@ -315,9 +340,9 @@ def pull_request_from_data(pr: PullRequestData) -> PullRequest:
         merged_at=pr["merged_at"],
         is_draft=pr["is_draft"],
         head=pr["head"],
-        head_repository=pr["head_repository"],
+        head_repository=repository_from_data(pr["head_repository"]),
         head_branch=pr["head_branch"],
-        repository=pr["repository"],
+        repository=remote_repository_from_data(pr["repository"]),
         title=pr["title"],
         body=pr["body"],
         base_branch=pr["base_branch"],

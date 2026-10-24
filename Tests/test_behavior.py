@@ -12,7 +12,8 @@ from typing import TypeVar, Unpack
 from pet_daemon.behavior.controller import Behavior
 from pet_daemon.behavior.sprites import Clip, Pack
 from pet_daemon.config import BehaviorConfig
-from pet_daemon.domain import PetState, ProcessStatus
+from pet_daemon.domain import PetState, ProcessStatus, SessionSource
+from pet_daemon.identity import SessionIdentity
 from pet_daemon.runtime import (
     AnimationPacket,
     MotionPacket,
@@ -147,7 +148,7 @@ class BehaviorTests(unittest.TestCase):
     def start(self) -> None:
         self.sessions.handle(
             {
-                "harness": "cli",
+                "source": "cli",
                 "event": "intent",
                 "session": "one",
                 "goal": "Build project",
@@ -155,7 +156,7 @@ class BehaviorTests(unittest.TestCase):
         )
         self.sessions.handle(
             {
-                "harness": "cli",
+                "source": "cli",
                 "event": "tool_start",
                 "session": "one",
                 "call": "build",
@@ -164,7 +165,7 @@ class BehaviorTests(unittest.TestCase):
         )
 
     def finish(self) -> None:
-        self.sessions.handle({"harness": "cli", "event": "turn_done", "session": "one"})
+        self.sessions.handle({"source": "cli", "event": "turn_done", "session": "one"})
 
     def animations(self) -> list[AnimationPacket]:
         return [packet["animation"] for packet in self.output if "animation" in packet]
@@ -240,10 +241,10 @@ class BehaviorTests(unittest.TestCase):
             any(a["id"] in ("jumping", "waving", "failed") for a in self.animations())
         )
         self.sessions.handle(
-            {"harness": "cli", "event": "tool_done", "session": "one", "call": "build"}
+            {"source": "cli", "event": "tool_done", "session": "one", "call": "build"}
         )
         self.sessions.handle(
-            {"harness": "cli", "event": "waiting", "session": "one", "call": "question"}
+            {"source": "cli", "event": "waiting", "session": "one", "call": "question"}
         )
         self.advance(behavior, 15)
         self.assertTrue(any(a["id"] == "failed" for a in self.animations()))
@@ -554,19 +555,29 @@ class BehaviorTests(unittest.TestCase):
         )
         self.sessions.handle(
             {
-                "harness": "cli",
+                "source": "cli",
                 "event": "tool_start",
                 "session": "one",
                 "call": "inspect",
                 "tool": "Read file",
             }
         )
-        self.assertTrue(behavior.react("investigation", self.sessions, "cli:one"))
+        self.assertTrue(
+            behavior.react(
+                "investigation",
+                self.sessions,
+                SessionIdentity(SessionSource.COMMAND, "one"),
+            )
+        )
         self.assertEqual(self.animations()[-1]["id"], "review")
         self.sessions.handle(
-            {"harness": "cli", "event": "waiting", "session": "one", "call": "question"}
+            {"source": "cli", "event": "waiting", "session": "one", "call": "question"}
         )
-        self.assertTrue(behavior.react("waiting", self.sessions, "cli:one"))
+        self.assertTrue(
+            behavior.react(
+                "waiting", self.sessions, SessionIdentity(SessionSource.COMMAND, "one")
+            )
+        )
         self.assertEqual(self.animations()[-1]["id"], "waiting")
 
     def test_walk_waits_for_matching_motion_feedback(self) -> None:
@@ -673,7 +684,7 @@ class BehaviorTests(unittest.TestCase):
         )
         self.sessions.handle(
             {
-                "harness": "cli",
+                "source": "cli",
                 "event": "tool_start",
                 "session": "one",
                 "call": "inspect",
@@ -733,7 +744,7 @@ class BehaviorTests(unittest.TestCase):
         self.advance(behavior, 600, PetState.WORKING)
         self.assertIsNone(behavior.pending)
         self.assertEqual(self.animations()[-1]["id"], "quiet-pose")
-        self.sessions.handle({"harness": "cli", "session": "one", "event": "progress"})
+        self.sessions.handle({"source": "cli", "session": "one", "event": "progress"})
         behavior.resume()
         behavior.tick(PetState.WORKING, self.sessions)
         self.assertEqual(self.animations()[-1]["id"], "busy")
@@ -793,7 +804,7 @@ class BehaviorTests(unittest.TestCase):
                 owner = ProcessIdentity(42, "verified-start")
                 self.sessions.handle(
                     {
-                        "harness": "cli",
+                        "source": "cli",
                         "session": "one",
                         "event": event,
                         "goal": "Plan changes",
@@ -809,7 +820,7 @@ class BehaviorTests(unittest.TestCase):
     def test_quiet_live_turn_settles_and_naps_after_activity_becomes_uncertain(
         self,
     ) -> None:
-        self.sessions.handle({"harness": "cli", "session": "one", "event": "intent"})
+        self.sessions.handle({"source": "cli", "session": "one", "event": "intent"})
         behavior = self.make_behavior(
             naps=True, nap_interval=(1, 1), nap_seconds=(60, 60)
         )
@@ -820,15 +831,13 @@ class BehaviorTests(unittest.TestCase):
         self.assertTrue(self.sessions.active)
         self.assertFalse(self.sessions.working)
         self.assertTrue(behavior.sleeping)
-        self.sessions.handle({"harness": "cli", "session": "one", "event": "progress"})
+        self.sessions.handle({"source": "cli", "session": "one", "event": "progress"})
         behavior.tick(PetState.WORKING, self.sessions)
         self.assertFalse(behavior.sleeping)
 
     def test_finished_failed_turn_can_settle_and_nap(self) -> None:
         self.start()
-        self.sessions.handle(
-            {"harness": "cli", "session": "one", "event": "turn_error"}
-        )
+        self.sessions.handle({"source": "cli", "session": "one", "event": "turn_error"})
         self.assertFalse(self.sessions.active)
         behavior = self.make_behavior(naps=True, nap_interval=(1, 1))
         self.wait_for_nap(behavior)

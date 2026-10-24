@@ -17,11 +17,25 @@ from pet_daemon.commentary.cognition import Cognition
 from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.commentary.story import prepare
 from pet_daemon.config import Config
-from pet_daemon.domain import ModelPurpose, SpeechReason, SpeechSituation
-from pet_daemon.runtime import ProcessPacket
+from pet_daemon.domain import (
+    ExecutionOutcome,
+    ModelPurpose,
+    SessionSource,
+    SpeechReason,
+    SpeechSituation,
+)
+from pet_daemon.identity import SessionIdentity
+from pet_daemon.runtime import (
+    HookEvent,
+    HookEventKind,
+    ProcessIdentity,
+    ProcessPacket,
+    WaitingKind,
+)
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources.hooks import normalize_hook
 from pet_daemon.storage import Memory
+from pet_daemon.work.models import ExecutionEvidence
 from Tests.fixtures import capture_snapshot
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,7 +53,7 @@ class NoModel:
 
 class ReceivedPacket(TypedDict, total=False):
     kind: str
-    harness: str
+    source: str
     session: str
     event: str
     aliases: list[str]
@@ -90,13 +104,13 @@ class NotifyTests(unittest.TestCase):
 
     def run_hook(
         self,
-        harness: str,
+        source: str,
         event: str,
         payload: Mapping[str, object] | None = None,
         raw: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [sys.executable, str(HOOK), harness, event],
+            [sys.executable, str(HOOK), source, event],
             input=raw if raw is not None else json.dumps(payload or {}),
             env=self.environment,
             capture_output=True,
@@ -140,7 +154,7 @@ class NotifyTests(unittest.TestCase):
             self.assertEqual(packet["session"], "worker-one")
             self.assertEqual(packet["call"], "test-one")
             self.assertEqual(packet["event"], event)
-            self.assertEqual(packet["harness"], "cli")
+            self.assertEqual(packet["source"], "cli")
             self.assertTrue(packet["manual"])
             self.assertEqual(packet["exit_code"], 1)
 
@@ -150,7 +164,7 @@ class NotifyTests(unittest.TestCase):
             self.receive(),
             {
                 "kind": "event",
-                "harness": "cli",
+                "source": "cli",
                 "session": "worker",
                 "event": "intent",
                 "goal": 'Fix "quotes" 🐈',
@@ -163,18 +177,18 @@ class NotifyTests(unittest.TestCase):
     def test_hook_preserves_user_sentiment_prose_before_prompt_compression(
         self,
     ) -> None:
-        for harness, event, identity in (
+        for source, event, identity in (
             ("claude", "UserPromptSubmit", {"session_id": "worker"}),
             ("codex", "UserPromptSubmit", {"session_id": "worker"}),
             ("cursor", "beforeSubmitPrompt", {"conversation_id": "worker"}),
         ):
-            with self.subTest(harness=harness):
+            with self.subTest(source=source):
                 prompt = (
                     "This is terrible.\n```\n"
                     + 'error = "awful"\n' * 500
                     + "```\nPlease fix the parser."
                 )
-                result = self.run_hook(harness, event, {**identity, "prompt": prompt})
+                result = self.run_hook(source, event, {**identity, "prompt": prompt})
                 self.assertEqual(result.returncode, 0, result.stderr)
                 packet = self.receive()
                 self.assertEqual(
@@ -336,15 +350,15 @@ class NotifyTests(unittest.TestCase):
         )
         hook_packet = self.receive()
         native_packet = {
-            "harness": "codex",
+            "source": "codex",
             "session": "native-review",
             "event": "intent",
             "goal": prompt,
         }
         for packet in (cli_packet, hook_packet, native_packet):
-            with self.subTest(harness=packet["harness"]):
+            with self.subTest(source=packet["source"]):
                 memory = Memory(
-                    self.path / f"{packet['harness']}.sqlite3",
+                    self.path / f"{packet['source']}.sqlite3",
                     "pet",
                     clock=lambda: 1000,
                 )
@@ -458,15 +472,15 @@ class NotifyTests(unittest.TestCase):
             self.assertNotIn("turn", packet)
 
     def test_child_turns_and_tools_stay_separate_from_the_parent(self) -> None:
-        for harness in ("claude", "codex"):
-            with self.subTest(harness=harness):
+        for source in ("claude", "codex"):
+            with self.subTest(source=source):
                 sessions = Sessions(time.monotonic)
                 for agent in ("", "first", "second"):
                     identity = {"session_id": "parent"}
                     if agent:
                         identity["agent_id"] = agent
                     self.run_hook(
-                        harness,
+                        source,
                         "UserPromptSubmit",
                         {**identity, "turn_id": agent or "parent", "prompt": "Inspect"},
                     )
@@ -475,7 +489,7 @@ class NotifyTests(unittest.TestCase):
                     for agent in ("first", "", "second"):
                         name = agent or "parent"
                         self.run_hook(
-                            harness,
+                            source,
                             event,
                             {
                                 "session_id": "parent",
@@ -487,7 +501,9 @@ class NotifyTests(unittest.TestCase):
                         )
                         self.assertIsNotNone(sessions.handle(self.receive()))
                     for name in ("parent", "first", "second"):
-                        session = sessions.by_id[f"{harness}:{name}"]
+                        session = sessions.by_id[
+                            SessionIdentity(SessionSource(source), name)
+                        ]
                         self.assertEqual(session.turn, name)
                         self.assertEqual(
                             set(session.calls),
@@ -495,10 +511,12 @@ class NotifyTests(unittest.TestCase):
                         )
                         self.assertEqual(
                             session.parent,
-                            None if name == "parent" else f"{harness}:parent",
+                            None
+                            if name == "parent"
+                            else SessionIdentity(SessionSource(source), "parent"),
                         )
                 self.run_hook(
-                    harness,
+                    source,
                     "PreToolUse",
                     {
                         "session_id": "parent",
@@ -508,17 +526,26 @@ class NotifyTests(unittest.TestCase):
                     },
                 )
                 self.assertIsNone(sessions.handle(self.receive()))
-                self.assertEqual(sessions.by_id[f"{harness}:first"].turn, "first")
-                self.assertFalse(sessions.by_id[f"{harness}:first"].calls)
+                self.assertEqual(
+                    sessions.by_id[
+                        SessionIdentity(SessionSource(source), "first")
+                    ].turn,
+                    "first",
+                )
+                self.assertFalse(
+                    sessions.by_id[
+                        SessionIdentity(SessionSource(source), "first")
+                    ].calls
+                )
 
     def test_child_prompts_do_not_score_sentiment_and_input_requests_stay_child_scoped(
         self,
     ) -> None:
-        for harness in ("claude", "codex"):
-            with self.subTest(harness=harness):
+        for source in ("claude", "codex"):
+            with self.subTest(source=source):
                 identity = {"session_id": "parent", "agent_id": "child"}
                 self.run_hook(
-                    harness,
+                    source,
                     "UserPromptSubmit",
                     {**identity, "prompt": "This is terrible. Inspect the parser."},
                 )
@@ -528,7 +555,7 @@ class NotifyTests(unittest.TestCase):
                 )
                 self.assertNotIn("sentiment_text", packet)
                 self.run_hook(
-                    harness,
+                    source,
                     "PreToolUse",
                     {
                         **identity,
@@ -548,20 +575,23 @@ class NotifyTests(unittest.TestCase):
                 )
                 self.assertEqual(packet["waiting_kind"], "question")
 
-    def test_permission_waits_keep_their_command_separate_from_user_questions(
+    def test_waits_preserve_their_kind_and_input_requirement(
         self,
     ) -> None:
-        sessions = Sessions(time.monotonic)
-        for event, tool, expected in (
-            ("PermissionRequest", "Bash", "permission"),
-            ("PreToolUse", "request_user_input", "question"),
+        for source, event, tool, expected in (
+            ("codex", "PermissionRequest", "Bash", "permission_check"),
+            ("claude", "PermissionRequest", "Bash", "permission_check"),
+            ("claude", "Notification", "Bash", "permission"),
+            ("codex", "PreToolUse", "request_user_input", "question"),
         ):
-            with self.subTest(event=event):
+            with self.subTest(source=source, event=event):
+                sessions = Sessions(time.monotonic)
                 self.run_hook(
-                    "codex",
+                    source,
                     event,
                     {
                         "session_id": "worker",
+                        "notification_type": "permission_prompt",
                         "tool_name": tool,
                         "tool_input": {
                             "command": "python check.py",
@@ -571,7 +601,22 @@ class NotifyTests(unittest.TestCase):
                 )
                 packet = self.receive()
                 self.assertEqual(packet["waiting_kind"], expected)
-                self.assertIsNotNone(sessions.handle(packet))
+                accepted = sessions.handle(packet)
+                self.assertIsNotNone(accepted)
+                assert accepted is not None
+                self.assertTrue(
+                    sessions.by_id[
+                        SessionIdentity(SessionSource(source), "worker")
+                    ].waiting
+                )
+                self.assertEqual(
+                    any(
+                        isinstance(report, ExecutionEvidence)
+                        and report.event == "waiting"
+                        for report in accepted.observation.reports
+                    ),
+                    expected != "permission_check",
+                )
                 snapshot = sessions.activity_view().sessions[0]
                 self.assertEqual(snapshot.waiting_kind, expected)
                 self.assertEqual(snapshot.waiting_tool, "python check.py")
@@ -579,10 +624,12 @@ class NotifyTests(unittest.TestCase):
                     snapshot.waiting_prompt,
                     "Which strategy should I use?" if expected == "question" else None,
                 )
-                self.assertTrue(snapshot.waiting_for_input)
+                self.assertEqual(
+                    snapshot.waiting_for_input, expected != "permission_check"
+                )
                 self.assertIsNotNone(
                     sessions.handle(
-                        {"harness": "codex", "session": "worker", "event": "progress"}
+                        {"source": source, "session": "worker", "event": "progress"}
                     )
                 )
                 resumed = sessions.activity_view().sessions[0]
@@ -777,9 +824,11 @@ class NotifyTests(unittest.TestCase):
             },
         )
         self.assertIsNotNone(sessions.handle(self.receive()))
-        self.assertEqual(set(sessions.by_id), {"cursor:child"})
-        child = sessions.by_id["cursor:child"]
-        self.assertEqual(child.parent, "cursor:parent")
+        self.assertEqual(
+            set(sessions.by_id), {SessionIdentity(SessionSource.CURSOR, "child")}
+        )
+        child = sessions.by_id[SessionIdentity(SessionSource.CURSOR, "child")]
+        self.assertEqual(child.parent, SessionIdentity(SessionSource.CURSOR, "parent"))
         self.assertEqual(child.turn, "generation")
         self.assertFalse(child.calls)
 
@@ -824,12 +873,12 @@ class NotifyTests(unittest.TestCase):
         self.assertNotIn("progress", packet)
 
     def test_interrupted_tools_finish_without_an_error_alert(self) -> None:
-        for harness, event, key in (
+        for source, event, key in (
             ("claude", "PostToolUseFailure", "session_id"),
             ("cursor", "postToolUseFailure", "conversation_id"),
         ):
             self.run_hook(
-                harness,
+                source,
                 event,
                 {key: "worker", "tool_use_id": "call", "is_interrupt": True},
             )
@@ -852,13 +901,13 @@ class NotifyTests(unittest.TestCase):
             self.assertEqual((packet["event"], packet["outcome"]), (event, outcome))
 
     def test_waiting_input_keeps_tool_identity_without_starting_work(self) -> None:
-        for harness, event, session_key in (
+        for source, event, session_key in (
             ("claude", "PreToolUse", "session_id"),
             ("codex", "PreToolUse", "session_id"),
             ("cursor", "preToolUse", "conversation_id"),
         ):
             self.run_hook(
-                harness,
+                source,
                 event,
                 {
                     session_key: "worker",
@@ -892,13 +941,13 @@ class NotifyTests(unittest.TestCase):
 
     def test_examples_use_supported_native_events(self) -> None:
         module = runpy.run_path(str(HOOK))
-        for harness, filename in (
+        for source, filename in (
             ("claude", "claude-settings.json"),
             ("codex", "codex-hooks.json"),
             ("cursor", "cursor-hooks.json"),
         ):
             config = json.loads((ROOT / "examples" / filename).read_text())
-            self.assertEqual(set(config["hooks"]), set(module["EVENTS"][harness]))
+            self.assertEqual(set(config["hooks"]), set(module["EVENTS"][source]))
             self.assertNotIn("--speak", json.dumps(config))
 
     def test_wrapper_preserves_piped_stdin(self) -> None:
@@ -974,6 +1023,136 @@ class NotifyTests(unittest.TestCase):
             self.assertEqual(end["outcome"], "success" if code == 0 else "error")
             sessions.append(start["session"])
         self.assertNotEqual(*sessions)
+
+
+class HookTranslationTests(unittest.TestCase):
+    def test_adapters_return_typed_events_for_provider_waits(self) -> None:
+        update = runpy.run_path(str(HOOK))["update"]
+        for source, event, payload, kind in (
+            (
+                "claude",
+                "PermissionRequest",
+                {"session_id": "worker"},
+                WaitingKind.PERMISSION_CHECK,
+            ),
+            (
+                "codex",
+                "PermissionRequest",
+                {"session_id": "worker"},
+                WaitingKind.PERMISSION_CHECK,
+            ),
+            (
+                "claude",
+                "Notification",
+                {"session_id": "worker", "notification_type": "permission_prompt"},
+                WaitingKind.PERMISSION,
+            ),
+            (
+                "claude",
+                "Elicitation",
+                {"session_id": "worker"},
+                WaitingKind.QUESTION,
+            ),
+            (
+                "cursor",
+                "preToolUse",
+                {
+                    "conversation_id": "worker",
+                    "tool_name": "RequestUserInput",
+                    "tool_input": {"questions": [{"title": "Which parser?"}]},
+                },
+                WaitingKind.QUESTION,
+            ),
+        ):
+            with self.subTest(source=source, event=event):
+                hook = update(source, event, payload)
+                self.assertIsInstance(hook, HookEvent)
+                self.assertIs(hook.source, SessionSource(source))
+                self.assertIs(hook.event, HookEventKind.WAITING)
+                self.assertIs(hook.waiting_kind, kind)
+                self.assertEqual(normalize_hook(hook.packet()), hook)
+                if source == "cursor":
+                    self.assertEqual(hook.progress, "Which parser?")
+
+    def test_adapter_keeps_empty_intent_distinct_from_absent_goal(self) -> None:
+        update = runpy.run_path(str(HOOK))["update"]
+        for source, intent, start, identity in (
+            ("claude", "UserPromptSubmit", "SessionStart", {"session_id": "worker"}),
+            ("codex", "UserPromptSubmit", "SessionStart", {"session_id": "worker"}),
+            (
+                "cursor",
+                "beforeSubmitPrompt",
+                "sessionStart",
+                {"conversation_id": "worker"},
+            ),
+        ):
+            with self.subTest(source=source):
+                empty = update(source, intent, {**identity, "prompt": ""})
+                absent = update(source, start, identity)
+                self.assertEqual(empty.goal, "")
+                self.assertEqual(empty.packet()["goal"], "")
+                self.assertIsNone(absent.goal)
+                self.assertNotIn("goal", absent.packet())
+                self.assertIsNone(empty.progress)
+                self.assertNotIn("progress", empty.packet())
+
+    def test_packets_round_trip_typed_kinds_and_explicit_empty_fields(self) -> None:
+        for event in HookEventKind:
+            for waiting_kind in (*WaitingKind, None):
+                with self.subTest(event=event, waiting_kind=waiting_kind):
+                    hook = HookEvent(
+                        SessionSource.CODEX,
+                        "worker",
+                        event,
+                        aliases=("alternate",),
+                        parent="",
+                        parent_call="",
+                        call="",
+                        turn="",
+                        tool="",
+                        goal="",
+                        progress="",
+                        repo="",
+                        repository="",
+                        branch="",
+                        pull_request="",
+                        tool_name="",
+                        sentiment_text="",
+                        outcome=ExecutionOutcome.SUCCESS,
+                        manual=False,
+                        owner=ProcessIdentity(43210, "observed-start"),
+                        exit_code=0,
+                        waiting_kind=waiting_kind,
+                    )
+                    packet = hook.packet()
+                    self.assertIs(type(packet["event"]), str)
+                    self.assertIs(type(packet["source"]), str)
+                    self.assertIs(type(packet["outcome"]), str)
+                    if waiting_kind is None:
+                        self.assertNotIn("waiting_kind", packet)
+                    else:
+                        self.assertIs(type(packet["waiting_kind"]), str)
+                    received = normalize_hook(json.loads(json.dumps(packet)))
+                    self.assertEqual(received, hook)
+                    assert received is not None
+                    self.assertIs(received.event, event)
+                    self.assertIs(received.waiting_kind, waiting_kind)
+
+    def test_receiver_rejects_unknown_and_nontext_kinds(self) -> None:
+        for field, values in (
+            ("event", ("PermissionRequest", "unknown", None, [], {})),
+            ("waiting_kind", ("permission_prompt", "unknown", None, [], {})),
+            ("source", ("unknown", None, [], {})),
+        ):
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    packet = {
+                        "source": "codex",
+                        "session": "worker",
+                        "event": "waiting",
+                        field: value,
+                    }
+                    self.assertIsNone(normalize_hook(packet))
 
 
 if __name__ == "__main__":

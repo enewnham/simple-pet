@@ -5,13 +5,13 @@
     {
       "packets": [
         {
-          "harness": "codex",
+          "source": "codex",
           "session": "root",
           "event": "intent",
           "goal": "Simplify the log labels."
         },
         {
-          "harness": "codex",
+          "source": "codex",
           "session": "root",
           "event": "turn_done",
           "progress": "Finished simplifying the log labels."
@@ -21,7 +21,7 @@
     {
       "packets": [
         {
-          "harness": "codex",
+          "source": "codex",
           "session": "root",
           "event": "intent",
           "goal": "Build a local commentary explorer."

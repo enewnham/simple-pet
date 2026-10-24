@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from pet_daemon.domain import SessionSource
+from pet_daemon.identity import SessionIdentity
 from pet_daemon.triage import load_logs, save_case, select_logs, trace_delivery
 
 
@@ -128,7 +130,7 @@ def test_select_logs_filters_exact_fields_and_time(tmp_path: Path) -> None:
             "event": "renderer.command",
             "run_id": "run-a",
             "observation_id": "observation-a",
-            "session": "session-a",
+            "session": {"source": "codex", "native_id": "session-a"},
             "timestamp": "2026-10-23T12:00:00Z",
             "packet": {"animation": "sleep"},
         },
@@ -136,7 +138,7 @@ def test_select_logs_filters_exact_fields_and_time(tmp_path: Path) -> None:
             "event": "renderer.command",
             "run_id": "run-a",
             "observation_id": "observation-b",
-            "session": "session-a",
+            "session": {"source": "codex", "native_id": "session-a"},
             "timestamp": "2026-10-23T12:02:00Z",
             "packet": {"animation": "wake"},
         },
@@ -144,7 +146,7 @@ def test_select_logs_filters_exact_fields_and_time(tmp_path: Path) -> None:
             "event": "renderer.command",
             "run_id": "run-b",
             "observation_id": "observation-a",
-            "session": "session-a",
+            "session": {"source": "codex", "native_id": "session-a"},
             "timestamp": "2026-10-23T12:00:00Z",
             "packet": {"animation": "sleep"},
         },
@@ -154,7 +156,7 @@ def test_select_logs_filters_exact_fields_and_time(tmp_path: Path) -> None:
         load_logs(log).entries,
         run_id="run-a",
         observation_id="observation-a",
-        session="session-a",
+        session=SessionIdentity(SessionSource.CODEX, "session-a"),
         event="renderer.command",
         packet={"animation": "sleep"},
         start="2026-10-23T12:00:00Z",

@@ -7,12 +7,15 @@ from typing import Unpack
 
 from pet_daemon.domain import (
     ArtifactKind,
+    CollectionKind,
     EvidenceSource,
     LinkRelationship,
     PullRequestState,
     SessionSource,
 )
-from pet_daemon.runtime import HookEvent, HookTextFields
+from pet_daemon.identity import SessionIdentity
+from pet_daemon.repository_identity import LocalRepository, RemoteRepository
+from pet_daemon.runtime import HookEvent, HookEventKind, HookTextFields
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources.hooks import normalize_hook
 from pet_daemon.storage.memory import Memory
@@ -36,7 +39,8 @@ from pet_daemon.work.views import (
 )
 from Tests.fixtures import require, sessions_snapshot
 
-REPOSITORY = "github.com/team/project"
+REPOSITORY = RemoteRepository("github.com/team/project")
+SESSION = SessionIdentity(SessionSource.CODEX, "one")
 
 
 class WorkTests(unittest.TestCase):
@@ -55,16 +59,16 @@ class WorkTests(unittest.TestCase):
     def event(
         self,
         event: str,
-        session: str = "codex:one",
+        session: SessionIdentity = SESSION,
         *,
         aliases: tuple[str, ...] = (),
         **fields: Unpack[HookTextFields],
     ) -> None:
-        harness, name = session.split(":", 1)
+        source, name = session.source.value, session.native_id
         hook = require(
             normalize_hook(
                 {
-                    "harness": harness,
+                    "source": source,
                     "session": name,
                     "event": event,
                     "aliases": list(aliases),
@@ -145,12 +149,12 @@ class WorkTests(unittest.TestCase):
             f"https://github.com/team/project/pull/{number}",
             PullRequestState.OPEN,
             None,
-            True,
-            "head",
-            REPOSITORY,
-            "feature",
-            REPOSITORY,
-            "Handle quotes",
+            is_draft=True,
+            head="head",
+            head_repository=REPOSITORY,
+            head_branch="feature",
+            repository=REPOSITORY,
+            title="Handle quotes",
         )
 
     def branch(self, number: int = 7, branch: str = "feature") -> BranchObservation:
@@ -158,27 +162,36 @@ class WorkTests(unittest.TestCase):
             REPOSITORY, branch, replace(self.pr(number), head_branch=branch), self.now
         )
 
-    def story(self, session: str = "codex:one") -> WorkStory:
+    def story(self, session: SessionIdentity = SESSION) -> WorkStory:
         return next(
             subject.story
             for subject in self.memory.connected_work(sessions_snapshot())
             if session in subject.sessions
         )
 
-    def reports(self, session: str = "codex:one") -> tuple[EvidenceView, ...]:
+    def reports(self, session: SessionIdentity = SESSION) -> tuple[EvidenceView, ...]:
         return self.story(session).activity
 
     def test_child_keeps_its_scope_and_report_with_the_parent_story(self) -> None:
         self.event(
             "intent",
-            "codex:child",
+            SessionIdentity(SessionSource.CODEX, "child"),
             goal="Cover escapes",
             parent="root",
             repo="/work/child",
         )
-        self.event("intent", "codex:root", goal="Improve parser", repo="/work/root")
-        self.event("progress", "codex:child", progress="Escape tests pass")
-        story = self.story("codex:root")
+        self.event(
+            "intent",
+            SessionIdentity(SessionSource.CODEX, "root"),
+            goal="Improve parser",
+            repo="/work/root",
+        )
+        self.event(
+            "progress",
+            SessionIdentity(SessionSource.CODEX, "child"),
+            progress="Escape tests pass",
+        )
+        story = self.story(SessionIdentity(SessionSource.CODEX, "root"))
         self.assertEqual(story.intent, "Improve parser")
         self.assertEqual(
             [record.details for record in story.activity],
@@ -187,16 +200,26 @@ class WorkTests(unittest.TestCase):
         self.assertEqual(story.sessions[0].scope, "Cover escapes")
         self.assertEqual(require(story.sessions[0].context).checkout, "/work/child")
         self.assertEqual(
-            self.story("codex:root").sessions[0].activity[0].details,
+            self.story(SessionIdentity(SessionSource.CODEX, "root"))
+            .sessions[0]
+            .activity[0]
+            .details,
             ProgressView("Escape tests pass"),
         )
 
     def test_refined_intent_and_alias_reports_share_one_story(self) -> None:
         self.event("intent", goal="Improve parser")
         self.event("intent", goal="Cover escapes", aliases=("alias",))
-        self.event("progress", "codex:alias", progress="Covered escapes")
+        self.event(
+            "progress",
+            SessionIdentity(SessionSource.CODEX, "alias"),
+            progress="Covered escapes",
+        )
         subjects = self.memory.connected_work(sessions_snapshot())
-        self.assertEqual(tuple(subject.id for subject in subjects), ("codex:one",))
+        self.assertEqual(
+            tuple(subject.id for subject in subjects),
+            (SessionIdentity(SessionSource.CODEX, "one"),),
+        )
         self.assertEqual(subjects[0].story.intent, "Cover escapes")
         self.assertEqual(
             subjects[0].story.activity[0].details, ProgressView("Covered escapes")
@@ -207,7 +230,7 @@ class WorkTests(unittest.TestCase):
     ) -> None:
         sessions = Sessions(lambda: self.now)
 
-        def ingest(hook: HookEvent) -> str:
+        def ingest(hook: HookEvent) -> SessionIdentity:
             result = require(sessions.apply(hook))
             with self.memory.transaction():
                 self.store.record_session(result.observation)
@@ -218,7 +241,7 @@ class WorkTests(unittest.TestCase):
             HookEvent(
                 SessionSource.CODEX,
                 "a",
-                "session_start",
+                HookEventKind.SESSION_START,
                 repo="/work/a",
                 aliases=("old-a",),
             )
@@ -227,25 +250,35 @@ class WorkTests(unittest.TestCase):
             HookEvent(
                 SessionSource.CODEX,
                 "b",
-                "session_start",
+                HookEventKind.SESSION_START,
                 repo="/work/b",
                 aliases=("old-b",),
             )
         )
         ingest(
-            HookEvent(SessionSource.CODEX, "b", "intent", goal="Initial parser goal")
+            HookEvent(
+                SessionSource.CODEX,
+                "b",
+                HookEventKind.INTENT,
+                goal="Initial parser goal",
+            )
         )
         self.now += 1
         ingest(
-            HookEvent(SessionSource.CODEX, "a", "intent", goal="Refined parser goal")
+            HookEvent(
+                SessionSource.CODEX,
+                "a",
+                HookEventKind.INTENT,
+                goal="Refined parser goal",
+            )
         )
         ingest(
             HookEvent(
                 SessionSource.CODEX,
                 "a",
-                "progress",
+                HookEventKind.PROGRESS,
                 progress="First parser report",
-                repository=REPOSITORY,
+                repository=REPOSITORY.value,
                 branch="first",
                 pull_request=self.pr(7).url,
             )
@@ -255,32 +288,40 @@ class WorkTests(unittest.TestCase):
             HookEvent(
                 SessionSource.CODEX,
                 "b",
-                "progress",
+                HookEventKind.PROGRESS,
                 progress="Second parser report",
                 repo="/work/latest",
-                repository=REPOSITORY,
+                repository=REPOSITORY.value,
                 branch="second",
                 pull_request=self.pr(8).url,
             )
         )
-        ingest(HookEvent(SessionSource.CODEX, "b", "waiting"))
+        ingest(HookEvent(SessionSource.CODEX, "b", HookEventKind.WAITING))
         ingest(
             HookEvent(
                 SessionSource.CODEX,
                 "child",
-                "subagent_start",
+                HookEventKind.SUBAGENT_START,
                 parent="a",
                 goal="Check escapes",
             )
         )
         self.assertEqual(
             ingest(
-                HookEvent(SessionSource.CODEX, "b", "session_start", aliases=("a",))
+                HookEvent(
+                    SessionSource.CODEX,
+                    "b",
+                    HookEventKind.SESSION_START,
+                    aliases=("a",),
+                )
             ),
-            "codex:b",
+            SessionIdentity(SessionSource.CODEX, "b"),
         )
         subjects = self.memory.connected_work(sessions.activity_view())
-        self.assertEqual(tuple(subject.id for subject in subjects), ("codex:b",))
+        self.assertEqual(
+            tuple(subject.id for subject in subjects),
+            (SessionIdentity(SessionSource.CODEX, "b"),),
+        )
         story = subjects[0].story
         self.assertEqual(story.intent, "Refined parser goal")
         self.assertEqual(story.sessions[0].scope, "Check escapes")
@@ -318,6 +359,35 @@ class WorkTests(unittest.TestCase):
         self.assertEqual(context.pull_request, self.pr(7).url)
         self.assertEqual(context.repository, REPOSITORY)
 
+    def test_local_repository_identity_survives_restart(self) -> None:
+        repository = LocalRepository("/work/parser/.git")
+        checkout = self.checkout()
+        self.store.observe(
+            replace(
+                checkout, local=replace(require(checkout.local), repository=repository)
+            )
+        )
+        branch = BranchObservation(repository, "feature", None, self.now)
+        self.store.observe(branch)
+        self.event("intent", goal="Improve parser", repo="/work/parser")
+        self.event("progress", progress="Feature tests pass")
+        self.memory.close()
+        self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
+        story = self.memory.connected_work(sessions_snapshot())[0].story
+        self.assertEqual(story.artifacts[0].repository, repository)
+        self.assertIn(
+            replace(branch, last_success_at=self.now), self.memory.load_repositories()
+        )
+        self.assertEqual(require(story.requests[0].context).repository, repository)
+        self.assertEqual(
+            next(
+                target.repository
+                for target in self.memory.collection_targets()
+                if target.kind == CollectionKind.BRANCH
+            ),
+            repository,
+        )
+
     def test_unknown_report_context_stays_unknown_after_checkout_discovery(
         self,
     ) -> None:
@@ -327,7 +397,7 @@ class WorkTests(unittest.TestCase):
         self.store.observe(self.branch())
         context = require(self.reports()[0].context)
         self.assertEqual(context.checkout, "/work/parser")
-        self.assertEqual(context.repository, "")
+        self.assertIsNone(context.repository)
         self.assertEqual(context.branch, "")
         self.assertEqual(context.pull_request, "")
 
@@ -353,7 +423,7 @@ class WorkTests(unittest.TestCase):
         self.event(
             "progress",
             progress="Validated the alternate branch",
-            repository=REPOSITORY,
+            repository=REPOSITORY.value,
             branch="alternate",
             pull_request=self.pr(9).url,
         )
@@ -391,7 +461,10 @@ class WorkTests(unittest.TestCase):
         )
         self.store.observe(PullRequestObservation(self.pr(8).url, self.pr(8), self.now))
         self.event(
-            "intent", goal="Improve parser", repository=REPOSITORY, branch="feature"
+            "intent",
+            goal="Improve parser",
+            repository=REPOSITORY.value,
+            branch="feature",
         )
         story = self.story()
         outputs = [
@@ -409,7 +482,10 @@ class WorkTests(unittest.TestCase):
         self,
     ) -> None:
         self.event(
-            "intent", goal="Improve parser", repository=REPOSITORY, branch="feature"
+            "intent",
+            goal="Improve parser",
+            repository=REPOSITORY.value,
+            branch="feature",
         )
         self.store.observe(self.branch())
         self.now += 1
@@ -544,16 +620,37 @@ class WorkTests(unittest.TestCase):
         self.assertEqual(before, self.story())
 
     def test_child_and_parent_reports_retain_distinct_scopes(self) -> None:
-        self.event("intent", "codex:child", parent="root", goal="Cover escapes")
-        self.event("progress", "codex:child", progress="Child tests pass")
-        self.event("intent", "codex:root", goal="Improve parser")
-        self.event("progress", "codex:root", progress="Parent tests pass")
+        self.event(
+            "intent",
+            SessionIdentity(SessionSource.CODEX, "child"),
+            parent="root",
+            goal="Cover escapes",
+        )
+        self.event(
+            "progress",
+            SessionIdentity(SessionSource.CODEX, "child"),
+            progress="Child tests pass",
+        )
+        self.event(
+            "intent",
+            SessionIdentity(SessionSource.CODEX, "root"),
+            goal="Improve parser",
+        )
+        self.event(
+            "progress",
+            SessionIdentity(SessionSource.CODEX, "root"),
+            progress="Parent tests pass",
+        )
         self.assertEqual(
-            self.story("codex:root").sessions[0].activity[0].details,
+            self.story(SessionIdentity(SessionSource.CODEX, "root"))
+            .sessions[0]
+            .activity[0]
+            .details,
             ProgressView("Child tests pass"),
         )
         self.assertEqual(
-            self.reports("codex:root")[0].details, ProgressView("Parent tests pass")
+            self.reports(SessionIdentity(SessionSource.CODEX, "root"))[0].details,
+            ProgressView("Parent tests pass"),
         )
 
     def test_repository_observations_create_no_agent_story(self) -> None:
@@ -575,7 +672,10 @@ class WorkTests(unittest.TestCase):
 
     def test_explicit_branch_reference_is_collected_without_a_checkout(self) -> None:
         self.event(
-            "intent", goal="Improve parser", repository=REPOSITORY, branch="feature"
+            "intent",
+            goal="Improve parser",
+            repository=REPOSITORY.value,
+            branch="feature",
         )
         self.assertEqual(
             {
@@ -620,10 +720,15 @@ class WorkTests(unittest.TestCase):
     def test_alias_after_restart_keeps_parent_checkout_and_report_context(self) -> None:
         self.store.observe(self.checkout())
         self.store.observe(self.branch())
-        self.event("intent", "codex:root", goal="Improve parser", repo="/work/root")
+        self.event(
+            "intent",
+            SessionIdentity(SessionSource.CODEX, "root"),
+            goal="Improve parser",
+            repo="/work/root",
+        )
         self.event(
             "subagent_start",
-            "codex:old",
+            SessionIdentity(SessionSource.CODEX, "old"),
             goal="Cover escapes",
             parent="root",
             repo="/work/parser",
@@ -634,13 +739,16 @@ class WorkTests(unittest.TestCase):
         self.sessions = Sessions(lambda: self.now)
         self.event(
             "progress",
-            "codex:native",
+            SessionIdentity(SessionSource.CODEX, "native"),
             aliases=("old",),
             progress="Escape cases pass",
         )
 
         subjects = self.memory.connected_work(self.sessions.activity_view())
-        self.assertEqual(tuple(subject.id for subject in subjects), ("codex:root",))
+        self.assertEqual(
+            tuple(subject.id for subject in subjects),
+            (SessionIdentity(SessionSource.CODEX, "root"),),
+        )
         child = subjects[0].story.sessions[0]
         self.assertEqual(child.scope, "Cover escapes")
         report = next(
@@ -674,7 +782,10 @@ class WorkTests(unittest.TestCase):
         self.store.observe(self.checkout("other"))
         self.store.observe(self.branch(8, "other"))
         self.event(
-            "intent", "codex:two", goal="Improve other code", repo="/work/parser"
+            "intent",
+            SessionIdentity(SessionSource.CODEX, "two"),
+            goal="Improve other code",
+            repo="/work/parser",
         )
         old = self.story()
         self.assertEqual(

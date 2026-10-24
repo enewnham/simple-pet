@@ -5,6 +5,7 @@ from pathlib import Path
 
 from ..domain import CollectionKind
 from ..logging import get_logger
+from ..repository_identity import RepositoryIdentity, repository_columns
 from ..work.observations import (
     BranchObservation,
     CheckoutObservation,
@@ -18,15 +19,24 @@ from .git import RunCommand
 
 log = get_logger("pet-daemon")
 
-type CollectionKey = tuple[CollectionKind, str]
+type CollectionKey = (
+    tuple[CollectionKind, str] | tuple[CollectionKind, RepositoryIdentity, str]
+)
 
 
 def _key(item: RepositoryObservation) -> CollectionKey:
     if isinstance(item, CheckoutObservation):
         return CollectionKind.CHECKOUT, item.worktree
     if isinstance(item, BranchObservation):
-        return CollectionKind.BRANCH, f"{item.repository}:{item.branch}"
+        return CollectionKind.BRANCH, item.repository, item.branch
     return CollectionKind.PULL_REQUEST, item.ref
+
+
+def _sort_key(key: CollectionKey) -> tuple[str, str, str, str]:
+    if len(key) == 2:
+        return key[0], key[1], "", ""
+    kind, value = repository_columns(key[1])
+    return key[0], kind, value, key[2]
 
 
 class RepositoryTracker:
@@ -97,7 +107,7 @@ class RepositoryTracker:
             self._invalidate((CollectionKind.CHECKOUT, root))
 
     def reconcile_targets(self, targets: Iterable[RepositoryTarget]) -> None:
-        desired = {}
+        desired: dict[CollectionKey, RepositoryTarget] = {}
         paths = set()
         for target in targets:
             if target.kind == CollectionKind.CHECKOUT:
@@ -107,9 +117,9 @@ class RepositoryTracker:
                     paths.add(root)
                 desired[(CollectionKind.CHECKOUT, root)] = target
             elif target.kind == CollectionKind.BRANCH and target.ref:
-                repository = git.canonical_repository(target.repository)
+                repository = target.repository
                 if repository:
-                    desired[(CollectionKind.BRANCH, f"{repository}:{target.ref}")] = (
+                    desired[(CollectionKind.BRANCH, repository, target.ref)] = (
                         RepositoryTarget(
                             CollectionKind.BRANCH,
                             target.ref,
@@ -137,7 +147,7 @@ class RepositoryTracker:
             local = self.locals.get(path)
             if not local or not local.branch:
                 continue
-            key = CollectionKind.BRANCH, f"{local.repository}:{local.branch}"
+            key = CollectionKind.BRANCH, local.repository, local.branch
             desired.setdefault(
                 key,
                 RepositoryTarget(CollectionKind.BRANCH, local.branch, local.repository),
@@ -151,7 +161,9 @@ class RepositoryTracker:
         self.subscriptions = desired
 
     def snapshot(self) -> tuple[RepositoryObservation, ...]:
-        return tuple(self.observations[key] for key in sorted(self.observations))
+        return tuple(
+            self.observations[key] for key in sorted(self.observations, key=_sort_key)
+        )
 
     def signature(self) -> tuple[RepositoryObservation, ...]:
         return self.snapshot()
@@ -296,11 +308,13 @@ class RepositoryTracker:
             )
         if not self._active(key, version, epoch):
             return
-        item = (
-            BranchObservation(target.repository, target.ref, pr, checked_at, error)
-            if target.kind == CollectionKind.BRANCH
-            else PullRequestObservation(target.ref, pr, checked_at, error)
-        )
+        if target.kind == CollectionKind.BRANCH:
+            assert target.repository is not None
+            item: RepositoryObservation = BranchObservation(
+                target.repository, target.ref, pr, checked_at, error
+            )
+        else:
+            item = PullRequestObservation(target.ref, pr, checked_at, error)
         self._save(item)
 
     def pause(self) -> None:

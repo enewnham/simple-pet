@@ -17,6 +17,7 @@ from .commentary.usage import collect_usage
 from .config import Config
 from .delivery import DeliveryOutcome, SpeechDelivery, SpeechMessage
 from .domain import DeliveryStatus, SpeechReason
+from .identity import SessionIdentity
 from .logging import get_logger
 from .runtime import (
     HookEvent,
@@ -480,7 +481,7 @@ class Application:
                 self.memory.save_attention_history(identifier, history)
         self.attention.mark_considered(selection.subject, selection.update)
 
-    def persist_attention(self, subject_id: str | None) -> None:
+    def persist_attention(self, subject_id: SessionIdentity | None) -> None:
         if subject_id is not None:
             self.memory.save_attention_history(
                 subject_id, self.attention.history(subject_id)
@@ -580,7 +581,8 @@ class Application:
         check_in = tuple(
             key
             for key in self.sessions.check_in_due(self.config.idle_message_seconds)
-            if not self.sessions.by_id[key].parent or self.sessions.by_id[key].waiting
+            if not self.sessions.by_id[key].parent
+            or self.sessions.by_id[key].waiting_for_input
         )
         request = self.attention.request(
             snapshot,
