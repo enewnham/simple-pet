@@ -33,7 +33,7 @@ test: test-swift test-python
 endif
 
 test-swift: setup
-	@desktop=$$(uv run --locked python -c 'from AppKit import NSApplication, NSScreen; NSApplication.sharedApplication(); print(int(bool(NSScreen.screens())))') || exit $$?; \
+	@desktop=$$(uv run --locked python scripts/check-desktop.py) || exit $$?; \
 	swift_filter=; \
 	if [ "$$desktop" != 1 ]; then \
 		echo "Desktop access unavailable; skipping overlay tests."; \
@@ -46,7 +46,7 @@ test-python: setup
 		echo "Process tests require ps access. Run make test outside the agent sandbox." >&2; \
 		exit 1; \
 	}
-	@desktop=$$(uv run --locked python -c 'from AppKit import NSApplication, NSScreen; NSApplication.sharedApplication(); print(int(bool(NSScreen.screens())))') || exit $$?; \
+	@desktop=$$(uv run --locked python scripts/check-desktop.py) || exit $$?; \
 	if [ "$$desktop" = 1 ]; then \
 		echo "Desktop access available; running Python tests."; \
 	else \
