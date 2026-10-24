@@ -2,52 +2,11 @@ from __future__ import annotations
 
 from typing import NotRequired, TypedDict
 
-from ..domain import (
-    ArtifactKind,
-    EvidenceKind,
-    EvidenceSource,
-    ExecutionOutcome,
-    PullRequestState,
-)
+from ..domain import ArtifactKind, EvidenceKind, EvidenceSource, ExecutionOutcome
 from ..identity import SessionIdentity
+from ..types import JSONObject
 from ..work.models import ReportContext
-from ..work.views import (
-    AssociationView,
-    AvailabilityView,
-    EvidenceView,
-    ExecutionView,
-    GitEvidenceView,
-    IntentView,
-    MissingPullRequestView,
-    ProgressView,
-    PullRequestEvidenceView,
-    WorkStory,
-)
-
-
-class PullRequestRecord(TypedDict):
-    url: str
-    title: str
-    state: PullRequestState
-    is_draft: bool | None
-
-
-class EvidenceFields(TypedDict, total=False):
-    repository: str | None
-    branch: str
-    output_present: bool
-    conflicts: bool
-    behind: bool
-    output: PullRequestRecord
-    pull_request_found: bool
-    execution: str
-    reported_progress: str
-    reported_execution_outcome: ExecutionOutcome
-    uncertainty: tuple[str, ...]
-    text: str
-    association: str
-    authorship: str
-    context: ReportContextRecord
+from ..work.views import EvidenceView, ExecutionView, WorkStory
 
 
 class ReferenceRecord(TypedDict):
@@ -60,6 +19,24 @@ class ReportContextRecord(TypedDict, total=False):
     pull_request: str
     references: tuple[ReferenceRecord, ...]
     uncertainty: tuple[str, ...]
+
+
+class EvidenceFields(TypedDict, total=False):
+    repository: str | None
+    branch: str
+    output_present: bool
+    conflicts: bool
+    behind: bool
+    output: JSONObject
+    pull_request_found: bool
+    execution: str
+    reported_progress: str
+    reported_execution_outcome: ExecutionOutcome
+    uncertainty: tuple[str, ...]
+    text: str
+    association: str
+    authorship: str
+    context: ReportContextRecord
 
 
 class PresentedEvidence(EvidenceFields):
@@ -107,46 +84,14 @@ def context_record(context: ReportContext) -> ReportContextRecord:
 
 
 def evidence_record(record: EvidenceView) -> PresentedEvidence:
-    result: PresentedEvidence = {"source": record.source, "kind": record.kind}
-    match record.details:
-        case GitEvidenceView() as details:
-            result.update(
-                repository=details.repository,
-                branch=details.branch,
-                output_present=details.output_present,
-                conflicts=details.conflicts,
-                behind=details.behind,
-            )
-        case PullRequestEvidenceView() as details:
-            output = details.output
-            result.update(
-                output={
-                    "url": output.url,
-                    "title": output.title,
-                    "state": output.state,
-                    "is_draft": output.is_draft,
-                },
-            )
-        case MissingPullRequestView() as details:
-            result["pull_request_found"] = details.pull_request_found
-        case ExecutionView() as details:
-            result["execution"] = details.execution
-            if details.reported_progress is not None:
-                result["reported_progress"] = details.reported_progress
-            if details.reported_execution_outcome is not None:
-                result["reported_execution_outcome"] = (
-                    details.reported_execution_outcome
-                )
-        case AvailabilityView() as details:
-            result["uncertainty"] = details.uncertainty
-        case IntentView() as details:
-            result["text"] = details.text
-        case ProgressView() as details:
-            result["reported_progress"] = details.reported_progress
-        case AssociationView() as details:
-            result.update(
-                association=details.association, authorship=details.authorship
-            )
+    details = record.details
+    result: PresentedEvidence = {
+        "source": record.source,
+        "kind": record.kind,
+        **details.model_dump(
+            exclude={"type"}, exclude_none=isinstance(details, ExecutionView)
+        ),
+    }
     if record.observed_at is not None:
         result["observed_at"] = record.observed_at
     if record.context is not None:

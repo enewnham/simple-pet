@@ -1,33 +1,31 @@
 import re
-from dataclasses import dataclass
-from typing import Literal, TypedDict, overload
+from typing import Annotated, Literal, overload
 from urllib.parse import urlsplit
 
+from pydantic import BaseModel, ConfigDict, Field
 
-@dataclass(frozen=True, order=True)
-class RemoteRepository:
+
+class RemoteRepository(BaseModel):
+    model_config = ConfigDict(frozen=True)
     value: str
+    kind: Literal["remote"] = "remote"
+
+    def __lt__(self, other: RemoteRepository) -> bool:
+        return self.value < other.value
 
 
-@dataclass(frozen=True, order=True)
-class LocalRepository:
+class LocalRepository(BaseModel):
+    model_config = ConfigDict(frozen=True)
     path: str
+    kind: Literal["local"] = "local"
+
+    def __lt__(self, other: LocalRepository) -> bool:
+        return self.path < other.path
 
 
-type RepositoryIdentity = RemoteRepository | LocalRepository
-
-
-class RemoteRepositoryData(TypedDict):
-    kind: Literal["remote"]
-    value: str
-
-
-class LocalRepositoryData(TypedDict):
-    kind: Literal["local"]
-    path: str
-
-
-type RepositoryData = RemoteRepositoryData | LocalRepositoryData
+type RepositoryIdentity = Annotated[
+    RemoteRepository | LocalRepository, Field(discriminator="kind")
+]
 
 
 def parse_remote_repository(value: str) -> RemoteRepository | None:
@@ -46,41 +44,7 @@ def parse_remote_repository(value: str) -> RemoteRepository | None:
         else:
             return None
     path = path.strip("/").removesuffix(".git")
-    return RemoteRepository(f"{host}/{path}".lower()) if path else None
-
-
-@overload
-def repository_data(value: RepositoryIdentity) -> RepositoryData: ...
-
-
-@overload
-def repository_data(value: None) -> None: ...
-
-
-def repository_data(value: RepositoryIdentity | None) -> RepositoryData | None:
-    match value:
-        case RemoteRepository():
-            return {"kind": "remote", "value": value.value}
-        case LocalRepository():
-            return {"kind": "local", "path": value.path}
-        case None:
-            return None
-
-
-@overload
-def repository_from_data(value: RepositoryData) -> RepositoryIdentity: ...
-
-
-@overload
-def repository_from_data(value: None) -> None: ...
-
-
-def repository_from_data(value: RepositoryData | None) -> RepositoryIdentity | None:
-    if value is None:
-        return None
-    if value["kind"] == "remote":
-        return RemoteRepository(value["value"])
-    return LocalRepository(value["path"])
+    return RemoteRepository(value=f"{host}/{path}".lower()) if path else None
 
 
 @overload
@@ -111,13 +75,7 @@ def repository_from_columns(
     if value is None:
         raise ValueError("Repository identity requires a value")
     if kind == "remote":
-        return RemoteRepository(value)
+        return RemoteRepository(value=value)
     if kind == "local":
-        return LocalRepository(value)
+        return LocalRepository(path=value)
     raise ValueError(f"Unsupported repository kind: {kind}")
-
-
-def remote_repository_from_data(value: RepositoryData | None) -> RemoteRepository:
-    if value is None or value["kind"] != "remote":
-        raise ValueError("Pull request requires a remote repository")
-    return RemoteRepository(value["value"])

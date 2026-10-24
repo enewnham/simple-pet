@@ -156,7 +156,7 @@ def test_select_logs_filters_exact_fields_and_time(tmp_path: Path) -> None:
         load_logs(log).entries,
         run_id="run-a",
         observation_id="observation-a",
-        session=SessionIdentity(SessionSource.CODEX, "session-a"),
+        session=SessionIdentity(source=SessionSource.CODEX, native_id="session-a"),
         event="renderer.command",
         packet={"animation": "sleep"},
         start="2026-10-23T12:00:00Z",

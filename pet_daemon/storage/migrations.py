@@ -2,7 +2,7 @@ import sqlite3
 
 from .transactions import transaction
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 
 MEMORY_SCHEMA = """

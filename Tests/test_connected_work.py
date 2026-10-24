@@ -30,7 +30,7 @@ from pet_daemon.work.observations import (
 )
 from Tests.fixtures import capture_snapshot, require, sessions_snapshot
 
-REPOSITORY = RemoteRepository("github.com/team/project")
+REPOSITORY = RemoteRepository(value="github.com/team/project")
 
 
 class ConnectedWorkTests(unittest.TestCase):
@@ -56,23 +56,33 @@ class ConnectedWorkTests(unittest.TestCase):
     def test_connected_sessions_preserve_same_named_branches_across_repository_kinds(
         self,
     ) -> None:
-        repositories = (LocalRepository("/local/.git"), REPOSITORY)
+        repositories = (LocalRepository(path="/local/.git"), REPOSITORY)
         for name, repository in zip(("root", "child"), repositories):
             path = f"/work/{name}"
             self.memory.work.observe(
                 CheckoutObservation(
-                    path,
-                    GitObservation(
-                        path, "main", "head", 0, 0, 0, 0, "", 0, 0, repository
+                    worktree=path,
+                    local=GitObservation(
+                        worktree=path,
+                        branch="main",
+                        head="head",
+                        staged=0,
+                        unstaged=0,
+                        untracked=0,
+                        conflicts=0,
+                        upstream="",
+                        ahead=0,
+                        behind=0,
+                        repository=repository,
                     ),
-                    self.now,
+                    checked_at=self.now,
                 )
             )
             self.event(
                 HookEvent(
-                    SessionSource.CODEX,
-                    name,
-                    HookEventKind.INTENT,
+                    source=SessionSource.CODEX,
+                    session=name,
+                    event=HookEventKind.INTENT,
                     goal="Check the shared branch",
                     repo=path,
                     parent="root" if name == "child" else None,
@@ -98,10 +108,10 @@ class ConnectedWorkTests(unittest.TestCase):
         )
         return tuple(
             PullRequest(
-                number,
-                f"https://{REPOSITORY.value}/pull/{number}",
-                PullRequestState.OPEN,
-                None,
+                number=number,
+                url=f"https://{REPOSITORY.value}/pull/{number}",
+                state=PullRequestState.OPEN,
+                merged_at=None,
                 head=f"head-{branch}",
                 head_repository=REPOSITORY,
                 head_branch=branch,
@@ -109,10 +119,10 @@ class ConnectedWorkTests(unittest.TestCase):
                 title=title,
                 related_links=tuple(
                     RelatedLink(
-                        ArtifactKind.PULL_REQUEST,
-                        f"https://{REPOSITORY.value}/pull/{other_number}",
-                        LinkRelationship.STACK_ENTRY,
-                        EvidenceSource.GITHUB_STACK,
+                        kind=ArtifactKind.PULL_REQUEST,
+                        ref=f"https://{REPOSITORY.value}/pull/{other_number}",
+                        relationship=LinkRelationship.STACK_ENTRY,
+                        source=EvidenceSource.GITHUB_STACK,
                         stack=6,
                         position=position,
                     )
@@ -126,30 +136,37 @@ class ConnectedWorkTests(unittest.TestCase):
     def assert_family_layout(self, paths: tuple[str, str, str]) -> None:
         prs = self.stack()
         for pr in prs:
-            self.memory.work.observe(PullRequestObservation(pr.url, pr, self.now))
+            self.memory.work.observe(
+                PullRequestObservation(ref=pr.url, pr=pr, checked_at=self.now)
+            )
         checked_out = dict(zip(paths, prs))
         for path, pr in checked_out.items():
             self.memory.work.observe(
                 CheckoutObservation(
-                    path,
-                    GitObservation(
-                        path,
-                        pr.head_branch,
-                        pr.head,
-                        0,
-                        1,
-                        0,
-                        0,
-                        "",
-                        0,
-                        0,
-                        REPOSITORY,
+                    worktree=path,
+                    local=GitObservation(
+                        worktree=path,
+                        branch=pr.head_branch,
+                        head=pr.head,
+                        staged=0,
+                        unstaged=1,
+                        untracked=0,
+                        conflicts=0,
+                        upstream="",
+                        ahead=0,
+                        behind=0,
+                        repository=REPOSITORY,
                     ),
-                    self.now,
+                    checked_at=self.now,
                 )
             )
             self.memory.work.observe(
-                BranchObservation(REPOSITORY, pr.head_branch, pr, self.now)
+                BranchObservation(
+                    repository=REPOSITORY,
+                    branch=pr.head_branch,
+                    pr=pr,
+                    checked_at=self.now,
+                )
             )
         scopes = (
             (
@@ -171,9 +188,9 @@ class ConnectedWorkTests(unittest.TestCase):
         for path, (name, goal, report) in zip(paths, scopes):
             self.event(
                 HookEvent(
-                    SessionSource.CODEX,
-                    name,
-                    HookEventKind.INTENT,
+                    source=SessionSource.CODEX,
+                    session=name,
+                    event=HookEventKind.INTENT,
                     goal=goal,
                     repo=path,
                     parent="root" if name != "root" else None,
@@ -181,19 +198,24 @@ class ConnectedWorkTests(unittest.TestCase):
             )
             self.event(
                 HookEvent(
-                    SessionSource.CODEX, name, HookEventKind.PROGRESS, progress=report
+                    source=SessionSource.CODEX,
+                    session=name,
+                    event=HookEventKind.PROGRESS,
+                    progress=report,
                 )
             )
         subjects = self.subjects()
         self.assertEqual(len(subjects), 1)
         subject = subjects[0]
-        self.assertEqual(subject.id, SessionIdentity(SessionSource.CODEX, "root"))
+        self.assertEqual(
+            subject.id, SessionIdentity(source=SessionSource.CODEX, native_id="root")
+        )
         self.assertEqual(
             subject.sessions,
             (
-                SessionIdentity(SessionSource.CODEX, "docs"),
-                SessionIdentity(SessionSource.CODEX, "restore"),
-                SessionIdentity(SessionSource.CODEX, "root"),
+                SessionIdentity(source=SessionSource.CODEX, native_id="docs"),
+                SessionIdentity(source=SessionSource.CODEX, native_id="restore"),
+                SessionIdentity(source=SessionSource.CODEX, native_id="root"),
             ),
         )
         record = work_record(subject.story)
@@ -242,29 +264,31 @@ class ConnectedWorkTests(unittest.TestCase):
     ) -> None:
         self.event(
             HookEvent(
-                SessionSource.CODEX,
-                "child",
-                HookEventKind.INTENT,
+                source=SessionSource.CODEX,
+                session="child",
+                event=HookEventKind.INTENT,
                 parent="root",
                 goal="Document restart examples",
             )
         )
         self.event(
             HookEvent(
-                SessionSource.CODEX,
-                "child",
-                HookEventKind.PROGRESS,
+                source=SessionSource.CODEX,
+                session="child",
+                event=HookEventKind.PROGRESS,
                 progress="The restart example is ready.",
             )
         )
         before = self.subjects()
         self.assertEqual(len(before), 1)
-        self.assertEqual(before[0].id, SessionIdentity(SessionSource.CODEX, "root"))
+        self.assertEqual(
+            before[0].id, SessionIdentity(source=SessionSource.CODEX, native_id="root")
+        )
         self.event(
             HookEvent(
-                SessionSource.CODEX,
-                "root",
-                HookEventKind.INTENT,
+                source=SessionSource.CODEX,
+                session="root",
+                event=HookEventKind.INTENT,
                 aliases=("root-conversation",),
                 goal="Preserve session context across restarts",
             )
@@ -282,28 +306,35 @@ class ConnectedWorkTests(unittest.TestCase):
 
     def test_families_sharing_a_ticket_and_pr_keep_separate_subjects(self) -> None:
         pr = self.stack()[0]
-        self.memory.work.observe(PullRequestObservation(pr.url, pr, self.now))
+        self.memory.work.observe(
+            PullRequestObservation(ref=pr.url, pr=pr, checked_at=self.now)
+        )
         ticket = "https://linear.app/team/issue/ENG-42/session-context"
         for name, goal, child_goal in (
             ("storage", "Review session storage", "Check serialized fields"),
             ("restore", "Review restart restoration", "Check restart behavior"),
         ):
             self.event(
-                HookEvent(SessionSource.CODEX, name, HookEventKind.INTENT, goal=goal)
+                HookEvent(
+                    source=SessionSource.CODEX,
+                    session=name,
+                    event=HookEventKind.INTENT,
+                    goal=goal,
+                )
             )
             self.event(
                 HookEvent(
-                    SessionSource.CODEX,
-                    name,
-                    HookEventKind.PROGRESS,
+                    source=SessionSource.CODEX,
+                    session=name,
+                    event=HookEventKind.PROGRESS,
                     progress=f"Reviewing {pr.url} for {ticket}",
                 )
             )
             self.event(
                 HookEvent(
-                    SessionSource.CODEX,
-                    name + "-child",
-                    HookEventKind.INTENT,
+                    source=SessionSource.CODEX,
+                    session=name + "-child",
+                    event=HookEventKind.INTENT,
                     parent=name,
                     goal=child_goal,
                 )
@@ -312,8 +343,8 @@ class ConnectedWorkTests(unittest.TestCase):
         self.assertEqual(
             {subject.id for subject in subjects},
             {
-                SessionIdentity(SessionSource.CODEX, "storage"),
-                SessionIdentity(SessionSource.CODEX, "restore"),
+                SessionIdentity(source=SessionSource.CODEX, native_id="storage"),
+                SessionIdentity(source=SessionSource.CODEX, native_id="restore"),
             },
         )
         for subject in subjects:
@@ -322,7 +353,8 @@ class ConnectedWorkTests(unittest.TestCase):
             self.assertTrue({pr.url, ticket} <= refs)
             expected = (
                 "Check serialized fields"
-                if subject.id == SessionIdentity(SessionSource.CODEX, "storage")
+                if subject.id
+                == SessionIdentity(source=SessionSource.CODEX, native_id="storage")
                 else "Check restart behavior"
             )
             self.assertEqual(
@@ -335,16 +367,16 @@ class ConnectedWorkTests(unittest.TestCase):
         sessions = Sessions(lambda: self.now, retention_seconds=1)
         for event in (
             HookEvent(
-                SessionSource.CODEX,
-                "child",
-                HookEventKind.INTENT,
+                source=SessionSource.CODEX,
+                session="child",
+                event=HookEventKind.INTENT,
                 parent="root",
                 goal="Document restart examples",
             ),
             HookEvent(
-                SessionSource.CODEX,
-                "child",
-                HookEventKind.TURN_DONE,
+                source=SessionSource.CODEX,
+                session="child",
+                event=HookEventKind.TURN_DONE,
                 progress="The restart example is ready.",
                 outcome=ExecutionOutcome.SUCCESS,
             ),
@@ -359,7 +391,10 @@ class ConnectedWorkTests(unittest.TestCase):
         runtime = sessions.activity_view()
         subjects = self.memory.connected_work(runtime)
         self.assertEqual(len(subjects), 1)
-        self.assertEqual(subjects[0].id, SessionIdentity(SessionSource.CODEX, "root"))
+        self.assertEqual(
+            subjects[0].id,
+            SessionIdentity(source=SessionSource.CODEX, native_id="root"),
+        )
         self.assertEqual(subjects[0].story.intent, "")
         self.assertEqual(subjects[0].story.requests, ())
         self.assertEqual(subjects[0].story.activity, ())
@@ -372,7 +407,9 @@ class ConnectedWorkTests(unittest.TestCase):
         request = require(attention.request(snapshot))
         self.assertEqual(request.reason, "routine")
         selection = attention.select(snapshot, request.reason)
-        self.assertEqual(selection.id, SessionIdentity(SessionSource.CODEX, "root"))
+        self.assertEqual(
+            selection.id, SessionIdentity(source=SessionSource.CODEX, native_id="root")
+        )
         self.assertIsNone(selection.focus_session)
         record = work_record(require(selection.subject).story)
         self.assertEqual(

@@ -3,7 +3,6 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from dataclasses import replace
 from typing import Protocol
 
 from ..domain import ArtifactKind
@@ -55,7 +54,7 @@ class WorkIngestion:
     ) -> ReportContext:
         if pull_request:
             pull_request = normalize_reference(
-                ArtifactReference(ArtifactKind.PULL_REQUEST, pull_request)
+                ArtifactReference(kind=ArtifactKind.PULL_REQUEST, ref=pull_request)
             ).ref
         checkout = (
             self.repository.get_checkout(location, enclosing=True) if location else None
@@ -78,15 +77,13 @@ class WorkIngestion:
             "",
         )
         resolved_pr = pull_request or explicit or context.pull_request
-        return replace(
-            context,
-            repository=repo,
-            branch=branch_name,
-            pull_request=resolved_pr,
-            branch_resolution=len(observed.resolutions)
-            if observed and not resolved_pr
-            else 0,
+        context.repository = repo
+        context.branch = branch_name
+        context.pull_request = resolved_pr
+        context.branch_resolution = (
+            len(observed.resolutions) if observed and not resolved_pr else 0
         )
+        return context
 
     def record_session(self, observation: SessionObservation) -> None:
         now = self.clock()
@@ -111,7 +108,7 @@ class WorkIngestion:
             )
             for payload, context in zip(observation.reports, contexts, strict=True):
                 appended = self.repository.append_report(
-                    SessionReport(payload, context, now)
+                    SessionReport(payload=payload, context=context, observed_at=now)
                 )
                 if (
                     not appended
@@ -138,10 +135,10 @@ class WorkIngestion:
             if isinstance(collected, BranchObservation) and collected.pr:
                 self.observe(
                     PullRequestObservation(
-                        collected.pr.url,
-                        collected.pr,
-                        collected.checked_at,
-                        collected.error,
+                        ref=collected.pr.url,
+                        pr=collected.pr,
+                        checked_at=collected.checked_at,
+                        error=collected.error,
                     )
                 )
 

@@ -3,7 +3,6 @@ import math
 import sqlite3
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -15,7 +14,7 @@ from .commentary import Cognition, CommentarySupport
 from .commentary.cognition import StoryUnavailable
 from .commentary.usage import collect_usage
 from .config import Config
-from .delivery import DeliveryOutcome, SpeechDelivery, SpeechMessage
+from .delivery import DeliveryOutcome, MessageSupport, SpeechDelivery, SpeechMessage
 from .domain import DeliveryStatus, SpeechReason
 from .identity import SessionIdentity
 from .logging import get_logger
@@ -45,13 +44,6 @@ class ObservationProvider(Protocol):
     def resume(self) -> None: ...
     def clear(self) -> None: ...
     async def close(self) -> None: ...
-
-
-@dataclass(frozen=True)
-class MessageSupport:
-    commentary: CommentarySupport
-    trigger: Trigger | None
-    request_epoch: int
 
 
 class Application:
@@ -187,38 +179,29 @@ class Application:
 
     def context(self, trigger: Trigger | None = None) -> PetContext:
         runtime = self.sessions.activity_view()
-        sessions = []
         for session in runtime.sessions:
             context = self.memory.context(session.id)
             if context:
-                session = replace(
-                    session,
-                    goal=context.initial_request or session.goal,
-                    initial_request=context.initial_request,
-                    summary=context.summary,
-                    recent_requests=tuple(context.recent_requests),
-                    request_count=context.request_count,
-                    first_summary_attempted=context.first_summary_attempted,
-                )
-            sessions.append(session)
-        runtime = replace(runtime, sessions=tuple(sessions))
-        subjects = tuple(
-            replace(subject, revision=semantic_revision(subject.story))
-            for subject in self.memory.connected_work(runtime)
-        )
+                session.goal = context.initial_request or session.goal
+                session.initial_request = context.initial_request
+                session.summary = context.summary
+                session.recent_requests = tuple(context.recent_requests)
+                session.request_count = context.request_count
+                session.first_summary_attempted = context.first_summary_attempted
+        subjects = self.memory.connected_work(runtime)
+        for subject in subjects:
+            subject.revision = semantic_revision(subject.story)
         stories = {
             session: subject.story
             for subject in subjects
             for session in subject.sessions
         }
-        members = []
         for session in runtime.sessions:
-            story = stories.get(session.id)
-            members.append(replace(session, connected_work=story))
+            session.connected_work = stories.get(session.id)
         return PetContext(
-            runtime.activity,
-            tuple(members),
-            self.behavior.sleeping,
+            activity=runtime.activity,
+            sessions=runtime.sessions,
+            sleeping=self.behavior.sleeping,
             trigger=trigger,
             work=subjects,
             convergence=runtime.convergence,
@@ -236,7 +219,7 @@ class Application:
 
     def _ingest_hook(self, hook: HookEvent) -> None:
         if hook.repo:
-            hook = replace(hook, repo=str(Path(hook.repo).resolve()))
+            hook.repo = str(Path(hook.repo).resolve())
         result = self.agent_activity.handle(hook, self.suspended)
         if not result:
             return
@@ -421,15 +404,19 @@ class Application:
                         self.behavior.wake("speech")
                         self.behavior.stop_movement()
                         message = SpeechMessage(
-                            result.speak,
-                            seconds,
-                            reason,
-                            str(uuid.uuid4()),
-                            selection.id,
-                            selection.subject.revision if selection.subject else None,
+                            text=result.speak,
+                            ttl=seconds,
+                            reason=reason,
+                            selection_id=str(uuid.uuid4()),
+                            subject_id=selection.id,
+                            revision=selection.subject.revision
+                            if selection.subject
+                            else None,
                             history_epoch=history_epoch,
                             support=MessageSupport(
-                                result.prepared.support, trigger, epoch
+                                commentary=result.prepared.support,
+                                trigger=trigger,
+                                request_epoch=epoch,
                             ),
                         )
                         self.delivery.submit(message)
@@ -459,7 +446,7 @@ class Application:
                     session=focus_session,
                     outcome=outcome,
                     duration_seconds=round(self.clock() - started, 3),
-                    **(asdict(tokens) if tokens is not None else {}),
+                    **(tokens.model_dump() if tokens is not None else {}),
                 )
 
     def selection_valid(

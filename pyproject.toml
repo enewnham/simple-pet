@@ -6,6 +6,7 @@ requires-python = ">=3.15"
 dependencies = [
     "anthropic>=0.79,<1",
     "nltk>=3.9.2,<4",
+    "pydantic>=2.12,<3",
     "pyobjc-framework-naturallanguage>=12.2.2,<13",
     "rich>=14,<15",
     "structlog>=26.1,<27",
@@ -16,13 +17,12 @@ dependencies = [
 package = false
 
 [tool.ruff]
-extend-include = ["bin/pet-notify", "scripts/pet-hook"]
 
 [tool.ruff.lint]
 extend-select = ["ANN"]
 
 [tool.ty.src]
-include = ["**/*.py", "scripts/pet-hook", "bin/pet-notify"]
+include = ["**/*.py"]
 
 [tool.ty.rules]
 missing-type-argument = "error"

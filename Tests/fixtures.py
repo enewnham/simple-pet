@@ -1,5 +1,4 @@
 import json
-from dataclasses import replace
 from pathlib import Path
 from typing import TypedDict, Unpack
 
@@ -128,14 +127,16 @@ class SessionOptions(TypedDict, total=False):
 
 
 def session_snapshot(**values: Unpack[SessionOptions]) -> SessionContext:
-    identity = values.get("id", SessionIdentity(SessionSource.COMMAND, "fixture"))
+    identity = values.get(
+        "id", SessionIdentity(source=SessionSource.COMMAND, native_id="fixture")
+    )
     source, name = identity.source.value, identity.native_id
     sessions = Sessions(lambda: 1000)
     sessions.handle({"event": "session_start", "source": source, "session": name})
     if values.get("waiting_for_input"):
         sessions.handle({"event": "waiting", "source": source, "session": name})
     snapshot = sessions.activity_view().sessions[0]
-    return replace(snapshot, **values)
+    return snapshot.model_copy(update=dict(**values))
 
 
 def sessions_snapshot(*sessions: SessionContext) -> SwarmActivity:
@@ -154,16 +155,17 @@ def capture_snapshot(
         for session in snapshot.sessions:
             context = memory.context(session.id)
             if context:
-                session = replace(
-                    session,
-                    initial_request=context.initial_request,
-                    summary=context.summary,
-                    recent_requests=tuple(context.recent_requests),
-                    request_count=context.request_count,
-                    first_summary_attempted=context.first_summary_attempted,
+                session = session.model_copy(
+                    update={
+                        "initial_request": context.initial_request,
+                        "summary": context.summary,
+                        "recent_requests": tuple(context.recent_requests),
+                        "request_count": context.request_count,
+                        "first_summary_attempted": context.first_summary_attempted,
+                    }
                 )
             members.append(session)
-        snapshot = replace(snapshot, sessions=tuple(members))
+        snapshot = snapshot.model_copy(update={"sessions": tuple(members)})
     return PetContext(
         activity=snapshot.activity,
         sessions=snapshot.sessions,

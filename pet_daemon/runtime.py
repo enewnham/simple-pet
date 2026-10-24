@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, NotRequired, Protocol, TypedDict
+from typing import TYPE_CHECKING, Annotated, Literal, Protocol, TypedDict, cast
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .domain import (
     Activity,
@@ -38,38 +39,8 @@ class WaitingKind(StrEnum):
     QUESTION = "question"
 
 
-class ProcessPacket(TypedDict):
-    pid: int
-    started: str
-
-
-class HookTextFields(TypedDict, total=False):
-    waiting_kind: str
-    parent: str
-    parent_call: str
-    call: str
-    turn: str
-    tool: str
-    goal: str
-    progress: str
-    repo: str
-    repository: str
-    branch: str
-    pull_request: str
-    tool_name: str
-    sentiment_text: str
-    outcome: str
-
-
-class HookPacket(HookTextFields):
-    source: str
-    session: str
-    event: str
-    kind: NotRequired[str]
-    aliases: NotRequired[list[str]]
-    manual: NotRequired[bool]
-    owner: NotRequired[ProcessPacket]
-    exit_code: NotRequired[int]
+type ProcessPacket = dict[str, object]
+type HookPacket = dict[str, object]
 
 
 class AnimationPacket(TypedDict):
@@ -96,33 +67,55 @@ class OverlayPacket(TypedDict, total=False):
     state: PetState
 
 
-@dataclass(frozen=True)
-class Point:
-    x: float
-    y: float
+class Point(BaseModel):
+    x: float = Field(strict=True, allow_inf_nan=False)
+    y: float = Field(strict=True, allow_inf_nan=False)
 
 
-@dataclass(frozen=True)
-class SessionTrigger:
+class SessionTrigger(BaseModel):
+    kind: Literal["session"] = "session"
     session_id: SessionIdentity
 
 
-@dataclass(frozen=True)
-class SubjectTrigger:
+class SubjectTrigger(BaseModel):
+    kind: Literal["subject"] = "subject"
     subject_id: SessionIdentity
 
 
-@dataclass(frozen=True)
-class ReactionTrigger:
+class ReactionKind(StrEnum):
+    START = "start"
+    WAITING = "waiting"
+    INVESTIGATION = "investigation"
+    TROUBLE = "trouble"
+    RECOVERY = "recovery"
+    FAILURE = "failure"
+    CANCELLED = "cancelled"
+    SUCCESS = "success"
+
+
+class SessionReaction(BaseModel):
+    kind: ReactionKind
+    session: SessionIdentity
+    generation: int
+    activity: Activity
+    serial: int
+
+
+class ReactionTrigger(BaseModel):
+    kind: Literal["reaction"] = "reaction"
+    model_config = ConfigDict(defer_build=True)
     reaction: SessionReaction
 
 
-@dataclass(frozen=True)
-class CareTrigger:
+class CareTrigger(BaseModel):
+    kind: Literal["care"] = "care"
     care: CareKind
 
 
-type Trigger = SessionTrigger | SubjectTrigger | ReactionTrigger | CareTrigger
+type Trigger = Annotated[
+    SessionTrigger | SubjectTrigger | ReactionTrigger | CareTrigger,
+    Field(discriminator="kind"),
+]
 
 
 class RandomSource(Protocol):
@@ -131,45 +124,39 @@ class RandomSource(Protocol):
     def choice[T](self, seq: Sequence[T]) -> T: ...
 
 
-@dataclass(frozen=True)
-class UserSentiment:
+class UserSentiment(BaseModel):
     compound: float
     seconds_ago: float
 
 
-@dataclass(frozen=True)
-class ConvergenceItem:
+class ConvergenceItem(BaseModel):
     id: SessionIdentity
     outcome: ExecutionOutcome | None
 
 
-@dataclass(frozen=True)
-class ProcessIdentity:
-    pid: int
-    started: str
+class ProcessIdentity(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    pid: int = Field(strict=True, gt=0)
+    started: str = Field(min_length=1, max_length=128)
 
     @classmethod
     def parse(cls, value: object) -> ProcessIdentity | None:
-        if (
-            isinstance(value, dict)
-            and type(value.get("pid")) is int
-            and value["pid"] > 1
-            and isinstance(value.get("started"), str)
-            and 0 < len(value["started"]) <= 128
-        ):
-            return cls(value["pid"], value["started"])
-        return None
+        try:
+            identity = cls.model_validate(value)
+            return identity if identity.pid > 1 else None
+        except ValidationError:
+            return None
 
     def packet(self) -> ProcessPacket:
-        return {"pid": self.pid, "started": self.started}
+        return cast(ProcessPacket, self.model_dump(mode="json"))
 
 
-@dataclass(frozen=True)
-class HookEvent:
+class HookEvent(BaseModel):
+    kind: Literal["event"] = "event"
     source: SessionSource
-    session: str
+    session: str = Field(min_length=1)
     event: HookEventKind
-    aliases: tuple[str, ...] = ()
+    aliases: tuple[Annotated[str, Field(min_length=1)], ...] = ()
     parent: str | None = None
     parent_call: str | None = None
     call: str | None = None
@@ -191,71 +178,27 @@ class HookEvent:
 
     @property
     def subject(self) -> SessionIdentity:
-        return SessionIdentity(self.source, self.session)
+        return SessionIdentity(source=self.source, native_id=self.session)
 
     def packet(self) -> HookPacket:
-        packet: HookPacket = {
-            "kind": "event",
-            "source": self.source.value,
-            "session": self.session,
-            "event": self.event.value,
-        }
-        if self.parent is not None:
-            packet["parent"] = self.parent
-        if self.waiting_kind is not None:
-            packet["waiting_kind"] = self.waiting_kind.value
-        if self.parent_call is not None:
-            packet["parent_call"] = self.parent_call
-        if self.call is not None:
-            packet["call"] = self.call
-        if self.turn is not None:
-            packet["turn"] = self.turn
-        if self.tool is not None:
-            packet["tool"] = self.tool
-        if self.goal is not None:
-            packet["goal"] = self.goal
-        if self.progress is not None:
-            packet["progress"] = self.progress
-        if self.repo is not None:
-            packet["repo"] = self.repo
-        if self.repository is not None:
-            packet["repository"] = self.repository
-        if self.branch is not None:
-            packet["branch"] = self.branch
-        if self.pull_request is not None:
-            packet["pull_request"] = self.pull_request
-        if self.tool_name is not None:
-            packet["tool_name"] = self.tool_name
-        if self.sentiment_text is not None:
-            packet["sentiment_text"] = self.sentiment_text
-        if self.outcome is not None:
-            packet["outcome"] = self.outcome.value
-        if self.manual is not None:
-            packet["manual"] = self.manual
-        if self.exit_code is not None:
-            packet["exit_code"] = self.exit_code
-        if self.aliases:
-            packet["aliases"] = list(self.aliases)
-        if self.owner is not None:
-            packet["owner"] = self.owner.packet()
-        return packet
+        packet = self.model_dump(mode="json", exclude_none=True)
+        if not self.aliases:
+            packet.pop("aliases")
+        return cast(HookPacket, packet)
 
 
 if TYPE_CHECKING:
-    from .sessions.reactions import SessionReaction
     from .work.views import WorkStory, WorkSubject
 
 
-@dataclass(frozen=True)
-class ActiveTool:
+class ActiveTool(BaseModel):
     call: str
     tool: str
     activity: Activity
     duration_seconds: float
 
 
-@dataclass(frozen=True)
-class FailureSnapshot:
+class FailureSnapshot(BaseModel):
     activity: Activity
     count: int
     goal: str
@@ -264,8 +207,8 @@ class FailureSnapshot:
     seconds_ago: float
 
 
-@dataclass(frozen=True)
-class SessionContext:
+class SessionContext(BaseModel):
+    model_config = ConfigDict(defer_build=True)
     id: SessionIdentity
     changed_at: float
     parent: SessionIdentity | None
@@ -306,15 +249,15 @@ class SessionContext:
         return self.waiting_seconds
 
 
-@dataclass(frozen=True)
-class SwarmActivity:
+class SwarmActivity(BaseModel):
+    model_config = ConfigDict(defer_build=True)
     activity: PetState
     sessions: tuple[SessionContext, ...]
     convergence: tuple[ConvergenceItem, ...] | None = None
 
 
-@dataclass(frozen=True)
-class PetContext:
+class PetContext(BaseModel):
+    model_config = ConfigDict(defer_build=True)
     activity: PetState
     sessions: tuple[SessionContext, ...]
     sleeping: bool

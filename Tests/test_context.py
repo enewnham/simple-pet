@@ -3,7 +3,6 @@ import random
 import tempfile
 import unittest
 from copy import deepcopy
-from dataclasses import replace
 from pathlib import Path
 from typing import Unpack
 
@@ -91,7 +90,7 @@ class ContextTests(unittest.TestCase):
         self.attention = Attention(self.config, lambda: 1000, random.Random(0))
         self.snapshot = sessions_snapshot(
             session_snapshot(
-                id=SessionIdentity(SessionSource.COMMAND, "parser"),
+                id=SessionIdentity(source=SessionSource.COMMAND, native_id="parser"),
                 turn_active=True,
                 generation=1,
                 recent_requests=(
@@ -115,8 +114,8 @@ class ContextTests(unittest.TestCase):
 
     def update_session(self, index: int = 0, **values: Unpack[SessionOptions]) -> None:
         sessions = list(self.snapshot.sessions)
-        sessions[index] = replace(sessions[index], **values)
-        self.snapshot = replace(self.snapshot, sessions=tuple(sessions))
+        sessions[index] = sessions[index].model_copy(update=dict(**values))
+        self.snapshot = self.snapshot.model_copy(update={"sessions": tuple(sessions)})
 
     def current_snapshot(self) -> PetContext:
         return capture_snapshot(self.snapshot, work=self.work)
@@ -136,13 +135,22 @@ class ContextTests(unittest.TestCase):
         self,
     ) -> None:
         narrative = WorkNarrative(
-            SessionIdentity(SessionSource.COMMAND, "parser"),
-            "revision",
-            NarrativeStatement("Preserve parser compatibility.", ("intent",)),
-            (NarrativeStatement("Keep the public API stable.", ("decision",)),),
-            (
+            subject_id=SessionIdentity(
+                source=SessionSource.COMMAND, native_id="parser"
+            ),
+            revision="revision",
+            intent=NarrativeStatement(
+                text="Preserve parser compatibility.", sources=("intent",)
+            ),
+            decisions=(
                 NarrativeStatement(
-                    "The agent reports compatibility checks are running.", ("progress",)
+                    text="Keep the public API stable.", sources=("decision",)
+                ),
+            ),
+            progress=(
+                NarrativeStatement(
+                    text="The agent reports compatibility checks are running.",
+                    sources=("progress",),
                 ),
             ),
         )
@@ -171,10 +179,16 @@ class ContextTests(unittest.TestCase):
         self,
     ) -> None:
         narrative = WorkNarrative(
-            SessionIdentity(SessionSource.COMMAND, "parser"),
-            "revision",
-            NarrativeStatement("Preserve parser compatibility.", ("request",)),
-            progress=(NarrativeStatement("Parser checks passed.", ("report",)),),
+            subject_id=SessionIdentity(
+                source=SessionSource.COMMAND, native_id="parser"
+            ),
+            revision="revision",
+            intent=NarrativeStatement(
+                text="Preserve parser compatibility.", sources=("request",)
+            ),
+            progress=(
+                NarrativeStatement(text="Parser checks passed.", sources=("report",)),
+            ),
             sources={
                 "request": {"observed_at": 700, "scope": "root"},
                 "report": {"observed_at": 880, "scope": "root"},
@@ -182,7 +196,7 @@ class ContextTests(unittest.TestCase):
         )
         self.memory.save_narrative(narrative)
         cached = self.memory.load_narrative(
-            SessionIdentity(SessionSource.COMMAND, "parser")
+            SessionIdentity(source=SessionSource.COMMAND, native_id="parser")
         )
         snapshot = self.current_snapshot()
         selection = self.attention.select(snapshot, SpeechReason.ROUTINE)
@@ -201,7 +215,7 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(
             cached,
             self.memory.load_narrative(
-                SessionIdentity(SessionSource.COMMAND, "parser")
+                SessionIdentity(source=SessionSource.COMMAND, native_id="parser")
             ),
         )
 
@@ -212,22 +226,25 @@ class ContextTests(unittest.TestCase):
         subject = self.work[0]
         requests = tuple(
             EvidenceView(
-                EvidenceSource.USER,
-                EvidenceKind.INTENT,
-                IntentView(f"Decision {index}"),
-                900 + index,
+                source=EvidenceSource.USER,
+                kind=EvidenceKind.INTENT,
+                details=IntentView(text=f"Decision {index}"),
+                observed_at=900 + index,
             )
             for index in range(7)
         )
-        subject = replace(subject, story=replace(subject.story, requests=requests))
+        subject = subject.model_copy(
+            update={"story": subject.story.model_copy(update={"requests": requests})}
+        )
         self.work = (subject,)
         snapshot = self.current_snapshot()
         selection = self.attention.select(snapshot, SpeechReason.ROUTINE)
         narrative = WorkNarrative(
-            subject.id,
-            semantic_revision(subject.story),
-            NarrativeStatement(
-                "Keep the original compatibility decision.", ("old-decision",)
+            subject_id=subject.id,
+            revision=semantic_revision(subject.story),
+            intent=NarrativeStatement(
+                text="Keep the original compatibility decision.",
+                sources=("old-decision",),
             ),
         )
         prepared = self.cognition.prompts.prepare(
@@ -236,18 +253,23 @@ class ContextTests(unittest.TestCase):
         raw = self.cognition.prompts.prompt(snapshot, selection)
         self.assertTrue(prepared.support.valid(snapshot))
         self.work = (
-            replace(
-                subject,
-                story=replace(
-                    subject.story,
-                    requests=(
-                        replace(
-                            requests[0],
-                            details=IntentView("Corrected compatibility decision"),
-                        ),
-                        *requests[1:],
-                    ),
-                ),
+            subject.model_copy(
+                update={
+                    "story": subject.story.model_copy(
+                        update={
+                            "requests": (
+                                requests[0].model_copy(
+                                    update={
+                                        "details": IntentView(
+                                            text="Corrected compatibility decision"
+                                        )
+                                    }
+                                ),
+                                *requests[1:],
+                            )
+                        }
+                    )
+                }
             ),
         )
         current = self.current_snapshot()
@@ -258,13 +280,15 @@ class ContextTests(unittest.TestCase):
 
     def test_spoken_narrative_statements_are_omitted_without_empty_values(self) -> None:
         utterance = "I checked the parser."
-        statement = NarrativeStatement(utterance, ("source",))
+        statement = NarrativeStatement(text=utterance, sources=("source",))
         narrative = WorkNarrative(
-            SessionIdentity(SessionSource.COMMAND, "parser"),
-            "revision",
-            statement,
-            (statement,),
-            (statement,),
+            subject_id=SessionIdentity(
+                source=SessionSource.COMMAND, native_id="parser"
+            ),
+            revision="revision",
+            intent=statement,
+            decisions=(statement,),
+            progress=(statement,),
         )
         snapshot = self.current_snapshot()
         selection = self.attention.select(snapshot, SpeechReason.ROUTINE)
@@ -301,7 +325,14 @@ class ContextTests(unittest.TestCase):
                     waiting_for_input=waiting,
                     waiting_seconds=180 if waiting else None,
                     waiting_tool=command if waiting else "",
-                    active_tools=(ActiveTool("call", command, Activity.TESTING, 180),),
+                    active_tools=(
+                        ActiveTool(
+                            call="call",
+                            tool=command,
+                            activity=Activity.TESTING,
+                            duration_seconds=180,
+                        ),
+                    ),
                 )
                 snapshot = self.current_snapshot()
                 selection = self.attention.select(snapshot, SpeechReason.CHECK_IN)
@@ -354,16 +385,19 @@ class ContextTests(unittest.TestCase):
 
     def test_manifest_ignores_an_omitted_session_changing(self) -> None:
         self.config.prompt_target_bytes = 1
-        self.snapshot = replace(
-            self.snapshot,
-            sessions=(
-                *self.snapshot.sessions,
-                session_snapshot(
-                    id=SessionIdentity(SessionSource.COMMAND, "renderer"),
-                    turn_active=True,
-                    progress="Checking layout",
-                ),
-            ),
+        self.snapshot = self.snapshot.model_copy(
+            update={
+                "sessions": (
+                    *self.snapshot.sessions,
+                    session_snapshot(
+                        id=SessionIdentity(
+                            source=SessionSource.COMMAND, native_id="renderer"
+                        ),
+                        turn_active=True,
+                        progress="Checking layout",
+                    ),
+                )
+            }
         )
         prepared = self.prepare()
         self.update_session(1, progress="Renderer completed", turn_active=False)
@@ -401,17 +435,21 @@ class ContextTests(unittest.TestCase):
     ) -> None:
         self.record_hook(
             HookEvent(
-                SessionSource.COMMAND,
-                "parser",
-                HookEventKind.INTENT,
+                source=SessionSource.COMMAND,
+                session="parser",
+                event=HookEventKind.INTENT,
                 goal="Preserve parser compatibility",
             )
         )
-        self.snapshot = replace(self.snapshot, sessions=())
+        self.snapshot = self.snapshot.model_copy(update={"sessions": ()})
         self.work = self.memory.connected_work(self.snapshot)
         snapshot = self.current_snapshot()
         selection = AttentionSelection(
-            self.work[0], None, (), SpeechReason.CLICK, SpeechSituation.CLICK_WORKING
+            subject=self.work[0],
+            focus_session=None,
+            context_sessions=(),
+            reason=SpeechReason.CLICK,
+            situation=SpeechSituation.CLICK_WORKING,
         )
         prepared = self.cognition.prompts.prepare(
             snapshot, selection, self.cognition.request
@@ -427,7 +465,7 @@ class ContextTests(unittest.TestCase):
         self.assertFalse(prepared.support.valid(self.current_snapshot()))
 
     def test_quiet_greeting_remains_valid_without_session_context(self) -> None:
-        self.snapshot = replace(self.snapshot, sessions=())
+        self.snapshot = self.snapshot.model_copy(update={"sessions": ()})
         prepared = self.prepare(SpeechReason.CLICK)
         self.assertTrue(prepared.support.valid(self.current_snapshot()))
 
@@ -457,61 +495,61 @@ class ContextTests(unittest.TestCase):
         is_draft: bool = True,
     ) -> None:
         if not self.memory.recent(
-            session=SessionIdentity(SessionSource.COMMAND, "parser"),
+            session=SessionIdentity(source=SessionSource.COMMAND, native_id="parser"),
             event_types=("intent",),
         ):
             self.record_hook(
                 HookEvent(
-                    SessionSource.COMMAND,
-                    "parser",
-                    HookEventKind.INTENT,
+                    source=SessionSource.COMMAND,
+                    session="parser",
+                    event=HookEventKind.INTENT,
                     goal="Make session tracking survive restarts",
                 )
             )
         self.memory.work.observe(
             CheckoutObservation(
-                "/parser",
-                GitObservation(
-                    "/parser",
-                    "persistence",
-                    head,
-                    0,
-                    7,
-                    0,
-                    0,
-                    "",
-                    0,
-                    0,
-                    RemoteRepository("example.test/team/parser"),
+                worktree="/parser",
+                local=GitObservation(
+                    worktree="/parser",
+                    branch="persistence",
+                    head=head,
+                    staged=0,
+                    unstaged=7,
+                    untracked=0,
+                    conflicts=0,
+                    upstream="",
+                    ahead=0,
+                    behind=0,
+                    repository=RemoteRepository(value="example.test/team/parser"),
                 ),
-                1000,
+                checked_at=1000,
             )
         )
         self.record_hook(
             HookEvent(
-                SessionSource.COMMAND,
-                "parser",
-                HookEventKind.SESSION_START,
+                source=SessionSource.COMMAND,
+                session="parser",
+                event=HookEventKind.SESSION_START,
                 repo="/parser",
             )
         )
         self.memory.work.observe(
             BranchObservation(
-                RemoteRepository("example.test/team/parser"),
-                "persistence",
-                PullRequest(
-                    42,
-                    "https://example.test/team/parser/pull/42",
-                    state,
-                    None,
+                repository=RemoteRepository(value="example.test/team/parser"),
+                branch="persistence",
+                pr=PullRequest(
+                    number=42,
+                    url="https://example.test/team/parser/pull/42",
+                    state=state,
+                    merged_at=None,
                     is_draft=is_draft,
                     title="Persist coding session context",
                     head=head,
-                    head_repository=RemoteRepository("example.test/team/parser"),
+                    head_repository=RemoteRepository(value="example.test/team/parser"),
                     head_branch="persistence",
-                    repository=RemoteRepository("example.test/team/parser"),
+                    repository=RemoteRepository(value="example.test/team/parser"),
                 ),
-                1000,
+                checked_at=1000,
             )
         )
         self.work = self.memory.connected_work(self.snapshot)
@@ -543,14 +581,16 @@ class ContextTests(unittest.TestCase):
     ) -> None:
         self.output()
         pr = PullRequest(
-            42,
-            "https://example.test/team/parser/pull/42",
-            PullRequestState.MERGED,
-            "2026-10-21T00:00:00Z",
+            number=42,
+            url="https://example.test/team/parser/pull/42",
+            state=PullRequestState.MERGED,
+            merged_at="2026-10-21T00:00:00Z",
             title="Persist coding session context",
-            repository=RemoteRepository("example.test/team/parser"),
+            repository=RemoteRepository(value="example.test/team/parser"),
         )
-        self.memory.work.observe(PullRequestObservation(pr.url, pr, 1001))
+        self.memory.work.observe(
+            PullRequestObservation(ref=pr.url, pr=pr, checked_at=1001)
+        )
         self.work = self.memory.connected_work(self.snapshot)
         encoded = json.dumps(self.payload(self.prepare()))
         self.assertNotIn(PullRequestState.MERGED, encoded)
@@ -560,17 +600,20 @@ class ContextTests(unittest.TestCase):
         self.output()
         prepared = self.prepare()
         self.work = tuple(
-            replace(
-                subject,
-                story=replace(
-                    subject.story,
-                    artifacts=(
-                        *subject.story.artifacts,
-                        ArtifactContext(
-                            ArtifactKind.TICKET, "https://example.test/tickets/123"
-                        ),
-                    ),
-                ),
+            subject.model_copy(
+                update={
+                    "story": subject.story.model_copy(
+                        update={
+                            "artifacts": (
+                                *subject.story.artifacts,
+                                ArtifactContext(
+                                    kind=ArtifactKind.TICKET,
+                                    ref="https://example.test/tickets/123",
+                                ),
+                            )
+                        }
+                    )
+                }
             )
             for subject in self.work
         )
@@ -579,7 +622,9 @@ class ContextTests(unittest.TestCase):
     def test_disconnected_focus_invalidates_the_captured_subject(self) -> None:
         self.output()
         prepared = self.prepare()
-        self.work = tuple(replace(subject, sessions=()) for subject in self.work)
+        self.work = tuple(
+            subject.model_copy(update={"sessions": ()}) for subject in self.work
+        )
         self.assertFalse(prepared.support.valid(self.current_snapshot()))
 
     def test_selected_work_context_is_supplied_once(self) -> None:
@@ -594,8 +639,8 @@ class ContextTests(unittest.TestCase):
 
     def test_resumed_work_invalidates_a_quiet_care_remark(self) -> None:
         self.snapshot = sessions_snapshot()
-        snapshot = replace(
-            self.current_snapshot(), trigger=CareTrigger(CareKind.EXERCISE)
+        snapshot = self.current_snapshot().model_copy(
+            update={"trigger": CareTrigger(care=CareKind.EXERCISE)}
         )
         selection = self.attention.select(snapshot, SpeechReason.CARE)
         prepared = self.cognition.prompts.prepare(
@@ -646,49 +691,57 @@ class ContextTests(unittest.TestCase):
     def test_earlier_reports_do_not_describe_the_current_request(self) -> None:
         self.output()
         self.work = tuple(
-            replace(
-                subject,
-                story=replace(
-                    subject.story,
-                    requests=(
-                        EvidenceView(
-                            EvidenceSource.USER,
-                            EvidenceKind.INTENT,
-                            IntentView("Build a log explorer"),
-                            900,
-                        ),
-                    ),
-                    activity=(
-                        EvidenceView(
-                            EvidenceSource.SOURCE,
-                            EvidenceKind.PROGRESS,
-                            ProgressView("Finished simplifying log labels"),
-                            800,
-                        ),
-                    ),
-                    sessions=(
-                        SessionContribution(
-                            "Audit tests",
-                            session=SessionIdentity(SessionSource.COMMAND, "audit"),
-                            requests=(
+            subject.model_copy(
+                update={
+                    "story": subject.story.model_copy(
+                        update={
+                            "requests": (
                                 EvidenceView(
-                                    EvidenceSource.SOURCE,
-                                    EvidenceKind.INTENT,
-                                    IntentView("Audit tests"),
-                                    750,
+                                    source=EvidenceSource.USER,
+                                    kind=EvidenceKind.INTENT,
+                                    details=IntentView(text="Build a log explorer"),
+                                    observed_at=900,
                                 ),
                             ),
-                            activity=(
+                            "activity": (
                                 EvidenceView(
-                                    EvidenceSource.SOURCE,
-                                    EvidenceKind.PROGRESS,
-                                    ProgressView("Found two redundant assertions"),
-                                    850,
+                                    source=EvidenceSource.SOURCE,
+                                    kind=EvidenceKind.PROGRESS,
+                                    details=ProgressView(
+                                        reported_progress="Finished simplifying log labels"
+                                    ),
+                                    observed_at=800,
                                 ),
                             ),
-                        ),
-                    ),
-                ),
+                            "sessions": (
+                                SessionContribution(
+                                    scope="Audit tests",
+                                    session=SessionIdentity(
+                                        source=SessionSource.COMMAND, native_id="audit"
+                                    ),
+                                    requests=(
+                                        EvidenceView(
+                                            source=EvidenceSource.SOURCE,
+                                            kind=EvidenceKind.INTENT,
+                                            details=IntentView(text="Audit tests"),
+                                            observed_at=750,
+                                        ),
+                                    ),
+                                    activity=(
+                                        EvidenceView(
+                                            source=EvidenceSource.SOURCE,
+                                            kind=EvidenceKind.PROGRESS,
+                                            details=ProgressView(
+                                                reported_progress="Found two redundant assertions"
+                                            ),
+                                            observed_at=850,
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        }
+                    )
+                }
             )
             for subject in self.work
         )
@@ -736,44 +789,67 @@ class ContextTests(unittest.TestCase):
         self,
     ) -> None:
         self.update_session(
-            active_tools=(ActiveTool("first", "Run tests", Activity.TESTING, 180),)
+            active_tools=(
+                ActiveTool(
+                    call="first",
+                    tool="Run tests",
+                    activity=Activity.TESTING,
+                    duration_seconds=180,
+                ),
+            )
         )
         snapshot = self.current_snapshot()
-        selection = replace(
-            self.attention.select(snapshot, SpeechReason.ROUTINE),
-            situation=SpeechSituation.CHECK_IN_RUNNING,
+        selection = self.attention.select(snapshot, SpeechReason.ROUTINE).model_copy(
+            update={"situation": SpeechSituation.CHECK_IN_RUNNING}
         )
         prepared = self.cognition.prompts.prepare(
             snapshot, selection, self.cognition.request
         )
         self.update_session(
-            active_tools=(ActiveTool("second", "Run tests", Activity.TESTING, 10),)
+            active_tools=(
+                ActiveTool(
+                    call="second",
+                    tool="Run tests",
+                    activity=Activity.TESTING,
+                    duration_seconds=10,
+                ),
+            )
         )
         self.assertFalse(prepared.support.valid(self.current_snapshot()))
 
     def test_selected_terminal_failure_preserves_the_failed_call(self) -> None:
         self.output()
         subject = self.work[0]
-        story = replace(
-            subject.story,
-            activity=(
-                EvidenceView(
-                    EvidenceSource.SOURCE,
-                    EvidenceKind.EXECUTION,
-                    ExecutionView("turn ended", None, ExecutionOutcome.ERROR),
-                    1000,
-                ),
-            ),
+        story = subject.story.model_copy(
+            update={
+                "activity": (
+                    EvidenceView(
+                        source=EvidenceSource.SOURCE,
+                        kind=EvidenceKind.EXECUTION,
+                        details=ExecutionView(
+                            execution="turn ended",
+                            reported_progress=None,
+                            reported_execution_outcome=ExecutionOutcome.ERROR,
+                        ),
+                        observed_at=1000,
+                    ),
+                )
+            }
         )
-        self.work = (replace(subject, story=story),)
+        self.work = (subject.model_copy(update={"story": story}),)
         snapshot = self.current_snapshot()
         selection = AttentionSelection(
-            self.work[0],
-            snapshot.sessions[0],
-            (),
-            SpeechReason.FAILURE,
-            SpeechSituation.FAILURE,
-            update=WorkUpdate(subject.id, "terminal-revision", 1000, 1000),
+            subject=self.work[0],
+            focus_session=snapshot.sessions[0],
+            context_sessions=(),
+            reason=SpeechReason.FAILURE,
+            situation=SpeechSituation.FAILURE,
+            update=WorkUpdate(
+                session=subject.id,
+                revision="terminal-revision",
+                observed_at=1000,
+                ended_at=1000,
+            ),
         )
         moment = self.cognition.prompts.prompt(snapshot, selection)["current_moment"]
         self.assertEqual(moment, {"kind": "failed_call"})
@@ -783,29 +859,37 @@ class ContextTests(unittest.TestCase):
     ) -> None:
         self.output()
         subject = self.work[0]
-        story = replace(
-            subject.story,
-            activity=(
-                EvidenceView(
-                    EvidenceSource.SOURCE,
-                    EvidenceKind.EXECUTION,
-                    ExecutionView(
-                        "turn ended", "Parser checks passed", ExecutionOutcome.SUCCESS
+        story = subject.story.model_copy(
+            update={
+                "activity": (
+                    EvidenceView(
+                        source=EvidenceSource.SOURCE,
+                        kind=EvidenceKind.EXECUTION,
+                        details=ExecutionView(
+                            execution="turn ended",
+                            reported_progress="Parser checks passed",
+                            reported_execution_outcome=ExecutionOutcome.SUCCESS,
+                        ),
+                        observed_at=1000,
                     ),
-                    1000,
-                ),
-            ),
+                )
+            }
         )
-        self.work = (replace(subject, story=story),)
-        self.snapshot = replace(self.snapshot, sessions=())
+        self.work = (subject.model_copy(update={"story": story}),)
+        self.snapshot = self.snapshot.model_copy(update={"sessions": ()})
         snapshot = self.current_snapshot()
         selection = AttentionSelection(
-            self.work[0],
-            None,
-            (),
-            SpeechReason.ROUTINE,
-            SpeechSituation.COMPLETION,
-            update=WorkUpdate(subject.id, "terminal-revision", 1000, 1000),
+            subject=self.work[0],
+            focus_session=None,
+            context_sessions=(),
+            reason=SpeechReason.ROUTINE,
+            situation=SpeechSituation.COMPLETION,
+            update=WorkUpdate(
+                session=subject.id,
+                revision="terminal-revision",
+                observed_at=1000,
+                ended_at=1000,
+            ),
         )
         moment = self.cognition.prompts.prompt(snapshot, selection)["current_moment"]
         self.assertEqual(moment["kind"], "turn_ended")
@@ -817,44 +901,54 @@ class ContextTests(unittest.TestCase):
     ) -> None:
         self.output()
         subject = self.work[0]
-        story = replace(
-            subject.story,
-            activity=(
-                EvidenceView(
-                    EvidenceSource.SOURCE,
-                    EvidenceKind.EXECUTION,
-                    ExecutionView(
-                        "turn ended", "Parent checks passed", ExecutionOutcome.SUCCESS
+        story = subject.story.model_copy(
+            update={
+                "activity": (
+                    EvidenceView(
+                        source=EvidenceSource.SOURCE,
+                        kind=EvidenceKind.EXECUTION,
+                        details=ExecutionView(
+                            execution="turn ended",
+                            reported_progress="Parent checks passed",
+                            reported_execution_outcome=ExecutionOutcome.SUCCESS,
+                        ),
+                        observed_at=700,
                     ),
-                    700,
                 ),
-            ),
-            sessions=(
-                SessionContribution(
-                    "Inspect the parser",
-                    session=SessionIdentity(SessionSource.COMMAND, "child"),
-                    activity=(
-                        EvidenceView(
-                            EvidenceSource.SOURCE,
-                            EvidenceKind.PROGRESS,
-                            ProgressView("Child is inspecting escape handling"),
-                            940,
+                "sessions": (
+                    SessionContribution(
+                        scope="Inspect the parser",
+                        session=SessionIdentity(
+                            source=SessionSource.COMMAND, native_id="child"
+                        ),
+                        activity=(
+                            EvidenceView(
+                                source=EvidenceSource.SOURCE,
+                                kind=EvidenceKind.PROGRESS,
+                                details=ProgressView(
+                                    reported_progress="Child is inspecting escape handling"
+                                ),
+                                observed_at=940,
+                            ),
                         ),
                     ),
                 ),
-            ),
+            }
         )
-        self.work = (replace(subject, story=story),)
+        self.work = (subject.model_copy(update={"story": story}),)
         snapshot = self.current_snapshot()
-        selection = replace(
-            self.attention.select(snapshot, SpeechReason.ROUTINE),
-            subject=self.work[0],
-            update=WorkUpdate(
-                SessionIdentity(SessionSource.COMMAND, "child"),
-                "child-revision",
-                940,
-                None,
-            ),
+        selection = self.attention.select(snapshot, SpeechReason.ROUTINE).model_copy(
+            update={
+                "subject": self.work[0],
+                "update": WorkUpdate(
+                    session=SessionIdentity(
+                        source=SessionSource.COMMAND, native_id="child"
+                    ),
+                    revision="child-revision",
+                    observed_at=940,
+                    ended_at=None,
+                ),
+            }
         )
         payload = self.cognition.prompts.prompt(snapshot, selection)
         self.assertEqual(payload["current_work"]["request"], "Inspect the parser")
@@ -874,46 +968,58 @@ class ContextTests(unittest.TestCase):
     def test_selected_related_task_preserves_the_scope_of_broader_results(self) -> None:
         self.output()
         subject = self.work[0]
-        related = SessionIdentity(SessionSource.COMMAND, "coverage")
-        story = replace(
-            subject.story,
-            intent="Build parser",
-            activity=(
-                EvidenceView(
-                    EvidenceSource.SOURCE,
-                    EvidenceKind.PROGRESS,
-                    ProgressView("Parser compatibility checks passed"),
-                    700,
+        related = SessionIdentity(source=SessionSource.COMMAND, native_id="coverage")
+        story = subject.story.model_copy(
+            update={
+                "intent": "Build parser",
+                "activity": (
+                    EvidenceView(
+                        source=EvidenceSource.SOURCE,
+                        kind=EvidenceKind.PROGRESS,
+                        details=ProgressView(
+                            reported_progress="Parser compatibility checks passed"
+                        ),
+                        observed_at=700,
+                    ),
                 ),
-            ),
-            sessions=(
-                SessionContribution(
-                    "current task",
-                    session=related,
-                    activity=(
-                        EvidenceView(
-                            EvidenceSource.SOURCE,
-                            EvidenceKind.PROGRESS,
-                            ProgressView("Escape checks passed"),
-                            940,
+                "sessions": (
+                    SessionContribution(
+                        scope="current task",
+                        session=related,
+                        activity=(
+                            EvidenceView(
+                                source=EvidenceSource.SOURCE,
+                                kind=EvidenceKind.PROGRESS,
+                                details=ProgressView(
+                                    reported_progress="Escape checks passed"
+                                ),
+                                observed_at=940,
+                            ),
                         ),
                     ),
                 ),
-            ),
+            }
         )
-        self.work = (replace(subject, story=story),)
+        self.work = (subject.model_copy(update={"story": story}),)
         snapshot = self.current_snapshot()
-        selection = replace(
-            self.attention.select(snapshot, SpeechReason.ROUTINE),
-            update=WorkUpdate(related, "coverage-result", 940),
+        selection = self.attention.select(snapshot, SpeechReason.ROUTINE).model_copy(
+            update={
+                "update": WorkUpdate(
+                    session=related, revision="coverage-result", observed_at=940
+                )
+            }
         )
         narrative = WorkNarrative(
-            subject.id,
-            semantic_revision(story),
-            NarrativeStatement("I am building the parser", ("request",)),
+            subject_id=subject.id,
+            revision=semantic_revision(story),
+            intent=NarrativeStatement(
+                text="I am building the parser", sources=("request",)
+            ),
             progress=(
-                NarrativeStatement("I checked parser compatibility", ("parser",)),
-                NarrativeStatement("I checked escapes", ("coverage",)),
+                NarrativeStatement(
+                    text="I checked parser compatibility", sources=("parser",)
+                ),
+                NarrativeStatement(text="I checked escapes", sources=("coverage",)),
             ),
             sources={
                 "request": {
@@ -947,41 +1053,49 @@ class ContextTests(unittest.TestCase):
     def test_child_report_keeps_the_assignment_observed_before_its_result(self) -> None:
         self.output()
         report = EvidenceView(
-            EvidenceSource.SOURCE,
-            EvidenceKind.PROGRESS,
-            ProgressView("Found two redundant assertions"),
-            850,
+            source=EvidenceSource.SOURCE,
+            kind=EvidenceKind.PROGRESS,
+            details=ProgressView(reported_progress="Found two redundant assertions"),
+            observed_at=850,
         )
         earlier_assignment = EvidenceView(
-            EvidenceSource.SOURCE, EvidenceKind.INTENT, IntentView("Audit tests"), 800
+            source=EvidenceSource.SOURCE,
+            kind=EvidenceKind.INTENT,
+            details=IntentView(text="Audit tests"),
+            observed_at=800,
         )
         current_assignment = EvidenceView(
-            EvidenceSource.SOURCE,
-            EvidenceKind.INTENT,
-            IntentView("Check the explorer website"),
-            900,
+            source=EvidenceSource.SOURCE,
+            kind=EvidenceKind.INTENT,
+            details=IntentView(text="Check the explorer website"),
+            observed_at=900,
         )
         child = SessionContribution(
-            "Check the explorer website",
-            session=SessionIdentity(SessionSource.COMMAND, "explorer"),
+            scope="Check the explorer website",
+            session=SessionIdentity(source=SessionSource.COMMAND, native_id="explorer"),
             requests=(earlier_assignment, current_assignment),
             activity=(report,),
         )
         self.work = tuple(
-            replace(subject, story=replace(subject.story, sessions=(child,)))
+            subject.model_copy(
+                update={
+                    "story": subject.story.model_copy(update={"sessions": (child,)})
+                }
+            )
             for subject in self.work
         )
         payload = self.payload(self.prepare())
         self.assertEqual(payload["earlier_context"][-1]["scope"], "Audit tests")
-        child_without_earlier_assignment = replace(
-            child, requests=(current_assignment,)
+        child_without_earlier_assignment = child.model_copy(
+            update={"requests": (current_assignment,)}
         )
         self.work = tuple(
-            replace(
-                subject,
-                story=replace(
-                    subject.story, sessions=(child_without_earlier_assignment,)
-                ),
+            subject.model_copy(
+                update={
+                    "story": subject.story.model_copy(
+                        update={"sessions": (child_without_earlier_assignment,)}
+                    )
+                }
             )
             for subject in self.work
         )
@@ -996,7 +1110,11 @@ class ContextTests(unittest.TestCase):
         )
         snapshot = self.current_snapshot()
         selection = AttentionSelection(
-            None, snapshot.sessions[0], (), SpeechReason.CLICK, SpeechSituation.ROUTINE
+            subject=None,
+            focus_session=snapshot.sessions[0],
+            context_sessions=(),
+            reason=SpeechReason.CLICK,
+            situation=SpeechSituation.ROUTINE,
         )
         prepared = self.cognition.prompts.prepare(
             snapshot, selection, self.cognition.request
@@ -1008,12 +1126,18 @@ class ContextTests(unittest.TestCase):
 
     def test_running_check_in_omits_an_unknown_tool_name(self) -> None:
         self.update_session(
-            active_tools=(ActiveTool("first", "", Activity.COMMAND, 180),)
+            active_tools=(
+                ActiveTool(
+                    call="first",
+                    tool="",
+                    activity=Activity.COMMAND,
+                    duration_seconds=180,
+                ),
+            )
         )
         snapshot = self.current_snapshot()
-        selection = replace(
-            self.attention.select(snapshot, SpeechReason.ROUTINE),
-            situation=SpeechSituation.CHECK_IN_RUNNING,
+        selection = self.attention.select(snapshot, SpeechReason.ROUTINE).model_copy(
+            update={"situation": SpeechSituation.CHECK_IN_RUNNING}
         )
         prepared = self.cognition.prompts.prepare(
             snapshot, selection, self.cognition.request
@@ -1027,40 +1151,46 @@ class ContextTests(unittest.TestCase):
     ) -> None:
         self.output()
         progress = EvidenceView(
-            EvidenceSource.SOURCE,
-            EvidenceKind.PROGRESS,
-            ProgressView("Checked parser compatibility"),
-            800,
+            source=EvidenceSource.SOURCE,
+            kind=EvidenceKind.PROGRESS,
+            details=ProgressView(reported_progress="Checked parser compatibility"),
+            observed_at=800,
         )
         ended = EvidenceView(
-            EvidenceSource.SOURCE,
-            EvidenceKind.EXECUTION,
-            ExecutionView(
-                "turn ended", "Checked parser compatibility", ExecutionOutcome.CANCELLED
+            source=EvidenceSource.SOURCE,
+            kind=EvidenceKind.EXECUTION,
+            details=ExecutionView(
+                execution="turn ended",
+                reported_progress="Checked parser compatibility",
+                reported_execution_outcome=ExecutionOutcome.CANCELLED,
             ),
-            800,
+            observed_at=800,
         )
         request = EvidenceView(
-            EvidenceSource.USER,
-            EvidenceKind.INTENT,
-            IntentView("Build a log explorer"),
-            900,
+            source=EvidenceSource.USER,
+            kind=EvidenceKind.INTENT,
+            details=IntentView(text="Build a log explorer"),
+            observed_at=900,
         )
         self.work = tuple(
-            replace(
-                subject,
-                story=replace(
-                    subject.story,
-                    requests=(request,),
-                    activity=(progress, ended),
-                    sessions=(
-                        SessionContribution(
-                            "Audit tests",
-                            session=SessionIdentity(SessionSource.COMMAND, "audit"),
-                            activity=(ended, progress),
-                        ),
-                    ),
-                ),
+            subject.model_copy(
+                update={
+                    "story": subject.story.model_copy(
+                        update={
+                            "requests": (request,),
+                            "activity": (progress, ended),
+                            "sessions": (
+                                SessionContribution(
+                                    scope="Audit tests",
+                                    session=SessionIdentity(
+                                        source=SessionSource.COMMAND, native_id="audit"
+                                    ),
+                                    activity=(ended, progress),
+                                ),
+                            ),
+                        }
+                    )
+                }
             )
             for subject in self.work
         )
@@ -1075,39 +1205,47 @@ class ContextTests(unittest.TestCase):
     ) -> None:
         self.output()
         original_request = EvidenceView(
-            EvidenceSource.USER,
-            EvidenceKind.INTENT,
-            IntentView("Build a log explorer"),
-            700,
+            source=EvidenceSource.USER,
+            kind=EvidenceKind.INTENT,
+            details=IntentView(text="Build a log explorer"),
+            observed_at=700,
         )
         followup = EvidenceView(
-            EvidenceSource.USER, EvidenceKind.INTENT, IntentView("proceed"), 900
+            source=EvidenceSource.USER,
+            kind=EvidenceKind.INTENT,
+            details=IntentView(text="proceed"),
+            observed_at=900,
         )
         children = tuple(
             SessionContribution(
-                f"Assignment {index}",
-                session=SessionIdentity(SessionSource.COMMAND, f"child-{index}"),
+                scope=f"Assignment {index}",
+                session=SessionIdentity(
+                    source=SessionSource.COMMAND, native_id=f"child-{index}"
+                ),
                 activity=(
                     EvidenceView(
-                        EvidenceSource.SOURCE,
-                        EvidenceKind.PROGRESS,
-                        ProgressView(
-                            f"Report {index}: " + "Checked parser behavior. " * 8
+                        source=EvidenceSource.SOURCE,
+                        kind=EvidenceKind.PROGRESS,
+                        details=ProgressView(
+                            reported_progress=f"Report {index}: "
+                            + "Checked parser behavior. " * 8
                         ),
-                        950,
+                        observed_at=950,
                     ),
                 ),
             )
             for index in range(6)
         )
         self.work = tuple(
-            replace(
-                subject,
-                story=replace(
-                    subject.story,
-                    requests=(original_request, followup),
-                    sessions=children,
-                ),
+            subject.model_copy(
+                update={
+                    "story": subject.story.model_copy(
+                        update={
+                            "requests": (original_request, followup),
+                            "sessions": children,
+                        }
+                    )
+                }
             )
             for subject in self.work
         )

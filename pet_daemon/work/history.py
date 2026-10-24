@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from pydantic import BaseModel
 
 from ..domain import Activity, ExecutionOutcome
 from ..identity import SessionIdentity
@@ -16,20 +17,10 @@ if TYPE_CHECKING:
     from ..runtime import HookEvent
 
 
-@dataclass(frozen=True)
-class HistoryDetails:
+class HistoryDetails(BaseModel):
     reported_outcome: ExecutionOutcome | None = None
     activity: Activity | None = None
     progress: str | None = None
-
-    @classmethod
-    def from_data(cls, data: dict[str, str | None]) -> HistoryDetails:
-        outcome, activity = data["reported_outcome"], data["activity"]
-        return cls(
-            ExecutionOutcome(outcome) if outcome is not None else None,
-            Activity(activity) if activity is not None else None,
-            data["progress"],
-        )
 
 
 HISTORY_SEARCH_STOP_WORDS = {
@@ -43,8 +34,7 @@ HISTORY_SEARCH_STOP_WORDS = {
 }
 
 
-@dataclass(frozen=True)
-class SessionEntry:
+class SessionEntry(BaseModel):
     session: SessionIdentity
     working_directory: str
     repository: RepositoryIdentity | None
@@ -54,15 +44,13 @@ class SessionEntry:
     explicit_goal: str
 
 
-@dataclass(frozen=True)
-class RecallQuery:
+class RecallQuery(BaseModel):
     repository: RepositoryIdentity | None
     session: SessionIdentity
     terms: tuple[str, ...]
 
 
-@dataclass(frozen=True)
-class SessionContext:
+class SessionContext(BaseModel):
     session_id: SessionIdentity
     working_directory: str
     goal: str
@@ -109,7 +97,9 @@ def build_session_entry(
             if context and context.activity
             else activity(tool, event.tool_name or "")
         )
-    details = HistoryDetails(outcome, category, progress or None)
+    details = HistoryDetails(
+        reported_outcome=outcome, activity=category, progress=progress or None
+    )
     return SessionEntry(
         session=session_id,
         working_directory=working_directory,

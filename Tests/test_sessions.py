@@ -1,7 +1,6 @@
 import json
 import tempfile
 import unittest
-from dataclasses import asdict
 from pathlib import Path
 
 from pet_daemon.domain import Activity, ExecutionOutcome, PetState, SessionSource
@@ -61,17 +60,23 @@ class SessionsTests(unittest.TestCase):
         self.event("intent", source="claude", session="child", goal="Inspect hooks")
 
         identities = {
-            SessionIdentity(SessionSource.CODEX, "child"),
-            SessionIdentity(SessionSource.CODEX, "codex:child"),
-            SessionIdentity(SessionSource.CLAUDE, "child"),
+            SessionIdentity(source=SessionSource.CODEX, native_id="child"),
+            SessionIdentity(source=SessionSource.CODEX, native_id="codex:child"),
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="child"),
         }
         self.assertEqual(set(self.sessions.by_id), identities)
         self.assertEqual(
             {session.id: session.goal for session in self.sessions.by_id.values()},
             {
-                SessionIdentity(SessionSource.CODEX, "child"): "Inspect parser",
-                SessionIdentity(SessionSource.CODEX, "codex:child"): "Inspect renderer",
-                SessionIdentity(SessionSource.CLAUDE, "child"): "Inspect hooks",
+                SessionIdentity(
+                    source=SessionSource.CODEX, native_id="child"
+                ): "Inspect parser",
+                SessionIdentity(
+                    source=SessionSource.CODEX, native_id="codex:child"
+                ): "Inspect renderer",
+                SessionIdentity(
+                    source=SessionSource.CLAUDE, native_id="child"
+                ): "Inspect hooks",
             },
         )
         stored = self.memory.connected_work(self.sessions.activity_view())
@@ -79,7 +84,9 @@ class SessionsTests(unittest.TestCase):
 
     def test_hook_values_become_domain_members(self) -> None:
         self.event("intent", goal="Check the parser")
-        session = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")]
+        session = self.sessions.by_id[
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+        ]
         self.assertIsNone(session.phase)
         self.event("tool_start", call="checks", tool="pytest")
         self.assertIs(session.phase, Activity.TESTING)
@@ -125,8 +132,12 @@ class SessionsTests(unittest.TestCase):
         self.event(
             "intent", goal="Preserve parser behavior", repo="/parser", turn="current"
         )
-        before = self.memory.connected_work(SwarmActivity(PetState.IDLE, ()))
-        context = self.memory.context(SessionIdentity(SessionSource.CLAUDE, "main"))
+        before = self.memory.connected_work(
+            SwarmActivity(activity=PetState.IDLE, sessions=())
+        )
+        context = self.memory.context(
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+        )
         result = self.event(
             "tool_done",
             call="unknown",
@@ -137,10 +148,16 @@ class SessionsTests(unittest.TestCase):
         )
         self.assertIsNone(result)
         self.assertEqual(
-            self.memory.connected_work(SwarmActivity(PetState.IDLE, ())), before
+            self.memory.connected_work(
+                SwarmActivity(activity=PetState.IDLE, sessions=())
+            ),
+            before,
         )
         self.assertEqual(
-            self.memory.context(SessionIdentity(SessionSource.CLAUDE, "main")), context
+            self.memory.context(
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+            ),
+            context,
         )
 
     def test_terminal_observation_uses_the_outcome_of_the_accepted_turn(self) -> None:
@@ -158,7 +175,9 @@ class SessionsTests(unittest.TestCase):
         self.assertEqual(execution.outcome, "error")
         self.assertEqual(execution.progress, "Checks need repair")
         self.assertEqual(
-            self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")].progress,
+            self.sessions.by_id[
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+            ].progress,
             "",
         )
 
@@ -203,11 +222,11 @@ class SessionsTests(unittest.TestCase):
             self.sessions.convergence,
             (
                 ConvergenceItem(
-                    id=SessionIdentity(SessionSource.CLAUDE, "one"),
+                    id=SessionIdentity(source=SessionSource.CLAUDE, native_id="one"),
                     outcome=ExecutionOutcome.SUCCESS,
                 ),
                 ConvergenceItem(
-                    id=SessionIdentity(SessionSource.CODEX, "two"),
+                    id=SessionIdentity(source=SessionSource.CODEX, native_id="two"),
                     outcome=ExecutionOutcome.SUCCESS,
                 ),
             ),
@@ -227,12 +246,18 @@ class SessionsTests(unittest.TestCase):
             call="test",
             tool="pytest",
         )
-        child = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "child")]
+        child = self.sessions.by_id[
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="child")
+        ]
         self.assertEqual(child.goal, "Refactor batch inserts")
-        self.assertEqual(child.parent, SessionIdentity(SessionSource.CLAUDE, "main"))
+        self.assertEqual(
+            child.parent, SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+        )
         self.assertIn("test", child.calls)
         self.assertFalse(
-            self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")].calls
+            self.sessions.by_id[
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+            ].calls
         )
         self.event(
             "progress",
@@ -265,12 +290,16 @@ class SessionsTests(unittest.TestCase):
         self.assertEqual(len(self.sessions.by_id), 2)
         self.assertIn(
             "read",
-            self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "child")].calls,
+            self.sessions.by_id[
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="child")
+            ].calls,
         )
         self.event("tool_done", session="child-thread", call="read")
         self.assertTrue(self.sessions.working)
         self.assertFalse(
-            self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "child")].calls
+            self.sessions.by_id[
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="child")
+            ].calls
         )
 
     def test_alias_merge_keeps_the_canonical_identity_when_adopting_active_work(
@@ -281,12 +310,12 @@ class SessionsTests(unittest.TestCase):
         self.event("tool_start", session="temporary", call="read", tool="Read")
         self.event("progress", session="temporary", progress="Checking escaped quotes")
         temporary = self.sessions.by_id[
-            SessionIdentity(SessionSource.CLAUDE, "temporary")
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="temporary")
         ]
 
         self.event("session_start", session="native", aliases=["temporary"])
 
-        identity = SessionIdentity(SessionSource.CLAUDE, "native")
+        identity = SessionIdentity(source=SessionSource.CLAUDE, native_id="native")
         retained = self.sessions.by_id[identity]
         self.assertIs(retained, temporary)
         self.assertEqual(retained.id, identity)
@@ -310,11 +339,13 @@ class SessionsTests(unittest.TestCase):
             "waiting", session="temporary", call="second", progress="Choose a target"
         )
         temporary = self.sessions.by_id[
-            SessionIdentity(SessionSource.CLAUDE, "temporary")
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="temporary")
         ]
         temporary.last_check_in = self.clock()
         self.event("session_start", session="native", aliases=["temporary"])
-        lane = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "native")]
+        lane = self.sessions.by_id[
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="native")
+        ]
         self.assertTrue(lane.waiting)
         self.assertFalse(lane.working)
         self.assertEqual(lane.waiting_call, "second")
@@ -339,7 +370,9 @@ class SessionsTests(unittest.TestCase):
             aliases=["child-thread"],
             goal="Check parser",
         )
-        child = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "child")]
+        child = self.sessions.by_id[
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="child")
+        ]
         self.assertTrue(child.active)
         self.assertTrue(self.sessions.failed)
         self.assertEqual(require(child.failure).activity, "testing")
@@ -354,12 +387,14 @@ class SessionsTests(unittest.TestCase):
         self.event("turn_done", session="child-thread")
         self.assertEqual(
             self.sessions.by_id[
-                SessionIdentity(SessionSource.CLAUDE, "child-thread")
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="child-thread")
             ].outcome,
             "error",
         )
         self.event("subagent_done", session="child", aliases=["child-thread"])
-        child = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "child")]
+        child = self.sessions.by_id[
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="child")
+        ]
         self.assertTrue(child.finished)
         self.assertEqual(child.outcome, "error")
         self.assertEqual(require(child.failure).activity, "testing")
@@ -367,7 +402,7 @@ class SessionsTests(unittest.TestCase):
         snapshot = self.sessions.activity_view().sessions
         self.assertEqual(
             [lane.id for lane in snapshot],
-            [SessionIdentity(SessionSource.CLAUDE, "child")],
+            [SessionIdentity(source=SessionSource.CLAUDE, native_id="child")],
         )
         self.assertEqual(snapshot[0].outcome, "error")
         self.assertFalse(self.sessions.clean_convergence)
@@ -391,7 +426,7 @@ class SessionsTests(unittest.TestCase):
                     tool_name=name,
                 )
                 lane = self.sessions.by_id[
-                    SessionIdentity(SessionSource.CLAUDE, session)
+                    SessionIdentity(source=SessionSource.CLAUDE, native_id=session)
                 ]
                 self.assertEqual(lane.calls["file"].activity, expected)
                 self.event("tool_error", session=session, call="file")
@@ -430,7 +465,7 @@ class SessionsTests(unittest.TestCase):
                     tool_name="exec_command",
                 )
                 lane = self.sessions.by_id[
-                    SessionIdentity(SessionSource.CLAUDE, session)
+                    SessionIdentity(source=SessionSource.CLAUDE, native_id=session)
                 ]
                 self.assertEqual(lane.phase, "editing")
                 self.event("tool_error", session=session, call="shell")
@@ -462,7 +497,7 @@ class SessionsTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     self.sessions.by_id[
-                        SessionIdentity(SessionSource.CLAUDE, session)
+                        SessionIdentity(source=SessionSource.CLAUDE, native_id=session)
                     ].phase,
                     expected,
                 )
@@ -482,7 +517,9 @@ class SessionsTests(unittest.TestCase):
         self.assertFalse(self.sessions.working)
         self.assertFalse(self.sessions.active)
         self.assertFalse(self.sessions.clean_convergence)
-        lane = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")]
+        lane = self.sessions.by_id[
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+        ]
         self.assertEqual(lane.outcome, "error")
         self.assertEqual(lane.progress, "")
         self.assertEqual(require(lane.failure).activity, "source")
@@ -501,7 +538,9 @@ class SessionsTests(unittest.TestCase):
         self.assertTrue(self.sessions.working)
         self.assertEqual(
             require(
-                self.memory.context(SessionIdentity(SessionSource.CLAUDE, "main"))
+                self.memory.context(
+                    SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+                )
             ).recent_requests[-1],
             "Second goal",
         )
@@ -522,28 +561,34 @@ class SessionsTests(unittest.TestCase):
             "tool_done", source="codex", session="child", turn=first_turn, call="first"
         )
         self.event("subagent_done", source="codex", session="child", parent="main")
-        child = self.sessions.by_id[SessionIdentity(SessionSource.CODEX, "child")]
+        child = self.sessions.by_id[
+            SessionIdentity(source=SessionSource.CODEX, native_id="child")
+        ]
         generation = child.generation
         result = self.event(
             "tool_start", source="codex", session="child", turn=next_turn, call="next"
         )
         self.assertIn(
             ExecutionEvidence(
-                SessionIdentity(SessionSource.CODEX, "child"),
-                "resumed",
-                None,
-                None,
-                None,
+                session=SessionIdentity(source=SessionSource.CODEX, native_id="child"),
+                event="resumed",
+                outcome=None,
+                tool_name=None,
+                progress=None,
             ),
             require(result).observation.reports,
         )
         self.assertTrue(child.working)
         self.assertEqual(child.turn, next_turn)
         self.assertEqual(child.generation, generation + 1)
-        parent = self.sessions.by_id[SessionIdentity(SessionSource.CODEX, "main")]
+        parent = self.sessions.by_id[
+            SessionIdentity(source=SessionSource.CODEX, native_id="main")
+        ]
         self.assertEqual(parent.turn, "parent")
         self.assertTrue(parent.active)
-        self.assertEqual(child.parent, SessionIdentity(SessionSource.CODEX, "main"))
+        self.assertEqual(
+            child.parent, SessionIdentity(source=SessionSource.CODEX, native_id="main")
+        )
         self.assertEqual(child.goal, "Review the changes")
         self.assertEqual(set(child.calls), {"next"})
         self.assertIsNone(
@@ -618,7 +663,7 @@ class SessionsTests(unittest.TestCase):
                     )
                 )
                 session = self.sessions.by_id[
-                    SessionIdentity(SessionSource(source), subject)
+                    SessionIdentity(source=SessionSource(source), native_id=subject)
                 ]
                 self.assertFalse(session.active)
                 self.assertEqual(session.turn, previous)
@@ -627,7 +672,9 @@ class SessionsTests(unittest.TestCase):
         self.event("tool_start", call="checks", tool="pytest")
         result = self.event("tool_done", call="checks", outcome="error")
         self.assertTrue(require(result).failure)
-        lane = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")]
+        lane = self.sessions.by_id[
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+        ]
         self.assertEqual(require(lane.failure).activity, "testing")
         self.assertFalse(require(lane.failure).resolved)
         self.event("turn_done")
@@ -647,7 +694,7 @@ class SessionsTests(unittest.TestCase):
         self.assertTrue(
             require(
                 self.sessions.by_id[
-                    SessionIdentity(SessionSource.CLAUDE, "main")
+                    SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
                 ].failure
             ).resolved
         )
@@ -665,7 +712,7 @@ class SessionsTests(unittest.TestCase):
                 error_signature=f"HASH {index}",
             )
         failure = self.sessions.by_id[
-            SessionIdentity(SessionSource.CLAUDE, "main")
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
         ].failure
         self.assertEqual(require(failure).activity, "testing")
         self.assertEqual(require(failure).count, 2)
@@ -676,7 +723,7 @@ class SessionsTests(unittest.TestCase):
         self.assertEqual(
             require(
                 self.sessions.by_id[
-                    SessionIdentity(SessionSource.CLAUDE, "main")
+                    SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
                 ].failure
             ).activity,
             "building",
@@ -684,7 +731,7 @@ class SessionsTests(unittest.TestCase):
         self.assertEqual(
             require(
                 self.sessions.by_id[
-                    SessionIdentity(SessionSource.CLAUDE, "main")
+                    SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
                 ].failure
             ).count,
             1,
@@ -694,7 +741,7 @@ class SessionsTests(unittest.TestCase):
         self.assertEqual(
             require(
                 self.sessions.by_id[
-                    SessionIdentity(SessionSource.CLAUDE, "main")
+                    SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
                 ].failure
             ).count,
             3,
@@ -704,7 +751,7 @@ class SessionsTests(unittest.TestCase):
         self.assertEqual(
             require(
                 self.sessions.by_id[
-                    SessionIdentity(SessionSource.CLAUDE, "other")
+                    SessionIdentity(source=SessionSource.CLAUDE, native_id="other")
                 ].failure
             ).count,
             1,
@@ -715,7 +762,7 @@ class SessionsTests(unittest.TestCase):
         self.assertEqual(
             require(
                 self.sessions.by_id[
-                    SessionIdentity(SessionSource.CLAUDE, "main")
+                    SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
                 ].failure
             ).count,
             1,
@@ -742,7 +789,7 @@ class SessionsTests(unittest.TestCase):
         self.assertEqual(
             require(
                 self.sessions.by_id[
-                    SessionIdentity(SessionSource.CLAUDE, "main")
+                    SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
                 ].failure
             ).activity,
             "command",
@@ -751,17 +798,21 @@ class SessionsTests(unittest.TestCase):
         self.assertEqual(
             require(
                 self.sessions.by_id[
-                    SessionIdentity(SessionSource.CLAUDE, "main")
+                    SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
                 ].failure
             ).activity,
             "source",
         )
-        self.assertNotIn("SECRET", json.dumps(asdict(self.sessions.activity_view())))
+        self.assertNotIn(
+            "SECRET", json.dumps(self.sessions.activity_view().model_dump())
+        )
         self.event("intent", goal="Fresh task", turn="fresh")
         self.event("interrupt")
         self.assertFalse(self.sessions.failed)
         self.assertEqual(
-            self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")].outcome,
+            self.sessions.by_id[
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+            ].outcome,
             "cancelled",
         )
 
@@ -788,22 +839,28 @@ class SessionsTests(unittest.TestCase):
     ) -> None:
         self.event("intent", goal="Compress the workflow", turn="native-turn")
         generation = self.sessions.by_id[
-            SessionIdentity(SessionSource.CLAUDE, "main")
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
         ].generation
         result = self.event(
             "intent", goal="Explain the counter limits", turn="native-turn"
         )
         self.assertIsNotNone(result)
-        lane = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")]
+        lane = self.sessions.by_id[
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+        ]
         self.assertEqual(
             require(
-                self.memory.context(SessionIdentity(SessionSource.CLAUDE, "main"))
+                self.memory.context(
+                    SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+                )
             ).initial_request,
             "Compress the workflow",
         )
         self.assertEqual(
             require(
-                self.memory.context(SessionIdentity(SessionSource.CLAUDE, "main"))
+                self.memory.context(
+                    SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+                )
             ).recent_requests,
             ["Compress the workflow", "Explain the counter limits"],
         )
@@ -826,7 +883,8 @@ class SessionsTests(unittest.TestCase):
             for lane in capture_snapshot(
                 self.sessions.activity_view(), memory=self.memory
             ).sessions
-            if lane.id == SessionIdentity(SessionSource.CLAUDE, "child")
+            if lane.id
+            == SessionIdentity(source=SessionSource.CLAUDE, native_id="child")
         )
         self.assertEqual(child.initial_request, "Inspect parser behavior")
         self.assertIn("Check edge cases", child.recent_requests)
@@ -864,9 +922,9 @@ class SessionsTests(unittest.TestCase):
         self.assertFalse(require(result).convergence)
         self.assertTrue(self.sessions.working)
         for key in [
-            SessionIdentity(SessionSource.CLAUDE, "main"),
-            SessionIdentity(SessionSource.CLAUDE, "child"),
-            SessionIdentity(SessionSource.CLAUDE, "grandchild"),
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="main"),
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="child"),
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="grandchild"),
         ]:
             self.assertEqual(self.sessions.by_id[key].outcome, "cancelled")
             self.assertFalse(self.sessions.by_id[key].calls)
@@ -901,7 +959,7 @@ class SessionsTests(unittest.TestCase):
             self.assertTrue(require(result).convergence)
             self.assertEqual(
                 self.sessions.by_id[
-                    SessionIdentity(SessionSource.COMMAND, session)
+                    SessionIdentity(source=SessionSource.COMMAND, native_id=session)
                 ].outcome,
                 outcome,
             )
@@ -913,7 +971,9 @@ class SessionsTests(unittest.TestCase):
         self.event("intent", goal="Try the build")
         self.event("tool_start", call="first", tool="cargo build")
         self.event("tool_done", call="first", outcome="cancelled")
-        lane = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")]
+        lane = self.sessions.by_id[
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+        ]
         generation = lane.generation
         self.assertTrue(lane.active)
         self.assertTrue(lane.cancelled)
@@ -922,13 +982,17 @@ class SessionsTests(unittest.TestCase):
         self.assertFalse(lane.cancelled)
         self.assertEqual(
             require(
-                self.memory.context(SessionIdentity(SessionSource.CLAUDE, "main"))
+                self.memory.context(
+                    SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+                )
             ).initial_request,
             "Try the build",
         )
         self.assertEqual(
             require(
-                self.memory.context(SessionIdentity(SessionSource.CLAUDE, "main"))
+                self.memory.context(
+                    SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+                )
             ).recent_requests[-1],
             "Try the build again",
         )
@@ -951,7 +1015,9 @@ class SessionsTests(unittest.TestCase):
         self.event(
             "tool_start", session="child", call="test", tool="pytest", turn="child-turn"
         )
-        child = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "child")]
+        child = self.sessions.by_id[
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="child")
+        ]
         generation = child.generation
         self.event(
             "subagent_start",
@@ -967,7 +1033,9 @@ class SessionsTests(unittest.TestCase):
         self.event("tool_done", session="child", call="test", turn="child-turn")
         self.assertFalse(child.calls)
         self.assertEqual(
-            self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")].turn,
+            self.sessions.by_id[
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+            ].turn,
             "parent-turn",
         )
 
@@ -993,7 +1061,8 @@ class SessionsTests(unittest.TestCase):
         self.assertFalse(require(result).failure)
         self.assertFalse(require(result).convergence)
         self.assertEqual(
-            require(result).session, SessionIdentity(SessionSource.CLAUDE, "main")
+            require(result).session,
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="main"),
         )
         snapshot = self.sessions.activity_view()
         self.assertFalse(snapshot.sessions[0].waiting_for_input)
@@ -1006,7 +1075,9 @@ class SessionsTests(unittest.TestCase):
         self.event("intent", goal="Build it")
         self.clock.advance(10)
         self.event("turn_done", outcome="success", progress="Checks pass")
-        session = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")]
+        session = self.sessions.by_id[
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+        ]
         ended, changed_at = session.ended, session.changed_at
         self.clock.advance(30)
         self.event("session_end")
@@ -1023,7 +1094,9 @@ class SessionsTests(unittest.TestCase):
         self.event("intent", goal="Build it")
         self.event("tool_start", call="build", tool="build")
         self.event("session_end")
-        session = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")]
+        session = self.sessions.by_id[
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+        ]
         self.assertFalse(session.active)
         self.assertFalse(session.calls)
         self.assertIsNone(session.outcome)
@@ -1040,7 +1113,9 @@ class SessionsTests(unittest.TestCase):
         self.assertFalse(self.sessions.working)
         self.assertFalse(self.sessions.active)
         self.assertIsNone(
-            self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")].outcome
+            self.sessions.by_id[
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+            ].outcome
         )
         self.assertIsNone(self.sessions.convergence)
         self.clock.now += 120
@@ -1058,17 +1133,25 @@ class SessionsTests(unittest.TestCase):
         self.clock.advance(1)
         self.assertEqual(
             self.sessions.check_in_due(300),
-            [SessionIdentity(SessionSource.CLAUDE, "main")],
+            [SessionIdentity(source=SessionSource.CLAUDE, native_id="main")],
         )
         snapshots = {lane.id: lane for lane in self.sessions.activity_view().sessions}
         self.assertEqual(
-            snapshots[SessionIdentity(SessionSource.CLAUDE, "main")].quiet_seconds, 300
+            snapshots[
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+            ].quiet_seconds,
+            300,
         )
         self.assertEqual(
-            snapshots[SessionIdentity(SessionSource.CODEX, "other")].quiet_seconds, 1
+            snapshots[
+                SessionIdentity(source=SessionSource.CODEX, native_id="other")
+            ].quiet_seconds,
+            1,
         )
         self.assertIsNone(
-            snapshots[SessionIdentity(SessionSource.CLAUDE, "main")].waiting_seconds
+            snapshots[
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+            ].waiting_seconds
         )
         self.event("progress", progress="Build still running")
         self.assertEqual(self.sessions.check_in_due(300), [])
@@ -1097,7 +1180,7 @@ class SessionsTests(unittest.TestCase):
         self.clock.advance(1)
         self.assertEqual(
             self.sessions.check_in_due(300),
-            [SessionIdentity(SessionSource.CLAUDE, "main")],
+            [SessionIdentity(source=SessionSource.CLAUDE, native_id="main")],
         )
         snapshot = capture_snapshot(
             self.sessions.activity_view(), memory=self.memory
@@ -1118,7 +1201,7 @@ class SessionsTests(unittest.TestCase):
         self.clock.advance(299)
         self.assertEqual(
             self.sessions.check_in_due(300),
-            [SessionIdentity(SessionSource.CLAUDE, "main")],
+            [SessionIdentity(source=SessionSource.CLAUDE, native_id="main")],
         )
 
     def test_accepted_activity_resumes_waiting_without_matching_the_question(
@@ -1144,7 +1227,8 @@ class SessionsTests(unittest.TestCase):
                 snapshot = next(
                     item
                     for item in self.sessions.activity_view().sessions
-                    if item.id == SessionIdentity(SessionSource.CLAUDE, kind)
+                    if item.id
+                    == SessionIdentity(source=SessionSource.CLAUDE, native_id=kind)
                 )
                 self.assertFalse(snapshot.waiting_for_input)
                 self.assertIsNone(snapshot.waiting_seconds)
@@ -1191,16 +1275,18 @@ class SessionsTests(unittest.TestCase):
         self.clock.advance(300)
         self.assertEqual(
             self.sessions.check_in_due(300),
-            [SessionIdentity(SessionSource.CLAUDE, "main")],
+            [SessionIdentity(source=SessionSource.CLAUDE, native_id="main")],
         )
-        lane = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")]
+        lane = self.sessions.by_id[
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+        ]
         lane.last_check_in = self.clock()
         self.clock.advance(299)
         self.assertEqual(self.sessions.check_in_due(300), [])
         self.clock.advance(1)
         self.assertEqual(
             self.sessions.check_in_due(300),
-            [SessionIdentity(SessionSource.CLAUDE, "main")],
+            [SessionIdentity(source=SessionSource.CLAUDE, native_id="main")],
         )
         self.event("intent", turn="second", goal="Run another build")
         self.event("tool_start", turn="second", call="build", tool="make")
@@ -1209,7 +1295,7 @@ class SessionsTests(unittest.TestCase):
         self.clock.advance(300)
         self.assertEqual(
             self.sessions.check_in_due(300),
-            [SessionIdentity(SessionSource.CLAUDE, "main")],
+            [SessionIdentity(source=SessionSource.CLAUDE, native_id="main")],
         )
 
     def test_idle_completed_cancelled_and_stale_sessions_do_not_get_check_ins(
@@ -1225,7 +1311,9 @@ class SessionsTests(unittest.TestCase):
         self.clock.advance(60)
         self.sessions.prune()
         self.assertIsNone(
-            self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "stale")].outcome
+            self.sessions.by_id[
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="stale")
+            ].outcome
         )
         self.assertEqual(self.sessions.check_in_due(30), [])
 

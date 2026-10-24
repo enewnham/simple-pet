@@ -1,7 +1,6 @@
 import errno
 import json
 import os
-import runpy
 import socket
 import subprocess
 import sys
@@ -13,6 +12,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from pet_daemon.attention import AttentionSelection
+from pet_daemon.cli.hook import EVENTS, update
 from pet_daemon.commentary.cognition import Cognition
 from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.commentary.story import prepare
@@ -36,7 +36,7 @@ from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources.hooks import normalize_hook
 from pet_daemon.storage import Memory
 from pet_daemon.work.models import ExecutionEvidence
-from Tests.fixtures import capture_snapshot
+from Tests.fixtures import capture_snapshot, require
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT = ROOT / "bin" / "pet-notify"
@@ -94,7 +94,7 @@ class NotifyTests(unittest.TestCase):
 
     def run_client(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [sys.executable, str(CLIENT), *arguments],
+            [str(CLIENT), *arguments],
             env=self.environment,
             capture_output=True,
             text=True,
@@ -110,7 +110,7 @@ class NotifyTests(unittest.TestCase):
         raw: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [sys.executable, str(HOOK), source, event],
+            [str(HOOK), source, event],
             input=raw if raw is not None else json.dumps(payload or {}),
             env=self.environment,
             capture_output=True,
@@ -128,6 +128,76 @@ class NotifyTests(unittest.TestCase):
         self.listener.settimeout(0.03)
         with self.assertRaises(socket.timeout):
             self.listener.recv(8192)
+
+    def test_launchers_resolve_symlinks_with_only_system_python_on_path(self) -> None:
+        environment = dict(self.environment, PATH="/usr/bin:/bin")
+        environment.pop("PYTHONPATH", None)
+        environment.pop("VIRTUAL_ENV", None)
+        links = self.path / "command links"
+        links.mkdir()
+        working_directory = self.path / "unrelated"
+        working_directory.mkdir()
+        for entrypoint, arguments, payload, response, event in (
+            (
+                HOOK,
+                ("codex", "UserPromptSubmit"),
+                {"session_id": "native", "prompt": "Check launch"},
+                "{}",
+                "intent",
+            ),
+            (
+                CLIENT,
+                ("intent", "--session", "manual", "--text", "Check launch"),
+                {},
+                "",
+                "intent",
+            ),
+        ):
+            with self.subTest(entrypoint=entrypoint.name):
+                intermediate = links / (entrypoint.name + "-target")
+                intermediate.symlink_to(entrypoint)
+                launcher = links / entrypoint.name
+                launcher.symlink_to(intermediate.name)
+                result = subprocess.run(
+                    [str(launcher), *arguments],
+                    input=json.dumps(payload),
+                    env=environment,
+                    cwd=working_directory,
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, "")
+                self.assertEqual(result.stdout.strip(), response)
+                packet = self.receive()
+                self.assertEqual(packet["event"], event)
+                self.assertEqual(packet["goal"], "Check launch")
+
+    def test_wrapper_uses_project_python_from_an_unrelated_directory(self) -> None:
+        environment = dict(self.environment, PATH="/usr/bin:/bin")
+        environment.pop("PYTHONPATH", None)
+        environment.pop("VIRTUAL_ENV", None)
+        result = subprocess.run(
+            [str(WRAPPER), "/bin/cat"],
+            input="command input\n",
+            env=environment,
+            cwd=self.path,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(result.stdout, "command input\n")
+        packets = [self.receive() for _ in range(4)]
+        self.assertEqual(
+            [packet["event"] for packet in packets],
+            ["intent", "tool_start", "tool_done", "session_end"],
+        )
+        self.assertEqual(packets[-1]["outcome"], "success")
 
     def test_cli_preserves_calls_and_parallel_session_identity(self) -> None:
         for status, event in (
@@ -373,11 +443,11 @@ class NotifyTests(unittest.TestCase):
                     subjects = memory.connected_work(activity)
                     snapshot = capture_snapshot(activity, memory=memory, work=subjects)
                     selection = AttentionSelection(
-                        subjects[0],
-                        activity.sessions[0],
-                        (),
-                        SpeechReason.ROUTINE,
-                        SpeechSituation.ROUTINE,
+                        subject=subjects[0],
+                        focus_session=activity.sessions[0],
+                        context_sessions=(),
+                        reason=SpeechReason.ROUTINE,
+                        situation=SpeechSituation.ROUTINE,
                     )
                     cognition = Cognition(
                         NoModel(), Config(pet_dir=self.path), memory=memory
@@ -502,7 +572,9 @@ class NotifyTests(unittest.TestCase):
                         self.assertIsNotNone(sessions.handle(self.receive()))
                     for name in ("parent", "first", "second"):
                         session = sessions.by_id[
-                            SessionIdentity(SessionSource(source), name)
+                            SessionIdentity(
+                                source=SessionSource(source), native_id=name
+                            )
                         ]
                         self.assertEqual(session.turn, name)
                         self.assertEqual(
@@ -513,7 +585,9 @@ class NotifyTests(unittest.TestCase):
                             session.parent,
                             None
                             if name == "parent"
-                            else SessionIdentity(SessionSource(source), "parent"),
+                            else SessionIdentity(
+                                source=SessionSource(source), native_id="parent"
+                            ),
                         )
                 self.run_hook(
                     source,
@@ -528,13 +602,13 @@ class NotifyTests(unittest.TestCase):
                 self.assertIsNone(sessions.handle(self.receive()))
                 self.assertEqual(
                     sessions.by_id[
-                        SessionIdentity(SessionSource(source), "first")
+                        SessionIdentity(source=SessionSource(source), native_id="first")
                     ].turn,
                     "first",
                 )
                 self.assertFalse(
                     sessions.by_id[
-                        SessionIdentity(SessionSource(source), "first")
+                        SessionIdentity(source=SessionSource(source), native_id="first")
                     ].calls
                 )
 
@@ -606,7 +680,9 @@ class NotifyTests(unittest.TestCase):
                 assert accepted is not None
                 self.assertTrue(
                     sessions.by_id[
-                        SessionIdentity(SessionSource(source), "worker")
+                        SessionIdentity(
+                            source=SessionSource(source), native_id="worker"
+                        )
                     ].waiting
                 )
                 self.assertEqual(
@@ -825,10 +901,16 @@ class NotifyTests(unittest.TestCase):
         )
         self.assertIsNotNone(sessions.handle(self.receive()))
         self.assertEqual(
-            set(sessions.by_id), {SessionIdentity(SessionSource.CURSOR, "child")}
+            set(sessions.by_id),
+            {SessionIdentity(source=SessionSource.CURSOR, native_id="child")},
         )
-        child = sessions.by_id[SessionIdentity(SessionSource.CURSOR, "child")]
-        self.assertEqual(child.parent, SessionIdentity(SessionSource.CURSOR, "parent"))
+        child = sessions.by_id[
+            SessionIdentity(source=SessionSource.CURSOR, native_id="child")
+        ]
+        self.assertEqual(
+            child.parent,
+            SessionIdentity(source=SessionSource.CURSOR, native_id="parent"),
+        )
         self.assertEqual(child.turn, "generation")
         self.assertFalse(child.calls)
 
@@ -940,14 +1022,13 @@ class NotifyTests(unittest.TestCase):
         self.assertEqual(self.receive()["goal"], "goal")
 
     def test_examples_use_supported_native_events(self) -> None:
-        module = runpy.run_path(str(HOOK))
         for source, filename in (
             ("claude", "claude-settings.json"),
             ("codex", "codex-hooks.json"),
             ("cursor", "cursor-hooks.json"),
         ):
             config = json.loads((ROOT / "examples" / filename).read_text())
-            self.assertEqual(set(config["hooks"]), set(module["EVENTS"][source]))
+            self.assertEqual(set(config["hooks"]), set(EVENTS[source]))
             self.assertNotIn("--speak", json.dumps(config))
 
     def test_wrapper_preserves_piped_stdin(self) -> None:
@@ -1027,7 +1108,6 @@ class NotifyTests(unittest.TestCase):
 
 class HookTranslationTests(unittest.TestCase):
     def test_adapters_return_typed_events_for_provider_waits(self) -> None:
-        update = runpy.run_path(str(HOOK))["update"]
         for source, event, payload, kind in (
             (
                 "claude",
@@ -1065,7 +1145,7 @@ class HookTranslationTests(unittest.TestCase):
             ),
         ):
             with self.subTest(source=source, event=event):
-                hook = update(source, event, payload)
+                hook = require(update(source, event, payload))
                 self.assertIsInstance(hook, HookEvent)
                 self.assertIs(hook.source, SessionSource(source))
                 self.assertIs(hook.event, HookEventKind.WAITING)
@@ -1075,7 +1155,6 @@ class HookTranslationTests(unittest.TestCase):
                     self.assertEqual(hook.progress, "Which parser?")
 
     def test_adapter_keeps_empty_intent_distinct_from_absent_goal(self) -> None:
-        update = runpy.run_path(str(HOOK))["update"]
         for source, intent, start, identity in (
             ("claude", "UserPromptSubmit", "SessionStart", {"session_id": "worker"}),
             ("codex", "UserPromptSubmit", "SessionStart", {"session_id": "worker"}),
@@ -1087,8 +1166,8 @@ class HookTranslationTests(unittest.TestCase):
             ),
         ):
             with self.subTest(source=source):
-                empty = update(source, intent, {**identity, "prompt": ""})
-                absent = update(source, start, identity)
+                empty = require(update(source, intent, {**identity, "prompt": ""}))
+                absent = require(update(source, start, identity))
                 self.assertEqual(empty.goal, "")
                 self.assertEqual(empty.packet()["goal"], "")
                 self.assertIsNone(absent.goal)
@@ -1101,9 +1180,9 @@ class HookTranslationTests(unittest.TestCase):
             for waiting_kind in (*WaitingKind, None):
                 with self.subTest(event=event, waiting_kind=waiting_kind):
                     hook = HookEvent(
-                        SessionSource.CODEX,
-                        "worker",
-                        event,
+                        source=SessionSource.CODEX,
+                        session="worker",
+                        event=event,
                         aliases=("alternate",),
                         parent="",
                         parent_call="",
@@ -1120,7 +1199,7 @@ class HookTranslationTests(unittest.TestCase):
                         sentiment_text="",
                         outcome=ExecutionOutcome.SUCCESS,
                         manual=False,
-                        owner=ProcessIdentity(43210, "observed-start"),
+                        owner=ProcessIdentity(pid=43210, started="observed-start"),
                         exit_code=0,
                         waiting_kind=waiting_kind,
                     )

@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from pydantic import BaseModel
+
 from ..domain import Activity, ExecutionOutcome, PetState, ProcessStatus, SessionSource
 from ..identity import SessionIdentity
 from ..logging import get_logger
@@ -46,8 +48,7 @@ class Failure:
     goal: str
 
 
-@dataclass(frozen=True)
-class SessionUpdate:
+class SessionUpdate(BaseModel):
     failure: bool
     convergence: bool
     session: SessionIdentity
@@ -208,7 +209,7 @@ class Sessions:
         )
 
     def _key(self, source: SessionSource, identifier: str) -> SessionIdentity:
-        identity = SessionIdentity(source, identifier)
+        identity = SessionIdentity(source=source, native_id=identifier)
         return self.aliases.get(identity, identity)
 
     def _session(
@@ -226,7 +227,7 @@ class Sessions:
             HookEventKind.WAITING,
         ):
             target = self.child_calls.get(
-                (SessionIdentity(source, identifier), parent_call)
+                (SessionIdentity(source=source, native_id=identifier), parent_call)
             )
             if target and target != key:
                 key = target
@@ -322,14 +323,16 @@ class Sessions:
                     active_calls=list(session.calls),
                     parent=session.parent,
                 )
-            alias_key = SessionIdentity(source, alias)
+            alias_key = SessionIdentity(source=source, native_id=alias)
             if alias_key != key and self.aliases.get(alias_key) != key:
                 log.info("session.aliased", session=key, alias=alias_key)
             self.aliases[alias_key] = key
         if parent:
             session.parent = self._key(source, parent)
             if parent_call:
-                self.child_calls[(SessionIdentity(source, parent), parent_call)] = key
+                self.child_calls[
+                    (SessionIdentity(source=source, native_id=parent), parent_call)
+                ] = key
             parent_session = self.by_id.get(session.parent)
             if parent_session and not session.goal:
                 session.goal = parent_session.goal
@@ -806,7 +809,7 @@ class Sessions:
         convergence = previously_active and not self.active
         if convergence:
             self.convergence = tuple(
-                ConvergenceItem(member, self.by_id[member].outcome)
+                ConvergenceItem(id=member, outcome=self.by_id[member].outcome)
                 for member in sorted(self.members)
                 if member in self.by_id
             )
@@ -843,25 +846,57 @@ class Sessions:
     ) -> SessionObservation:
         reports: list[IntentEvidence | ProgressEvidence | ExecutionEvidence] = []
         if event.goal and event.event in ("intent", "subagent_start"):
-            reports.append(IntentEvidence(key, select_prompt(prose_text(event.goal))))
+            reports.append(
+                IntentEvidence(session=key, text=select_prompt(prose_text(event.goal)))
+            )
         if session.finished and event.event != "session_start":
             kind = "turn_done" if event.event.startswith("tool_") else event.event
             reports.append(
-                ExecutionEvidence(key, kind, session.outcome, None, event.progress)
+                ExecutionEvidence(
+                    session=key,
+                    event=kind,
+                    outcome=session.outcome,
+                    tool_name=None,
+                    progress=event.progress,
+                )
             )
         elif session.waiting:
             if session.waiting_for_input:
-                reports.append(ExecutionEvidence(key, "waiting", None, None, None))
+                reports.append(
+                    ExecutionEvidence(
+                        session=key,
+                        event="waiting",
+                        outcome=None,
+                        tool_name=None,
+                        progress=None,
+                    )
+                )
         elif resumed:
-            reports.append(ExecutionEvidence(key, "resumed", None, None, None))
+            reports.append(
+                ExecutionEvidence(
+                    session=key,
+                    event="resumed",
+                    outcome=None,
+                    tool_name=None,
+                    progress=None,
+                )
+            )
         elif opened or event.event in ("intent", "subagent_start"):
-            reports.append(ExecutionEvidence(key, "turn_start", None, None, None))
+            reports.append(
+                ExecutionEvidence(
+                    session=key,
+                    event="turn_start",
+                    outcome=None,
+                    tool_name=None,
+                    progress=None,
+                )
+            )
         if (
             event.progress
             and not event.event.startswith("tool_")
             and event.waiting_kind != WaitingKind.PERMISSION_CHECK
         ):
-            reports.append(ProgressEvidence(key, event.progress))
+            reports.append(ProgressEvidence(session=key, text=event.progress))
         return SessionObservation(
             session=key,
             aliases=tuple(

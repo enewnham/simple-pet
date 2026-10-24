@@ -29,9 +29,10 @@ class SpriteTests(unittest.TestCase):
         pack = self.load(max_repeats=3)
         self.assertEqual(pack.pet, "cat")
         self.assertEqual(
-            pack.clips[pack.rest], Clip("rest", ("rest.png",), 2, "rest", 3)
+            pack.clips[pack.rest],
+            Clip(id="rest", frames=("rest.png",), fps=2, role="rest", max_repeats=3),
         )
-        self.assertEqual(pack.gaze_anchor, Point(0.5, 0.5))
+        self.assertEqual(pack.gaze_anchor, Point(x=0.5, y=0.5))
         self.assertEqual(pack.gaze, ())
 
     def test_invalid_clip_fields_are_rejected_at_load(self) -> None:
@@ -51,6 +52,15 @@ class SpriteTests(unittest.TestCase):
                 self.assertRaises((TypeError, ValueError)),
             ):
                 self.load(**fields)
+
+    def test_explicit_gaze_anchor_requires_both_coordinates(self) -> None:
+        self.load()
+        path = self.directory / "manifest.json"
+        manifest = json.loads(path.read_text())
+        for anchor in ({}, {"x": 0.2}, {"y": 0.8}, None):
+            with self.subTest(anchor=anchor), self.assertRaises(ValueError):
+                path.write_text(json.dumps({**manifest, "gazeAnchor": anchor}))
+                Pack(self.directory)
 
     def test_invalid_manifest_shapes_are_rejected_at_load(self) -> None:
         for manifest in (

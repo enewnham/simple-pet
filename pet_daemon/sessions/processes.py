@@ -26,7 +26,7 @@ def _parse_process(line: str) -> ProcessRow | None:
         started = stat[19]
     except OSError, IndexError:
         pass
-    return ProcessIdentity(pid, started), parent, fields[7], fields[8]
+    return ProcessIdentity(pid=pid, started=started), parent, fields[7], fields[8]
 
 
 def _processes(pid: int | None = None) -> dict[int, ProcessRow]:

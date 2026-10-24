@@ -86,7 +86,7 @@ async def repository_identity(
             "git", "rev-parse", "--path-format=absolute", "--git-common-dir", cwd=path
         )
     ).strip()
-    return LocalRepository(str(Path(common).resolve()))
+    return LocalRepository(path=str(Path(common).resolve()))
 
 
 async def discover(path: CommandPath, run: RunCommand = command) -> str:
@@ -144,15 +144,15 @@ async def observe(path: str | Path, run: RunCommand = command) -> GitObservation
         raise RuntimeError("Repository changed during observation")
     repository = await repository_identity(path, run)
     return GitObservation(
-        str(path),
-        branch,
-        head,
-        staged,
-        unstaged,
-        untracked,
-        conflicts,
-        upstream,
-        ahead,
-        behind,
-        repository,
+        worktree=str(path),
+        branch=branch,
+        head=head,
+        staged=staged,
+        unstaged=unstaged,
+        untracked=untracked,
+        conflicts=conflicts,
+        upstream=upstream,
+        ahead=ahead,
+        behind=behind,
+        repository=repository,
     )

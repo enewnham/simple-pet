@@ -2,7 +2,6 @@ import asyncio
 import json
 import os
 import random
-import sys
 import tempfile
 import time
 import unittest
@@ -124,7 +123,6 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
 
                 async def cli(*arguments: str) -> None:
                     process = await asyncio.create_subprocess_exec(
-                        sys.executable,
                         str(root / "bin/pet-notify"),
                         *arguments,
                         env=env,
@@ -138,7 +136,6 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                     expected: JSONObject | None = None,
                 ) -> None:
                     process = await asyncio.create_subprocess_exec(
-                        sys.executable,
                         str(root / "scripts/pet-hook"),
                         source,
                         event,
@@ -238,7 +235,9 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                     await wait_for(
                         lambda: (
                             daemon.application.sessions.by_id[
-                                SessionIdentity(SessionSource.COMMAND, "build")
+                                SessionIdentity(
+                                    source=SessionSource.COMMAND, native_id="build"
+                                )
                             ].finished
                         )
                     )

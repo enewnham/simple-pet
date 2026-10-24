@@ -305,7 +305,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.wait_for(
             lambda: (
-                SessionIdentity(SessionSource.CODEX, "persistence")
+                SessionIdentity(source=SessionSource.CODEX, native_id="persistence")
                 in self.daemon.application.sessions.by_id
             )
         )
@@ -331,7 +331,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: (
                 self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.CODEX, "persistence")
+                    SessionIdentity(source=SessionSource.CODEX, native_id="persistence")
                 ].outcome
                 == "success"
             )
@@ -351,7 +351,8 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         return next(
             subject.id
             for subject in self.daemon.application.context().work
-            if SessionIdentity(SessionSource.CODEX, "persistence") in subject.sessions
+            if SessionIdentity(source=SessionSource.CODEX, native_id="persistence")
+            in subject.sessions
         )
 
     async def test_native_agent_report_reaches_commentary_without_publication_details(
@@ -430,7 +431,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             lambda: (
                 "update the examples"
                 in self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.CODEX, "persistence")
+                    SessionIdentity(source=SessionSource.CODEX, native_id="persistence")
                 ].progress
             )
         )
@@ -473,7 +474,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             lambda: (
                 "different approach"
                 in self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.CODEX, "persistence")
+                    SessionIdentity(source=SessionSource.CODEX, native_id="persistence")
                 ].progress
             )
         )

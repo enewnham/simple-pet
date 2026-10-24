@@ -1,4 +1,3 @@
-import json
 import sqlite3
 from contextlib import AbstractContextManager
 
@@ -19,10 +18,8 @@ from ..work.observations import (
     PullRequestObservation,
     RepositoryObservation,
     SessionObservation,
-    repository_observation_from_mapping,
+    repository_observation_adapter,
 )
-from ..work.serialization import report_data, report_from_data
-from ..work.validation import canonical
 from .identities import (
     optional_session_from_row,
     optional_session_values,
@@ -132,7 +129,7 @@ class SQLiteWorkRepository:
                 (self.pet, *values, kind),
             )
             for row in rows:
-                previous = report_from_data(json.loads(row["data"]))
+                previous = SessionReport.model_validate_json(row["data"])
                 payload = previous.payload
                 if (
                     isinstance(payload, ExecutionEvidence)
@@ -146,7 +143,7 @@ class SQLiteWorkRepository:
             (self.pet, *values, kind),
         ).fetchone()
         if row and not isinstance(report.payload, IntentEvidence):
-            recorded = report_from_data(json.loads(row["data"]))
+            recorded = SessionReport.model_validate_json(row["data"])
             if (
                 recorded.payload == report.payload
                 and recorded.context == report.context
@@ -158,7 +155,7 @@ class SQLiteWorkRepository:
                 self.pet,
                 *session_values(session),
                 kind,
-                canonical(report_data(report)),
+                report.model_dump_json(),
                 report.observed_at,
             ),
         )
@@ -208,13 +205,11 @@ class SQLiteWorkRepository:
             f"SELECT data FROM {table} WHERE pet=? AND {where}", (self.pet, *values)
         ).fetchone()
         return (
-            repository_observation_from_mapping(json.loads(row["data"]))
-            if row
-            else None
+            repository_observation_adapter.validate_json(row["data"]) if row else None
         )
 
     def put_observation(self, observation: RepositoryObservation) -> None:
-        data = canonical(observation.packet())
+        data = observation.model_dump_json()
         match observation:
             case CheckoutObservation():
                 self.db.execute(
@@ -249,7 +244,7 @@ class SQLiteWorkRepository:
             (self.pet, *values),
         )
         reports = tuple(
-            report_from_data(json.loads(record["data"])) for record in records
+            SessionReport.model_validate_json(record["data"]) for record in records
         )
         authored = tuple(
             report
@@ -315,7 +310,7 @@ class SQLiteWorkRepository:
             for row in self.db.execute(
                 f"SELECT data FROM {table} WHERE pet=?", (self.pet,)
             ):
-                value = repository_observation_from_mapping(json.loads(row["data"]))
+                value = repository_observation_adapter.validate_json(row["data"])
                 match value:
                     case CheckoutObservation():
                         state.checkouts[value.worktree] = value

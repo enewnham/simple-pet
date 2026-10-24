@@ -1,9 +1,8 @@
 import unittest
-from typing import Unpack
 
 from pet_daemon.domain import SessionSource
 from pet_daemon.identity import SessionIdentity
-from pet_daemon.runtime import HookPacket, HookTextFields, WaitingKind
+from pet_daemon.runtime import HookPacket, WaitingKind
 from pet_daemon.sessions.reactions import (
     ReactionKind,
     SessionReaction,
@@ -14,10 +13,6 @@ from pet_daemon.sources.hooks import normalize_hook
 from Tests.fixtures import require
 
 
-class ReactionOptions(HookTextFields, total=False):
-    aliases: list[str]
-
-
 class ReactionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.now = 1000
@@ -25,7 +20,7 @@ class ReactionTests(unittest.TestCase):
         self.reactions = SessionReactions()
 
     def event(
-        self, event: str, session: str = "one", **extra: Unpack[ReactionOptions]
+        self, event: str, session: str = "one", **extra: object
     ) -> list[SessionReaction]:
         packet: HookPacket = {
             "event": event,
@@ -65,7 +60,9 @@ class ReactionTests(unittest.TestCase):
         self.assertEqual(self.event("session_end"), [])
         self.assertEqual(self.event("session_end"), [])
         self.assertIsNone(
-            self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "one")].outcome
+            self.sessions.by_id[
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="one")
+            ].outcome
         )
 
     def test_closure_keeps_the_existing_terminal_reaction_relevant(self) -> None:
@@ -129,7 +126,9 @@ class ReactionTests(unittest.TestCase):
         permission = self.event(
             "waiting", call="check", waiting_kind=WaitingKind.PERMISSION
         )[0]
-        session = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "one")]
+        session = self.sessions.by_id[
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="one")
+        ]
         self.assertTrue(session.waiting_for_input)
         self.assertEqual(session.waiting_since, self.now)
         self.assertFalse(self.reactions.relevant(internal, self.sessions))
@@ -212,7 +211,9 @@ class ReactionTests(unittest.TestCase):
         self.assertEqual(
             self.event("session_start", session="native", aliases=["temporary"]), []
         )
-        lane = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "native")]
+        lane = self.sessions.by_id[
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="native")
+        ]
         self.assertTrue(lane.waiting)
         self.assertEqual(lane.waiting_call, "question")
         captured = waiting

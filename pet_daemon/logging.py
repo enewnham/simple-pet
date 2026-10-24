@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import cast
 
 import structlog
+from pydantic import BaseModel
 from structlog.stdlib import get_logger
 from structlog.typing import EventDict, Processor, WrappedLogger
 
@@ -59,6 +60,8 @@ log = get_logger("pet-daemon")
 
 
 def json_default(value: object) -> object:
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
     if is_dataclass(value) and not isinstance(value, type):
         return asdict(value)
     if isinstance(value, Enum):
@@ -128,7 +131,7 @@ def configure(
     scalar_repr = default_formatter.value_repr
 
     def render_value(value: object) -> str:
-        if isinstance(value, (dict, list, tuple, set, frozenset, Enum)) or (
+        if isinstance(value, (BaseModel, dict, list, tuple, set, frozenset, Enum)) or (
             is_dataclass(value) and not isinstance(value, type)
         ):
             rendered = json.dumps(value, default=json_default, ensure_ascii=False)

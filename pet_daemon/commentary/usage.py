@@ -1,11 +1,11 @@
 import contextlib
 import contextvars
 from collections.abc import Generator
-from dataclasses import dataclass
+
+from pydantic import BaseModel
 
 
-@dataclass(frozen=True)
-class UsageTokens:
+class UsageTokens(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0

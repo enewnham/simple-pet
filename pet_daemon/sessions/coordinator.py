@@ -1,5 +1,4 @@
 from collections.abc import Callable
-from dataclasses import asdict
 
 from ..behavior.controller import Behavior
 from ..config import Config
@@ -78,13 +77,13 @@ class ActivityCoordinator:
             "hook.received",
             detail="payload",
             packet=packet.packet(),
-            result=asdict(result) if result is not None else None,
-            snapshot=asdict(self.sessions.activity_view()),
+            result=result.model_dump() if result is not None else None,
+            snapshot=self.sessions.activity_view().model_dump(),
         )
         return result
 
     def queue_reaction(self, reaction: SessionReaction, hook: HookEvent) -> None:
-        trigger = ReactionTrigger(reaction)
+        trigger = ReactionTrigger(reaction=reaction)
         if reaction.kind in (ReactionKind.TROUBLE, ReactionKind.FAILURE):
             self.error_until = self.clock() + self.config.behavior.error_seconds
             self.queue(SpeechReason.FAILURE, trigger)

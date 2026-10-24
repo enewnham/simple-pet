@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import replace
 from urllib.parse import urlsplit, urlunsplit
 
 from ..domain import ArtifactKind
@@ -34,7 +33,7 @@ def references(prose: str) -> tuple[ArtifactReference, ...]:
         else:
             continue
         ref = urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, "", ""))
-        found[kind, ref] = normalize_reference(ArtifactReference(kind, ref))
+        found[kind, ref] = normalize_reference(ArtifactReference(kind=kind, ref=ref))
     return tuple(found.values())
 
 
@@ -46,12 +45,14 @@ def report_context(
 ) -> ReportContext:
     local = checkout.local if checkout else None
     return ReportContext(
-        checkout.worktree if checkout else location,
-        local.repository if local else None,
-        local.branch if local else "",
-        branch.pr.url if branch and branch.pr else "",
-        references(prose),
-        len(branch.resolutions) if branch and branch.pr is None else 0,
+        checkout=checkout.worktree if checkout else location,
+        repository=local.repository if local else None,
+        branch=local.branch if local else "",
+        pull_request=branch.pr.url if branch and branch.pr else "",
+        references=references(prose),
+        branch_resolution=len(branch.resolutions)
+        if branch and branch.pr is None
+        else 0,
     )
 
 
@@ -90,15 +91,16 @@ def decide_observation(
     last_success_at = record.last_success_at if record else None
     if not failed:
         last_success_at = observation.checked_at
-    observation = replace(observation, last_success_at=last_success_at)
+    observation = observation.model_copy()
+    observation.last_success_at = last_success_at
     if record and failed:
         match observation, record:
             case CheckoutObservation(), CheckoutObservation():
-                observation = replace(observation, local=record.local)
+                observation.local = record.local
             case BranchObservation(), BranchObservation():
-                observation = replace(observation, pr=record.pr)
+                observation.pr = record.pr
             case PullRequestObservation(), PullRequestObservation():
-                observation = replace(observation, pr=record.pr)
+                observation.pr = record.pr
     if (
         isinstance(observation, (BranchObservation, PullRequestObservation))
         and isinstance(record, (BranchObservation, PullRequestObservation))
@@ -107,10 +109,8 @@ def decide_observation(
         and observation.pr.url == record.pr.url
         and observation.pr.related_links_error
     ):
-        observation = replace(
-            observation,
-            pr=replace(observation.pr, related_links=record.pr.related_links),
-        )
+        observation.pr = observation.pr.model_copy()
+        observation.pr.related_links = record.pr.related_links
     if isinstance(observation, BranchObservation):
         prior = record if isinstance(record, BranchObservation) else None
         resolutions = prior.resolutions if prior else ()
@@ -122,5 +122,5 @@ def decide_observation(
             )
         ):
             resolutions = (*resolutions, observation.pr.url)
-        observation = replace(observation, resolutions=resolutions)
+        observation.resolutions = resolutions
     return observation if record != observation else None

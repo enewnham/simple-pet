@@ -1,5 +1,4 @@
 import json
-from dataclasses import replace
 from typing import Required, TypedDict
 from urllib.parse import urlsplit
 
@@ -116,7 +115,8 @@ async def _stack_links(
                     head_branch=(item.get("head") or {}).get("ref", ""),
                 )
             )
-        return replace(pr, related_links=tuple(links))
+        pr.related_links = tuple(links)
+        return pr
     except (
         OSError,
         RuntimeError,
@@ -125,7 +125,8 @@ async def _stack_links(
         TypeError,
         TimeoutError,
     ) as error:
-        return replace(pr, related_links_error=str(error)[:240])
+        pr.related_links_error = str(error)[:240]
+        return pr
 
 
 async def observe(
@@ -164,7 +165,7 @@ async def observe(
         )
         if name:
             host = repository.value.split("/", 1)[0]
-            query_repository = RemoteRepository(f"{host}/{name}".lower())
+            query_repository = RemoteRepository(value=f"{host}/{name}".lower())
     output = await run(
         "gh",
         "pr",

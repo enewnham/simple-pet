@@ -18,6 +18,14 @@ from pet_daemon.sessions.tracking import Sessions, SessionUpdate
 
 
 class ProcessTests(unittest.IsolatedAsyncioTestCase):
+    def test_system_process_identity_is_observable_and_rejected_as_hook_owner(
+        self,
+    ) -> None:
+        identity = process_identity(1)
+        assert identity is not None
+        self.assertEqual(identity.pid, 1)
+        self.assertIsNone(ProcessIdentity.parse(identity.packet()))
+
     async def test_exited_owner_retires_work_without_an_exit_hook(self) -> None:
         child = await asyncio.create_subprocess_exec(
             sys.executable, "-c", "import time; time.sleep(30)"
@@ -47,7 +55,9 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertFalse(sessions.active)
             self.assertIsNone(
-                sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")].outcome
+                sessions.by_id[
+                    SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+                ].outcome
             )
         finally:
             if child.returncode is None:
@@ -57,7 +67,7 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
     async def test_replaced_identity_retires_only_its_associated_session(self) -> None:
         owner = process_identity(os.getpid())
         assert owner is not None
-        replaced = ProcessIdentity(owner.pid, "another-start")
+        replaced = ProcessIdentity(pid=owner.pid, started="another-start")
         self.assertEqual(await asyncio.to_thread(probe, replaced), "replaced")
         sessions = Sessions(lambda: 1000)
         for name, identity in (("current", owner), ("old", replaced)):
@@ -72,10 +82,14 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
         tracker = ProcessTracker()
         sessions.apply_process_status(await tracker.refresh(sessions.process_owners()))
         self.assertTrue(
-            sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "current")].active
+            sessions.by_id[
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="current")
+            ].active
         )
         self.assertFalse(
-            sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "old")].active
+            sessions.by_id[
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="old")
+            ].active
         )
         self.assertEqual(await tracker.refresh(sessions.process_owners()), {})
 
@@ -101,7 +115,9 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
         sessions.apply_process_status(results)
         self.assertTrue(sessions.active)
         self.assertEqual(
-            sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")].presence,
+            sessions.by_id[
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+            ].presence,
             "unknown",
         )
 
@@ -109,7 +125,12 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
         def row(
             pid: int, parent: int, command: str
         ) -> tuple[ProcessIdentity, int, str, str]:
-            return (ProcessIdentity(pid, f"started-{pid}"), parent, "S", command)
+            return (
+                ProcessIdentity(pid=pid, started=f"started-{pid}"),
+                parent,
+                "S",
+                command,
+            )
 
         rows = {
             30: row(30, 20, "sh -c pet-hook"),
@@ -128,9 +149,9 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(discover_owner(SessionSource.CODEX, pid=30), rows[20][0])
 
     def test_explicit_wrapper_must_match_a_live_ancestor_identity(self) -> None:
-        owner = ProcessIdentity(20, "wrapper-start")
+        owner = ProcessIdentity(pid=20, started="wrapper-start")
         rows = {
-            30: (ProcessIdentity(30, "hook-start"), 20, "S", "python hook"),
+            30: (ProcessIdentity(pid=30, started="hook-start"), 20, "S", "python hook"),
             20: (owner, 1, "S", "bash examples/pet-run"),
         }
         with patch("pet_daemon.sessions.processes._processes", return_value=rows):
@@ -187,10 +208,12 @@ class FreshnessTests(unittest.TestCase):
         self.assertEqual(self.sessions.check_in_due(30), [])
 
     def test_owner_exit_preserves_result_and_closure_does_not_revive_it(self) -> None:
-        owner = ProcessIdentity(42, "owner-start")
+        owner = ProcessIdentity(pid=42, started="owner-start")
         self.event("intent", owner=owner.packet())
         self.event("turn_done", outcome="success")
-        session = self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")]
+        session = self.sessions.by_id[
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+        ]
         original_time = session.changed_at
         self.now += 10
         self.sessions.apply_process_status({owner: ProcessStatus.EXITED})
@@ -224,7 +247,9 @@ class FreshnessTests(unittest.TestCase):
             }
         )
         self.assertEqual(
-            self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "child")].owner,
+            self.sessions.by_id[
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="child")
+            ].owner,
             owner,
         )
         self.sessions.apply_process_status({owner: ProcessStatus.EXITED})
@@ -237,5 +262,7 @@ class FreshnessTests(unittest.TestCase):
         self.sessions.prune()
         self.assertFalse(self.sessions.active)
         self.assertIsNone(
-            self.sessions.by_id[SessionIdentity(SessionSource.CLAUDE, "main")].outcome
+            self.sessions.by_id[
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
+            ].outcome
         )

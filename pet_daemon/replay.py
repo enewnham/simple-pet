@@ -12,7 +12,6 @@ import tempfile
 import time
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Self
 
@@ -86,7 +85,7 @@ class RecordingModel:
             finally:
                 call["latency_seconds"] = round(time.monotonic() - started, 3)
                 call["usage"] = {
-                    str(key): asdict(value) for key, value in usage.items()
+                    str(key): value.model_dump() for key, value in usage.items()
                 }
                 self.calls.append(call)
                 if parent_usage is not None:
@@ -194,8 +193,8 @@ class ReplayHarness:
         if config is None:
             pack = pack or self._fixture_pack(directory / "sprites")
             config = Config(pet_dir=pack.directory)
-        self.config = replace(
-            config, memory_file=memory_file or directory / "memory.sqlite3"
+        self.config = config.model_copy(
+            update={"memory_file": memory_file or directory / "memory.sqlite3"}
         )
         self.pack = pack or Pack(self.config.pet_dir)
         self.seed = seed
@@ -390,7 +389,7 @@ class ReplayHarness:
                     "model_mode": "fixture"
                     if self.fixture_model is not None
                     else "provided_client",
-                    "config": asdict(self.config),
+                    "config": self.config.model_dump(),
                     "monotonic_time": self.clock(),
                     "wall_time": self.clock.wall(),
                     "packets": self.packets,

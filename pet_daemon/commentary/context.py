@@ -1,11 +1,11 @@
 import json
 from collections.abc import Callable, Sequence
 from copy import deepcopy
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
 
 from anthropic.types import CacheControlEphemeralParam, TextBlockParam
+from pydantic import BaseModel
 
 from ..attention import AttentionSelection
 from ..config import Config
@@ -402,8 +402,7 @@ def stable_payload(payload: CommentaryPayload) -> CommentaryPayload:
     return result
 
 
-@dataclass(frozen=True)
-class CommentarySupport:
+class CommentarySupport(BaseModel):
     selection: AttentionSelection
     payload: CommentaryPayload
     narrative_revision: str | None = None
@@ -470,8 +469,7 @@ class CommentarySupport:
         )
 
 
-@dataclass(frozen=True)
-class PreparedCommentary:
+class PreparedCommentary(BaseModel):
     selection: AttentionSelection
     request: ModelRequest
     support: CommentarySupport
@@ -619,14 +617,14 @@ class PromptBuilder:
             included.append(index)
         request = make_request(selected, system, speech_required=speech_required)
         return PreparedCommentary(
-            selection,
-            request,
-            CommentarySupport(
-                selection,
-                project_payload(snapshot, selection, self.clock())
+            selection=selection,
+            request=request,
+            support=CommentarySupport(
+                selection=selection,
+                payload=project_payload(snapshot, selection, self.clock())
                 if narrative is not None or basic
                 else deepcopy(selected),
-                narrative.revision
+                narrative_revision=narrative.revision
                 if narrative is not None and selection.subject is not None
                 else None,
             ),

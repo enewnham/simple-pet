@@ -1,23 +1,16 @@
-from dataclasses import dataclass
-from typing import TypedDict
+from pydantic import BaseModel, ConfigDict
 
 from .domain import SessionSource
 
 
-@dataclass(frozen=True, order=True)
-class SessionIdentity:
+class SessionIdentity(BaseModel):
+    model_config = ConfigDict(frozen=True)
     source: SessionSource
     native_id: str
 
-
-class SessionData(TypedDict):
-    source: str
-    native_id: str
+    def __lt__(self, other: SessionIdentity) -> bool:
+        return (self.source, self.native_id) < (other.source, other.native_id)
 
 
-def session_data(identity: SessionIdentity) -> SessionData:
-    return {"source": identity.source.value, "native_id": identity.native_id}
-
-
-def session_from_data(data: SessionData) -> SessionIdentity:
-    return SessionIdentity(SessionSource(data["source"]), data["native_id"])
+def session_data(identity: SessionIdentity) -> dict[str, object]:
+    return identity.model_dump(mode="json")

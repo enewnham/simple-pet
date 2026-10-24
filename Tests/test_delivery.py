@@ -25,12 +25,12 @@ class DeliveryTests(unittest.TestCase):
             valid=lambda message: self.current,
         )
         self.message = SpeechMessage(
-            "The parser preserves quoted fields.",
-            10,
-            SpeechReason.ROUTINE,
-            "selection",
-            SessionIdentity(SessionSource.COMMAND, "work"),
-            "one",
+            text="The parser preserves quoted fields.",
+            ttl=10,
+            reason=SpeechReason.ROUTINE,
+            selection_id="selection",
+            subject_id=SessionIdentity(source=SessionSource.COMMAND, native_id="work"),
+            revision="one",
         )
 
     def acknowledge(self, identifier: str | None = None) -> bool:
@@ -59,7 +59,13 @@ class DeliveryTests(unittest.TestCase):
                 (item.message.subject_id, item.message.revision, item.status)
                 for item in self.outcomes
             ],
-            [(SessionIdentity(SessionSource.COMMAND, "work"), "one", "accepted")],
+            [
+                (
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="work"),
+                    "one",
+                    "accepted",
+                )
+            ],
         )
 
     def test_missing_acknowledgment_retries_the_same_message_once(self) -> None:

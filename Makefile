@@ -66,6 +66,8 @@ check: lint test
 	bash -n scripts/fetch-assets.sh
 	bash -n examples/pet-run
 	bash -n bin/pet-daemon
+	bash -n bin/pet-notify
+	bash -n scripts/pet-hook
 
 assets:
 	scripts/fetch-assets.sh $(ARGS)

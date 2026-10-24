@@ -10,7 +10,7 @@ def session_values(identity: SessionIdentity) -> tuple[str, str]:
 
 def session_from_row(row: sqlite3.Row, prefix: str = "") -> SessionIdentity:
     return SessionIdentity(
-        SessionSource(row[f"{prefix}source"]), row[f"{prefix}session"]
+        source=SessionSource(row[f"{prefix}source"]), native_id=row[f"{prefix}session"]
     )
 
 

@@ -5,7 +5,6 @@ import random
 import tempfile
 import unittest
 from collections.abc import Sequence
-from dataclasses import replace
 from pathlib import Path
 from typing import TypeVar, Unpack
 
@@ -39,7 +38,13 @@ def make_clip(
     fps: float = 1,
     max_repeats: int | None = None,
 ) -> Clip:
-    return Clip(identifier, ("pixel.png",) * frame_count, fps, role, max_repeats)
+    return Clip(
+        id=identifier,
+        frames=("pixel.png",) * frame_count,
+        fps=fps,
+        role=role,
+        max_repeats=max_repeats,
+    )
 
 
 class Clock:
@@ -120,13 +125,34 @@ class BehaviorTests(unittest.TestCase):
         )
         behavior = Behavior(
             Pack(directory),
-            replace(defaults, **config),
+            defaults.model_copy(update=config),
             self.clock,
             self.rng,
             self.output.append,
         )
         self.assertTrue(behavior.renderer_status(self.status()))
         return behavior
+
+    def test_malformed_renderer_status_preserves_the_last_observation(self) -> None:
+        behavior = self.make_behavior([])
+        original = behavior.status
+        for fields in (
+            {"x": True},
+            {"y": "100"},
+            {"width": 0},
+            {"height": float("nan")},
+            {"pointer": {"x": float("inf"), "y": 0}},
+            {"screen": {"x": 0, "y": 0, "width": -1, "height": 400}},
+            {"dragging": 0},
+            {"sleeping": None},
+        ):
+            with self.subTest(fields=fields):
+                self.assertFalse(behavior.renderer_status(self.status(**fields)))
+                self.assertIs(behavior.status, original)
+        missing = self.status()
+        missing.pop("system_sleeping")
+        self.assertFalse(behavior.renderer_status(missing))
+        self.assertIs(behavior.status, original)
 
     def status(self, **values: object) -> dict[str, object]:
         return {
@@ -566,7 +592,7 @@ class BehaviorTests(unittest.TestCase):
             behavior.react(
                 "investigation",
                 self.sessions,
-                SessionIdentity(SessionSource.COMMAND, "one"),
+                SessionIdentity(source=SessionSource.COMMAND, native_id="one"),
             )
         )
         self.assertEqual(self.animations()[-1]["id"], "review")
@@ -575,7 +601,9 @@ class BehaviorTests(unittest.TestCase):
         )
         self.assertTrue(
             behavior.react(
-                "waiting", self.sessions, SessionIdentity(SessionSource.COMMAND, "one")
+                "waiting",
+                self.sessions,
+                SessionIdentity(source=SessionSource.COMMAND, native_id="one"),
             )
         )
         self.assertEqual(self.animations()[-1]["id"], "waiting")
@@ -801,7 +829,7 @@ class BehaviorTests(unittest.TestCase):
         for event in ("tool_start", "waiting"):
             with self.subTest(event=event):
                 self.sessions = Sessions(self.clock, wall_clock=self.clock)
-                owner = ProcessIdentity(42, "verified-start")
+                owner = ProcessIdentity(pid=42, started="verified-start")
                 self.sessions.handle(
                     {
                         "source": "cli",

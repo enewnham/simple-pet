@@ -8,7 +8,6 @@ import socket
 import stat
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import asdict
 from typing import Never
 
 from anthropic import AsyncAnthropic
@@ -181,9 +180,9 @@ class Daemon:
         log.debug(
             "daemon.started",
             detail="payload",
-            config=asdict(self.config),
+            config=self.config.model_dump(),
             pet=self.pack.pet,
-            clips={key: asdict(clip) for key, clip in self.pack.clips.items()},
+            clips={key: clip.model_dump() for key, clip in self.pack.clips.items()},
             next_observation=self.application.attention.next_observation,
         )
         log.info(
@@ -234,7 +233,7 @@ class Daemon:
     async def close(self) -> None:
         log.info(
             "daemon.stopping",
-            snapshot=asdict(self.application.sessions.activity_view()),
+            snapshot=self.application.sessions.activity_view().model_dump(),
             sessions=len(self.application.sessions.by_id),
         )
         if self.loop_task:

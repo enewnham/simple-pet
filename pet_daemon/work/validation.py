@@ -1,6 +1,5 @@
 import json
 import re
-from dataclasses import asdict, replace
 from urllib.parse import urlsplit
 
 from ..domain import ArtifactKind
@@ -15,7 +14,7 @@ def canonical(value: object) -> str:
         sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
-        default=asdict,
+        default=lambda value: value.model_dump(mode="json"),
     )
 
 
@@ -28,17 +27,21 @@ def text(value: object, name: str, *, optional: bool = False) -> str:
 
 
 def normalize_reference(value: ArtifactReference) -> ArtifactReference:
-    result = replace(
-        value,
-        kind=ArtifactKind(value.kind),
-        ref=text(value.ref, "artifact.ref"),
-        revision=text(value.revision, "artifact.revision")
+    result = value.model_copy()
+    result.kind = ArtifactKind(value.kind)
+    result.ref = text(value.ref, "artifact.ref")
+    result.revision = (
+        text(value.revision, "artifact.revision")
         if value.revision is not None
-        else None,
-        checkout=text(value.checkout, "artifact.checkout")
+        else None
+    )
+    result.checkout = (
+        text(value.checkout, "artifact.checkout")
         if value.checkout is not None
-        else None,
-        title=text(value.title, "artifact.title") if value.title is not None else None,
+        else None
+    )
+    result.title = (
+        text(value.title, "artifact.title") if value.title is not None else None
     )
     if result.checkout is not None and "\0" in result.checkout:
         raise ValueError(
@@ -53,11 +56,8 @@ def normalize_reference(value: ArtifactReference) -> ArtifactReference:
     if result.kind == ArtifactKind.PULL_REQUEST:
         ref = result.ref.rstrip("/")
         parsed = urlsplit(ref)
-        result = replace(
-            result,
-            ref=ref,
-            repository=parse_remote_repository(
-                parsed.netloc + parsed.path.rsplit("/pull/", 1)[0]
-            ),
+        result.ref = ref
+        result.repository = parse_remote_repository(
+            parsed.netloc + parsed.path.rsplit("/pull/", 1)[0]
         )
     return result

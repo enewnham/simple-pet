@@ -1,7 +1,8 @@
 import time
 from collections.abc import Callable, Collection, Mapping
 from copy import deepcopy
-from dataclasses import dataclass, replace
+
+from pydantic import BaseModel
 
 from .config import Config
 from .domain import (
@@ -34,8 +35,7 @@ log = get_logger("pet-daemon")
 COMPLETION_GRACE_SECONDS = 300
 
 
-@dataclass(frozen=True)
-class AttentionRequest:
+class AttentionRequest(BaseModel):
     reason: SpeechReason
     context: str | None = None
     ttl: float | None = None
@@ -43,8 +43,7 @@ class AttentionRequest:
     eligible: frozenset[SessionIdentity] | None = None
 
 
-@dataclass(frozen=True)
-class SelectionSupport:
+class SelectionSupport(BaseModel):
     subject_revision: str | None = None
     session_transition: tuple[int, bool, bool, ExecutionOutcome | None] | tuple[()] = ()
 
@@ -55,8 +54,8 @@ class SelectionSupport:
         focus: SessionContext | None,
     ) -> SelectionSupport:
         return cls(
-            subject.revision if subject else None,
-            (
+            subject_revision=subject.revision if subject else None,
+            session_transition=(
                 focus.generation,
                 focus.turn_active,
                 focus.waiting_for_input,
@@ -67,8 +66,7 @@ class SelectionSupport:
         )
 
 
-@dataclass(frozen=True)
-class AttentionSelection:
+class AttentionSelection(BaseModel):
     subject: WorkSubject | None
     focus_session: SessionContext | None
     context_sessions: tuple[SessionContext, ...]
@@ -121,16 +119,17 @@ class AttentionSelection:
         sessions = {session.id: session for session in snapshot.sessions}
         subject = subjects.get(self.subject.id) if self.subject is not None else None
         focus = sessions.get(self.focus_session.id) if self.focus_session else None
-        return replace(
-            self,
-            subject=subject,
-            supporting_facts=SelectionSupport.capture(subject, focus),
-            focus_session=deepcopy(focus),
-            context_sessions=tuple(
-                deepcopy(sessions[item.id])
-                for item in self.context_sessions
-                if item.id in sessions
-            ),
+        return self.model_copy(
+            update={
+                "subject": subject,
+                "supporting_facts": SelectionSupport.capture(subject, focus),
+                "focus_session": deepcopy(focus),
+                "context_sessions": tuple(
+                    deepcopy(sessions[item.id])
+                    for item in self.context_sessions
+                    if item.id in sessions
+                ),
+            }
         )
 
 
@@ -532,14 +531,14 @@ class Attention:
                 SpeechReason.EXPLICIT: SpeechSituation.EXPLICIT,
             }[reason]
         return AttentionSelection(
-            subject,
-            deepcopy(focus),
-            deepcopy(others),
-            reason,
-            situation,
-            context,
-            SelectionSupport.capture(subject, focus),
-            update,
+            subject=subject,
+            focus_session=deepcopy(focus),
+            context_sessions=deepcopy(others),
+            reason=reason,
+            situation=situation,
+            context=context,
+            supporting_facts=SelectionSupport.capture(subject, focus),
+            update=update,
         )
 
     def request(
@@ -555,9 +554,11 @@ class Attention:
     ) -> AttentionRequest | None:
         now = self.clock()
         if manual is not None:
-            return AttentionRequest(SpeechReason.EXPLICIT, manual[0], manual[1])
+            return AttentionRequest(
+                reason=SpeechReason.EXPLICIT, context=manual[0], ttl=manual[1]
+            )
         if clicked:
-            return AttentionRequest(SpeechReason.CLICK)
+            return AttentionRequest(reason=SpeechReason.CLICK)
         if delivery_pending or snapshot.sleeping:
             return None
         if self.pending and now >= self.pending[1]:
@@ -566,9 +567,11 @@ class Attention:
             if not isinstance(trigger, ReactionTrigger) or reaction_relevant(
                 trigger.reaction
             ):
-                return AttentionRequest(reason, trigger=trigger)
+                return AttentionRequest(reason=reason, trigger=trigger)
         if check_in:
-            return AttentionRequest(SpeechReason.CHECK_IN, eligible=frozenset(check_in))
+            return AttentionRequest(
+                reason=SpeechReason.CHECK_IN, eligible=frozenset(check_in)
+            )
         if now >= self.next_observation:
             self.next_observation = now + self.rng.uniform(
                 *self.config.observation_seconds
@@ -576,15 +579,19 @@ class Attention:
             if any(
                 self.routine_eligible(subject, snapshot) for subject in snapshot.work
             ):
-                return AttentionRequest(SpeechReason.ROUTINE)
+                return AttentionRequest(reason=SpeechReason.ROUTINE)
         if care is not None and not any(
             session.turn_active for session in snapshot.sessions
         ):
-            return AttentionRequest(SpeechReason.CARE, trigger=CareTrigger(care))
+            return AttentionRequest(
+                reason=SpeechReason.CARE, trigger=CareTrigger(care=care)
+            )
         return None
 
     def restore(self, history: Mapping[SessionIdentity, HistoryRecord]) -> None:
-        self.histories = dict(history)
+        self.histories = {
+            identifier: record.model_copy() for identifier, record in history.items()
+        }
         self.sequence = max((row.last_selected for row in history.values()), default=0)
 
     def is_new(self, subject: WorkSubject) -> bool:
@@ -595,14 +602,15 @@ class Attention:
     ) -> dict[SessionIdentity, HistoryRecord]:
         records = {}
         if subject:
-            records[subject.id] = replace(
-                self.history(subject.id), considered_subject_revision=subject.revision
-            )
+            record = self.history(subject.id).model_copy()
+            record.considered_subject_revision = subject.revision
+            records[subject.id] = record
         if update:
-            member = records.get(update.session, self.history(update.session))
-            records[update.session] = replace(
-                member, considered_session_revision=update.revision
-            )
+            record = records.get(update.session)
+            if record is None:
+                record = self.history(update.session).model_copy()
+                records[update.session] = record
+            record.considered_session_revision = update.revision
         return records
 
     def mark_considered(
@@ -615,9 +623,8 @@ class Attention:
 
     def mark_selected(self, subject_id: SessionIdentity) -> None:
         self.sequence = max(self.clock(), self.sequence + 0.000001)
-        self.histories[subject_id] = replace(
-            self.history(subject_id), last_selected=self.sequence
-        )
+        record = self.histories.setdefault(subject_id, HistoryRecord())
+        record.last_selected = self.sequence
         log.debug("attention.selected", session=subject_id)
 
     def allowed(self, reason: SpeechReason, trigger: Trigger | None = None) -> bool:

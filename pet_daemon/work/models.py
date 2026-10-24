@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Annotated, Literal
+
+from pydantic import BaseModel, Field
 
 from ..domain import (
     ArtifactKind,
@@ -24,8 +26,7 @@ if TYPE_CHECKING:
     )
 
 
-@dataclass(frozen=True)
-class RelatedLink:
+class RelatedLink(BaseModel):
     kind: ArtifactKind
     ref: str
     relationship: LinkRelationship
@@ -39,8 +40,7 @@ class RelatedLink:
     title: str = ""
 
 
-@dataclass(frozen=True)
-class ArtifactReference:
+class ArtifactReference(BaseModel):
     kind: ArtifactKind
     ref: str
     repository: RepositoryIdentity | None = None
@@ -49,28 +49,28 @@ class ArtifactReference:
     title: str | None = None
 
 
-@dataclass(frozen=True)
-class IntentEvidence:
-    source: ClassVar[EvidenceSource] = EvidenceSource.USER
-    kind: ClassVar[EvidenceKind] = EvidenceKind.INTENT
+class IntentEvidence(BaseModel):
+    type: Literal["IntentEvidence"] = "IntentEvidence"
+    source: Literal[EvidenceSource.USER] = EvidenceSource.USER
+    kind: Literal[EvidenceKind.INTENT] = EvidenceKind.INTENT
 
     session: SessionIdentity
     text: str
 
 
-@dataclass(frozen=True)
-class ProgressEvidence:
-    source: ClassVar[EvidenceSource] = EvidenceSource.SOURCE
-    kind: ClassVar[EvidenceKind] = EvidenceKind.PROGRESS
+class ProgressEvidence(BaseModel):
+    type: Literal["ProgressEvidence"] = "ProgressEvidence"
+    source: Literal[EvidenceSource.SOURCE] = EvidenceSource.SOURCE
+    kind: Literal[EvidenceKind.PROGRESS] = EvidenceKind.PROGRESS
 
     session: SessionIdentity
     text: str
 
 
-@dataclass(frozen=True)
-class ExecutionEvidence:
-    source: ClassVar[EvidenceSource] = EvidenceSource.SOURCE
-    kind: ClassVar[EvidenceKind] = EvidenceKind.EXECUTION
+class ExecutionEvidence(BaseModel):
+    type: Literal["ExecutionEvidence"] = "ExecutionEvidence"
+    source: Literal[EvidenceSource.SOURCE] = EvidenceSource.SOURCE
+    kind: Literal[EvidenceKind.EXECUTION] = EvidenceKind.EXECUTION
 
     session: SessionIdentity
     event: str
@@ -79,60 +79,65 @@ class ExecutionEvidence:
     progress: str | None
 
 
-@dataclass(frozen=True)
-class CheckoutAssociation:
-    source: ClassVar[EvidenceSource] = EvidenceSource.SOURCE
-    kind: ClassVar[EvidenceKind] = EvidenceKind.RELATIONSHIP
+class CheckoutAssociation(BaseModel):
+    type: Literal["CheckoutAssociation"] = "CheckoutAssociation"
+    source: Literal[EvidenceSource.SOURCE] = EvidenceSource.SOURCE
+    kind: Literal[EvidenceKind.RELATIONSHIP] = EvidenceKind.RELATIONSHIP
 
     checkout: str
     branch: str
 
 
-@dataclass(frozen=True)
-class PullRequestAssociation:
-    source: ClassVar[EvidenceSource] = EvidenceSource.GITHUB
-    kind: ClassVar[EvidenceKind] = EvidenceKind.RELATIONSHIP
+class PullRequestAssociation(BaseModel):
+    type: Literal["PullRequestAssociation"] = "PullRequestAssociation"
+    source: Literal[EvidenceSource.GITHUB] = EvidenceSource.GITHUB
+    kind: Literal[EvidenceKind.RELATIONSHIP] = EvidenceKind.RELATIONSHIP
 
     checkout: str
     branch: str
 
 
-@dataclass(frozen=True)
-class ReferenceAssociation:
-    kind: ClassVar[EvidenceKind] = EvidenceKind.RELATIONSHIP
+class ReferenceAssociation(BaseModel):
+    type: Literal["ReferenceAssociation"] = "ReferenceAssociation"
+    kind: Literal[EvidenceKind.RELATIONSHIP] = EvidenceKind.RELATIONSHIP
 
     ref: str
     source: EvidenceSource
 
 
-@dataclass(frozen=True)
-class StackAssociation:
-    source: ClassVar[EvidenceSource] = EvidenceSource.GITHUB_STACK
-    kind: ClassVar[EvidenceKind] = EvidenceKind.RELATIONSHIP
+class StackAssociation(BaseModel):
+    type: Literal["StackAssociation"] = "StackAssociation"
+    source: Literal[EvidenceSource.GITHUB_STACK] = EvidenceSource.GITHUB_STACK
+    kind: Literal[EvidenceKind.RELATIONSHIP] = EvidenceKind.RELATIONSHIP
 
     link: RelatedLink
     from_ref: str
 
 
-@dataclass(frozen=True)
-class GitHubEvidence:
-    source: ClassVar[EvidenceSource] = EvidenceSource.GITHUB
-    kind: ClassVar[EvidenceKind] = EvidenceKind.OBSERVATION
+class GitHubEvidence(BaseModel):
+    type: Literal["GitHubEvidence"] = "GitHubEvidence"
+    source: Literal[EvidenceSource.GITHUB] = EvidenceSource.GITHUB
+    kind: Literal[EvidenceKind.OBSERVATION] = EvidenceKind.OBSERVATION
 
     pr: PullRequest | None
     repository: RepositoryIdentity | None
 
 
-@dataclass(frozen=True)
-class AvailabilityEvidence:
-    source: ClassVar[EvidenceSource] = EvidenceSource.OBSERVER
-    kind: ClassVar[EvidenceKind] = EvidenceKind.AVAILABILITY
+class AvailabilityEvidence(BaseModel):
+    type: Literal["AvailabilityEvidence"] = "AvailabilityEvidence"
+    source: Literal[EvidenceSource.OBSERVER] = EvidenceSource.OBSERVER
+    kind: Literal[EvidenceKind.AVAILABILITY] = EvidenceKind.AVAILABILITY
 
     local_error: str | None
     github_error: str | None
 
 
-type EvidencePayload = (
+type ReportPayload = Annotated[
+    IntentEvidence | ProgressEvidence | ExecutionEvidence, Field(discriminator="type")
+]
+
+
+type EvidencePayload = Annotated[
     IntentEvidence
     | ProgressEvidence
     | ExecutionEvidence
@@ -140,14 +145,14 @@ type EvidencePayload = (
     | PullRequestAssociation
     | StackAssociation
     | ReferenceAssociation
-    | GitObservation
+    | "GitObservation"
     | GitHubEvidence
-    | AvailabilityEvidence
-)
+    | AvailabilityEvidence,
+    Field(discriminator="type"),
+]
 
 
-@dataclass(frozen=True)
-class EvidenceRecord:
+class EvidenceRecord(BaseModel):
     payload: EvidencePayload
     observed_at: float | None = None
     context: ReportContext | None = None
@@ -161,8 +166,7 @@ class EvidenceRecord:
         return self.payload.kind
 
 
-@dataclass(frozen=True)
-class ReportContext:
+class ReportContext(BaseModel):
     checkout: str = ""
     repository: RepositoryIdentity | None = None
     branch: str = ""
@@ -172,18 +176,18 @@ class ReportContext:
     branch_resolution: int = 0
 
 
-@dataclass(frozen=True)
-class SessionReport:
-    payload: IntentEvidence | ProgressEvidence | ExecutionEvidence
+class SessionReport(BaseModel):
+    payload: ReportPayload
     context: ReportContext
     observed_at: float
 
     def record(self) -> EvidenceRecord:
-        return EvidenceRecord(self.payload, self.observed_at, self.context)
+        return EvidenceRecord(
+            payload=self.payload, observed_at=self.observed_at, context=self.context
+        )
 
 
-@dataclass(frozen=True)
-class SessionRecord:
+class SessionRecord(BaseModel):
     id: SessionIdentity
     goal: str = ""
     parent: SessionIdentity | None = None

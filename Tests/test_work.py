@@ -1,9 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
-from dataclasses import replace
 from pathlib import Path
-from typing import Unpack
 
 from pet_daemon.domain import (
     ArtifactKind,
@@ -15,11 +13,12 @@ from pet_daemon.domain import (
 )
 from pet_daemon.identity import SessionIdentity
 from pet_daemon.repository_identity import LocalRepository, RemoteRepository
-from pet_daemon.runtime import HookEvent, HookEventKind, HookTextFields
+from pet_daemon.runtime import HookEvent, HookEventKind
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources.hooks import normalize_hook
 from pet_daemon.storage.memory import Memory
 from pet_daemon.storage.migrations import SCHEMA_VERSION, migrate
+from pet_daemon.work.association import decide_observation
 from pet_daemon.work.history import build_session_entry
 from pet_daemon.work.models import RelatedLink
 from pet_daemon.work.narrative import semantic_revision
@@ -39,8 +38,8 @@ from pet_daemon.work.views import (
 )
 from Tests.fixtures import require, sessions_snapshot
 
-REPOSITORY = RemoteRepository("github.com/team/project")
-SESSION = SessionIdentity(SessionSource.CODEX, "one")
+REPOSITORY = RemoteRepository(value="github.com/team/project")
+SESSION = SessionIdentity(source=SessionSource.CODEX, native_id="one")
 
 
 class WorkTests(unittest.TestCase):
@@ -62,7 +61,7 @@ class WorkTests(unittest.TestCase):
         session: SessionIdentity = SESSION,
         *,
         aliases: tuple[str, ...] = (),
-        **fields: Unpack[HookTextFields],
+        **fields: object,
     ) -> None:
         source, name = session.source.value, session.native_id
         hook = require(
@@ -138,17 +137,29 @@ class WorkTests(unittest.TestCase):
         self, branch: str = "feature", path: str = "/work/parser"
     ) -> CheckoutObservation:
         return CheckoutObservation(
-            path,
-            GitObservation(path, branch, "head", 0, 1, 0, 0, "", 0, 0, REPOSITORY),
-            self.now,
+            worktree=path,
+            local=GitObservation(
+                worktree=path,
+                branch=branch,
+                head="head",
+                staged=0,
+                unstaged=1,
+                untracked=0,
+                conflicts=0,
+                upstream="",
+                ahead=0,
+                behind=0,
+                repository=REPOSITORY,
+            ),
+            checked_at=self.now,
         )
 
     def pr(self, number: int = 7) -> PullRequest:
         return PullRequest(
-            number,
-            f"https://github.com/team/project/pull/{number}",
-            PullRequestState.OPEN,
-            None,
+            number=number,
+            url=f"https://github.com/team/project/pull/{number}",
+            state=PullRequestState.OPEN,
+            merged_at=None,
             is_draft=True,
             head="head",
             head_repository=REPOSITORY,
@@ -159,7 +170,10 @@ class WorkTests(unittest.TestCase):
 
     def branch(self, number: int = 7, branch: str = "feature") -> BranchObservation:
         return BranchObservation(
-            REPOSITORY, branch, replace(self.pr(number), head_branch=branch), self.now
+            repository=REPOSITORY,
+            branch=branch,
+            pr=self.pr(number).model_copy(update={"head_branch": branch}),
+            checked_at=self.now,
         )
 
     def story(self, session: SessionIdentity = SESSION) -> WorkStory:
@@ -175,36 +189,44 @@ class WorkTests(unittest.TestCase):
     def test_child_keeps_its_scope_and_report_with_the_parent_story(self) -> None:
         self.event(
             "intent",
-            SessionIdentity(SessionSource.CODEX, "child"),
+            SessionIdentity(source=SessionSource.CODEX, native_id="child"),
             goal="Cover escapes",
             parent="root",
             repo="/work/child",
         )
         self.event(
             "intent",
-            SessionIdentity(SessionSource.CODEX, "root"),
+            SessionIdentity(source=SessionSource.CODEX, native_id="root"),
             goal="Improve parser",
             repo="/work/root",
         )
         self.event(
             "progress",
-            SessionIdentity(SessionSource.CODEX, "child"),
+            SessionIdentity(source=SessionSource.CODEX, native_id="child"),
             progress="Escape tests pass",
         )
-        story = self.story(SessionIdentity(SessionSource.CODEX, "root"))
+        story = self.story(
+            SessionIdentity(source=SessionSource.CODEX, native_id="root")
+        )
         self.assertEqual(story.intent, "Improve parser")
         self.assertEqual(
             [record.details for record in story.activity],
-            [ExecutionView("in progress", None, None)],
+            [
+                ExecutionView(
+                    execution="in progress",
+                    reported_progress=None,
+                    reported_execution_outcome=None,
+                )
+            ],
         )
         self.assertEqual(story.sessions[0].scope, "Cover escapes")
         self.assertEqual(require(story.sessions[0].context).checkout, "/work/child")
         self.assertEqual(
-            self.story(SessionIdentity(SessionSource.CODEX, "root"))
+            self.story(SessionIdentity(source=SessionSource.CODEX, native_id="root"))
             .sessions[0]
             .activity[0]
             .details,
-            ProgressView("Escape tests pass"),
+            ProgressView(reported_progress="Escape tests pass"),
         )
 
     def test_refined_intent_and_alias_reports_share_one_story(self) -> None:
@@ -212,17 +234,18 @@ class WorkTests(unittest.TestCase):
         self.event("intent", goal="Cover escapes", aliases=("alias",))
         self.event(
             "progress",
-            SessionIdentity(SessionSource.CODEX, "alias"),
+            SessionIdentity(source=SessionSource.CODEX, native_id="alias"),
             progress="Covered escapes",
         )
         subjects = self.memory.connected_work(sessions_snapshot())
         self.assertEqual(
             tuple(subject.id for subject in subjects),
-            (SessionIdentity(SessionSource.CODEX, "one"),),
+            (SessionIdentity(source=SessionSource.CODEX, native_id="one"),),
         )
         self.assertEqual(subjects[0].story.intent, "Cover escapes")
         self.assertEqual(
-            subjects[0].story.activity[0].details, ProgressView("Covered escapes")
+            subjects[0].story.activity[0].details,
+            ProgressView(reported_progress="Covered escapes"),
         )
 
     def test_explicit_alias_keeps_one_family_with_the_latest_report(
@@ -239,44 +262,44 @@ class WorkTests(unittest.TestCase):
 
         ingest(
             HookEvent(
-                SessionSource.CODEX,
-                "a",
-                HookEventKind.SESSION_START,
+                source=SessionSource.CODEX,
+                session="a",
+                event=HookEventKind.SESSION_START,
                 repo="/work/a",
                 aliases=("old-a",),
             )
         )
         ingest(
             HookEvent(
-                SessionSource.CODEX,
-                "b",
-                HookEventKind.SESSION_START,
+                source=SessionSource.CODEX,
+                session="b",
+                event=HookEventKind.SESSION_START,
                 repo="/work/b",
                 aliases=("old-b",),
             )
         )
         ingest(
             HookEvent(
-                SessionSource.CODEX,
-                "b",
-                HookEventKind.INTENT,
+                source=SessionSource.CODEX,
+                session="b",
+                event=HookEventKind.INTENT,
                 goal="Initial parser goal",
             )
         )
         self.now += 1
         ingest(
             HookEvent(
-                SessionSource.CODEX,
-                "a",
-                HookEventKind.INTENT,
+                source=SessionSource.CODEX,
+                session="a",
+                event=HookEventKind.INTENT,
                 goal="Refined parser goal",
             )
         )
         ingest(
             HookEvent(
-                SessionSource.CODEX,
-                "a",
-                HookEventKind.PROGRESS,
+                source=SessionSource.CODEX,
+                session="a",
+                event=HookEventKind.PROGRESS,
                 progress="First parser report",
                 repository=REPOSITORY.value,
                 branch="first",
@@ -286,9 +309,9 @@ class WorkTests(unittest.TestCase):
         self.now += 1
         ingest(
             HookEvent(
-                SessionSource.CODEX,
-                "b",
-                HookEventKind.PROGRESS,
+                source=SessionSource.CODEX,
+                session="b",
+                event=HookEventKind.PROGRESS,
                 progress="Second parser report",
                 repo="/work/latest",
                 repository=REPOSITORY.value,
@@ -296,12 +319,16 @@ class WorkTests(unittest.TestCase):
                 pull_request=self.pr(8).url,
             )
         )
-        ingest(HookEvent(SessionSource.CODEX, "b", HookEventKind.WAITING))
         ingest(
             HookEvent(
-                SessionSource.CODEX,
-                "child",
-                HookEventKind.SUBAGENT_START,
+                source=SessionSource.CODEX, session="b", event=HookEventKind.WAITING
+            )
+        )
+        ingest(
+            HookEvent(
+                source=SessionSource.CODEX,
+                session="child",
+                event=HookEventKind.SUBAGENT_START,
                 parent="a",
                 goal="Check escapes",
             )
@@ -309,18 +336,18 @@ class WorkTests(unittest.TestCase):
         self.assertEqual(
             ingest(
                 HookEvent(
-                    SessionSource.CODEX,
-                    "b",
-                    HookEventKind.SESSION_START,
+                    source=SessionSource.CODEX,
+                    session="b",
+                    event=HookEventKind.SESSION_START,
                     aliases=("a",),
                 )
             ),
-            SessionIdentity(SessionSource.CODEX, "b"),
+            SessionIdentity(source=SessionSource.CODEX, native_id="b"),
         )
         subjects = self.memory.connected_work(sessions.activity_view())
         self.assertEqual(
             tuple(subject.id for subject in subjects),
-            (SessionIdentity(SessionSource.CODEX, "b"),),
+            (SessionIdentity(source=SessionSource.CODEX, native_id="b"),),
         )
         story = subjects[0].story
         self.assertEqual(story.intent, "Refined parser goal")
@@ -330,7 +357,9 @@ class WorkTests(unittest.TestCase):
             for record in story.activity
             if isinstance(record.details, ProgressView)
         ]
-        self.assertEqual(reports, [ProgressView("Second parser report")])
+        self.assertEqual(
+            reports, [ProgressView(reported_progress="Second parser report")]
+        )
         self.assertTrue(
             any(
                 record.details.progress == "First parser report"
@@ -360,14 +389,20 @@ class WorkTests(unittest.TestCase):
         self.assertEqual(context.repository, REPOSITORY)
 
     def test_local_repository_identity_survives_restart(self) -> None:
-        repository = LocalRepository("/work/parser/.git")
+        repository = LocalRepository(path="/work/parser/.git")
         checkout = self.checkout()
         self.store.observe(
-            replace(
-                checkout, local=replace(require(checkout.local), repository=repository)
+            checkout.model_copy(
+                update={
+                    "local": require(checkout.local).model_copy(
+                        update={"repository": repository}
+                    )
+                }
             )
         )
-        branch = BranchObservation(repository, "feature", None, self.now)
+        branch = BranchObservation(
+            repository=repository, branch="feature", pr=None, checked_at=self.now
+        )
         self.store.observe(branch)
         self.event("intent", goal="Improve parser", repo="/work/parser")
         self.event("progress", progress="Feature tests pass")
@@ -376,7 +411,8 @@ class WorkTests(unittest.TestCase):
         story = self.memory.connected_work(sessions_snapshot())[0].story
         self.assertEqual(story.artifacts[0].repository, repository)
         self.assertIn(
-            replace(branch, last_success_at=self.now), self.memory.load_repositories()
+            branch.model_copy(update={"last_success_at": self.now}),
+            self.memory.load_repositories(),
         )
         self.assertEqual(require(story.requests[0].context).repository, repository)
         self.assertEqual(
@@ -451,15 +487,21 @@ class WorkTests(unittest.TestCase):
     def test_stale_response_cannot_replace_newer_current_facts(self) -> None:
         fresh = self.branch(8)
         self.store.observe(fresh)
-        self.store.observe(replace(self.branch(7), checked_at=self.now - 1))
+        self.store.observe(
+            self.branch(7).model_copy(update={"checked_at": self.now - 1})
+        )
         self.store.observe(
             PullRequestObservation(
-                self.pr(8).url,
-                replace(self.pr(8), state=PullRequestState.MERGED),
-                self.now + 1,
+                ref=self.pr(8).url,
+                pr=self.pr(8).model_copy(update={"state": PullRequestState.MERGED}),
+                checked_at=self.now + 1,
             )
         )
-        self.store.observe(PullRequestObservation(self.pr(8).url, self.pr(8), self.now))
+        self.store.observe(
+            PullRequestObservation(
+                ref=self.pr(8).url, pr=self.pr(8), checked_at=self.now
+            )
+        )
         self.event(
             "intent",
             goal="Improve parser",
@@ -491,7 +533,11 @@ class WorkTests(unittest.TestCase):
         self.now += 1
         self.store.observe(
             BranchObservation(
-                REPOSITORY, "feature", None, self.now, "network unavailable"
+                repository=REPOSITORY,
+                branch="feature",
+                pr=None,
+                checked_at=self.now,
+                error="network unavailable",
             )
         )
         artifact = next(
@@ -514,13 +560,26 @@ class WorkTests(unittest.TestCase):
         self.event("intent", goal="Improve parser", repo="/work/parser")
         self.now += 30
         self.store.observe(
-            CheckoutObservation("/work/parser", None, self.now, "local failed")
+            CheckoutObservation(
+                worktree="/work/parser",
+                local=None,
+                checked_at=self.now,
+                error="local failed",
+            )
         )
         self.store.observe(
-            BranchObservation(REPOSITORY, "feature", None, self.now, "branch failed")
+            BranchObservation(
+                repository=REPOSITORY,
+                branch="feature",
+                pr=None,
+                checked_at=self.now,
+                error="branch failed",
+            )
         )
         self.store.observe(
-            PullRequestObservation(self.pr().url, None, self.now, "PR failed")
+            PullRequestObservation(
+                ref=self.pr().url, pr=None, checked_at=self.now, error="PR failed"
+            )
         )
         account = self.story()
         facts = [
@@ -540,18 +599,33 @@ class WorkTests(unittest.TestCase):
         history = self.memory.recent()
         self.now += 30
         self.store.observe(
-            CheckoutObservation("/work/parser", None, self.now, "local failed")
+            CheckoutObservation(
+                worktree="/work/parser",
+                local=None,
+                checked_at=self.now,
+                error="local failed",
+            )
         )
         self.store.observe(
-            BranchObservation(REPOSITORY, "feature", None, self.now, "branch failed")
+            BranchObservation(
+                repository=REPOSITORY,
+                branch="feature",
+                pr=None,
+                checked_at=self.now,
+                error="branch failed",
+            )
         )
         self.store.observe(
-            PullRequestObservation(self.pr().url, None, self.now, "PR failed")
+            PullRequestObservation(
+                ref=self.pr().url, pr=None, checked_at=self.now, error="PR failed"
+            )
         )
         self.assertEqual(self.memory.recent(), history)
         before = self.story()
         self.store.observe(
-            PullRequestObservation(self.pr().url, None, 1040, "stale error")
+            PullRequestObservation(
+                ref=self.pr().url, pr=None, checked_at=1040, error="stale error"
+            )
         )
         self.assertEqual(self.story(), before)
         account = self.story()
@@ -568,7 +642,9 @@ class WorkTests(unittest.TestCase):
     def test_first_failed_lookup_does_not_establish_missing_pull_request(self) -> None:
         self.event("intent", goal=f"Inspect {self.pr().url}")
         self.store.observe(
-            PullRequestObservation(self.pr().url, None, self.now, "network failed")
+            PullRequestObservation(
+                ref=self.pr().url, pr=None, checked_at=self.now, error="network failed"
+            )
         )
         account = self.story()
         self.assertFalse(
@@ -607,7 +683,12 @@ class WorkTests(unittest.TestCase):
         after = self.story()
         self.assertNotEqual(waiting.revision, after.revision)
         self.assertEqual(
-            after.activity[0].details, ExecutionView("in progress", None, None)
+            after.activity[0].details,
+            ExecutionView(
+                execution="in progress",
+                reported_progress=None,
+                reported_execution_outcome=None,
+            ),
         )
         self.assertNotIn("Raw command", str(after))
         self.assertNotIn("Raw command", str(self.memory.recent()))
@@ -622,35 +703,37 @@ class WorkTests(unittest.TestCase):
     def test_child_and_parent_reports_retain_distinct_scopes(self) -> None:
         self.event(
             "intent",
-            SessionIdentity(SessionSource.CODEX, "child"),
+            SessionIdentity(source=SessionSource.CODEX, native_id="child"),
             parent="root",
             goal="Cover escapes",
         )
         self.event(
             "progress",
-            SessionIdentity(SessionSource.CODEX, "child"),
+            SessionIdentity(source=SessionSource.CODEX, native_id="child"),
             progress="Child tests pass",
         )
         self.event(
             "intent",
-            SessionIdentity(SessionSource.CODEX, "root"),
+            SessionIdentity(source=SessionSource.CODEX, native_id="root"),
             goal="Improve parser",
         )
         self.event(
             "progress",
-            SessionIdentity(SessionSource.CODEX, "root"),
+            SessionIdentity(source=SessionSource.CODEX, native_id="root"),
             progress="Parent tests pass",
         )
         self.assertEqual(
-            self.story(SessionIdentity(SessionSource.CODEX, "root"))
+            self.story(SessionIdentity(source=SessionSource.CODEX, native_id="root"))
             .sessions[0]
             .activity[0]
             .details,
-            ProgressView("Child tests pass"),
+            ProgressView(reported_progress="Child tests pass"),
         )
         self.assertEqual(
-            self.reports(SessionIdentity(SessionSource.CODEX, "root"))[0].details,
-            ProgressView("Parent tests pass"),
+            self.reports(SessionIdentity(source=SessionSource.CODEX, native_id="root"))[
+                0
+            ].details,
+            ProgressView(reported_progress="Parent tests pass"),
         )
 
     def test_repository_observations_create_no_agent_story(self) -> None:
@@ -722,13 +805,13 @@ class WorkTests(unittest.TestCase):
         self.store.observe(self.branch())
         self.event(
             "intent",
-            SessionIdentity(SessionSource.CODEX, "root"),
+            SessionIdentity(source=SessionSource.CODEX, native_id="root"),
             goal="Improve parser",
             repo="/work/root",
         )
         self.event(
             "subagent_start",
-            SessionIdentity(SessionSource.CODEX, "old"),
+            SessionIdentity(source=SessionSource.CODEX, native_id="old"),
             goal="Cover escapes",
             parent="root",
             repo="/work/parser",
@@ -739,7 +822,7 @@ class WorkTests(unittest.TestCase):
         self.sessions = Sessions(lambda: self.now)
         self.event(
             "progress",
-            SessionIdentity(SessionSource.CODEX, "native"),
+            SessionIdentity(source=SessionSource.CODEX, native_id="native"),
             aliases=("old",),
             progress="Escape cases pass",
         )
@@ -747,14 +830,14 @@ class WorkTests(unittest.TestCase):
         subjects = self.memory.connected_work(self.sessions.activity_view())
         self.assertEqual(
             tuple(subject.id for subject in subjects),
-            (SessionIdentity(SessionSource.CODEX, "root"),),
+            (SessionIdentity(source=SessionSource.CODEX, native_id="root"),),
         )
         child = subjects[0].story.sessions[0]
         self.assertEqual(child.scope, "Cover escapes")
         report = next(
             record
             for record in child.activity
-            if record.details == ProgressView("Escape cases pass")
+            if record.details == ProgressView(reported_progress="Escape cases pass")
         )
         context = require(report.context)
         self.assertEqual(
@@ -783,7 +866,7 @@ class WorkTests(unittest.TestCase):
         self.store.observe(self.branch(8, "other"))
         self.event(
             "intent",
-            SessionIdentity(SessionSource.CODEX, "two"),
+            SessionIdentity(source=SessionSource.CODEX, native_id="two"),
             goal="Improve other code",
             repo="/work/parser",
         )
@@ -819,22 +902,27 @@ class WorkTests(unittest.TestCase):
         self,
     ) -> None:
         link = RelatedLink(
-            ArtifactKind.PULL_REQUEST,
-            self.pr(8).url,
-            LinkRelationship.STACK_ENTRY,
-            EvidenceSource.GITHUB_STACK,
+            kind=ArtifactKind.PULL_REQUEST,
+            ref=self.pr(8).url,
+            relationship=LinkRelationship.STACK_ENTRY,
+            source=EvidenceSource.GITHUB_STACK,
         )
-        first = replace(self.pr(), related_links=(link,))
-        self.store.observe(PullRequestObservation(first.url, first, self.now))
+        first = self.pr().model_copy(update={"related_links": (link,)})
+        self.store.observe(
+            PullRequestObservation(ref=first.url, pr=first, checked_at=self.now)
+        )
         self.event("intent", goal=f"Review {first.url}")
         self.now += 1
-        failed = replace(
-            first,
-            state=PullRequestState.MERGED,
-            related_links=(),
-            related_links_error="stack lookup unavailable",
+        failed = first.model_copy(
+            update={
+                "state": PullRequestState.MERGED,
+                "related_links": (),
+                "related_links_error": "stack lookup unavailable",
+            }
         )
-        self.store.observe(PullRequestObservation(first.url, failed, self.now))
+        self.store.observe(
+            PullRequestObservation(ref=first.url, pr=failed, checked_at=self.now)
+        )
         output = next(item for item in self.story().artifacts if item.ref == first.url)
         self.assertTrue(
             any(
@@ -850,7 +938,9 @@ class WorkTests(unittest.TestCase):
         self.now += 1
         self.store.observe(
             PullRequestObservation(
-                first.url, replace(failed, related_links_error=None), self.now
+                ref=first.url,
+                pr=failed.model_copy(update={"related_links_error": None}),
+                checked_at=self.now,
             )
         )
         self.assertNotIn(
@@ -864,7 +954,12 @@ class WorkTests(unittest.TestCase):
         self.store.observe(self.branch())
         self.now += 1
         self.store.observe(
-            CheckoutObservation("/work/parser", None, self.now, available=False)
+            CheckoutObservation(
+                worktree="/work/parser",
+                local=None,
+                checked_at=self.now,
+                available=False,
+            )
         )
         account = self.story()
         self.assertIn(self.pr().url, {item.ref for item in account.artifacts})
@@ -905,3 +1000,47 @@ class WorkTests(unittest.TestCase):
             self.assertEqual(statements, ["PRAGMA user_version"])
         finally:
             database.close()
+
+
+class ObservationDecisionTests(unittest.TestCase):
+    def test_failed_stack_refresh_preserves_both_input_observations(self) -> None:
+        link = RelatedLink(
+            kind=ArtifactKind.PULL_REQUEST,
+            ref="https://github.com/team/project/pull/2",
+            relationship=LinkRelationship.STACK_ENTRY,
+            source=EvidenceSource.GITHUB_STACK,
+        )
+        previous_pr = PullRequest(
+            number=1,
+            url="https://github.com/team/project/pull/1",
+            state=PullRequestState.OPEN,
+            merged_at=None,
+            repository=REPOSITORY,
+            related_links=(link,),
+        )
+        refreshed_pr = previous_pr.model_copy()
+        refreshed_pr.related_links = ()
+        refreshed_pr.related_links_error = "unavailable"
+        previous = BranchObservation(
+            repository=REPOSITORY,
+            branch="main",
+            pr=previous_pr,
+            checked_at=1,
+            last_success_at=1,
+            resolutions=(previous_pr.url,),
+        )
+        refreshed = BranchObservation(
+            repository=REPOSITORY,
+            branch="main",
+            pr=refreshed_pr,
+            checked_at=2,
+        )
+        decided = require(decide_observation(previous, refreshed))
+        self.assertIsInstance(decided, BranchObservation)
+        assert isinstance(decided, BranchObservation)
+        self.assertEqual(require(decided.pr).related_links, (link,))
+        self.assertEqual(decided.last_success_at, 2)
+        self.assertEqual(refreshed_pr.related_links, ())
+        self.assertIsNone(refreshed.last_success_at)
+        self.assertEqual(previous.last_success_at, 1)
+        self.assertIsNone(previous_pr.related_links_error)

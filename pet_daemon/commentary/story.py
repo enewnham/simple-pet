@@ -1,5 +1,8 @@
 import json
-from dataclasses import dataclass
+from typing import cast
+
+from anthropic import transform_schema
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..attention import AttentionSelection
 from ..identity import SessionIdentity, session_data
@@ -30,13 +33,19 @@ when nothing is relevant.
 """.strip()
 
 
-@dataclass(frozen=True)
-class PreparedStory:
+class PreparedStory(BaseModel):
     subject_id: SessionIdentity
     revision: str
     sources: dict[str, JSONObject]
     request: ModelRequest
     latest_request_source: str
+
+
+class StoryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    intent: NarrativeStatement
+    decisions: tuple[NarrativeStatement, ...] = Field(max_length=4)
+    progress: tuple[NarrativeStatement, ...] = Field(max_length=4)
 
 
 def prepare(
@@ -97,7 +106,7 @@ def prepare(
         assignment = assignments.get(identity, "")
         scope = "current task" if identity == root else assignment or "related task"
         match item:
-            case IntentEvidence(_, text):
+            case IntentEvidence(session=_, text=text):
                 add(
                     "request",
                     text,
@@ -105,7 +114,7 @@ def prepare(
                     origin=identity,
                     observed_at=report.observed_at,
                 )
-            case ProgressEvidence(_, text):
+            case ProgressEvidence(session=_, text=text):
                 add(
                     "reported_progress",
                     text,
@@ -113,7 +122,9 @@ def prepare(
                     origin=identity,
                     observed_at=report.observed_at,
                 )
-            case ExecutionEvidence(_, event, outcome, _, progress) if event in {
+            case ExecutionEvidence(
+                session=_, event=event, outcome=outcome, tool_name=_, progress=progress
+            ) if event in {
                 "turn_done",
                 "turn_error",
                 "subagent_done",
@@ -130,16 +141,20 @@ def prepare(
     if not sources:
         for record in (*subject.story.requests, *subject.story.activity):
             match record.details:
-                case IntentView(text):
+                case IntentView(text=text):
                     add("request", text, "current task", observed_at=record.observed_at)
-                case ProgressView(text):
+                case ProgressView(reported_progress=text):
                     add(
                         "reported_progress",
                         text,
                         "current task",
                         observed_at=record.observed_at,
                     )
-                case ExecutionView("turn ended", progress, outcome):
+                case ExecutionView(
+                    execution="turn ended",
+                    reported_progress=progress,
+                    reported_execution_outcome=outcome,
+                ):
                     add(
                         "turn_ended",
                         progress or "",
@@ -153,7 +168,7 @@ def prepare(
             scope = assignment or "related task"
             for record in (*child.requests, *child.activity):
                 match record.details:
-                    case IntentView(text):
+                    case IntentView(text=text):
                         add(
                             "request",
                             text,
@@ -161,7 +176,7 @@ def prepare(
                             origin=child.session,
                             observed_at=record.observed_at,
                         )
-                    case ProgressView(text):
+                    case ProgressView(reported_progress=text):
                         add(
                             "reported_progress",
                             text,
@@ -169,7 +184,11 @@ def prepare(
                             origin=child.session,
                             observed_at=record.observed_at,
                         )
-                    case ExecutionView("turn ended", progress, outcome):
+                    case ExecutionView(
+                        execution="turn ended",
+                        reported_progress=progress,
+                        reported_execution_outcome=outcome,
+                    ):
                         add(
                             "turn_ended",
                             progress or "",
@@ -257,66 +276,31 @@ def prepare(
         if retained:
             payload["earlier_context"] = retained
     request = make_request(payload, [{"type": "text", "text": INSTRUCTIONS}])
-    statement: JSONSchema = {
-        "type": "object",
-        "properties": {
-            "text": {"type": "string"},
-            "sources": {"type": "array", "items": {"type": "string"}},
-        },
-        "required": ["text", "sources"],
-        "additionalProperties": False,
-    }
-    request["output_config"]["format"]["schema"] = {
-        "type": "object",
-        "properties": {
-            "intent": statement,
-            "decisions": {"type": "array", "items": statement},
-            "progress": {"type": "array", "items": statement},
-        },
-        "required": ["intent", "decisions", "progress"],
-        "additionalProperties": False,
-    }
+    request["output_config"]["format"]["schema"] = cast(
+        JSONSchema, transform_schema(StoryResponse)
+    )
     request["max_tokens"] = max(request["max_tokens"], 1400)
     return PreparedStory(
-        subject.id,
-        semantic_revision(subject.story),
-        sources,
-        request,
-        latest_request_source,
+        subject_id=subject.id,
+        revision=semantic_revision(subject.story),
+        sources=sources,
+        request=request,
+        latest_request_source=latest_request_source,
     )
 
 
 def validate(raw: dict[str, object], prepared: PreparedStory) -> WorkNarrative:
-    if set(raw) != {"intent", "decisions", "progress"}:
-        raise ValueError("Story requires intent, decisions, and progress")
-
-    def statement(value: object) -> NarrativeStatement:
-        if not isinstance(value, dict):
-            raise ValueError("Story statement requires an object")  # noqa: TRY004 - Reject malformed model output through one validation contract.
-        text, refs = value.get("text"), value.get("sources")
-        if not isinstance(text, str) or not text.strip() or len(text) > 400:
-            raise ValueError("Story statement requires bounded text")
-        if (
-            not isinstance(refs, list)
-            or not refs
-            or not all(isinstance(ref, str) and ref in prepared.sources for ref in refs)
-        ):
+    response = StoryResponse.model_validate(raw)
+    for statement in (response.intent, *response.decisions, *response.progress):
+        if any(ref not in prepared.sources for ref in statement.sources):
             raise ValueError("Story statement references unavailable evidence")
-        return NarrativeStatement(text.strip(), tuple(dict.fromkeys(refs)))
-
-    def statements(value: object) -> tuple[NarrativeStatement, ...]:
-        if not isinstance(value, list) or len(value) > 4:
-            raise ValueError("Story requires bounded statement arrays")
-        return tuple(statement(item) for item in value)
-
-    intent = statement(raw.get("intent"))
-    if prepared.latest_request_source not in intent.sources:
+    if prepared.latest_request_source not in response.intent.sources:
         raise ValueError("Story intent must reference the current request")
     return WorkNarrative(
-        prepared.subject_id,
-        prepared.revision,
-        intent,
-        statements(raw.get("decisions")),
-        statements(raw.get("progress")),
-        prepared.sources,
+        subject_id=prepared.subject_id,
+        revision=prepared.revision,
+        intent=response.intent,
+        decisions=response.decisions,
+        progress=response.progress,
+        sources=prepared.sources,
     )

@@ -121,9 +121,9 @@ class RepositoryTracker:
                 if repository:
                     desired[(CollectionKind.BRANCH, repository, target.ref)] = (
                         RepositoryTarget(
-                            CollectionKind.BRANCH,
-                            target.ref,
-                            repository,
+                            kind=CollectionKind.BRANCH,
+                            ref=target.ref,
+                            repository=repository,
                             include_links=target.include_links,
                         )
                     )
@@ -150,7 +150,11 @@ class RepositoryTracker:
             key = CollectionKind.BRANCH, local.repository, local.branch
             desired.setdefault(
                 key,
-                RepositoryTarget(CollectionKind.BRANCH, local.branch, local.repository),
+                RepositoryTarget(
+                    kind=CollectionKind.BRANCH,
+                    ref=local.branch,
+                    repository=local.repository,
+                ),
             )
         for key, target in self.subscriptions.items():
             if desired.get(key) != target:
@@ -195,7 +199,11 @@ class RepositoryTracker:
         except FileNotFoundError, NotADirectoryError:
             self.paths.pop(path, None)
             self.missing.add(path)
-            self._save(CheckoutObservation(path, None, self.clock(), available=False))
+            self._save(
+                CheckoutObservation(
+                    worktree=path, local=None, checked_at=self.clock(), available=False
+                )
+            )
             self._sync_subscriptions()
             log.info("repository.retired", path=path)
             return True
@@ -263,12 +271,21 @@ class RepositoryTracker:
             self.paths.pop(path, None)
             self.paths[root] = checked_at
             self.locals[root] = local
-            self._save(CheckoutObservation(root, local, checked_at))
+            self._save(
+                CheckoutObservation(worktree=root, local=local, checked_at=checked_at)
+            )
             self._sync_subscriptions()
         except (TimeoutError, OSError, RuntimeError, ValueError) as error:
             if not self._active(key, version, epoch):
                 return
-            self._save(CheckoutObservation(path, None, checked_at, str(error)[:240]))
+            self._save(
+                CheckoutObservation(
+                    worktree=path,
+                    local=None,
+                    checked_at=checked_at,
+                    error=str(error)[:240],
+                )
+            )
             log.info(
                 "repository.refresh_failed", source="git", path=path, error=str(error)
             )
@@ -311,10 +328,16 @@ class RepositoryTracker:
         if target.kind == CollectionKind.BRANCH:
             assert target.repository is not None
             item: RepositoryObservation = BranchObservation(
-                target.repository, target.ref, pr, checked_at, error
+                repository=target.repository,
+                branch=target.ref,
+                pr=pr,
+                checked_at=checked_at,
+                error=error,
             )
         else:
-            item = PullRequestObservation(target.ref, pr, checked_at, error)
+            item = PullRequestObservation(
+                ref=target.ref, pr=pr, checked_at=checked_at, error=error
+            )
         self._save(item)
 
     def pause(self) -> None:

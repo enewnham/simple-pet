@@ -4,7 +4,6 @@ import random
 import tempfile
 import unittest
 from collections.abc import Callable
-from dataclasses import replace
 from pathlib import Path
 
 import anthropic
@@ -345,11 +344,11 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_click_greets_only_when_all_sessions_are_inactive(self) -> None:
         snapshot = self.snapshot()
-        snapshot = replace(snapshot, activity="idle")
+        snapshot = snapshot.model_copy(update={"activity": "idle"})
         cases: list[tuple[PetContext, str]] = [
             (snapshot, "Briefly acknowledge the developer while our work continues."),
             (
-                PetContext(PetState.IDLE, (), False),
+                PetContext(activity=PetState.IDLE, sessions=(), sleeping=False),
                 "Give the developer a casual greeting.",
             ),
         ]
@@ -363,10 +362,15 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         completed_focus = self.snapshot()
-        completed_focus = replace(completed_focus, activity="idle")
-        completed_focus = replace(
-            completed_focus,
-            trigger=SessionTrigger(SessionIdentity(SessionSource.CLAUDE, "worker")),
+        completed_focus = completed_focus.model_copy(update={"activity": "idle"})
+        completed_focus = completed_focus.model_copy(
+            update={
+                "trigger": SessionTrigger(
+                    session_id=SessionIdentity(
+                        source=SessionSource.CLAUDE, native_id="worker"
+                    )
+                )
+            }
         )
         cases.append(
             (
@@ -398,17 +402,23 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
         snapshot = self.snapshot()
-        snapshot = replace(snapshot, activity="idle")
-        snapshot = replace(
-            snapshot,
-            trigger=SessionTrigger(SessionIdentity(SessionSource.CLAUDE, "worker")),
+        snapshot = snapshot.model_copy(update={"activity": "idle"})
+        snapshot = snapshot.model_copy(
+            update={
+                "trigger": SessionTrigger(
+                    session_id=SessionIdentity(
+                        source=SessionSource.CLAUDE, native_id="worker"
+                    )
+                )
+            }
         )
-        snapshot = replace(
-            snapshot,
-            sessions=(
-                replace(snapshot.sessions[0], turn_active=False),
-                *snapshot.sessions[1:],
-            ),
+        snapshot = snapshot.model_copy(
+            update={
+                "sessions": (
+                    snapshot.sessions[0].model_copy(update={"turn_active": False}),
+                    *snapshot.sessions[1:],
+                )
+            }
         )
         self.config.prompt_target_bytes = 1
         self.config.persona += " Curious and patient." * 145
@@ -447,9 +457,14 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.clock.advance(30)
         self.handle({"source": "codex", "session": "parallel-2", "event": "waiting"})
         snapshot = self.snapshot()
-        snapshot = replace(
-            snapshot,
-            trigger=SessionTrigger(SessionIdentity(SessionSource.CLAUDE, "worker")),
+        snapshot = snapshot.model_copy(
+            update={
+                "trigger": SessionTrigger(
+                    session_id=SessionIdentity(
+                        source=SessionSource.CLAUDE, native_id="worker"
+                    )
+                )
+            }
         )
         self.responses.append(
             (
@@ -515,7 +530,9 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         for care, direction in directions.items():
             with self.subTest(care=care):
                 snapshot = self.snapshot()
-                snapshot = replace(snapshot, trigger=CareTrigger(care))
+                snapshot = snapshot.model_copy(
+                    update={"trigger": CareTrigger(care=care)}
+                )
                 self.responses.append(({"speak": "A little stretch."}, "end_turn"))
                 await self.generate_for_context(snapshot, SpeechReason.CARE)
                 body = self.requests[-1][1]
@@ -652,9 +669,14 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 )
         self.clock.now += 120
         snapshot = self.snapshot()
-        snapshot = replace(
-            snapshot,
-            trigger=SessionTrigger(SessionIdentity(SessionSource.CODEX, "worker-7")),
+        snapshot = snapshot.model_copy(
+            update={
+                "trigger": SessionTrigger(
+                    session_id=SessionIdentity(
+                        source=SessionSource.CODEX, native_id="worker-7"
+                    )
+                )
+            }
         )
         self.responses.append(({"speak": "The checks are still running."}, "end_turn"))
         await self.generate_for_context(snapshot, SpeechReason.CHECK_IN)
@@ -715,9 +737,14 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             )
             self.cognition.memory.record_speech("猫" * 480, SpeechReason.ROUTINE)
         snapshot = self.snapshot()
-        snapshot = replace(
-            snapshot,
-            trigger=SessionTrigger(SessionIdentity(SessionSource.CODEX, "worker-7")),
+        snapshot = snapshot.model_copy(
+            update={
+                "trigger": SessionTrigger(
+                    session_id=SessionIdentity(
+                        source=SessionSource.CODEX, native_id="worker-7"
+                    )
+                )
+            }
         )
         await self.generate_for_context(snapshot, SpeechReason.FAILURE)
         body = self.requests[-1][1]
@@ -756,9 +783,14 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         snapshot = self.snapshot()
-        snapshot = replace(
-            snapshot,
-            trigger=SessionTrigger(SessionIdentity(SessionSource.CLAUDE, "worker")),
+        snapshot = snapshot.model_copy(
+            update={
+                "trigger": SessionTrigger(
+                    session_id=SessionIdentity(
+                        source=SessionSource.CLAUDE, native_id="worker"
+                    )
+                )
+            }
         )
         await self.generate_for_context(snapshot, SpeechReason.FAILURE)
         payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
@@ -857,7 +889,9 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         for reason in (SpeechReason.CLICK, SpeechReason.CARE):
             with self.subTest(reason=reason):
                 snapshot = self.snapshot()
-                snapshot = replace(snapshot, trigger=CareTrigger(CareKind.EXERCISE))
+                snapshot = snapshot.model_copy(
+                    update={"trigger": CareTrigger(care=CareKind.EXERCISE)}
+                )
                 self.responses.append(({"speak": "A little stretch."}, "end_turn"))
                 await self.generate_for_context(snapshot, reason)
                 payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
@@ -884,9 +918,14 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 "progress": "Checks passed.",
             }
         )
-        snapshot = replace(
-            self.snapshot(),
-            trigger=SessionTrigger(SessionIdentity(SessionSource.CODEX, "late")),
+        snapshot = self.snapshot().model_copy(
+            update={
+                "trigger": SessionTrigger(
+                    session_id=SessionIdentity(
+                        source=SessionSource.CODEX, native_id="late"
+                    )
+                )
+            }
         )
         await self.generate_for_context(snapshot, SpeechReason.COMPLETION)
         payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
@@ -900,7 +939,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         await self.generate_commentary()
         self.assertEqual(self.call_kinds, ["story", "commentary"])
         narrative = self.memory.load_narrative(
-            SessionIdentity(SessionSource.CLAUDE, "worker")
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="worker")
         )
         self.assertIsNotNone(narrative)
         payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
@@ -913,15 +952,17 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cached_story_refreshes_when_the_current_source_changes(self) -> None:
         await self.generate_commentary()
-        subject = SessionIdentity(SessionSource.CLAUDE, "worker")
+        subject = SessionIdentity(source=SessionSource.CLAUDE, native_id="worker")
         original = self.memory.load_narrative(subject)
         assert original is not None
         self.memory.save_narrative(
-            replace(
-                original,
-                intent=NarrativeStatement(
-                    "A child confirmed that step is done.", ("old-request-source",)
-                ),
+            original.model_copy(
+                update={
+                    "intent": NarrativeStatement(
+                        text="A child confirmed that step is done.",
+                        sources=("old-request-source",),
+                    )
+                }
             )
         )
         await self.generate_commentary()
@@ -965,7 +1006,9 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 self.snapshot(), SpeechReason.ROUTINE, refresh=self.snapshot
             )
         self.assertIsNone(
-            self.memory.load_narrative(SessionIdentity(SessionSource.CLAUDE, "worker"))
+            self.memory.load_narrative(
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="worker")
+            )
         )
         self.assertEqual(self.requests, [])
 

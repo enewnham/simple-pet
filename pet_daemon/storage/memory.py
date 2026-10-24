@@ -3,9 +3,9 @@ import sqlite3
 import time
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import AbstractContextManager
-from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TypedDict
+
+from pydantic import BaseModel
 
 from ..domain import DeliveryStatus, SpeechReason
 from ..identity import SessionIdentity
@@ -20,13 +20,12 @@ from ..runtime import SwarmActivity
 from ..work import WorkIngestion
 from ..work.history import HistoryDetails, RecallQuery, SessionEntry
 from ..work.models import IntentEvidence, SessionReport
-from ..work.narrative import NarrativeStatement, WorkNarrative
+from ..work.narrative import WorkNarrative
 from ..work.observations import (
     RepositoryObservation,
     RepositoryTarget,
     SessionObservation,
 )
-from ..work.serialization import report_from_data
 from ..work.views import WorkSubject, collection_targets, connected_work
 from .identities import (
     optional_session_from_row,
@@ -42,15 +41,13 @@ from .work import SQLiteWorkRepository
 log = get_logger("pet-daemon")
 
 
-@dataclass(frozen=True)
-class HistoryRecord:
+class HistoryRecord(BaseModel):
     last_selected: float = 0
     considered_subject_revision: str | None = None
     considered_session_revision: str | None = None
 
 
-@dataclass(frozen=True)
-class EventRecord:
+class EventRecord(BaseModel):
     id: int
     session: SessionIdentity
     working_directory: str
@@ -61,16 +58,14 @@ class EventRecord:
     timestamp: float
 
 
-@dataclass(frozen=True)
-class ProjectRecord:
+class ProjectRecord(BaseModel):
     repo: str
     goal: str
     last_request: str
     timestamp: float
 
 
-@dataclass(frozen=True)
-class ContextRecord:
+class ContextRecord(BaseModel):
     initial_request: str
     summary: str
     recent_requests: list[str]
@@ -78,8 +73,7 @@ class ContextRecord:
     first_summary_attempted: bool
 
 
-@dataclass(frozen=True)
-class MessageOutcome:
+class MessageOutcome(BaseModel):
     message_id: str
     outcome: DeliveryStatus
     text: str
@@ -89,16 +83,10 @@ class MessageOutcome:
     timestamp: float
 
 
-@dataclass(frozen=True)
-class SpeechRecord:
+class SpeechRecord(BaseModel):
     text: str
     reason: SpeechReason
     timestamp: float
-
-
-class StoredStatement(TypedDict):
-    text: str
-    sources: list[str]
 
 
 class Memory:
@@ -145,11 +133,7 @@ class Memory:
             (self.pet,),
         ).fetchall()
         return {
-            session_from_row(row, "subject_"): HistoryRecord(
-                last_selected=row["last_selected"],
-                considered_subject_revision=row["considered_subject_revision"],
-                considered_session_revision=row["considered_session_revision"],
-            )
+            session_from_row(row, "subject_"): HistoryRecord.model_validate(dict(row))
             for row in rows
         }
 
@@ -160,19 +144,7 @@ class Memory:
         ).fetchone()
         if row is None:
             return None
-        data = json.loads(row["data"])
-
-        def statement(value: StoredStatement) -> NarrativeStatement:
-            return NarrativeStatement(value["text"], tuple(value["sources"]))
-
-        return WorkNarrative(
-            subject_id,
-            data["revision"],
-            statement(data["intent"]),
-            tuple(statement(value) for value in data["decisions"]),
-            tuple(statement(value) for value in data["progress"]),
-            data["sources"],
-        )
+        return WorkNarrative.model_validate_json(row["data"])
 
     def save_narrative(self, narrative: WorkNarrative) -> None:
         with self.transaction():
@@ -183,7 +155,7 @@ class Memory:
                 (
                     self.pet,
                     *session_values(narrative.subject_id),
-                    json.dumps(asdict(narrative), ensure_ascii=False),
+                    narrative.model_dump_json(),
                     self.clock(),
                 ),
             )
@@ -203,7 +175,7 @@ class Memory:
             f"SELECT data FROM work_reports WHERE pet=? AND (source,session) IN ({placeholders}) ORDER BY observed_at,id",
             (self.pet, *values),
         )
-        return tuple(report_from_data(json.loads(row["data"])) for row in rows)
+        return tuple(SessionReport.model_validate_json(row["data"]) for row in rows)
 
     def save_attention_history(
         self, subject_id: SessionIdentity, history: HistoryRecord
@@ -302,19 +274,11 @@ class Memory:
             "SELECT message_id,outcome,text,reason,subject_source,subject_session,revision,timestamp FROM message_outcomes WHERE pet=? AND message_id=?",
             (self.pet, message_id),
         ).fetchone()
-        return (
-            MessageOutcome(
-                message_id=row["message_id"],
-                outcome=DeliveryStatus(row["outcome"]),
-                text=row["text"],
-                reason=SpeechReason(row["reason"]),
-                subject_id=optional_session_from_row(row, "subject_"),
-                revision=row["revision"],
-                timestamp=row["timestamp"],
-            )
-            if row
-            else None
-        )
+        if row is None:
+            return None
+        data = dict(row)
+        data["subject_id"] = optional_session_from_row(row, "subject_")
+        return MessageOutcome.model_validate(data)
 
     def prune(self) -> None:
         now = self.clock()
@@ -358,7 +322,7 @@ class Memory:
     def record_event(self, record: SessionEntry | None) -> int | None:
         if record is None:
             return None
-        details = json.dumps(asdict(record.details), ensure_ascii=False)
+        details = record.details.model_dump_json()
         if record.event_type in {"progress", "waiting", "session_start"}:
             previous = self.db.execute(
                 "SELECT event_type,details FROM events WHERE pet=? AND source=? AND session=? AND working_directory=? ORDER BY id DESC LIMIT 1",
@@ -446,20 +410,20 @@ class Memory:
             (*values, limit),
         ).fetchall()
         return [
-            EventRecord(
-                id=row["id"],
-                session=session_from_row(row),
-                working_directory=row["working_directory"],
-                repository=repository_from_columns(
-                    row["repository_kind"], row["repository_value"]
-                ),
-                event_type=row["event_type"],
-                details=HistoryDetails.from_data(json.loads(row["details"])),
-                goal=row["goal"],
-                timestamp=row["timestamp"],
-            )
-            for row in sorted(rows, key=lambda row: row["id"])
+            self._event_record(row) for row in sorted(rows, key=lambda row: row["id"])
         ]
+
+    @staticmethod
+    def _event_record(row: sqlite3.Row) -> EventRecord:
+        data = dict(row)
+        data.update(
+            session=session_from_row(row),
+            repository=repository_from_columns(
+                row["repository_kind"], row["repository_value"]
+            ),
+            details=HistoryDetails.model_validate_json(row["details"]),
+        )
+        return EventRecord.model_validate(data)
 
     def recall(self, request: RecallQuery | None, limit: int = 2) -> list[EventRecord]:
         if request is None:
@@ -480,21 +444,7 @@ class Memory:
                 limit,
             ),
         ).fetchall()
-        return [
-            EventRecord(
-                id=row["id"],
-                session=session_from_row(row),
-                working_directory=row["working_directory"],
-                repository=repository_from_columns(
-                    row["repository_kind"], row["repository_value"]
-                ),
-                event_type=row["event_type"],
-                details=HistoryDetails.from_data(json.loads(row["details"])),
-                goal=row["goal"],
-                timestamp=row["timestamp"],
-            )
-            for row in rows
-        ]
+        return [self._event_record(row) for row in rows]
 
     def projects(self, repos: Iterable[str]) -> list[ProjectRecord]:
         result = []
@@ -504,30 +454,19 @@ class Memory:
                 (self.pet, repo),
             ).fetchone()
             if row:
-                result.append(
-                    ProjectRecord(
-                        repo=row["repo"],
-                        goal=row["goal"],
-                        last_request=row["last_request"],
-                        timestamp=row["timestamp"],
-                    )
-                )
+                result.append(ProjectRecord.model_validate(dict(row)))
         return result
 
     def context(self, session: SessionIdentity) -> ContextRecord | None:
         row = self.db.execute(
-            "SELECT first_prompt,session_context,recent_requests,request_count,first_summary_attempted FROM contexts WHERE pet=? AND source=? AND session=?",
+            "SELECT first_prompt AS initial_request,session_context AS summary,recent_requests,request_count,first_summary_attempted FROM contexts WHERE pet=? AND source=? AND session=?",
             (self.pet, *session_values(session)),
         ).fetchone()
         if row is None:
             return None
-        return ContextRecord(
-            initial_request=row["first_prompt"],
-            summary=row["session_context"],
-            recent_requests=json.loads(row["recent_requests"]),
-            request_count=row["request_count"],
-            first_summary_attempted=bool(row["first_summary_attempted"]),
-        )
+        data = dict(row)
+        data["recent_requests"] = json.loads(row["recent_requests"])
+        return ContextRecord.model_validate(data)
 
     def observe_session_context(self, observation: SessionObservation) -> None:
         stored = self.context(observation.session)
@@ -622,14 +561,7 @@ class Memory:
             "SELECT text,reason,timestamp FROM speech WHERE pet=? AND timestamp > ? ORDER BY id DESC LIMIT ?",
             (self.pet, self.clock() - self.speech_history_seconds, limit),
         ).fetchall()
-        return [
-            SpeechRecord(
-                text=row["text"],
-                reason=SpeechReason(row["reason"]),
-                timestamp=row["timestamp"],
-            )
-            for row in reversed(rows)
-        ]
+        return [SpeechRecord.model_validate(dict(row)) for row in reversed(rows)]
 
     def clear_speech(self) -> None:
         with self.transaction():

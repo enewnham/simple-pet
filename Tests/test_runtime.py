@@ -3,13 +3,11 @@ import base64
 import json
 import os
 import random
-import runpy
 import socket
 import tempfile
 import time
 import unittest
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Unpack
 
@@ -17,6 +15,8 @@ import httpx
 from anthropic import AsyncAnthropic
 
 from pet_daemon.behavior.sprites import Pack
+from pet_daemon.cli.hook import update
+from pet_daemon.cli.notify import encode
 from pet_daemon.commentary.context import SITUATIONS, CommentaryPayload
 from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.config import Config
@@ -40,10 +40,6 @@ from Tests.fixtures import require, story_response
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII="
 )
-
-
-def set_config_value(config: Config, name: str, value: object) -> None:
-    setattr(config, name, value)
 
 
 def request_reason(body: ModelRequest) -> str:
@@ -331,17 +327,17 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.install_sentiment_clips()
         self.slow = True
         self.daemon.application.agent_activity.rng = random.Random(1)
-        root = Path(__file__).resolve().parents[1]
-        hook = runpy.run_path(str(root / "scripts" / "pet-hook"))
-        packet = hook["update"](
-            "claude",
-            "UserPromptSubmit",
-            {
-                "session_id": "frustrated",
-                "prompt": "This is terrible. Stop making this worse.",
-            },
+        packet = require(
+            update(
+                "claude",
+                "UserPromptSubmit",
+                {
+                    "session_id": "frustrated",
+                    "prompt": "This is terrible. Stop making this worse.",
+                },
+            )
         )
-        encoded = hook["CLIENT"]["encode"](packet.packet())
+        encoded = require(encode(packet.packet()))
         self.daemon.receive(encoded)
         reaction = await self.packet(
             lambda item: item.get("animation", {}).get("id") == "failed"
@@ -365,8 +361,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.daemon.receive(encoded)
         self.daemon.application.agent_activity.rng = random.Random(1)
-        packet = replace(packet, session="another")
-        self.daemon.receive(hook["CLIENT"]["encode"](packet.packet()))
+        packet = packet.model_copy(update={"session": "another"})
+        self.daemon.receive(require(encode(packet.packet())))
         self.assertFalse(
             any(
                 item.get("animation", {}).get("id") == "failed"
@@ -520,14 +516,14 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             "event": "intent",
             "goal": "This is terrible. Stop making this worse.",
         }
-        self.daemon.application.behavior.status = replace(
-            require(self.daemon.application.behavior.status), menu=True
-        )
+        self.daemon.application.behavior.status = require(
+            self.daemon.application.behavior.status
+        ).model_copy(update={"menu": True})
         self.daemon.application.agent_activity.rng = random.Random(1)
         self.daemon.receive(json.dumps(packet).encode())
-        self.daemon.application.behavior.status = replace(
-            require(self.daemon.application.behavior.status), menu=False
-        )
+        self.daemon.application.behavior.status = require(
+            self.daemon.application.behavior.status
+        ).model_copy(update={"menu": False})
         self.daemon.application.behavior.tick(
             self.daemon.application.agent_activity.activity(),
             self.daemon.application.sessions,
@@ -570,25 +566,30 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(memory.recent(), [])
         self.assertEqual(memory.speech(), [])
         self.assertEqual(memory.projects(["/repo/parser"]), [])
-        self.assertIsNone(memory.context(SessionIdentity(SessionSource.COMMAND, "one")))
+        self.assertIsNone(
+            memory.context(
+                SessionIdentity(source=SessionSource.COMMAND, native_id="one")
+            )
+        )
         self.assertIsNone(self.daemon.application.last_speech)
         self.assertFalse(any(packet.get("text") for packet in await self.drain()))
         self.slow = False
         self.event("intent", goal="Write documentation", repo="/repo/parser")
         await self.packet(lambda packet: packet.get("text") == self.speech)
         self.daemon.application.sessions.by_id[
-            SessionIdentity(SessionSource.COMMAND, "one")
+            SessionIdentity(source=SessionSource.COMMAND, native_id="one")
         ]
         self.assertEqual(
             require(
                 self.daemon.application.memory.context(
-                    SessionIdentity(SessionSource.COMMAND, "one")
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                 )
             ).initial_request,
             "Write documentation",
         )
         self.assertNotIn(
-            "Improve parser", json.dumps([asdict(record) for record in memory.recent()])
+            "Improve parser",
+            json.dumps([record.model_dump() for record in memory.recent()]),
         )
 
     async def test_clear_speech_preserves_work_and_forgets_previous_remarks(
@@ -603,13 +604,17 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: bool(
                 self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.COMMAND, "one")
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                 ].calls
             )
         )
         memory = self.daemon.application.memory
         sessions = self.daemon.application.sessions
-        context = require(memory.context(SessionIdentity(SessionSource.COMMAND, "one")))
+        context = require(
+            memory.context(
+                SessionIdentity(source=SessionSource.COMMAND, native_id="one")
+            )
+        )
         events = memory.recent()
         targets = memory.collection_targets()
         last_attempt = self.daemon.application.attention.last_attempt
@@ -622,10 +627,15 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.daemon.application.sessions, sessions)
         self.assertIn(
             "checks",
-            sessions.by_id[SessionIdentity(SessionSource.COMMAND, "one")].calls,
+            sessions.by_id[
+                SessionIdentity(source=SessionSource.COMMAND, native_id="one")
+            ].calls,
         )
         self.assertEqual(
-            memory.context(SessionIdentity(SessionSource.COMMAND, "one")), context
+            memory.context(
+                SessionIdentity(source=SessionSource.COMMAND, native_id="one")
+            ),
+            context,
         )
         self.assertEqual(memory.recent(), events)
         self.assertEqual(memory.collection_targets(), targets)
@@ -658,7 +668,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             require(
                 self.daemon.application.memory.context(
-                    SessionIdentity(SessionSource.COMMAND, "one")
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                 )
             ).initial_request,
             "Improve parser",
@@ -803,7 +813,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: (
                 self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.COMMAND, "one")
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                 ].presence
                 == "exited"
             ),
@@ -813,7 +823,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.comment(SpeechReason.ROUTINE)
         self.assertEqual(self.requests, [])
         session = self.daemon.application.sessions.by_id[
-            SessionIdentity(SessionSource.COMMAND, "one")
+            SessionIdentity(source=SessionSource.COMMAND, native_id="one")
         ]
         self.assertEqual(session.presence, "exited")
         self.assertFalse(session.active)
@@ -870,7 +880,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         task = asyncio.create_task(
             self.comment(
                 SpeechReason.ROUTINE,
-                trigger=SessionTrigger(SessionIdentity(SessionSource.COMMAND, "focus")),
+                trigger=SessionTrigger(
+                    session_id=SessionIdentity(
+                        source=SessionSource.COMMAND, native_id="focus"
+                    )
+                ),
             )
         )
         self.addCleanup(task.cancel)
@@ -880,7 +894,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             lambda: (
                 require(
                     self.daemon.application.memory.context(
-                        SessionIdentity(SessionSource.COMMAND, "other")
+                        SessionIdentity(source=SessionSource.COMMAND, native_id="other")
                     )
                 ).request_count
                 == 2
@@ -925,7 +939,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.event("intent", session="focus", goal="Review parser behavior")
         await self.wait_for(
             lambda: (
-                SessionIdentity(SessionSource.COMMAND, "focus")
+                SessionIdentity(source=SessionSource.COMMAND, native_id="focus")
                 in self.daemon.application.sessions.by_id
             )
         )
@@ -933,7 +947,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         task = asyncio.create_task(
             self.comment(
                 SpeechReason.ROUTINE,
-                trigger=SessionTrigger(SessionIdentity(SessionSource.COMMAND, "focus")),
+                trigger=SessionTrigger(
+                    session_id=SessionIdentity(
+                        source=SessionSource.COMMAND, native_id="focus"
+                    )
+                ),
             )
         )
         self.addCleanup(task.cancel)
@@ -1120,7 +1138,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.speech_by_reason["care"] = care_speech
         self.slow = True
         task = asyncio.create_task(
-            self.comment(SpeechReason.CARE, trigger=CareTrigger(CareKind.CONSTERNATION))
+            self.comment(
+                SpeechReason.CARE, trigger=CareTrigger(care=CareKind.CONSTERNATION)
+            )
         )
         self.addCleanup(task.cancel)
         await asyncio.wait_for(self.entered.wait(), 10)
@@ -1148,7 +1168,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: (
                 not self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.COMMAND, "one")
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                 ].calls
             )
         )
@@ -1157,7 +1177,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: (
                 not self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.CURSOR, "two")
+                    SessionIdentity(source=SessionSource.CURSOR, native_id="two")
                 ].calls
             )
         )
@@ -1232,7 +1252,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             lambda: (
                 "tests"
                 in self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.COMMAND, "one")
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                 ].calls
             )
         )
@@ -1243,7 +1263,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             lambda: (
                 "retry"
                 in self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.COMMAND, "one")
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                 ].calls
             )
         )
@@ -1256,7 +1276,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             lambda: (
                 "cancelled"
                 in self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.COMMAND, "one")
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                 ].calls
             )
         )
@@ -1264,7 +1284,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: (
                 not self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.COMMAND, "one")
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                 ].calls
             )
         )
@@ -1416,7 +1436,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: (
                 self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.COMMAND, "one")
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                 ].waiting
             )
         )
@@ -1449,7 +1469,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: (
                 self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.COMMAND, "one")
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                 ].progress
                 == "Still choosing a target"
             )
@@ -1466,7 +1486,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: (
                 self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.COMMAND, "one")
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                 ].waiting_call
                 == "second"
             )
@@ -1494,13 +1514,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: (
                 not self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.COMMAND, "one")
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                 ].calls
             )
         )
         self.assertFalse(
             self.daemon.application.sessions.by_id[
-                SessionIdentity(SessionSource.COMMAND, "one")
+                SessionIdentity(source=SessionSource.COMMAND, native_id="one")
             ].waiting
         )
         self.release.set()
@@ -1512,8 +1532,6 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_native_permission_wait_without_call_id_ends_when_the_tool_completes(
         self,
     ) -> None:
-        root = Path(__file__).resolve().parents[1]
-        hook = runpy.run_path(str(root / "scripts" / "pet-hook"))
         base = {
             "session_id": "native",
             "tool_name": "Bash",
@@ -1523,24 +1541,26 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             ("PreToolUse", {"tool_use_id": "tests"}),
             ("PermissionRequest", {}),
         ):
-            packet = hook["update"]("claude", name, {**base, **fields})
-            self.daemon.receive(hook["CLIENT"]["encode"](packet.packet()))
+            packet = require(update("claude", name, {**base, **fields}))
+            self.daemon.receive(require(encode(packet.packet())))
         self.assertIsNone(packet.call)
         self.assertTrue(
             self.daemon.application.sessions.by_id[
-                SessionIdentity(SessionSource.CLAUDE, "native")
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="native")
             ].waiting
         )
         snapshot = self.daemon.application.sessions.activity_view().sessions[0]
         self.assertFalse(snapshot.waiting_for_input)
         self.assertIsNotNone(snapshot.waiting_seconds)
         self.assertEqual(self.requests, [])
-        packet = hook["update"](
-            "claude",
-            "PostToolUse",
-            {**base, "tool_use_id": "tests", "tool_response": {"exit_code": 0}},
+        packet = require(
+            update(
+                "claude",
+                "PostToolUse",
+                {**base, "tool_use_id": "tests", "tool_response": {"exit_code": 0}},
+            )
         )
-        self.daemon.receive(hook["CLIENT"]["encode"](packet.packet()))
+        self.daemon.receive(require(encode(packet.packet())))
         snapshot = self.daemon.application.sessions.activity_view().sessions[0]
         self.assertFalse(snapshot.waiting_for_input)
         self.assertIsNone(snapshot.waiting_seconds)
@@ -1581,7 +1601,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             "Superseded acknowledgment.",
             json.dumps(
                 [
-                    asdict(record)
+                    record.model_dump()
                     for record in self.daemon.application.cognition.memory.speech()
                 ]
             ),
@@ -1596,7 +1616,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             "Repair the parser",
             json.dumps(
                 [
-                    asdict(record)
+                    record.model_dump()
                     for record in self.daemon.application.cognition.memory.recent()
                 ]
             ),
@@ -1610,7 +1630,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.speech,
             json.dumps(
                 [
-                    asdict(record)
+                    record.model_dump()
                     for record in self.daemon.application.cognition.memory.speech()
                 ]
             ),
@@ -1667,7 +1687,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.story_requests), 1)
         narrative = require(
             self.daemon.application.memory.load_narrative(
-                SessionIdentity(SessionSource.COMMAND, "one")
+                SessionIdentity(source=SessionSource.COMMAND, native_id="one")
             )
         )
         self.assertEqual(narrative.intent.text, "Refactor the parser")
@@ -1683,7 +1703,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             require(
                 self.daemon.application.memory.load_narrative(
-                    SessionIdentity(SessionSource.COMMAND, "one")
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                 )
             ).intent.text,
             "Investigate the parser timeout",
@@ -1696,7 +1716,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.packet(lambda packet: "text" in packet)
         await self.wait_for(lambda: self.daemon.application.task is None)
         previous = self.daemon.application.memory.load_narrative(
-            SessionIdentity(SessionSource.COMMAND, "one")
+            SessionIdentity(source=SessionSource.COMMAND, native_id="one")
         )
         self.story_status = 500
         self.event("intent", goal="Validate parser behavior")
@@ -1707,7 +1727,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             self.daemon.application.memory.load_narrative(
-                SessionIdentity(SessionSource.COMMAND, "one")
+                SessionIdentity(source=SessionSource.COMMAND, native_id="one")
             ),
             previous,
         )
@@ -1729,7 +1749,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             require(
                 self.daemon.application.memory.load_narrative(
-                    SessionIdentity(SessionSource.COMMAND, "one")
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                 )
             ).intent.text,
             "Refactor the parser",
@@ -1752,7 +1772,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "Keep the parser API unchanged"
                 in require(
                     self.daemon.application.memory.context(
-                        SessionIdentity(SessionSource.COMMAND, "one")
+                        SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                     )
                 ).recent_requests
             )
@@ -1762,7 +1782,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(lambda: self.daemon.application.task is None)
         narrative = require(
             self.daemon.application.memory.load_narrative(
-                SessionIdentity(SessionSource.COMMAND, "one")
+                SessionIdentity(source=SessionSource.COMMAND, native_id="one")
             )
         )
         self.assertEqual(narrative.intent.text, "Keep the parser API unchanged")
@@ -1779,13 +1799,17 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         memory = self.daemon.application.memory
         self.assertEqual(
             require(
-                memory.load_narrative(SessionIdentity(SessionSource.COMMAND, "parser"))
+                memory.load_narrative(
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="parser")
+                )
             ).intent.text,
             "Refactor the parser",
         )
         self.assertEqual(
             require(
-                memory.load_narrative(SessionIdentity(SessionSource.COMMAND, "hooks"))
+                memory.load_narrative(
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="hooks")
+                )
             ).intent.text,
             "Review Python hooks",
         )
@@ -1821,14 +1845,14 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.event("tool_start", call="checks", tool="pytest")
         await self.wait_for(lambda: self.daemon.application.sessions.working)
         saved = self.daemon.application.memory.load_narrative(
-            SessionIdentity(SessionSource.COMMAND, "one")
+            SessionIdentity(source=SessionSource.COMMAND, native_id="one")
         )
         await self.daemon.close()
         self.daemon = Daemon(self.config, self.client, rng=random.Random(7))
         self.assertFalse(self.daemon.application.sessions.active)
         self.assertEqual(
             self.daemon.application.memory.load_narrative(
-                SessionIdentity(SessionSource.COMMAND, "one")
+                SessionIdentity(source=SessionSource.COMMAND, native_id="one")
             ),
             saved,
         )
@@ -1839,13 +1863,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.packet(lambda packet: "text" in packet)
         self.assertFalse(
             self.daemon.application.sessions.by_id[
-                SessionIdentity(SessionSource.COMMAND, "one")
+                SessionIdentity(source=SessionSource.COMMAND, native_id="one")
             ].calls
         )
         self.assertEqual(
             require(
                 self.daemon.application.memory.load_narrative(
-                    SessionIdentity(SessionSource.COMMAND, "one")
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                 )
             ).intent.text,
             "Continue parser validation",
@@ -1871,7 +1895,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: (
                 self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.COMMAND, "one")
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                 ].progress
                 == "Parser checks passed"
             )
@@ -1888,11 +1912,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.event("tool_start", call=f"check-{index}", tool="pytest")
             await self.wait_for(
                 lambda index=index: (
-                    SessionIdentity(SessionSource.COMMAND, "one")
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                     in self.daemon.application.sessions.by_id
                     and f"check-{index}"
                     in self.daemon.application.sessions.by_id[
-                        SessionIdentity(SessionSource.COMMAND, "one")
+                        SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                     ].calls
                 )
             )
@@ -1906,12 +1930,14 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             await self.wait_for(
                 lambda index=index: (
                     self.daemon.application.sessions.by_id[
-                        SessionIdentity(SessionSource.COMMAND, "one")
+                        SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                     ].failure
                     is not None
                     and require(
                         self.daemon.application.sessions.by_id[
-                            SessionIdentity(SessionSource.COMMAND, "one")
+                            SessionIdentity(
+                                source=SessionSource.COMMAND, native_id="one"
+                            )
                         ].failure
                     ).count
                     == index + 1
@@ -1928,7 +1954,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             require(
                 self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.COMMAND, "one")
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                 ].failure
             ).count,
             5,
@@ -1942,11 +1968,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.event("tool_start", session=session, call="checks", tool="pytest")
             await self.wait_for(
                 lambda session=session: (
-                    SessionIdentity(SessionSource.COMMAND, session)
+                    SessionIdentity(source=SessionSource.COMMAND, native_id=session)
                     in self.daemon.application.sessions.by_id
                     and "checks"
                     in self.daemon.application.sessions.by_id[
-                        SessionIdentity(SessionSource.COMMAND, session)
+                        SessionIdentity(source=SessionSource.COMMAND, native_id=session)
                     ].calls
                 )
             )
@@ -1958,7 +1984,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                     lambda call=call, session=session: (
                         call
                         in self.daemon.application.sessions.by_id[
-                            SessionIdentity(SessionSource.COMMAND, session)
+                            SessionIdentity(
+                                source=SessionSource.COMMAND, native_id=session
+                            )
                         ].calls
                     )
                 )
@@ -1967,7 +1995,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                     lambda index=index, session=session: (
                         require(
                             self.daemon.application.sessions.by_id[
-                                SessionIdentity(SessionSource.COMMAND, session)
+                                SessionIdentity(
+                                    source=SessionSource.COMMAND, native_id=session
+                                )
                             ].failure
                         ).count
                         == index + 2
@@ -1980,7 +2010,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                         self.daemon.application.attention.pending[2], ReactionTrigger
                     )
                     and self.daemon.application.attention.pending[2].reaction.session
-                    == SessionIdentity(SessionSource.COMMAND, session)
+                    == SessionIdentity(source=SessionSource.COMMAND, native_id=session)
                 )
             )
         self.event("tool_start", session="two", call="retry", tool="pytest")
@@ -1988,7 +2018,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             lambda: (
                 "retry"
                 in self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.COMMAND, "two")
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="two")
                 ].calls
             )
         )
@@ -1997,7 +2027,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             lambda: (
                 require(
                     self.daemon.application.sessions.by_id[
-                        SessionIdentity(SessionSource.COMMAND, "two")
+                        SessionIdentity(source=SessionSource.COMMAND, native_id="two")
                     ].failure
                 ).resolved
             )
@@ -2024,7 +2054,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.wait_for(
             lambda: (
-                SessionIdentity(SessionSource.CLAUDE, "child")
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="child")
                 in self.daemon.application.sessions.by_id
             )
         )
@@ -2040,7 +2070,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             lambda: (
                 "check"
                 in self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.CLAUDE, "child")
+                    SessionIdentity(source=SessionSource.CLAUDE, native_id="child")
                 ].calls
             )
         )
@@ -2056,7 +2086,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: (
                 self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.CLAUDE, "child")
+                    SessionIdentity(source=SessionSource.CLAUDE, native_id="child")
                 ].failure
                 is not None
             )
@@ -2065,7 +2095,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: (
                 self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.CLAUDE, "child")
+                    SessionIdentity(source=SessionSource.CLAUDE, native_id="child")
                 ].finished
             )
         )
@@ -2078,7 +2108,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(failures), 1)
         self.assertEqual(
-            failures[0].session, SessionIdentity(SessionSource.CLAUDE, "child")
+            failures[0].session,
+            SessionIdentity(source=SessionSource.CLAUDE, native_id="child"),
         )
         self.assertEqual(failures[0].working_directory, "/repo/parser")
 
@@ -2102,13 +2133,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("SECRET", json.dumps(body))
         self.assertNotIn(
             "SECRET",
-            json.dumps(asdict(self.daemon.application.sessions.activity_view())),
+            json.dumps(self.daemon.application.sessions.activity_view().model_dump()),
         )
         self.assertNotIn(
             "SECRET",
             json.dumps(
                 [
-                    asdict(record)
+                    record.model_dump()
                     for record in self.daemon.application.cognition.memory.recent()
                 ]
             ),
@@ -2160,7 +2191,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             lambda: (
                 "lint"
                 in self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.CODEX, "one")
+                    SessionIdentity(source=SessionSource.CODEX, native_id="one")
                 ].calls
             )
         )
@@ -2189,7 +2220,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: (
                 self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.CURSOR, "two")
+                    SessionIdentity(source=SessionSource.CURSOR, native_id="two")
                 ].progress
                 == "Build progressing"
             )
@@ -2204,13 +2235,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["current_moment"]["tool"], "pytest")
         self.assertIsNotNone(
             self.daemon.application.sessions.by_id[
-                SessionIdentity(SessionSource.CODEX, "one")
+                SessionIdentity(source=SessionSource.CODEX, native_id="one")
             ].last_check_in
         )
         self.assertNotIn("other_sessions", snapshot)
         self.assertTrue(
             self.daemon.application.sessions.by_id[
-                SessionIdentity(SessionSource.CURSOR, "two")
+                SessionIdentity(source=SessionSource.CURSOR, native_id="two")
             ].active
         )
         self.assertEqual(snapshot["current_moment"]["elapsed"], "5 minutes")
@@ -2266,7 +2297,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: (
                 not self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.CLAUDE, "one")
+                    SessionIdentity(source=SessionSource.CLAUDE, native_id="one")
                 ].waiting
             )
         )
@@ -2301,7 +2332,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: (
                 self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.CURSOR, "two")
+                    SessionIdentity(source=SessionSource.CURSOR, native_id="two")
                 ].progress
                 == "Building modules"
             )
@@ -2335,7 +2366,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: (
                 not self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.CLAUDE, "one")
+                    SessionIdentity(source=SessionSource.CLAUDE, native_id="one")
                 ].waiting
             )
         )
@@ -2350,7 +2381,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: (
                 self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.CLAUDE, "one")
+                    SessionIdentity(source=SessionSource.CLAUDE, native_id="one")
                 ].waiting
             )
         )
@@ -2382,7 +2413,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: (
                 not self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.CODEX, "one")
+                    SessionIdentity(source=SessionSource.CODEX, native_id="one")
                 ].calls
             )
         )
@@ -2406,7 +2437,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             lambda: (
                 "lint"
                 in self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.CODEX, "one")
+                    SessionIdentity(source=SessionSource.CODEX, native_id="one")
                 ].calls
             )
         )
@@ -2448,7 +2479,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         def failed_three_times() -> bool:
             session = self.daemon.application.sessions.by_id.get(
-                SessionIdentity(SessionSource.COMMAND, "one")
+                SessionIdentity(source=SessionSource.COMMAND, native_id="one")
             )
             return (
                 session is not None
@@ -2468,7 +2499,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             lambda: (
                 require(
                     self.daemon.application.sessions.by_id[
-                        SessionIdentity(SessionSource.COMMAND, "one")
+                        SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                     ].failure
                 ).count
                 == 1
@@ -2491,7 +2522,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         def recovered() -> bool:
             session = self.daemon.application.sessions.by_id.get(
-                SessionIdentity(SessionSource.COMMAND, "one")
+                SessionIdentity(source=SessionSource.COMMAND, native_id="one")
             )
             return (
                 session is not None
@@ -2510,11 +2541,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(
             lambda: (
                 self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.COMMAND, "one")
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                 ].last_tool
                 == "pytest"
                 and not self.daemon.application.sessions.by_id[
-                    SessionIdentity(SessionSource.COMMAND, "one")
+                    SessionIdentity(source=SessionSource.COMMAND, native_id="one")
                 ].calls
             )
         )
@@ -2642,11 +2673,13 @@ class ConfigurationTests(unittest.TestCase):
             ("walk_speed", [20, 40]),
             ("pointer_radius", [50, 100]),
         ):
-            with self.subTest(name=name, value=value):
-                config = Config(pet_dir=Path("fixture"))
-                setattr(config.behavior, name, value)
-                with self.assertRaisesRegex(ValueError, f"behavior.{name}"):
-                    config.validate()
+            with (
+                self.subTest(name=name, value=value),
+                self.assertRaisesRegex(ValueError, f"behavior.{name}"),
+            ):
+                Config.model_validate(
+                    {"pet_dir": Path("fixture"), "behavior": {name: value}}
+                )
 
     def test_speech_history_window_rejects_nonpositive_or_nonfinite_values(
         self,
@@ -2656,9 +2689,9 @@ class ConfigurationTests(unittest.TestCase):
                 self.subTest(value=value),
                 self.assertRaisesRegex(ValueError, "speech_history_seconds"),
             ):
-                config = Config(pet_dir=Path("fixture"))
-                set_config_value(config, "speech_history_seconds", value)
-                config.validate()
+                Config.model_validate(
+                    {"pet_dir": Path("fixture"), "speech_history_seconds": value}
+                )
 
     def test_loads_startup_paths_relative_to_config_and_configurable_timing(
         self,
@@ -2705,16 +2738,14 @@ class ConfigurationTests(unittest.TestCase):
                 self.subTest(seconds=seconds),
                 self.assertRaisesRegex(ValueError, "idle_message_seconds"),
             ):
-                config = Config(pet_dir=Path("fixture"))
-                set_config_value(config, "idle_message_seconds", seconds)
-                config.validate()
+                Config.model_validate(
+                    {"pet_dir": Path("fixture"), "idle_message_seconds": seconds}
+                )
 
     def test_rejects_empty_or_nontext_persona(self) -> None:
         for persona in ("", "   ", None, 3):
             with self.subTest(persona=persona), self.assertRaises(ValueError):
-                config = Config(pet_dir=Path("fixture"))
-                set_config_value(config, "persona", persona)
-                config.validate()
+                Config.model_validate({"pet_dir": Path("fixture"), "persona": persona})
 
     def test_rejects_invalid_memory_limits(self) -> None:
         for field in (
@@ -2727,18 +2758,12 @@ class ConfigurationTests(unittest.TestCase):
                     self.subTest(field=field, value=value),
                     self.assertRaises(ValueError),
                 ):
-                    config = Config(pet_dir=Path("fixture"))
-                    setattr(config, field, value)
-                    config.validate()
+                    Config.model_validate({"pet_dir": Path("fixture"), field: value})
 
     def test_rejects_invalid_intervals_and_shared_socket_before_startup(self) -> None:
-        for config in (
-            Config(pet_dir=Path("fixture"), observation_seconds=(90, 60)),
-            Config(
-                pet_dir=Path("fixture"),
-                daemon_socket="/tmp/same",
-                overlay_socket="/tmp/same",
-            ),
+        for fields in (
+            {"observation_seconds": (90, 60)},
+            {"daemon_socket": "/tmp/same", "overlay_socket": "/tmp/same"},
         ):
-            with self.subTest(config=config), self.assertRaises(ValueError):
-                config.validate()
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                Config.model_validate({"pet_dir": Path("fixture"), **fields})

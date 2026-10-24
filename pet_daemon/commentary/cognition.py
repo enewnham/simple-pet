@@ -1,9 +1,11 @@
 import json
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from typing import cast
 
+from anthropic import transform_schema
 from anthropic.types import TextBlockParam
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..attention import AttentionSelection
 from ..config import Config
@@ -14,7 +16,7 @@ from ..storage import Memory
 from ..work.narrative import WorkNarrative, semantic_revision
 from . import story
 from .context import PreparedCommentary, PromptBuilder
-from .contracts import JSONSchema, ModelRequest, TextSchema
+from .contracts import JSONSchema, ModelRequest
 from .model import ModelClient
 from .repetition import RepeatMatch, repeat_match
 
@@ -25,10 +27,28 @@ class StoryUnavailable(RuntimeError):
     pass
 
 
-@dataclass(frozen=True)
-class CommentaryResult:
+class CommentaryResult(BaseModel):
     speak: str | None
     prepared: PreparedCommentary
+
+
+class SpeechResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    speak: str | None = Field(
+        description="One brief spoken remark, or null for silence."
+    )
+
+
+class RequiredSpeechResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    speak: str = Field(description="One brief spoken remark.")
+
+    @field_validator("speak")
+    @classmethod
+    def nonblank_speech(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Requested commentary requires speech")
+        return value
 
 
 class Cognition:
@@ -47,22 +67,8 @@ class Cognition:
         self.prompts = PromptBuilder(config, lambda: self.clock())
 
     def schema(self, speech_required: bool = False) -> JSONSchema:
-        speech: TextSchema = (
-            {"type": "string"}
-            if speech_required
-            else {"anyOf": [{"type": "string"}, {"type": "null"}]}
-        )
-        speech["description"] = (
-            "One brief spoken remark."
-            if speech_required
-            else "One brief spoken remark, or null for silence."
-        )
-        return {
-            "type": "object",
-            "properties": {"speak": speech},
-            "required": ["speak"],
-            "additionalProperties": False,
-        }
+        response = RequiredSpeechResponse if speech_required else SpeechResponse
+        return cast(JSONSchema, transform_schema(response))
 
     def request(
         self,
@@ -199,7 +205,7 @@ class Cognition:
             speaks=speech is not None,
             decision={"speak": speech},
         )
-        return CommentaryResult(speech, prepared)
+        return CommentaryResult(speak=speech, prepared=prepared)
 
     async def repetition(self, text: str | None) -> RepeatMatch | None:
         if not text or not text.strip():
@@ -207,12 +213,5 @@ class Cognition:
         return await repeat_match(text, [row.text for row in self.memory.speech()])
 
     def validate_speech(self, result: dict[str, object], required: bool) -> str | None:
-        if set(result) != {"speak"}:
-            raise ValueError("Observation requires speak")
-        speech = result["speak"]
-        if speech is not None and not isinstance(speech, str):
-            raise ValueError("Invalid observation text")
-        if required and (not isinstance(speech, str) or not speech.strip()):
-            raise ValueError("Requested commentary requires speech")
-
-        return speech
+        response = RequiredSpeechResponse if required else SpeechResponse
+        return response.model_validate(result).speak

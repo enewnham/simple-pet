@@ -1,13 +1,12 @@
 import asyncio
 import json
-import runpy
 from collections.abc import Callable, Mapping
-from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from pet_daemon.cli.hook import update as hook_update
 from pet_daemon.domain import (
     DeliveryStatus,
     ExecutionOutcome,
@@ -104,7 +103,7 @@ def test_replay_nap_configuration_changes_actual_renderer_actions() -> None:
 def test_process_evidence_is_injected_without_host_probes() -> None:
     async def scenario() -> None:
         async with ReplayHarness() as replay:
-            identity = ProcessIdentity(43210, "replayed-process")
+            identity = ProcessIdentity(pid=43210, started="replayed-process")
             replay.processes.statuses[identity] = ProcessStatus.ALIVE
             replay.ingest(
                 {
@@ -122,7 +121,7 @@ def test_process_evidence_is_injected_without_host_probes() -> None:
                 await replay.advance(0)
                 assert (
                     replay.app.sessions.by_id[
-                        SessionIdentity(SessionSource.CODEX, "parser")
+                        SessionIdentity(source=SessionSource.CODEX, native_id="parser")
                     ].presence
                     == ProcessStatus.ALIVE
                 )
@@ -130,14 +129,14 @@ def test_process_evidence_is_injected_without_host_probes() -> None:
                 await replay.advance(1)
                 assert (
                     replay.app.sessions.by_id[
-                        SessionIdentity(SessionSource.CODEX, "parser")
+                        SessionIdentity(source=SessionSource.CODEX, native_id="parser")
                     ].presence
                     == ProcessStatus.ALIVE
                 )
                 await replay.advance(replay.config.process_probe_seconds - 1)
                 assert (
                     replay.app.sessions.by_id[
-                        SessionIdentity(SessionSource.CODEX, "parser")
+                        SessionIdentity(source=SessionSource.CODEX, native_id="parser")
                     ].presence
                     == ProcessStatus.EXITED
                 )
@@ -197,7 +196,9 @@ def test_injected_client_uses_current_prompt_and_configured_pack(
         async with ReplayHarness() as source:
             client = FixtureModel()
             client.speech = "I am trying the configured persona."
-            config = replace(source.config, persona="Use a quiet botanical voice.")
+            config = source.config.model_copy(
+                update={"persona": "Use a quiet botanical voice."}
+            )
             async with ReplayHarness(
                 config, client, memory_file=tmp_path / "experiment.sqlite3"
             ) as replay:
@@ -226,12 +227,8 @@ def test_invalid_clock_steps_fail_before_mutating_time() -> None:
 
 @pytest.fixture
 def claude_hook() -> Callable[[str, Mapping[str, object]], HookEvent]:
-    adapter = runpy.run_path(
-        str(Path(__file__).resolve().parents[1] / "scripts" / "pet-hook")
-    )
-
     def update(event: str, payload: Mapping[str, object]) -> HookEvent:
-        hook = adapter["update"]("claude", event, payload)
+        hook = hook_update("claude", event, payload)
         assert isinstance(hook, HookEvent)
         return hook
 
@@ -311,7 +308,7 @@ def test_wait_kind_controls_scheduled_and_clicked_commentary(
             )
             await replay.advance(0)
             session = replay.app.sessions.by_id[
-                SessionIdentity(SessionSource.CLAUDE, "parser")
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="parser")
             ]
             assert session.waiting
             assert not session.working
@@ -367,7 +364,7 @@ def test_wait_kind_controls_scheduled_and_clicked_commentary(
             )
             assert not session.waiting
             reports = replay.memory.narrative_reports(
-                (SessionIdentity(SessionSource.CLAUDE, "parser"),)
+                (SessionIdentity(source=SessionSource.CLAUDE, native_id="parser"),)
             )
             transitions = [
                 report.payload.event
@@ -398,7 +395,7 @@ def test_wait_kind_controls_scheduled_and_clicked_commentary(
             assert payload["current_moment"]["kind"] == "turn_ended"
             assert payload["current_moment"]["outcome"] == "success"
             reports = replay.memory.narrative_reports(
-                (SessionIdentity(SessionSource.CLAUDE, "parser"),)
+                (SessionIdentity(source=SessionSource.CLAUDE, native_id="parser"),)
             )
             assert any(
                 isinstance(report.payload, ProgressEvidence)
@@ -468,7 +465,7 @@ def test_child_check_ins_follow_requests_for_input(
             )
             await replay.advance(1)
             child = replay.app.sessions.by_id[
-                SessionIdentity(SessionSource.CLAUDE, "examples")
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="examples")
             ]
             if internal_check:
                 assert len(replay.model.calls) == calls_after_wait
@@ -522,7 +519,7 @@ def test_internal_checks_retain_terminal_results_and_runtime_evidence(
             )
             await replay.advance(1)
             session = replay.app.sessions.by_id[
-                SessionIdentity(SessionSource.CLAUDE, "parser")
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="parser")
             ]
             assert not session.waiting
             assert session.outcome == (
@@ -532,7 +529,7 @@ def test_internal_checks_retain_terminal_results_and_runtime_evidence(
                 "failure" if failure else "completion"
             )
             reports = replay.memory.narrative_reports(
-                (SessionIdentity(SessionSource.CLAUDE, "parser"),)
+                (SessionIdentity(source=SessionSource.CLAUDE, native_id="parser"),)
             )
             transitions = [
                 report.payload

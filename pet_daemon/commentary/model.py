@@ -1,6 +1,5 @@
 import json
 import time
-from dataclasses import asdict
 from typing import Protocol
 
 from anthropic import AsyncAnthropic
@@ -74,7 +73,7 @@ class AnthropicModelClient:
             "observation.usage",
             reason=reason,
             duration_seconds=round(time.monotonic() - started, 3),
-            **asdict(tokens),
+            **tokens.model_dump(),
         )
         if response.stop_reason != "end_turn":
             raise ValueError(f"Observation ended with {response.stop_reason}")
@@ -88,6 +87,6 @@ class AnthropicModelClient:
             log.info(
                 "observation.story",
                 duration_seconds=round(time.monotonic() - started, 3),
-                **asdict(tokens),
+                **tokens.model_dump(),
             )
         return result

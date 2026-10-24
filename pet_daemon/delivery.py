@@ -3,14 +3,21 @@ from __future__ import annotations
 import time
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, TypedDict
+from dataclasses import dataclass
+from typing import TypedDict
 
+from pydantic import BaseModel, Field
+
+from .commentary.context import CommentarySupport
 from .domain import DeliveryStatus, SpeechReason
 from .identity import SessionIdentity
+from .runtime import Trigger
 
-if TYPE_CHECKING:
-    from .application import MessageSupport
+
+class MessageSupport(BaseModel):
+    commentary: CommentarySupport
+    trigger: Trigger | None
+    request_epoch: int
 
 
 class SpeechPacket(TypedDict):
@@ -19,8 +26,7 @@ class SpeechPacket(TypedDict):
     delivery_id: str
 
 
-@dataclass(frozen=True)
-class SpeechMessage:
+class SpeechMessage(BaseModel):
     text: str
     ttl: float
     reason: SpeechReason
@@ -28,12 +34,11 @@ class SpeechMessage:
     subject_id: SessionIdentity | None = None
     revision: str | None = None
     history_epoch: int = 0
-    message_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    message_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     support: MessageSupport | None = None
 
 
-@dataclass(frozen=True)
-class DeliveryOutcome:
+class DeliveryOutcome(BaseModel):
     message: SpeechMessage
     status: DeliveryStatus
 
@@ -111,7 +116,9 @@ class SpeechDelivery:
             or self.clock() > delivery.expires
         ):
             return False
-        self.on_outcome(DeliveryOutcome(delivery.message, DeliveryStatus.ACCEPTED))
+        self.on_outcome(
+            DeliveryOutcome(message=delivery.message, status=DeliveryStatus.ACCEPTED)
+        )
         delivery.status = DeliveryStatus.ACCEPTED
         return True
 
@@ -126,7 +133,9 @@ class SpeechDelivery:
                         self._send(delivery)
                     else:
                         self.on_outcome(
-                            DeliveryOutcome(delivery.message, DeliveryStatus.FAILED)
+                            DeliveryOutcome(
+                                message=delivery.message, status=DeliveryStatus.FAILED
+                            )
                         )
                         delivery.status = DeliveryStatus.FAILED
             if delivery.status != DeliveryStatus.PENDING and now > delivery.expires:

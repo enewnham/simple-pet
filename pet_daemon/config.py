@@ -1,8 +1,15 @@
-import json
-import math
-from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import TypeGuard, get_origin
+from typing import Annotated, Self
+
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    field_validator,
+    model_validator,
+)
 
 DEFAULT_PERSONA = """
 You are an interested, dry, understated companion working alongside the developer.
@@ -11,64 +18,48 @@ Never sound reluctant, invent trouble, or force a punchline.
 """.strip()
 
 
-def positive(value: object) -> TypeGuard[float]:
-    return (
-        (type(value) is int or type(value) is float)
-        and math.isfinite(value)
-        and value > 0
-    )
+type Positive = Annotated[float, Field(strict=True, gt=0, allow_inf_nan=False)]
+type Nonnegative = Annotated[float, Field(strict=True, ge=0, allow_inf_nan=False)]
+type PositiveInt = Annotated[int, Field(strict=True, gt=0)]
 
 
-def interval(value: object) -> TypeGuard[tuple[float, float] | list[float]]:
-    if not isinstance(value, (list, tuple)) or len(value) != 2:
-        return False
+def ordered_interval(value: tuple[float, float]) -> tuple[float, float]:
     lower, upper = value
-    return positive(lower) and positive(upper) and lower <= upper
+    if lower > upper:
+        raise ValueError("Expected a positive [minimum, maximum]")
+    return value
 
 
-@dataclass
-class BehaviorConfig:
-    roaming: bool = True
-    roaming_radius: float = 160
-    automatic_speech_cooldown_seconds: float = 90
-    naps: bool = True
-    care: bool = True
-    sentiment_reactions: bool = True
-    care_interval: tuple[float, float] = (300, 600)
-    care_speech_interval: tuple[float, float] = (2700, 5400)
-    nap_interval: tuple[float, float] = (120, 240)
-    nap_seconds: tuple[float, float] = (20, 45)
-    baseline_dwell: float = 2
-    error_seconds: float = 2
-    walk_seconds: tuple[float, float] = (2, 6)
-    walk_speed: float = 40
-    idle_pause: tuple[float, float] = (20, 60)
-    working_pause: tuple[float, float] = (2, 5)
-    work_burst_seconds: tuple[float, float] = (12, 25)
-    pointer_radius: float = 100
-    resume_seconds: float = 3
-    gaze_reset_seconds: float = 1.2
-    gaze_deadzone: float = 24
-
-    def validate(self) -> None:
-        for item in fields(self):
-            value = getattr(self, item.name)
-            if item.type is bool:
-                valid = type(value) is bool
-            elif item.name == "automatic_speech_cooldown_seconds":
-                valid = (
-                    type(value) in (int, float) and math.isfinite(value) and value >= 0
-                )
-            elif get_origin(item.type) is tuple:
-                valid = interval(value)
-            else:
-                valid = positive(value)
-            if not valid:
-                raise ValueError(f"Invalid behavior.{item.name}")
+type Interval = Annotated[tuple[Positive, Positive], AfterValidator(ordered_interval)]
 
 
-@dataclass
-class Config:
+class BehaviorConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    roaming: StrictBool = True
+    roaming_radius: Positive = 160
+    automatic_speech_cooldown_seconds: Nonnegative = 90
+    naps: StrictBool = True
+    care: StrictBool = True
+    sentiment_reactions: StrictBool = True
+    care_interval: Interval = (300, 600)
+    care_speech_interval: Interval = (2700, 5400)
+    nap_interval: Interval = (120, 240)
+    nap_seconds: Interval = (20, 45)
+    baseline_dwell: Positive = 2
+    error_seconds: Positive = 2
+    walk_seconds: Interval = (2, 6)
+    walk_speed: Positive = 40
+    idle_pause: Interval = (20, 60)
+    working_pause: Interval = (2, 5)
+    work_burst_seconds: Interval = (12, 25)
+    pointer_radius: Positive = 100
+    resume_seconds: Positive = 3
+    gaze_reset_seconds: Positive = 1.2
+    gaze_deadzone: Positive = 24
+
+
+class Config(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     pet_dir: Path
     persona: str = DEFAULT_PERSONA
     log_file: Path = Path("logs/pet-daemon.jsonl")
@@ -77,82 +68,55 @@ class Config:
     daemon_socket: str = "/tmp/pet-daemon.sock"
     overlay_socket: str = "/tmp/pet.sock"
     model: str = "claude-haiku-5-5"
-    observation_seconds: tuple[float, float] = (20, 40)
-    idle_message_seconds: float = 300
-    prompt_target_bytes: int = 16000
-    memory_retention_days: int = 30
-    memory_max_events: int = 10000
-    speech_history_seconds: float = 1800
-    speech_ttl: float = 15
-    request_timeout: float = 20
-    process_probe_seconds: float = 10
-    activity_fresh_seconds: float = 300
-    repository_refresh_seconds: float = 30
-    github_refresh_seconds: float = 180
-    stale_seconds: float = 3600
-    completed_retention_seconds: float = 7200
-    max_tokens: int = 512
-    behavior: BehaviorConfig = field(default_factory=BehaviorConfig)
+    observation_seconds: Interval = (20, 40)
+    idle_message_seconds: Positive = 300
+    prompt_target_bytes: PositiveInt = 16000
+    memory_retention_days: PositiveInt = 30
+    memory_max_events: PositiveInt = 10000
+    speech_history_seconds: Positive = 1800
+    speech_ttl: Positive = 15
+    request_timeout: Positive = 20
+    process_probe_seconds: Positive = 10
+    activity_fresh_seconds: Positive = 300
+    repository_refresh_seconds: Positive = 30
+    github_refresh_seconds: Positive = 180
+    stale_seconds: Positive = 3600
+    completed_retention_seconds: Positive = 7200
+    max_tokens: PositiveInt = 512
+    behavior: BehaviorConfig = Field(default_factory=BehaviorConfig)
 
     @classmethod
     def load(cls, path: str | Path) -> Config:
         path = Path(path).resolve()
-        data = json.loads(path.read_text())
-        if not isinstance(data, dict):
-            raise ValueError("Configuration must be a JSON object")  # noqa: TRY004 - Report malformed JSON values through the validation contract.
-        behavior = BehaviorConfig(**data.pop("behavior", {}))
-        config = cls(**data, behavior=behavior)
+        config = cls.model_validate_json(path.read_text())
         for name in ("pet_dir", "overlay_binary", "log_file", "memory_file"):
             value = Path(getattr(config, name)).expanduser()
             setattr(config, name, (path.parent / value).resolve())
-        config.validate()
-        for item in fields(behavior):
-            if get_origin(item.type) is tuple:
-                lower, upper = getattr(behavior, item.name)
-                setattr(behavior, item.name, (lower, upper))
-        lower, upper = config.observation_seconds
-        config.observation_seconds = (lower, upper)
         return config
 
-    def validate(self) -> None:
-        self.behavior.validate()
-        if not interval(self.observation_seconds):
-            raise ValueError(
-                "observation_seconds must be a positive [minimum, maximum]"
-            )
-        for name in (
-            "prompt_target_bytes",
-            "memory_retention_days",
-            "memory_max_events",
-            "max_tokens",
-        ):
-            if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
-                raise ValueError(f"{name} must be a positive integer")
-        for name in (
-            "idle_message_seconds",
-            "speech_history_seconds",
-            "speech_ttl",
-            "request_timeout",
-            "stale_seconds",
-            "completed_retention_seconds",
-            "process_probe_seconds",
-            "activity_fresh_seconds",
-            "repository_refresh_seconds",
-            "github_refresh_seconds",
-        ):
-            if not positive(getattr(self, name)):
-                raise ValueError(f"{name} must be positive")
-        if not isinstance(self.persona, str) or not self.persona.strip():
+    @field_validator("persona")
+    @classmethod
+    def nonempty_persona(cls, value: str) -> str:
+        if not value.strip():
             raise ValueError("persona must be a nonempty string")
-        if not isinstance(self.model, str) or not self.model:
+        return value
+
+    @field_validator("model")
+    @classmethod
+    def nonempty_model(cls, value: str) -> str:
+        if not value:
             raise ValueError("model must be nonempty")
-        for path in (self.daemon_socket, self.overlay_socket):
-            if (
-                not isinstance(path, str)
-                or not path
-                or "\0" in path
-                or len(path.encode()) >= 104
-            ):
-                raise ValueError("Socket paths must fit the macOS UNIX socket address")
+        return value
+
+    @field_validator("daemon_socket", "overlay_socket")
+    @classmethod
+    def socket_path(cls, value: str) -> str:
+        if not value or "\0" in value or len(value.encode()) >= 104:
+            raise ValueError("Socket paths must fit the macOS UNIX socket address")
+        return value
+
+    @model_validator(mode="after")
+    def distinct_sockets(self) -> Self:
         if self.daemon_socket == self.overlay_socket:
             raise ValueError("Daemon and overlay sockets must differ")
+        return self

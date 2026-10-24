@@ -1,100 +1,33 @@
 from collections.abc import Mapping
-from typing import cast
 
-from ..domain import ExecutionOutcome, SessionSource
-from ..runtime import (
-    HookEvent,
-    HookEventKind,
-    HookTextFields,
-    ProcessIdentity,
-    WaitingKind,
-)
+from pydantic import ValidationError
 
-TEXT_FIELDS = (
-    "parent",
-    "parent_call",
-    "call",
-    "turn",
-    "tool",
-    "goal",
-    "progress",
-    "repo",
-    "repository",
-    "branch",
-    "pull_request",
-    "tool_name",
-    "sentiment_text",
-)
+from ..domain import ExecutionOutcome
+from ..runtime import HookEvent, ProcessIdentity
 
 
 def normalize_hook(packet: object) -> HookEvent | None:
     if not isinstance(packet, Mapping):
         return None
-    source, event, session = (
-        packet.get("source"),
-        packet.get("event"),
-        packet.get("session"),
-    )
-    if (
-        not isinstance(source, str)
-        or not isinstance(event, str)
-        or not isinstance(session, str)
-        or not session
-    ):
-        return None
-    try:
-        session_source = SessionSource(source)
-        event_kind = HookEventKind(event)
-    except ValueError:
-        return None
+    nullable = {"manual", "owner", "exit_code"}
     if any(
-        name in packet and not isinstance(packet[name], str) for name in TEXT_FIELDS
+        value is None and name in HookEvent.model_fields and name not in nullable
+        for name, value in packet.items()
     ):
         return None
-    waiting_kind = None
-    if "waiting_kind" in packet:
-        try:
-            waiting_kind = WaitingKind(packet["waiting_kind"])
-        except ValueError, TypeError:
-            return None
-    aliases = packet.get("aliases", [])
-    if not isinstance(aliases, list) or not all(
-        isinstance(alias, str) and alias for alias in aliases
-    ):
+    if "aliases" in packet and not isinstance(packet["aliases"], list):
         return None
-    outcome = None
-    if "outcome" in packet:
-        try:
-            outcome = ExecutionOutcome(packet["outcome"])
-        except ValueError, TypeError:
-            return None
-        if outcome == ExecutionOutcome.STALE:
-            return None
-    if "\0" in packet.get("repo", ""):
+    data = dict(packet)
+    data.pop("kind", None)
+    if "manual" in data:
+        data["manual"] = bool(data["manual"])
+    data["owner"] = ProcessIdentity.parse(data.get("owner"))
+    if type(data.get("exit_code")) is not int:
+        data.pop("exit_code", None)
+    try:
+        event = HookEvent.model_validate(data)
+    except ValidationError:
         return None
-    validated = cast(HookTextFields, packet)
-    code = packet.get("exit_code")
-    return HookEvent(
-        session_source,
-        session,
-        event_kind,
-        aliases=tuple(aliases),
-        parent=validated.get("parent"),
-        parent_call=validated.get("parent_call"),
-        call=validated.get("call"),
-        turn=validated.get("turn"),
-        tool=validated.get("tool"),
-        goal=validated.get("goal"),
-        progress=validated.get("progress"),
-        repo=validated.get("repo"),
-        repository=validated.get("repository"),
-        branch=validated.get("branch"),
-        pull_request=validated.get("pull_request"),
-        tool_name=validated.get("tool_name"),
-        sentiment_text=validated.get("sentiment_text"),
-        outcome=outcome,
-        manual=bool(packet["manual"]) if "manual" in packet else None,
-        owner=ProcessIdentity.parse(packet.get("owner")),
-        exit_code=code if type(code) is int else None,
-        waiting_kind=waiting_kind,
-    )
+    if event.outcome == ExecutionOutcome.STALE or (event.repo and "\0" in event.repo):
+        return None
+    return event

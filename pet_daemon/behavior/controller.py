@@ -1,7 +1,9 @@
 import math
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from typing import TypeGuard
+
+from pydantic import Field, StrictBool, ValidationError
 
 from ..config import BehaviorConfig
 from ..domain import ActionKind, Activity, CareKind, ExecutionPhase, PetState
@@ -20,42 +22,19 @@ def finite_number(value: object) -> TypeGuard[float]:
     return (type(value) is int or type(value) is float) and math.isfinite(value)
 
 
-@dataclass(frozen=True)
 class Rectangle(Point):
-    width: float
-    height: float
+    width: float = Field(strict=True, gt=0, allow_inf_nan=False)
+    height: float = Field(strict=True, gt=0, allow_inf_nan=False)
 
 
-@dataclass(frozen=True)
 class RendererStatus(Rectangle):
     pointer: Point
     screen: Rectangle
-    dragging: bool
-    menu: bool
-    speech: bool
-    sleeping: bool
-    system_sleeping: bool
-
-
-def rectangle(packet: Mapping[str, object]) -> Rectangle | None:
-    x, y, width, height = (packet.get(key) for key in ("x", "y", "width", "height"))
-    if (
-        not finite_number(x)
-        or not finite_number(y)
-        or not finite_number(width)
-        or not finite_number(height)
-        or width <= 0
-        or height <= 0
-    ):
-        return None
-    return Rectangle(x=x, y=y, width=width, height=height)
-
-
-def point(packet: Mapping[str, object]) -> Point | None:
-    x, y = packet.get("x"), packet.get("y")
-    if not finite_number(x) or not finite_number(y):
-        return None
-    return Point(x=x, y=y)
+    dragging: StrictBool
+    menu: StrictBool
+    speech: StrictBool
+    sleeping: StrictBool
+    system_sleeping: StrictBool
 
 
 REACTION_SECONDS = 2.5
@@ -227,47 +206,11 @@ class Behavior:
         self._rest()
 
     def renderer_status(self, packet: Mapping[str, object]) -> bool:
-        dimensions = rectangle(packet)
-        screen_data, pointer_data = packet.get("screen"), packet.get("pointer")
-        if (
-            dimensions is None
-            or not isinstance(screen_data, dict)
-            or not isinstance(pointer_data, dict)
-        ):
+        try:
+            status = RendererStatus.model_validate(packet)
+        except ValidationError:
             return False
-        screen, pointer = rectangle(screen_data), point(pointer_data)
-        dragging, menu, speech = (
-            packet.get("dragging"),
-            packet.get("menu"),
-            packet.get("speech"),
-        )
-        if (
-            screen is None
-            or pointer is None
-            or type(dragging) is not bool
-            or type(menu) is not bool
-            or type(speech) is not bool
-        ):
-            return False
-        sleeping, system_sleeping = (
-            packet.get("sleeping"),
-            packet.get("system_sleeping"),
-        )
-        if type(sleeping) is not bool or type(system_sleeping) is not bool:
-            return False
-        status = RendererStatus(
-            x=dimensions.x,
-            y=dimensions.y,
-            width=dimensions.width,
-            height=dimensions.height,
-            screen=screen,
-            pointer=pointer,
-            dragging=dragging,
-            menu=menu,
-            speech=speech,
-            sleeping=sleeping,
-            system_sleeping=system_sleeping,
-        )
+        pointer, screen = status.pointer, status.screen
         position = (pointer.x, pointer.y)
         if position != self.last_pointer:
             self.pointer_moved = self.clock()

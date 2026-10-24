@@ -1,31 +1,16 @@
 from dataclasses import dataclass, field
-from enum import StrEnum
 from typing import assert_never
 
 from ..domain import Activity, ExecutionOutcome
 from ..identity import SessionIdentity
-from ..runtime import HookEvent, HookEventKind, WaitingKind
+from ..runtime import (
+    HookEvent,
+    HookEventKind,
+    ReactionKind,
+    SessionReaction,
+    WaitingKind,
+)
 from .tracking import AgentSession, Sessions, SessionUpdate
-
-
-class ReactionKind(StrEnum):
-    START = "start"
-    WAITING = "waiting"
-    INVESTIGATION = "investigation"
-    TROUBLE = "trouble"
-    RECOVERY = "recovery"
-    FAILURE = "failure"
-    CANCELLED = "cancelled"
-    SUCCESS = "success"
-
-
-@dataclass(frozen=True)
-class SessionReaction:
-    kind: ReactionKind
-    session: SessionIdentity
-    generation: int
-    activity: Activity
-    serial: int
 
 
 @dataclass
@@ -113,7 +98,13 @@ class SessionReactions:
         def add(kind: ReactionKind, activity: Activity = result.activity) -> None:
             self.serial += 1
             emitted.append(
-                SessionReaction(kind, key, session.generation, activity, self.serial)
+                SessionReaction(
+                    kind=kind,
+                    session=key,
+                    generation=session.generation,
+                    activity=activity,
+                    serial=self.serial,
+                )
             )
             if kind in (ReactionKind.TROUBLE, ReactionKind.RECOVERY):
                 state.category_serials[activity] = self.serial
