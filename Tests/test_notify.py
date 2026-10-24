@@ -439,7 +439,7 @@ class NotifyTests(unittest.TestCase):
                     assert result is not None
                     memory.observe_session_context(result.observation)
                     memory.work.record_session(result.observation)
-                    activity = sessions.activity_view()
+                    activity = sessions.activity()
                     subjects = memory.connected_work(activity)
                     snapshot = capture_snapshot(activity, memory=memory, work=subjects)
                     selection = AttentionSelection(
@@ -520,8 +520,10 @@ class NotifyTests(unittest.TestCase):
                     if event == completion:
                         assert accepted is not None
                         self.assertEqual(accepted.failure, outcome == "error")
-                self.assertEqual(sessions.activity_view().sessions[0].outcome, outcome)
-                self.assertEqual(sessions.clean_convergence, outcome == "success")
+                self.assertEqual(sessions.activity().sessions[0].outcome, outcome)
+                self.assertEqual(
+                    sessions.has_successful_convergence, outcome == "success"
+                )
 
     def test_codex_subagents_use_child_identity_and_parent_relationship(self) -> None:
         for event, expected in (
@@ -693,7 +695,7 @@ class NotifyTests(unittest.TestCase):
                     ),
                     expected != "permission_check",
                 )
-                snapshot = sessions.activity_view().sessions[0]
+                snapshot = sessions.activity().sessions[0]
                 self.assertEqual(snapshot.waiting_kind, expected)
                 self.assertEqual(snapshot.waiting_tool, "python check.py")
                 self.assertEqual(
@@ -708,7 +710,7 @@ class NotifyTests(unittest.TestCase):
                         {"source": source, "session": "worker", "event": "progress"}
                     )
                 )
-                resumed = sessions.activity_view().sessions[0]
+                resumed = sessions.activity().sessions[0]
                 self.assertFalse(resumed.waiting_for_input)
                 self.assertIsNone(resumed.waiting_kind)
                 self.assertIsNone(resumed.waiting_tool)

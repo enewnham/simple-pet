@@ -18,7 +18,13 @@ from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources.hooks import normalize_hook
 from pet_daemon.storage.memory import Memory
 from pet_daemon.storage.migrations import SCHEMA_VERSION, migrate
-from pet_daemon.work.association import decide_observation
+from pet_daemon.work.association import reconcile_observation
+from pet_daemon.work.evidence import (
+    CommentaryEvidence,
+    ExecutionStatus,
+    PullRequestStatus,
+    ReportedProgress,
+)
 from pet_daemon.work.history import build_session_entry
 from pet_daemon.work.models import RelatedLink
 from pet_daemon.work.narrative import semantic_revision
@@ -29,13 +35,7 @@ from pet_daemon.work.observations import (
     PullRequest,
     PullRequestObservation,
 )
-from pet_daemon.work.views import (
-    EvidenceView,
-    ExecutionView,
-    ProgressView,
-    PullRequestEvidenceView,
-    WorkStory,
-)
+from pet_daemon.work.stories import WorkStory
 from Tests.fixtures import require, sessions_snapshot
 
 REPOSITORY = RemoteRepository(value="github.com/team/project")
@@ -110,7 +110,7 @@ class WorkTests(unittest.TestCase):
         result = next(
             record.details
             for record in replayed.story.activity
-            if isinstance(record.details, ExecutionView)
+            if isinstance(record.details, ExecutionStatus)
         )
         self.assertEqual(result.reported_execution_outcome, "success")
 
@@ -183,7 +183,9 @@ class WorkTests(unittest.TestCase):
             if session in subject.sessions
         )
 
-    def reports(self, session: SessionIdentity = SESSION) -> tuple[EvidenceView, ...]:
+    def reports(
+        self, session: SessionIdentity = SESSION
+    ) -> tuple[CommentaryEvidence, ...]:
         return self.story(session).activity
 
     def test_child_keeps_its_scope_and_report_with_the_parent_story(self) -> None:
@@ -212,7 +214,7 @@ class WorkTests(unittest.TestCase):
         self.assertEqual(
             [record.details for record in story.activity],
             [
-                ExecutionView(
+                ExecutionStatus(
                     execution="in progress",
                     reported_progress=None,
                     reported_execution_outcome=None,
@@ -226,7 +228,7 @@ class WorkTests(unittest.TestCase):
             .sessions[0]
             .activity[0]
             .details,
-            ProgressView(reported_progress="Escape tests pass"),
+            ReportedProgress(reported_progress="Escape tests pass"),
         )
 
     def test_refined_intent_and_alias_reports_share_one_story(self) -> None:
@@ -245,7 +247,7 @@ class WorkTests(unittest.TestCase):
         self.assertEqual(subjects[0].story.intent, "Cover escapes")
         self.assertEqual(
             subjects[0].story.activity[0].details,
-            ProgressView(reported_progress="Covered escapes"),
+            ReportedProgress(reported_progress="Covered escapes"),
         )
 
     def test_explicit_alias_keeps_one_family_with_the_latest_report(
@@ -344,7 +346,7 @@ class WorkTests(unittest.TestCase):
             ),
             SessionIdentity(source=SessionSource.CODEX, native_id="b"),
         )
-        subjects = self.memory.connected_work(sessions.activity_view())
+        subjects = self.memory.connected_work(sessions.activity())
         self.assertEqual(
             tuple(subject.id for subject in subjects),
             (SessionIdentity(source=SessionSource.CODEX, native_id="b"),),
@@ -355,15 +357,15 @@ class WorkTests(unittest.TestCase):
         reports = [
             record.details
             for record in story.activity
-            if isinstance(record.details, ProgressView)
+            if isinstance(record.details, ReportedProgress)
         ]
         self.assertEqual(
-            reports, [ProgressView(reported_progress="Second parser report")]
+            reports, [ReportedProgress(reported_progress="Second parser report")]
         )
         self.assertTrue(
             any(
                 record.details.progress == "First parser report"
-                for record in self.memory.recent()
+                for record in self.memory.recent_events()
             )
         )
         self.assertEqual(
@@ -373,7 +375,7 @@ class WorkTests(unittest.TestCase):
         self.memory.close()
         self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
         self.store = self.memory.work
-        self.assertEqual(self.memory.connected_work(sessions.activity_view()), subjects)
+        self.assertEqual(self.memory.connected_work(sessions.activity()), subjects)
 
     def test_report_resolves_stored_branch_without_reading_later_checkout(self) -> None:
         self.store.observe(self.checkout())
@@ -475,12 +477,12 @@ class WorkTests(unittest.TestCase):
         self.store.observe(self.branch())
         self.event("intent", goal="Improve parser", repo="/work/parser")
         before = self.story()
-        history = self.memory.recent()
+        history = self.memory.recent_events()
         self.now += 30
         self.store.observe(self.checkout())
         self.store.observe(self.branch())
         self.assertEqual(before.revision, self.story().revision)
-        self.assertEqual(self.memory.recent(), history)
+        self.assertEqual(self.memory.recent_events(), history)
         checkpoints = self.memory.load_repositories()
         self.assertEqual({item.checked_at for item in checkpoints}, {self.now})
 
@@ -510,10 +512,10 @@ class WorkTests(unittest.TestCase):
         )
         story = self.story()
         outputs = [
-            evidence.details.output
+            evidence.details
             for artifact in story.artifacts
             for evidence in artifact.evidence
-            if isinstance(evidence.details, PullRequestEvidenceView)
+            if isinstance(evidence.details, PullRequestStatus)
         ]
         self.assertEqual(
             [(output.url, output.state) for output in outputs],
@@ -596,7 +598,7 @@ class WorkTests(unittest.TestCase):
         ]
         self.assertEqual({record.observed_at for record in facts}, {1000})
         self.assertEqual({record.observed_at for record in errors}, {1030})
-        history = self.memory.recent()
+        history = self.memory.recent_events()
         self.now += 30
         self.store.observe(
             CheckoutObservation(
@@ -620,7 +622,7 @@ class WorkTests(unittest.TestCase):
                 ref=self.pr().url, pr=None, checked_at=self.now, error="PR failed"
             )
         )
-        self.assertEqual(self.memory.recent(), history)
+        self.assertEqual(self.memory.recent_events(), history)
         before = self.story()
         self.store.observe(
             PullRequestObservation(
@@ -684,14 +686,14 @@ class WorkTests(unittest.TestCase):
         self.assertNotEqual(waiting.revision, after.revision)
         self.assertEqual(
             after.activity[0].details,
-            ExecutionView(
+            ExecutionStatus(
                 execution="in progress",
                 reported_progress=None,
                 reported_execution_outcome=None,
             ),
         )
         self.assertNotIn("Raw command", str(after))
-        self.assertNotIn("Raw command", str(self.memory.recent()))
+        self.assertNotIn("Raw command", str(self.memory.recent_events()))
 
     def test_unrelated_tool_result_keeps_waiting_and_story(self) -> None:
         self.event("intent", goal="Improve parser")
@@ -727,13 +729,13 @@ class WorkTests(unittest.TestCase):
             .sessions[0]
             .activity[0]
             .details,
-            ProgressView(reported_progress="Child tests pass"),
+            ReportedProgress(reported_progress="Child tests pass"),
         )
         self.assertEqual(
             self.reports(SessionIdentity(source=SessionSource.CODEX, native_id="root"))[
                 0
             ].details,
-            ProgressView(reported_progress="Parent tests pass"),
+            ReportedProgress(reported_progress="Parent tests pass"),
         )
 
     def test_repository_observations_create_no_agent_story(self) -> None:
@@ -783,11 +785,11 @@ class WorkTests(unittest.TestCase):
             "CREATE TRIGGER reject_progress BEFORE INSERT ON work_reports WHEN new.kind='progress' BEGIN SELECT RAISE(ABORT, 'reject'); END"
         )
         before = self.story()
-        history = self.memory.recent()
+        history = self.memory.recent_events()
         with self.assertRaises(sqlite3.IntegrityError):
             self.event("progress", repo="/work/other", progress="Must roll back")
         self.assertEqual(self.story(), before)
-        self.assertEqual(self.memory.recent(), history)
+        self.assertEqual(self.memory.recent_events(), history)
 
     def test_session_story_and_captured_context_survive_restart(self) -> None:
         self.store.observe(self.checkout())
@@ -827,7 +829,7 @@ class WorkTests(unittest.TestCase):
             progress="Escape cases pass",
         )
 
-        subjects = self.memory.connected_work(self.sessions.activity_view())
+        subjects = self.memory.connected_work(self.sessions.activity())
         self.assertEqual(
             tuple(subject.id for subject in subjects),
             (SessionIdentity(source=SessionSource.CODEX, native_id="root"),),
@@ -837,7 +839,7 @@ class WorkTests(unittest.TestCase):
         report = next(
             record
             for record in child.activity
-            if record.details == ProgressView(reported_progress="Escape cases pass")
+            if record.details == ReportedProgress(reported_progress="Escape cases pass")
         )
         context = require(report.context)
         self.assertEqual(
@@ -926,8 +928,8 @@ class WorkTests(unittest.TestCase):
         output = next(item for item in self.story().artifacts if item.ref == first.url)
         self.assertTrue(
             any(
-                isinstance(record.details, PullRequestEvidenceView)
-                and record.details.output.state == "MERGED"
+                isinstance(record.details, PullRequestStatus)
+                and record.details.state == "MERGED"
                 for record in output.evidence
             )
         )
@@ -1035,7 +1037,7 @@ class ObservationDecisionTests(unittest.TestCase):
             pr=refreshed_pr,
             checked_at=2,
         )
-        decided = require(decide_observation(previous, refreshed))
+        decided = require(reconcile_observation(previous, refreshed))
         self.assertIsInstance(decided, BranchObservation)
         assert isinstance(decided, BranchObservation)
         self.assertEqual(require(decided.pr).related_links, (link,))

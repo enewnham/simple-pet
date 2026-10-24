@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from ..domain import DeliveryStatus, SpeechReason
 from ..identity import SessionIdentity
 from ..logging import get_logger
-from ..prompts import select_prompt
+from ..prompts import request_excerpt
 from ..repository_identity import (
     RepositoryIdentity,
     repository_columns,
@@ -26,7 +26,8 @@ from ..work.observations import (
     RepositoryTarget,
     SessionObservation,
 )
-from ..work.views import WorkSubject, collection_targets, connected_work
+from ..work.shared_work import WorkSubject, shared_work
+from ..work.stories import collection_targets
 from .identities import (
     optional_session_from_row,
     optional_session_values,
@@ -41,7 +42,7 @@ from .work import SQLiteWorkRepository
 log = get_logger("pet-daemon")
 
 
-class HistoryRecord(BaseModel):
+class AttentionHistory(BaseModel):
     last_selected: float = 0
     considered_subject_revision: str | None = None
     considered_session_revision: str | None = None
@@ -127,13 +128,15 @@ class Memory:
     def transaction(self) -> AbstractContextManager[None]:
         return transaction(self.db)
 
-    def load_attention_history(self) -> dict[SessionIdentity, HistoryRecord]:
+    def load_attention_history(self) -> dict[SessionIdentity, AttentionHistory]:
         rows = self.db.execute(
             "SELECT subject_source,subject_session,last_selected,considered_subject_revision,considered_session_revision FROM attention_history WHERE pet=?",
             (self.pet,),
         ).fetchall()
         return {
-            session_from_row(row, "subject_"): HistoryRecord.model_validate(dict(row))
+            session_from_row(row, "subject_"): AttentionHistory.model_validate(
+                dict(row)
+            )
             for row in rows
         }
 
@@ -178,7 +181,7 @@ class Memory:
         return tuple(SessionReport.model_validate_json(row["data"]) for row in rows)
 
     def save_attention_history(
-        self, subject_id: SessionIdentity, history: HistoryRecord
+        self, subject_id: SessionIdentity, history: AttentionHistory
     ) -> None:
         with self.transaction():
             self.db.execute(
@@ -204,7 +207,7 @@ class Memory:
         reason: SpeechReason,
         subject_id: SessionIdentity | None = None,
         revision: str | None = None,
-        history: HistoryRecord | None = None,
+        history: AttentionHistory | None = None,
     ) -> bool:
         with self.transaction():
             previous = self.db.execute(
@@ -247,7 +250,7 @@ class Memory:
         text: str = "",
         subject_id: SessionIdentity | None = None,
         revision: str | None = None,
-        history: HistoryRecord | None = None,
+        history: AttentionHistory | None = None,
     ) -> bool:
         with self.transaction():
             result = self.db.execute(
@@ -378,7 +381,7 @@ class Memory:
         )
         return cursor.lastrowid
 
-    def recent(
+    def recent_events(
         self,
         limit: int = 5,
         *,
@@ -429,7 +432,7 @@ class Memory:
         if request is None:
             return []
         query = " AND ".join('"' + term + '"' for term in request.terms)
-        excluded = [row.id for row in self.recent()]
+        excluded = [row.id for row in self.recent_events()]
         placeholders = ",".join("?" for _ in excluded)
         rows = self.db.execute(
             f"""SELECT e.* FROM events_fts JOIN events e ON e.id=events_fts.rowid
@@ -490,7 +493,7 @@ class Memory:
             )
         for report in observation.reports:
             if isinstance(report, IntentEvidence):
-                request = select_prompt(report.text)
+                request = request_excerpt(report.text)
                 first = first if count else request
                 requests = [*requests, request][-4:]
                 count += 1
@@ -513,7 +516,7 @@ class Memory:
         request_count: int | None = None,
         first_summary_attempted: bool = False,
     ) -> None:
-        requests = [select_prompt(request) for request in recent_requests[-4:]]
+        requests = [request_excerpt(request) for request in recent_requests[-4:]]
         count = len(requests) if request_count is None else request_count
         with self.transaction():
             self.db.execute(
@@ -524,7 +527,7 @@ class Memory:
                 (
                     self.pet,
                     *session_values(session),
-                    select_prompt(initial_request),
+                    request_excerpt(initial_request),
                     summary or "",
                     json.dumps(requests),
                     self.clock(),
@@ -543,7 +546,7 @@ class Memory:
         self.prune()
 
     def connected_work(self, activity: SwarmActivity) -> tuple[WorkSubject, ...]:
-        return connected_work(self._work_repository.load(), activity)
+        return shared_work(self._work_repository.load(), activity)
 
     def collection_targets(self) -> tuple[RepositoryTarget, ...]:
         return collection_targets(self._work_repository.load())

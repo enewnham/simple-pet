@@ -556,7 +556,7 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.returncode, 1)
         local = await git.observe(str(self.path))
         self.assertEqual(local.conflicts, 1)
-        self.assertTrue(local.pending)
+        self.assertTrue(local.has_unpublished_changes)
 
     async def test_exact_head_repository_filters_forks_and_ambiguous_open_requests(
         self,

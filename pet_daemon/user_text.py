@@ -1,6 +1,6 @@
 import re
 
-from .prompts import select_prompt
+from .prompts import request_excerpt
 
 EMBEDDED = re.compile(
     r"<(?P<tag>agent-message|task-notification|pasted_content|skill|environment_context|instructions)\b[^>]*>.*?</(?P=tag)\b[^>]*>",
@@ -27,4 +27,4 @@ def user_prose(text: str) -> str:
 
 
 def sentiment_excerpt(text: str) -> str:
-    return select_prompt(user_prose(text), limit=600, max_bytes=602)
+    return request_excerpt(user_prose(text), limit=600, max_bytes=602)

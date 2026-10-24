@@ -6,8 +6,8 @@ from anthropic import AsyncAnthropic
 
 from ..domain import ModelPurpose, SpeechReason
 from ..logging import get_logger
-from .context import encoded_size
 from .contracts import ModelRequest
+from .request import encoded_size
 from .usage import UsageTokens, request_usage
 
 log = get_logger("pet-daemon")

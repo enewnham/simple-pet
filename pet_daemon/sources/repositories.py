@@ -241,7 +241,7 @@ class RepositoryTracker:
                     self._github(key, target, self.versions.get(key, 0), self.epoch),
                 )
 
-    def _active(self, key: CollectionKey, version: int, epoch: int) -> bool:
+    def _is_active(self, key: CollectionKey, version: int, epoch: int) -> bool:
         return (
             epoch == self.epoch
             and version == self.versions.get(key, 0)
@@ -257,9 +257,9 @@ class RepositoryTracker:
         checked_at = self.clock()
         try:
             async with self.limit:
-                root = await git.discover(path, self.run)
+                root = await git.checkout_root(path, self.run)
                 local = await git.observe(root, self.run)
-            if not self._active(key, version, epoch) or sequence < self.applied.get(
+            if not self._is_active(key, version, epoch) or sequence < self.applied.get(
                 root, 0
             ):
                 return
@@ -276,7 +276,7 @@ class RepositoryTracker:
             )
             self._sync_subscriptions()
         except (TimeoutError, OSError, RuntimeError, ValueError) as error:
-            if not self._active(key, version, epoch):
+            if not self._is_active(key, version, epoch):
                 return
             self._save(
                 CheckoutObservation(
@@ -323,7 +323,7 @@ class RepositoryTracker:
                 subject=key[1],
                 error=error,
             )
-        if not self._active(key, version, epoch):
+        if not self._is_active(key, version, epoch):
             return
         if target.kind == CollectionKind.BRANCH:
             assert target.repository is not None

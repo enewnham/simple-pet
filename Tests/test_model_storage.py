@@ -141,14 +141,15 @@ def test_prospective_consideration_retains_independent_history_values() -> None:
     from pet_daemon.attention import Attention
     from pet_daemon.config import Config
     from pet_daemon.domain import WorkSubjectKind
-    from pet_daemon.storage.memory import HistoryRecord
-    from pet_daemon.work.views import WorkStory, WorkSubject, WorkUpdate
+    from pet_daemon.storage.memory import AttentionHistory
+    from pet_daemon.work.shared_work import WorkSubject, WorkUpdate
+    from pet_daemon.work.stories import WorkStory
 
     identity = SessionIdentity(source=SessionSource.CODEX, native_id="session")
     attention = Attention(
         Config(pet_dir=Path(".")), clock=lambda: 1000, rng=random.Random(0)
     )
-    attention.restore({identity: HistoryRecord(last_selected=100)})
+    attention.restore({identity: AttentionHistory(last_selected=100)})
     subject = WorkSubject(
         id=identity,
         kind=WorkSubjectKind.WORK,
@@ -163,7 +164,7 @@ def test_prospective_consideration_retains_independent_history_values() -> None:
     assert second.last_selected == 100
     assert first.considered_subject_revision == "subject"
     assert first.considered_session_revision == "session"
-    assert attention.history(identity) == HistoryRecord(last_selected=100)
+    assert attention.history(identity) == AttentionHistory(last_selected=100)
     attention.mark_considered(subject, update)
     attention.mark_selected(identity)
     assert first.last_selected == 200

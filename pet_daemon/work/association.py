@@ -78,7 +78,7 @@ def enclosing_checkout(
     )
 
 
-def decide_observation(
+def reconcile_observation(
     record: RepositoryObservation | None, observation: RepositoryObservation
 ) -> RepositoryObservation | None:
     if record and observation.checked_at < record.checked_at:

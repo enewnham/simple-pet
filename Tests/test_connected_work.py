@@ -4,7 +4,6 @@ import unittest
 from pathlib import Path
 
 from pet_daemon.attention import Attention
-from pet_daemon.commentary.presentation import work_record
 from pet_daemon.config import Config
 from pet_daemon.domain import (
     ArtifactKind,
@@ -20,6 +19,7 @@ from pet_daemon.runtime import HookEvent, HookEventKind
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.storage import Memory
 from pet_daemon.work import WorkSubject
+from pet_daemon.work.evidence import ExecutionStatus, ReportedProgress
 from pet_daemon.work.models import RelatedLink
 from pet_daemon.work.observations import (
     BranchObservation,
@@ -218,31 +218,33 @@ class ConnectedWorkTests(unittest.TestCase):
                 SessionIdentity(source=SessionSource.CODEX, native_id="root"),
             ),
         )
-        record = work_record(subject.story)
-        self.assertEqual(record["intent"], scopes[0][1])
+        record = subject.story
+        self.assertEqual(record.intent, scopes[0][1])
         self.assertEqual(
             [
-                item["reported_progress"]
-                for item in record["activity"]
-                if "reported_progress" in item
+                item.details.reported_progress
+                for item in record.activity
+                if isinstance(item.details, (ReportedProgress, ExecutionStatus))
+                and item.details.reported_progress is not None
             ],
             [scopes[0][2]],
         )
-        scoped_sessions = {session["scope"]: session for session in record["sessions"]}
+        scoped_sessions = {session.scope: session for session in record.sessions}
         self.assertEqual(set(scoped_sessions), {scopes[1][1], scopes[2][1]})
         for _, goal, report in scopes[1:]:
             self.assertEqual(
                 [
-                    item["reported_progress"]
-                    for item in scoped_sessions[goal]["activity"]
-                    if "reported_progress" in item
+                    item.details.reported_progress
+                    for item in scoped_sessions[goal].activity
+                    if isinstance(item.details, (ReportedProgress, ExecutionStatus))
+                    and item.details.reported_progress is not None
                 ],
                 [report],
             )
         outputs = {
-            item["ref"]: item["title"]
-            for item in record["artifacts"]
-            if item["kind"] == "pull_request"
+            item.ref: item.title
+            for item in record.artifacts
+            if item.kind == "pull_request"
         }
         self.assertEqual(outputs, {pr.url: pr.title for pr in prs})
 
@@ -296,11 +298,13 @@ class ConnectedWorkTests(unittest.TestCase):
         after = self.subjects()
         self.assertEqual(len(after), 1)
         self.assertEqual(after[0].id, before[0].id)
-        record = work_record(after[0].story)
-        self.assertEqual(record["intent"], "Preserve session context across restarts")
-        self.assertEqual(record["sessions"][0]["scope"], "Document restart examples")
+        record = after[0].story
+        self.assertEqual(record.intent, "Preserve session context across restarts")
+        self.assertEqual(record.sessions[0].scope, "Document restart examples")
+        progress = record.sessions[0].activity[0].details
+        assert isinstance(progress, ReportedProgress)
         self.assertEqual(
-            record["sessions"][0]["activity"][0]["reported_progress"],
+            progress.reported_progress,
             "The restart example is ready.",
         )
 
@@ -348,8 +352,8 @@ class ConnectedWorkTests(unittest.TestCase):
             },
         )
         for subject in subjects:
-            record = work_record(subject.story)
-            refs = {item["ref"] for item in record["artifacts"]}
+            record = subject.story
+            refs = {item.ref for item in record.artifacts}
             self.assertTrue({pr.url, ticket} <= refs)
             expected = (
                 "Check serialized fields"
@@ -357,9 +361,7 @@ class ConnectedWorkTests(unittest.TestCase):
                 == SessionIdentity(source=SessionSource.CODEX, native_id="storage")
                 else "Check restart behavior"
             )
-            self.assertEqual(
-                [session["scope"] for session in record["sessions"]], [expected]
-            )
+            self.assertEqual([session.scope for session in record.sessions], [expected])
 
     def test_persisted_child_report_is_routine_eligible_after_runtime_pruning(
         self,
@@ -385,10 +387,10 @@ class ConnectedWorkTests(unittest.TestCase):
             self.event(event)
         self.now += 2
         sessions.prune()
-        self.assertEqual(sessions.activity_view().sessions, ())
+        self.assertEqual(sessions.activity().sessions, ())
         self.memory.close()
         self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
-        runtime = sessions.activity_view()
+        runtime = sessions.activity()
         subjects = self.memory.connected_work(runtime)
         self.assertEqual(len(subjects), 1)
         self.assertEqual(
@@ -411,8 +413,10 @@ class ConnectedWorkTests(unittest.TestCase):
             selection.id, SessionIdentity(source=SessionSource.CODEX, native_id="root")
         )
         self.assertIsNone(selection.focus_session)
-        record = work_record(require(selection.subject).story)
+        record = require(selection.subject).story
+        progress = record.sessions[0].activity[0].details
+        assert isinstance(progress, ReportedProgress)
         self.assertEqual(
-            record["sessions"][0]["activity"][0]["reported_progress"],
+            progress.reported_progress,
             "The restart example is ready.",
         )

@@ -6,7 +6,11 @@ from pathlib import Path
 from pet_daemon.attention import AttentionSelection
 from pet_daemon.commentary.cognition import Cognition
 from pet_daemon.commentary.contracts import ModelRequest
-from pet_daemon.commentary.story import PreparedStory, prepare, validate
+from pet_daemon.commentary.story import (
+    WorkNarrativeRequest,
+    prepare,
+    validate,
+)
 from pet_daemon.config import Config
 from pet_daemon.domain import (
     EvidenceKind,
@@ -19,6 +23,7 @@ from pet_daemon.domain import (
 )
 from pet_daemon.identity import SessionIdentity, session_data
 from pet_daemon.storage import Memory
+from pet_daemon.work.evidence import CommentaryEvidence, UserIntent
 from pet_daemon.work.models import ExecutionEvidence, IntentEvidence, ProgressEvidence
 from pet_daemon.work.narrative import (
     NarrativeStatement,
@@ -26,13 +31,8 @@ from pet_daemon.work.narrative import (
     semantic_revision,
 )
 from pet_daemon.work.observations import SessionObservation
-from pet_daemon.work.views import (
-    EvidenceView,
-    IntentView,
-    SessionContribution,
-    WorkStory,
-    WorkSubject,
-)
+from pet_daemon.work.shared_work import WorkSubject
+from pet_daemon.work.stories import SessionContribution, WorkStory
 from Tests.fixtures import (
     capture_snapshot,
     require,
@@ -73,7 +73,7 @@ class StoryTests(unittest.TestCase):
             SessionObservation(session=identity, parent=parent, reports=reports)
         )
 
-    def prepared(self, *, target_bytes: int = 12000) -> PreparedStory:
+    def prepared(self, *, target_bytes: int = 12000) -> WorkNarrativeRequest:
         focus = session_snapshot(
             id=SessionIdentity(source=SessionSource.CODEX, native_id="root")
         )
@@ -483,10 +483,10 @@ class StoryTests(unittest.TestCase):
             intent="Improve parser",
             revision="fallback",
             requests=(
-                EvidenceView(
+                CommentaryEvidence(
                     source=EvidenceSource.USER,
                     kind=EvidenceKind.INTENT,
-                    details=IntentView(text="Improve parser"),
+                    details=UserIntent(text="Improve parser"),
                 ),
             ),
             sessions=(
@@ -496,10 +496,10 @@ class StoryTests(unittest.TestCase):
                         source=SessionSource.CODEX, native_id="coverage"
                     ),
                     requests=(
-                        EvidenceView(
+                        CommentaryEvidence(
                             source=EvidenceSource.USER,
                             kind=EvidenceKind.INTENT,
-                            details=IntentView(text="Audit escapes"),
+                            details=UserIntent(text="Audit escapes"),
                         ),
                     ),
                 ),

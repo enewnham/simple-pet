@@ -8,14 +8,14 @@ from typing import TypedDict
 
 from pydantic import BaseModel, Field
 
-from .commentary.context import CommentarySupport
+from .commentary.request import SpeechConditions
 from .domain import DeliveryStatus, SpeechReason
 from .identity import SessionIdentity
 from .runtime import Trigger
 
 
-class MessageSupport(BaseModel):
-    commentary: CommentarySupport
+class DeliveryConditions(BaseModel):
+    commentary: SpeechConditions
     trigger: Trigger | None
     request_epoch: int
 
@@ -35,7 +35,7 @@ class SpeechMessage(BaseModel):
     revision: str | None = None
     history_epoch: int = 0
     message_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    support: MessageSupport | None = None
+    conditions: DeliveryConditions | None = None
 
 
 class DeliveryOutcome(BaseModel):

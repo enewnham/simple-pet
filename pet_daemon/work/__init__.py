@@ -1,4 +1,5 @@
 from .ingest import WorkIngestion
-from .views import WorkStory, WorkSubject
+from .shared_work import WorkSubject
+from .stories import WorkStory
 
 __all__ = ["WorkIngestion", "WorkStory", "WorkSubject"]

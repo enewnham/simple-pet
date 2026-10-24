@@ -8,7 +8,7 @@ import socket
 from collections.abc import Mapping
 
 from ..domain import SessionSource
-from ..prompts import select_prompt
+from ..prompts import request_excerpt
 from ..prose import prose_text, work_prose
 from ..sessions.processes import discover_owner
 
@@ -21,7 +21,7 @@ def encode(payload: Mapping[str, object]) -> bytes | None:
     original_goal = payload.get("goal")
     if isinstance(original_goal, str):
         original_goal = prose_text(original_goal)
-        payload["goal"] = select_prompt(original_goal)
+        payload["goal"] = request_excerpt(original_goal)
 
     def serialized() -> bytes:
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
@@ -38,7 +38,7 @@ def encode(payload: Mapping[str, object]) -> bytes | None:
         if field == "goal":
             payload[field] = ""
             available = MAX_DATAGRAM_BYTES - len(serialized()) + 2
-            payload[field] = select_prompt(original_goal, max_bytes=available)
+            payload[field] = request_excerpt(original_goal, max_bytes=available)
             data = serialized()
             continue
         low, high = 0, len(value)

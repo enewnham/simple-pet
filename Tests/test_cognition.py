@@ -16,8 +16,8 @@ from pet_daemon.commentary.cognition import (
     CommentaryResult,
     StoryUnavailable,
 )
-from pet_daemon.commentary.context import INSTRUCTIONS
 from pet_daemon.commentary.model import AnthropicModelClient
+from pet_daemon.commentary.request import INSTRUCTIONS
 from pet_daemon.config import Config
 from pet_daemon.domain import CareKind, PetState, SessionSource, SpeechReason
 from pet_daemon.identity import SessionIdentity
@@ -202,7 +202,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 self.memory.work.record_session(result.observation)
 
     def snapshot(self) -> PetContext:
-        activity = self.sessions.activity_view()
+        activity = self.sessions.activity()
         return capture_snapshot(
             activity, memory=self.memory, work=self.memory.connected_work(activity)
         )

@@ -54,7 +54,7 @@ class ActivityCoordinator:
             PetState.ERROR
             if self.clock() < self.error_until
             else PetState.WORKING
-            if self.sessions.working
+            if self.sessions.is_working
             else PetState.IDLE
         )
 
@@ -78,7 +78,7 @@ class ActivityCoordinator:
             detail="payload",
             packet=packet.packet(),
             result=result.model_dump() if result is not None else None,
-            snapshot=self.sessions.activity_view().model_dump(),
+            snapshot=self.sessions.activity().model_dump(),
         )
         return result
 
@@ -94,7 +94,7 @@ class ActivityCoordinator:
             self.queue(SpeechReason.PROMPT, trigger)
         elif reaction.kind == ReactionKind.WAITING:
             session = self.sessions.by_id[reaction.session]
-            if session.waiting_for_input:
+            if session.is_waiting_for_input:
                 self.queue(SpeechReason.CHECK_IN, trigger)
         elif reaction.kind in (
             ReactionKind.SUCCESS,

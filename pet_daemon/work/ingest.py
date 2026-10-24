@@ -8,7 +8,7 @@ from typing import Protocol
 from ..domain import ArtifactKind
 from ..identity import SessionIdentity
 from ..repository_identity import RepositoryIdentity
-from .association import TERMINAL_EVENTS, decide_observation, report_context
+from .association import TERMINAL_EVENTS, reconcile_observation, report_context
 from .models import ArtifactReference, ExecutionEvidence, ReportContext, SessionReport
 from .observations import (
     BranchObservation,
@@ -128,7 +128,7 @@ class WorkIngestion:
                     )
                 case PullRequestObservation():
                     record = self.repository.get_pull_request(collected.ref)
-            observation = decide_observation(record, collected)
+            observation = reconcile_observation(record, collected)
             if observation is None:
                 return
             self.repository.put_observation(observation)

@@ -436,7 +436,7 @@ async def replay_sequence(
                 "expected_speech": event.get("expected_speech"),
             }
             call_start, event_start = len(replay.model.calls), len(replay.events)
-            if not replay.app.attention.selection_eligible(selection, current):
+            if not replay.app.attention.is_selection_eligible(selection, current):
                 step.update(speech=None, decision="unchanged_work", accepted=False)
             else:
                 await replay.app.comment(reason, snapshot=current, selection=selection)

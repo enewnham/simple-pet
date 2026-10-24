@@ -73,7 +73,7 @@ def object_value(value: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
 
-def failed(value: object) -> bool:
+def is_failed(value: object) -> bool:
     if not isinstance(value, dict):
         return False
     code = value.get("exit_code", value.get("exitCode"))
@@ -184,7 +184,7 @@ def update(source: str, event: str, payload: Mapping[str, object]) -> HookEvent 
     if source == "cursor":
         output = payload.get("tool_output")
         response = object_value(output) or output
-    if normalized == HookEventKind.TOOL_DONE and failed(response):
+    if normalized == HookEventKind.TOOL_DONE and is_failed(response):
         normalized_event = HookEventKind.TOOL_ERROR
     status = payload.get("status")
     if normalized == HookEventKind.TURN_DONE and source == "cursor":

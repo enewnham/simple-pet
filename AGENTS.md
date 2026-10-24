@@ -50,14 +50,14 @@ that require judgment beyond formatting, linting, and type checks.
 - **Work and evidence:** [pet_daemon/work/](pet_daemon/work/) defines typed agent sessions,
   report contexts, checkout facts, and explicit PR, stack, and ticket links.
   Runtime session transitions supply accepted facts to [pet_daemon/work/ingest.py](pet_daemon/work/ingest.py).
-  [pet_daemon/work/views.py](pet_daemon/work/views.py) joins stored sessions, reports,
+  [pet_daemon/work/shared_work.py](pet_daemon/work/shared_work.py) joins stored sessions, reports,
   and repository observations into shared work stories with distinct session contributions.
   Report references can resolve later without
   using a checkout's later state to reinterpret the report.
   [pet_daemon/sources/](pet_daemon/sources/) collects hook, Git, and GitHub observations
   without assigning work to sessions or creating PR tasks.
   [pet_daemon/sessions/reactions.py](pet_daemon/sessions/reactions.py) tracks reactions to accepted session transitions.
-- **Commentary and storage:** [pet_daemon/commentary/context.py](pet_daemon/commentary/context.py)
+- **Commentary and storage:** [pet_daemon/commentary/request.py](pet_daemon/commentary/request.py)
   builds bounded commentary prompts and captures their supporting facts.
   [pet_daemon/commentary/cognition.py](pet_daemon/commentary/cognition.py) runs model requests,
   summaries, and repetition checks against that selection.

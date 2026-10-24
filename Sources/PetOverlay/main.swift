@@ -129,7 +129,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return (screen ?? panel?.screen ?? NSScreen.main ?? NSScreen.screens.first)?.visibleFrame ?? .zero
     }
 
-    private var paused: Bool {
+    private var isPaused: Bool {
         if systemSleeping { return true }
         guard let panel = panel else { return true }
         let pointer = NSEvent.mouseLocation
@@ -148,7 +148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let command = event.motion, command.commandID > latestMotion {
             latestMotion = command.commandID
             stopMotion()
-            guard !paused, let panel = panel else {
+            guard !isPaused, let panel = panel else {
                 complete("motion", id: command.commandID, result: "interrupted")
                 return
             }
@@ -161,7 +161,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func advanceMotion() {
-        guard !paused else { stopMotion(); return }
+        guard !isPaused else { stopMotion(); return }
         guard let motion = motion, let panel = panel else { return }
         let sample = motion.sample(at: ProcessInfo.processInfo.systemUptime, size: panel.frame.size, bounds: screenBounds)
         panel.setFrameOrigin(sample.origin)
@@ -174,7 +174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func stopIfPaused() { if paused { stopMotion() } }
+    private func stopIfPaused() { if isPaused { stopMotion() } }
 
     private func stopMotion() {
         guard let motion = motion else { return }

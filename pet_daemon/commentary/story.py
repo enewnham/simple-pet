@@ -10,11 +10,12 @@ from ..prose import work_prose
 from ..runtime import PetContext
 from ..storage.memory import Memory
 from ..types import JSONObject, JSONValue
+from ..work.evidence import ExecutionStatus, ReportedProgress, UserIntent
 from ..work.models import ExecutionEvidence, IntentEvidence, ProgressEvidence
 from ..work.narrative import NarrativeStatement, WorkNarrative, semantic_revision
-from ..work.views import ExecutionView, IntentView, ProgressView, revision_key
-from .context import duration
+from ..work.stories import revision_key
 from .contracts import JSONSchema, ModelRequest, RequestFactory
+from .request import duration
 
 INSTRUCTIONS = """
 Maintain a short factual memory of your work with the developer. Observations describe
@@ -33,7 +34,7 @@ when nothing is relevant.
 """.strip()
 
 
-class PreparedStory(BaseModel):
+class WorkNarrativeRequest(BaseModel):
     subject_id: SessionIdentity
     revision: str
     sources: dict[str, JSONObject]
@@ -55,7 +56,7 @@ def prepare(
     make_request: RequestFactory,
     *,
     target_bytes: int = 12000,
-) -> PreparedStory | None:
+) -> WorkNarrativeRequest | None:
     subject = selection.subject
     if subject is None:
         return None
@@ -141,16 +142,16 @@ def prepare(
     if not sources:
         for record in (*subject.story.requests, *subject.story.activity):
             match record.details:
-                case IntentView(text=text):
+                case UserIntent(text=text):
                     add("request", text, "current task", observed_at=record.observed_at)
-                case ProgressView(reported_progress=text):
+                case ReportedProgress(reported_progress=text):
                     add(
                         "reported_progress",
                         text,
                         "current task",
                         observed_at=record.observed_at,
                     )
-                case ExecutionView(
+                case ExecutionStatus(
                     execution="turn ended",
                     reported_progress=progress,
                     reported_execution_outcome=outcome,
@@ -168,7 +169,7 @@ def prepare(
             scope = assignment or "related task"
             for record in (*child.requests, *child.activity):
                 match record.details:
-                    case IntentView(text=text):
+                    case UserIntent(text=text):
                         add(
                             "request",
                             text,
@@ -176,7 +177,7 @@ def prepare(
                             origin=child.session,
                             observed_at=record.observed_at,
                         )
-                    case ProgressView(reported_progress=text):
+                    case ReportedProgress(reported_progress=text):
                         add(
                             "reported_progress",
                             text,
@@ -184,7 +185,7 @@ def prepare(
                             origin=child.session,
                             observed_at=record.observed_at,
                         )
-                    case ExecutionView(
+                    case ExecutionStatus(
                         execution="turn ended",
                         reported_progress=progress,
                         reported_execution_outcome=outcome,
@@ -280,7 +281,7 @@ def prepare(
         JSONSchema, transform_schema(StoryResponse)
     )
     request["max_tokens"] = max(request["max_tokens"], 1400)
-    return PreparedStory(
+    return WorkNarrativeRequest(
         subject_id=subject.id,
         revision=semantic_revision(subject.story),
         sources=sources,
@@ -289,18 +290,18 @@ def prepare(
     )
 
 
-def validate(raw: dict[str, object], prepared: PreparedStory) -> WorkNarrative:
+def validate(raw: dict[str, object], request: WorkNarrativeRequest) -> WorkNarrative:
     response = StoryResponse.model_validate(raw)
     for statement in (response.intent, *response.decisions, *response.progress):
-        if any(ref not in prepared.sources for ref in statement.sources):
+        if any(ref not in request.sources for ref in statement.sources):
             raise ValueError("Story statement references unavailable evidence")
-    if prepared.latest_request_source not in response.intent.sources:
+    if request.latest_request_source not in response.intent.sources:
         raise ValueError("Story intent must reference the current request")
     return WorkNarrative(
-        subject_id=prepared.subject_id,
-        revision=prepared.revision,
+        subject_id=request.subject_id,
+        revision=request.revision,
         intent=response.intent,
         decisions=response.decisions,
         progress=response.progress,
-        sources=prepared.sources,
+        sources=request.sources,
     )

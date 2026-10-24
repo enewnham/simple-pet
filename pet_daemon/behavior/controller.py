@@ -18,7 +18,7 @@ from .sprites import Clip, Pack
 log = get_logger("pet-daemon")
 
 
-def finite_number(value: object) -> TypeGuard[float]:
+def is_finite_number(value: object) -> TypeGuard[float]:
     return (type(value) is int or type(value) is float) and math.isfinite(value)
 
 
@@ -75,7 +75,7 @@ class Behavior:
         self.care_remark: CareKind | None = None
         self.care_choices: list[tuple[CareKind, str, str]] = []
 
-    def satisfy(self) -> None:
+    def defer_care(self) -> None:
         self.next_care = self.clock() + self.rng.uniform(*self.config.care_interval)
         self.next_care_speech = self.clock() + self.rng.uniform(
             *self.config.care_speech_interval
@@ -83,12 +83,12 @@ class Behavior:
         self.care_remark = None
         self.care_choices = []
 
-    def _care(self, sessions: Sessions) -> bool:
-        if not self.config.care or sessions.working:
+    def _offer_care(self, sessions: Sessions) -> bool:
+        if not self.config.care or sessions.is_working:
             return False
         assert self.next_care is not None
         assert self.next_care_speech is not None
-        if self.clock() < self.next_care or self._blocked():
+        if self.clock() < self.next_care or self._is_blocked():
             return False
         choices: list[tuple[CareKind, str, str]] = [
             (CareKind.EXERCISE, "celebrate", "jumping"),
@@ -96,14 +96,14 @@ class Behavior:
             (CareKind.CONSTERNATION, "error", "failed"),
         ]
         available = [item for item in choices if self.pack.role(item[1])]
-        if sessions.engaged:
+        if sessions.is_engaged:
             available = [
                 item for item in available if item[0] == CareKind.CONSTERNATION
             ]
         self.next_care = self.clock() + self.rng.uniform(*self.config.care_interval)
         if not available:
             return False
-        if sessions.engaged:
+        if sessions.is_engaged:
             kind, role, preferred = self.rng.choice(available)
         else:
             if not self.care_choices:
@@ -117,7 +117,7 @@ class Behavior:
             kind, role, preferred = selected
         clip = self._resolve_clip(role, preferred, "idle")
         self._play(clip, "care", ActionKind.REACTION, REACTION_SECONDS)
-        if not sessions.engaged and self.clock() >= self.next_care_speech:
+        if not sessions.is_engaged and self.clock() >= self.next_care_speech:
             self.care_remark = kind
             self.next_care_speech = self.clock() + self.rng.uniform(
                 *self.config.care_speech_interval
@@ -133,7 +133,7 @@ class Behavior:
         return action
 
     @property
-    def sleeping(self) -> bool:
+    def is_sleeping(self) -> bool:
         return self.nap_until is not None
 
     def _next_id(self) -> int:
@@ -187,7 +187,7 @@ class Behavior:
 
     def resume(self) -> None:
         if self.suspension == "system_sleep":
-            self.satisfy()
+            self.defer_care()
         if self.suspension == "interaction":
             self.wake("interaction_finished")
         self.suspension = None
@@ -197,7 +197,7 @@ class Behavior:
         if reason != "nap_finished" and self.inactive_since is not None:
             self.inactive_since = self.clock()
         self.next_nap = self.clock() + self.rng.uniform(*self.config.nap_interval)
-        if not self.sleeping:
+        if not self.is_sleeping:
             return
         self.nap_until = None
         self.emit({"sleeping": False})
@@ -205,7 +205,7 @@ class Behavior:
         self._interrupt(reason)
         self._rest()
 
-    def renderer_status(self, packet: Mapping[str, object]) -> bool:
+    def update_renderer_status(self, packet: Mapping[str, object]) -> bool:
         try:
             status = RendererStatus.model_validate(packet)
         except ValidationError:
@@ -255,7 +255,7 @@ class Behavior:
             self.clip = None
             self._rest()
 
-    def _near_pointer(self) -> bool:
+    def _is_near_pointer(self) -> bool:
         status = self.status
         assert status is not None
         return (
@@ -266,13 +266,13 @@ class Behavior:
             <= self.config.pointer_radius
         )
 
-    def _blocked(self) -> bool:
+    def _is_blocked(self) -> bool:
         return (
             not self.status
             or self.status.speech
             or self.status.dragging
             or self.status.menu
-            or self._near_pointer()
+            or self._is_near_pointer()
         )
 
     def _play(
@@ -472,7 +472,7 @@ class Behavior:
         index = round(math.atan2(dx, dy) * 16 / (2 * math.pi)) % 16
         return self.pack.gaze[index]
 
-    def _available(self, candidate: Candidate) -> bool:
+    def _is_available(self, candidate: Candidate) -> bool:
         if candidate.name == "roam":
             return bool(self.pack.role("walk-left") and self.pack.role("walk-right"))
         if candidate.name == "observe":
@@ -484,12 +484,12 @@ class Behavior:
             return
         now = self.clock()
         status = self.status
-        if sessions.working:
+        if sessions.is_working:
             self.next_care = None
             self.next_care_speech = None
             self.care_remark = None
         elif self.next_care is None:
-            self.satisfy()
+            self.defer_care()
         if status.dragging or status.menu:
             if self.suspension is None:
                 self.suspend("interaction")
@@ -503,15 +503,15 @@ class Behavior:
             self.state = state
             log.info("behavior.state_changed", state=state)
             self.emit({"state": state})
-        if sessions.engaged:
+        if sessions.is_engaged:
             self.inactive_since = None
             self.next_nap = None
         elif self.inactive_since is None:
             self.inactive_since = now
             self.next_nap = now + self.rng.uniform(*self.config.nap_interval)
-        blocked = self._blocked()
+        blocked = self._is_blocked()
         if blocked:
-            if not sessions.engaged:
+            if not sessions.is_engaged:
                 self.inactive_since = now
                 self.next_nap = now + self.rng.uniform(*self.config.nap_interval)
             self.clear_since = None
@@ -523,10 +523,10 @@ class Behavior:
             0 if self.inactive_since is None else now - self.inactive_since
         )
         self.observation = Observation(
-            active=sessions.engaged,
-            working=sessions.working,
+            active=sessions.is_engaged,
+            working=sessions.is_working,
             investigating=any(
-                session.working and session.phase == Activity.INVESTIGATING
+                session.is_working and session.phase == Activity.INVESTIGATING
                 for session in sessions.by_id.values()
             ),
             waiting=any(session.waiting for session in sessions.by_id.values()),
@@ -540,7 +540,7 @@ class Behavior:
             ),
             can_nap=(
                 self.config.naps
-                and not sessions.engaged
+                and not sessions.is_engaged
                 and not blocked
                 and inactive_seconds >= 120
                 and self.next_nap is not None
@@ -550,10 +550,10 @@ class Behavior:
             rest_pressure=min(1, inactive_seconds / 240),
         )
         if self.nap_until is not None:
-            if sessions.engaged or blocked or now >= self.nap_until:
+            if sessions.is_engaged or blocked or now >= self.nap_until:
                 self.wake(
                     "activity_or_interaction"
-                    if sessions.engaged or blocked
+                    if sessions.is_engaged or blocked
                     else "nap_finished"
                 )
                 self._rest()
@@ -595,10 +595,13 @@ class Behavior:
             return
         if self.execution.phase != ExecutionPhase.IDLE:
             return
-        if state != PetState.ERROR and self._care(sessions):
+        if state != PetState.ERROR and self._offer_care(sessions):
             return
         candidate = self.policy.select(
-            self.observation, self.execution.last_completed, self.rng, self._available
+            self.observation,
+            self.execution.last_completed,
+            self.rng,
+            self._is_available,
         )
         if candidate.name == "roam" and self._walk():
             return

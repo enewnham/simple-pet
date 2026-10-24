@@ -168,7 +168,7 @@ class SessionReactions:
         state.investigating = session.phase == Activity.INVESTIGATING
         return emitted
 
-    def relevant(self, reaction: SessionReaction, sessions: Sessions) -> bool:
+    def is_relevant(self, reaction: SessionReaction, sessions: Sessions) -> bool:
         key = sessions.aliases.get(reaction.session, reaction.session)
         session = sessions.by_id.get(key)
         if (

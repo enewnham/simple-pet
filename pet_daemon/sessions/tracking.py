@@ -11,16 +11,16 @@ from pydantic import BaseModel
 from ..domain import Activity, ExecutionOutcome, PetState, ProcessStatus, SessionSource
 from ..identity import SessionIdentity
 from ..logging import get_logger
-from ..prompts import select_prompt
+from ..prompts import request_excerpt
 from ..prose import prose_text
 from ..repository_identity import parse_remote_repository
 from ..runtime import (
     ActiveTool,
+    AgentSessionStatus,
     ConvergenceItem,
     FailureSnapshot,
     HookEventKind,
     ProcessIdentity,
-    SessionContext,
     SwarmActivity,
     UserSentiment,
     WaitingKind,
@@ -110,7 +110,7 @@ class AgentSession:
         return self.id.source
 
     @property
-    def waiting_for_input(self) -> bool:
+    def is_waiting_for_input(self) -> bool:
         return self.waiting and self.waiting_kind != WaitingKind.PERMISSION_CHECK
 
     @property
@@ -119,7 +119,7 @@ class AgentSession:
         return self.waiting_since
 
     @property
-    def working(self) -> bool:
+    def is_working(self) -> bool:
         return (
             self.active
             and not self.activity_uncertain
@@ -151,12 +151,12 @@ class Sessions:
         self.convergence: tuple[ConvergenceItem, ...] | None = None
 
     @property
-    def working(self) -> bool:
+    def is_working(self) -> bool:
         self._refresh_activity()
-        return any(session.working for session in self.by_id.values())
+        return any(session.is_working for session in self.by_id.values())
 
     @property
-    def engaged(self) -> bool:
+    def is_engaged(self) -> bool:
         self._refresh_activity()
         return any(
             session.active and not session.activity_uncertain
@@ -164,14 +164,16 @@ class Sessions:
         )
 
     @property
-    def active(self) -> bool:
+    def is_active(self) -> bool:
         return any(session.active for session in self.by_id.values())
 
     @property
-    def failed(self) -> bool:
-        return any(self._current_failure(session) for session in self.by_id.values())
+    def has_current_failures(self) -> bool:
+        return any(
+            self._has_current_failure(session) for session in self.by_id.values()
+        )
 
-    def _current_failure(self, session: AgentSession) -> bool:
+    def _has_current_failure(self, session: AgentSession) -> bool:
         return any(
             failure.generation == session.generation and not failure.resolved
             for failure in session.failures.values()
@@ -199,10 +201,10 @@ class Sessions:
         return failure
 
     @property
-    def clean_convergence(self) -> bool:
+    def has_successful_convergence(self) -> bool:
         return (
             self.convergence is not None
-            and not self.active
+            and not self.is_active
             and all(
                 item.outcome == ExecutionOutcome.SUCCESS for item in self.convergence
             )
@@ -357,7 +359,7 @@ class Sessions:
     ) -> None:
         previous_turn = session.turn
         replaced_calls = list(session.calls)
-        if not self.active:
+        if not self.is_active:
             self.members.clear()
             self.convergence = None
         session.active = True
@@ -525,7 +527,7 @@ class Sessions:
         return self.apply(hook)
 
     @staticmethod
-    def _resumes_codex_child(session: AgentSession, event: HookEvent) -> bool:
+    def _can_resume_codex_child(session: AgentSession, event: HookEvent) -> bool:
         if not (
             session.source == SessionSource.CODEX
             and session.parent
@@ -545,13 +547,13 @@ class Sessions:
     def apply(self, event: HookEvent) -> SessionUpdate | None:
         kind = event.event
         now = self.clock()
-        previously_active = self.active
+        previously_active = self.is_active
         identity = self._session(event, now)
         if identity is None:
             return None
         key, session = identity
         turn = event.turn
-        resumes_child = self._resumes_codex_child(session, event)
+        resumes_child = self._can_resume_codex_child(session, event)
         if (
             turn
             and session.turn
@@ -597,7 +599,7 @@ class Sessions:
             ):
                 self._open(key, session, event, now)
             if event.goal:
-                request = select_prompt(prose_text(event.goal))
+                request = request_excerpt(prose_text(event.goal))
                 if not session.intent_received:
                     session.goal = request
                 session.intent_received = True
@@ -675,7 +677,7 @@ class Sessions:
             if event.manual and not session.calls:
                 outcome = (
                     ExecutionOutcome.ERROR
-                    if self._current_failure(session)
+                    if self._has_current_failure(session)
                     else ExecutionOutcome.CANCELLED
                     if session.cancelled
                     else ExecutionOutcome.SUCCESS
@@ -709,7 +711,7 @@ class Sessions:
             )
             if kind == HookEventKind.TURN_ERROR or outcome == ExecutionOutcome.ERROR:
                 outcome = ExecutionOutcome.ERROR
-                if kind == HookEventKind.TURN_ERROR or not self._current_failure(
+                if kind == HookEventKind.TURN_ERROR or not self._has_current_failure(
                     session
                 ):
                     session.failure = self._failure(session, Activity.SOURCE, now)
@@ -722,7 +724,7 @@ class Sessions:
                     if session.active
                     else session.outcome or ExecutionOutcome.CANCELLED
                 )
-            elif self._current_failure(session):
+            elif self._has_current_failure(session):
                 outcome = ExecutionOutcome.ERROR
             elif session.cancelled:
                 outcome = ExecutionOutcome.CANCELLED
@@ -806,7 +808,7 @@ class Sessions:
             self._resumed(key, session, event, now, waiting_since)
         self._accepted(key, session, event)
         session.last_seen = now
-        convergence = previously_active and not self.active
+        convergence = previously_active and not self.is_active
         if convergence:
             self.convergence = tuple(
                 ConvergenceItem(id=member, outcome=self.by_id[member].outcome)
@@ -847,7 +849,9 @@ class Sessions:
         reports: list[IntentEvidence | ProgressEvidence | ExecutionEvidence] = []
         if event.goal and event.event in ("intent", "subagent_start"):
             reports.append(
-                IntentEvidence(session=key, text=select_prompt(prose_text(event.goal)))
+                IntentEvidence(
+                    session=key, text=request_excerpt(prose_text(event.goal))
+                )
             )
         if session.finished and event.event != "session_start":
             kind = "turn_done" if event.event.startswith("tool_") else event.event
@@ -861,7 +865,7 @@ class Sessions:
                 )
             )
         elif session.waiting:
-            if session.waiting_for_input:
+            if session.is_waiting_for_input:
                 reports.append(
                     ExecutionEvidence(
                         session=key,
@@ -1053,7 +1057,7 @@ class Sessions:
             >= seconds
         ]
 
-    def activity_view(
+    def activity(
         self, keys: Collection[SessionIdentity] | None = None
     ) -> SwarmActivity:
         self._refresh_activity()
@@ -1065,10 +1069,10 @@ class Sessions:
         ]
         return SwarmActivity(
             activity=PetState.WORKING
-            if any(session.working for _, session in members)
+            if any(session.is_working for _, session in members)
             else PetState.IDLE,
             sessions=tuple(
-                SessionContext(
+                AgentSessionStatus(
                     id=key,
                     changed_at=session.changed_at,
                     last_hook_at=session.last_hook_at,
@@ -1100,7 +1104,7 @@ class Sessions:
                     if session.owner_last_alive is None
                     else round(now - session.owner_last_alive),
                     activity_uncertain=session.activity_uncertain,
-                    waiting_for_input=session.waiting_for_input,
+                    waiting_for_input=session.is_waiting_for_input,
                     waiting_seconds=None
                     if session.waiting_since is None
                     else round(now - session.waiting_since),

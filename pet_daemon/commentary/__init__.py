@@ -1,13 +1,13 @@
 from .cognition import Cognition, CommentaryResult
-from .context import CommentarySupport, PreparedCommentary, PromptBuilder
 from .model import AnthropicModelClient, ModelClient
+from .request import CommentaryRequest, PromptBuilder, SpeechConditions
 
 __all__ = [
     "AnthropicModelClient",
     "Cognition",
+    "CommentaryRequest",
     "CommentaryResult",
-    "CommentarySupport",
     "ModelClient",
-    "PreparedCommentary",
     "PromptBuilder",
+    "SpeechConditions",
 ]

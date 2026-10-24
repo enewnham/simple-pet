@@ -4,7 +4,7 @@ import shlex
 from ..domain import Activity
 
 
-def mutates_files(command: str) -> bool:
+def is_file_mutating(command: str) -> bool:
     tokens: list[str] = []
     try:
         lexer = shlex.shlex(command, posix=False, punctuation_chars=";&|()<>\n")
@@ -86,7 +86,7 @@ def activity(tool: str, name: str = "") -> Activity:
         "multiedit",
     ):
         return Activity.EDITING
-    if mutates_files(tool):
+    if is_file_mutating(tool):
         return Activity.EDITING
     text = (name + " " + tool).lower()
     if any(word in text for word in ("pytest", " test", "vitest", "jest", "unittest")):

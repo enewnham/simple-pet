@@ -15,16 +15,17 @@ from pet_daemon.domain import (
 )
 from pet_daemon.identity import SessionIdentity
 from pet_daemon.runtime import (
+    AgentSessionStatus,
     CareTrigger,
     FailureSnapshot,
     PetContext,
     ReactionTrigger,
-    SessionContext,
     SessionTrigger,
 )
 from pet_daemon.sessions.reactions import ReactionKind, SessionReaction
 from pet_daemon.work import WorkStory, WorkSubject
-from pet_daemon.work.views import SessionContribution, WorkUpdate
+from pet_daemon.work.shared_work import WorkUpdate
+from pet_daemon.work.stories import SessionContribution
 from Tests.fixtures import (
     capture_snapshot,
     require,
@@ -41,7 +42,7 @@ class AttentionTests(unittest.TestCase):
             self.config, lambda: self.now, random.Random(0), wall_clock=lambda: self.now
         )
 
-    def snapshot(self, *sessions: SessionContext) -> PetContext:
+    def snapshot(self, *sessions: AgentSessionStatus) -> PetContext:
         members = sessions
         subjects = tuple(
             WorkSubject(
@@ -57,7 +58,7 @@ class AttentionTests(unittest.TestCase):
         return capture_snapshot(sessions_snapshot(*members), work=subjects)
 
     def update_snapshot(
-        self, *sessions: SessionContext, updates: tuple[WorkUpdate, ...]
+        self, *sessions: AgentSessionStatus, updates: tuple[WorkUpdate, ...]
     ) -> PetContext:
         snapshot = self.connected_snapshot(*sessions)
         return snapshot.model_copy(
@@ -81,13 +82,13 @@ class AttentionTests(unittest.TestCase):
         )
         snapshot = snapshot.model_copy(update={"sessions": ()})
         self.now = 309
-        self.assertTrue(self.attention.routine_eligible(snapshot.work[0], snapshot))
+        self.assertTrue(self.attention.is_routine_eligible(snapshot.work[0], snapshot))
         selected = self.attention.select(snapshot)
         self.assertEqual(selected.update, update)
-        self.assertTrue(self.attention.selection_eligible(selected, snapshot))
+        self.assertTrue(self.attention.is_selection_eligible(selected, snapshot))
         self.now = 310
-        self.assertFalse(self.attention.routine_eligible(snapshot.work[0], snapshot))
-        self.assertFalse(self.attention.selection_eligible(selected, snapshot))
+        self.assertFalse(self.attention.is_routine_eligible(snapshot.work[0], snapshot))
+        self.assertFalse(self.attention.is_selection_eligible(selected, snapshot))
 
     def test_click_consideration_keeps_pending_member_updates_eligible(self) -> None:
         update = WorkUpdate(
@@ -103,9 +104,9 @@ class AttentionTests(unittest.TestCase):
             updates=(update,),
         )
         self.attention.mark_considered(snapshot.work[0])
-        self.assertTrue(self.attention.routine_eligible(snapshot.work[0], snapshot))
+        self.assertTrue(self.attention.is_routine_eligible(snapshot.work[0], snapshot))
         self.attention.mark_considered(snapshot.work[0], update)
-        self.assertFalse(self.attention.routine_eligible(snapshot.work[0], snapshot))
+        self.assertFalse(self.attention.is_routine_eligible(snapshot.work[0], snapshot))
 
     def test_consumed_result_follows_a_session_alias(self) -> None:
         old = WorkUpdate(
@@ -136,7 +137,7 @@ class AttentionTests(unittest.TestCase):
             ),
             updates=(renamed,),
         )
-        self.assertFalse(self.attention.routine_eligible(snapshot.work[0], snapshot))
+        self.assertFalse(self.attention.is_routine_eligible(snapshot.work[0], snapshot))
 
     def test_active_update_uses_owner_or_recent_hooks_beyond_five_minutes(self) -> None:
         update = WorkUpdate(
@@ -152,7 +153,7 @@ class AttentionTests(unittest.TestCase):
         )
         snapshot = self.update_snapshot(session, updates=(update,))
         self.now = 1000
-        self.assertTrue(self.attention.routine_eligible(snapshot.work[0], snapshot))
+        self.assertTrue(self.attention.is_routine_eligible(snapshot.work[0], snapshot))
         snapshot = snapshot.model_copy(
             update={
                 "sessions": (
@@ -160,7 +161,7 @@ class AttentionTests(unittest.TestCase):
                 )
             }
         )
-        self.assertFalse(self.attention.routine_eligible(snapshot.work[0], snapshot))
+        self.assertFalse(self.attention.is_routine_eligible(snapshot.work[0], snapshot))
         snapshot = snapshot.model_copy(
             update={
                 "sessions": (
@@ -170,7 +171,7 @@ class AttentionTests(unittest.TestCase):
                 )
             }
         )
-        self.assertTrue(self.attention.routine_eligible(snapshot.work[0], snapshot))
+        self.assertTrue(self.attention.is_routine_eligible(snapshot.work[0], snapshot))
 
     def test_live_child_selects_its_assignment_after_parent_result_is_consumed(
         self,
@@ -206,7 +207,7 @@ class AttentionTests(unittest.TestCase):
             SessionIdentity(source=SessionSource.COMMAND, native_id="child"),
         )
         self.attention.mark_considered(snapshot.work[0], child)
-        self.assertFalse(self.attention.routine_eligible(snapshot.work[0], snapshot))
+        self.assertFalse(self.attention.is_routine_eligible(snapshot.work[0], snapshot))
         targeted = snapshot.model_copy(
             update={
                 "trigger": SessionTrigger(
@@ -217,7 +218,7 @@ class AttentionTests(unittest.TestCase):
             }
         )
         self.assertFalse(
-            self.attention.selection_eligible(
+            self.attention.is_selection_eligible(
                 self.attention.select(targeted, SpeechReason.COMPLETION), targeted
             )
         )
@@ -258,7 +259,7 @@ class AttentionTests(unittest.TestCase):
             }
         )
         self.assertFalse(
-            self.attention.selection_eligible(
+            self.attention.is_selection_eligible(
                 self.attention.select(targeted, SpeechReason.COMPLETION), targeted
             )
         )
@@ -278,9 +279,9 @@ class AttentionTests(unittest.TestCase):
         )
         self.attention.mark_considered(snapshot.work[0], update)
         routine = self.attention.select(snapshot)
-        self.assertFalse(self.attention.selection_eligible(routine, snapshot))
+        self.assertFalse(self.attention.is_selection_eligible(routine, snapshot))
         selected = self.attention.select(snapshot, SpeechReason.CHECK_IN)
-        self.assertTrue(self.attention.selection_eligible(selected, snapshot))
+        self.assertTrue(self.attention.is_selection_eligible(selected, snapshot))
         snapshot = snapshot.model_copy(
             update={
                 "sessions": (
@@ -288,7 +289,7 @@ class AttentionTests(unittest.TestCase):
                 )
             }
         )
-        self.assertFalse(self.attention.selection_eligible(selected, snapshot))
+        self.assertFalse(self.attention.is_selection_eligible(selected, snapshot))
 
     def test_rotates_within_a_tier_before_preferring_recency(self) -> None:
         snapshot = self.snapshot(
@@ -307,7 +308,7 @@ class AttentionTests(unittest.TestCase):
         for _ in range(4):
             selected = self.attention.select(snapshot)
             chosen.append(selected.id)
-            self.attention.scheduled(selected.id)
+            self.attention.mark_scheduled(selected.id)
         self.assertEqual(
             chosen,
             [
@@ -318,7 +319,7 @@ class AttentionTests(unittest.TestCase):
             ],
         )
 
-    def connected_snapshot(self, *sessions: SessionContext) -> PetContext:
+    def connected_snapshot(self, *sessions: AgentSessionStatus) -> PetContext:
         root, *children = sessions
         subject = WorkSubject(
             id=root.id,
@@ -376,7 +377,7 @@ class AttentionTests(unittest.TestCase):
             [item.scope for item in require(selected.subject).story.sessions],
             ["Review code", "Run tests"],
         )
-        self.assertTrue(selected.supported(snapshot))
+        self.assertTrue(selected.is_valid(snapshot))
 
     def test_click_follows_active_descendants_with_a_finished_root(self) -> None:
         snapshot = self.connected_snapshot(
@@ -405,7 +406,7 @@ class AttentionTests(unittest.TestCase):
         self.assertEqual(
             require(selected.focus_session).outcome, ExecutionOutcome.SUCCESS
         )
-        self.assertTrue(selected.supported(snapshot))
+        self.assertTrue(selected.is_valid(snapshot))
         finished = snapshot.model_copy(
             update={
                 "sessions": tuple(
@@ -414,7 +415,7 @@ class AttentionTests(unittest.TestCase):
                 )
             }
         )
-        self.assertFalse(selected.supported(finished))
+        self.assertFalse(selected.is_valid(finished))
         self.assertEqual(
             self.attention.select(finished, SpeechReason.CLICK).situation, "click_idle"
         )
@@ -438,7 +439,7 @@ class AttentionTests(unittest.TestCase):
                 waiting_seconds=5,
             ),
         )
-        self.attention.scheduled(
+        self.attention.mark_scheduled(
             SessionIdentity(source=SessionSource.COMMAND, native_id="child")
         )
         selected = self.attention.select(snapshot, SpeechReason.CLICK)
@@ -447,7 +448,7 @@ class AttentionTests(unittest.TestCase):
             SessionIdentity(source=SessionSource.COMMAND, native_id="child"),
         )
         self.assertEqual(selected.situation, "click_waiting")
-        self.assertTrue(selected.supported(snapshot))
+        self.assertTrue(selected.is_valid(snapshot))
         targeted = snapshot.model_copy(
             update={
                 "trigger": SessionTrigger(
@@ -654,11 +655,11 @@ class AttentionTests(unittest.TestCase):
         )
 
     def test_cooldown_preserves_waiting_and_user_requests(self) -> None:
-        self.attention.scheduled()
-        self.assertFalse(self.attention.allowed(SpeechReason.ROUTINE))
-        self.assertTrue(self.attention.allowed(SpeechReason.CLICK))
+        self.attention.mark_scheduled()
+        self.assertFalse(self.attention.can_speak(SpeechReason.ROUTINE))
+        self.assertTrue(self.attention.can_speak(SpeechReason.CLICK))
         self.assertTrue(
-            self.attention.allowed(
+            self.attention.can_speak(
                 SpeechReason.CHECK_IN,
                 ReactionTrigger(
                     reaction=SessionReaction(
@@ -674,7 +675,7 @@ class AttentionTests(unittest.TestCase):
             )
         )
         self.now = self.config.behavior.automatic_speech_cooldown_seconds
-        self.assertTrue(self.attention.allowed(SpeechReason.ROUTINE))
+        self.assertTrue(self.attention.can_speak(SpeechReason.ROUTINE))
 
     def test_considered_subjects_stay_quiet_after_restoring_history(self) -> None:
         snapshot = self.snapshot(
@@ -684,13 +685,13 @@ class AttentionTests(unittest.TestCase):
             )
         )
         selected = self.attention.select(snapshot)
-        self.attention.scheduled(selected.id)
+        self.attention.mark_scheduled(selected.id)
         self.attention.mark_considered(require(selected.subject))
         history = self.attention.history(require(selected.id))
         restored = Attention(self.config, lambda: self.now, random.Random(0))
         restored.restore({require(selected.id): history})
         self.now = 60
-        self.assertFalse(restored.is_new(require(selected.subject)))
+        self.assertFalse(restored.has_unconsidered_changes(require(selected.subject)))
         self.assertIsNone(restored.request(snapshot))
 
     def test_request_precedence_keeps_manual_and_click_ahead_of_due_events(

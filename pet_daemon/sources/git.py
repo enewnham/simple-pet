@@ -89,7 +89,7 @@ async def repository_identity(
     return LocalRepository(path=str(Path(common).resolve()))
 
 
-async def discover(path: CommandPath, run: RunCommand = command) -> str:
+async def checkout_root(path: CommandPath, run: RunCommand = command) -> str:
     return (await run("git", "rev-parse", "--show-toplevel", cwd=path)).strip()
 
 

@@ -188,7 +188,8 @@ class HookEvent(BaseModel):
 
 
 if TYPE_CHECKING:
-    from .work.views import WorkStory, WorkSubject
+    from .work.shared_work import WorkSubject
+    from .work.stories import WorkStory
 
 
 class ActiveTool(BaseModel):
@@ -207,7 +208,7 @@ class FailureSnapshot(BaseModel):
     seconds_ago: float
 
 
-class SessionContext(BaseModel):
+class AgentSessionStatus(BaseModel):
     model_config = ConfigDict(defer_build=True)
     id: SessionIdentity
     changed_at: float
@@ -252,14 +253,14 @@ class SessionContext(BaseModel):
 class SwarmActivity(BaseModel):
     model_config = ConfigDict(defer_build=True)
     activity: PetState
-    sessions: tuple[SessionContext, ...]
+    sessions: tuple[AgentSessionStatus, ...]
     convergence: tuple[ConvergenceItem, ...] | None = None
 
 
 class PetContext(BaseModel):
     model_config = ConfigDict(defer_build=True)
     activity: PetState
-    sessions: tuple[SessionContext, ...]
+    sessions: tuple[AgentSessionStatus, ...]
     sleeping: bool
     trigger: Trigger | None = None
     work: tuple[WorkSubject, ...] = ()

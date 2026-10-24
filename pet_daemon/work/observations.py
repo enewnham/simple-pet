@@ -44,7 +44,7 @@ class GitObservation(BaseModel):
     repository: RepositoryIdentity
 
     @property
-    def pending(self) -> bool:
+    def has_unpublished_changes(self) -> bool:
         return bool(
             self.staged
             or self.unstaged
@@ -72,7 +72,7 @@ class PullRequest(BaseModel):
     related_links_error: str | None = None
 
     @property
-    def pending(self) -> bool:
+    def is_open(self) -> bool:
         return self.state == PullRequestState.OPEN
 
 

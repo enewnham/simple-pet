@@ -11,7 +11,7 @@ from pathlib import Path
 import httpx
 from anthropic import AsyncAnthropic
 
-from pet_daemon.commentary.context import SITUATIONS
+from pet_daemon.commentary.request import SITUATIONS
 from pet_daemon.config import Config
 from pet_daemon.daemon import Daemon
 from pet_daemon.domain import SessionSource, SpeechSituation
@@ -220,7 +220,7 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                     await wait_for(
                         lambda: (
                             len(daemon.application.sessions.by_id) == 2
-                            and daemon.application.sessions.working
+                            and daemon.application.sessions.is_working
                         )
                     )
                     await cli(
@@ -241,7 +241,7 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                             ].finished
                         )
                     )
-                    self.assertTrue(daemon.application.sessions.working)
+                    self.assertTrue(daemon.application.sessions.is_working)
                     await hook(
                         "cursor",
                         "postToolUseFailure",
@@ -253,7 +253,9 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                             "error_message": "Parser AssertionError",
                         },
                     )
-                    await wait_for(lambda: daemon.application.sessions.failed)
+                    await wait_for(
+                        lambda: daemon.application.sessions.has_current_failures
+                    )
                     self.assertEqual(daemon.application.behavior.state, "working")
                     release.set()
                     await wait_for(
@@ -264,7 +266,7 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                         lambda: not require(daemon.application.behavior.status).speech
                     )
                     self.assertTrue(daemon.application.cognition.memory.speech())
-                    self.assertTrue(daemon.application.sessions.working)
+                    self.assertTrue(daemon.application.sessions.is_working)
                     self.assertTrue(
                         any(
                             json.loads(request["messages"][-1]["content"])

@@ -170,7 +170,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "dragging": False,
                 "menu": False,
                 "speech": False,
-                "sleeping": self.daemon.application.behavior.sleeping,
+                "sleeping": self.daemon.application.behavior.is_sleeping,
                 "system_sleeping": self.daemon.application.suspended,
             }
         )

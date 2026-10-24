@@ -16,19 +16,19 @@ from .domain import (
 from .identity import SessionIdentity
 from .logging import get_logger
 from .runtime import (
+    AgentSessionStatus,
     CareTrigger,
     PetContext,
     RandomSource,
     ReactionTrigger,
-    SessionContext,
     SessionTrigger,
     SubjectTrigger,
     Trigger,
 )
 from .sessions.reactions import ReactionKind, SessionReaction
-from .storage.memory import HistoryRecord
+from .storage.memory import AttentionHistory
 from .work import WorkSubject
-from .work.views import WorkUpdate
+from .work.shared_work import WorkUpdate
 
 log = get_logger("pet-daemon")
 
@@ -43,19 +43,19 @@ class AttentionRequest(BaseModel):
     eligible: frozenset[SessionIdentity] | None = None
 
 
-class SelectionSupport(BaseModel):
+class SelectedWorkState(BaseModel):
     subject_revision: str | None = None
-    session_transition: tuple[int, bool, bool, ExecutionOutcome | None] | tuple[()] = ()
+    session_state: tuple[int, bool, bool, ExecutionOutcome | None] | tuple[()] = ()
 
     @classmethod
     def capture(
         cls,
         subject: WorkSubject | None,
-        focus: SessionContext | None,
-    ) -> SelectionSupport:
+        focus: AgentSessionStatus | None,
+    ) -> SelectedWorkState:
         return cls(
             subject_revision=subject.revision if subject else None,
-            session_transition=(
+            session_state=(
                 focus.generation,
                 focus.turn_active,
                 focus.waiting_for_input,
@@ -68,12 +68,12 @@ class SelectionSupport(BaseModel):
 
 class AttentionSelection(BaseModel):
     subject: WorkSubject | None
-    focus_session: SessionContext | None
-    context_sessions: tuple[SessionContext, ...]
+    focus_session: AgentSessionStatus | None
+    context_sessions: tuple[AgentSessionStatus, ...]
     reason: SpeechReason
     situation: SpeechSituation
     context: str | None = None
-    supporting_facts: SelectionSupport = SelectionSupport()
+    selected_state: SelectedWorkState = SelectedWorkState()
     update: WorkUpdate | None = None
 
     @property
@@ -86,7 +86,7 @@ class AttentionSelection(BaseModel):
             else None
         )
 
-    def supported(self, snapshot: PetContext) -> bool:
+    def is_valid(self, snapshot: PetContext) -> bool:
         current = self.refresh(snapshot)
         if self.subject is not None and current.subject is None:
             return False
@@ -94,8 +94,8 @@ class AttentionSelection(BaseModel):
             if current.focus_session is None:
                 return False
             if (
-                self.supporting_facts.session_transition
-                != current.supporting_facts.session_transition
+                self.selected_state.session_state
+                != current.selected_state.session_state
             ):
                 return False
         if current.subject is not None and current.focus_session is not None:
@@ -122,7 +122,7 @@ class AttentionSelection(BaseModel):
         return self.model_copy(
             update={
                 "subject": subject,
-                "supporting_facts": SelectionSupport.capture(subject, focus),
+                "selected_state": SelectedWorkState.capture(subject, focus),
                 "focus_session": deepcopy(focus),
                 "context_sessions": tuple(
                     deepcopy(sessions[item.id])
@@ -133,14 +133,14 @@ class AttentionSelection(BaseModel):
         )
 
 
-def _sessions(subject: WorkSubject, snapshot: PetContext) -> list[SessionContext]:
+def _sessions(subject: WorkSubject, snapshot: PetContext) -> list[AgentSessionStatus]:
     identifiers = set(subject.sessions)
     if subject.kind == WorkSubjectKind.SESSION:
         identifiers.add(subject.id)
     return [session for session in snapshot.sessions if session.id in identifiers]
 
 
-def _session_tier(session: SessionContext) -> int:
+def _session_tier(session: AgentSessionStatus) -> int:
     if session.waiting_for_input:
         return 0
     if session.turn_active and not session.activity_uncertain:
@@ -164,7 +164,7 @@ class Attention:
         config: Config,
         clock: Callable[[], float],
         rng: RandomSource,
-        history: Mapping[SessionIdentity, HistoryRecord] | None = None,
+        history: Mapping[SessionIdentity, AttentionHistory] | None = None,
         *,
         wall_clock: Callable[[], float] = time.time,
     ) -> None:
@@ -175,7 +175,7 @@ class Attention:
         self.pending: tuple[SpeechReason, float, Trigger | None] | None = None
         self.last_attempt = float("-inf")
         self.next_observation = clock() + rng.uniform(*config.observation_seconds)
-        self.histories: dict[SessionIdentity, HistoryRecord] = {}
+        self.histories: dict[SessionIdentity, AttentionHistory] = {}
         self.sequence: float = 0
         if history:
             self.restore(history)
@@ -215,7 +215,7 @@ class Attention:
             scheduled=self.pending,
         )
 
-    def live(self, session: SessionContext) -> bool:
+    def is_working(self, session: AgentSessionStatus) -> bool:
         if session.retired or session.presence in (
             ProcessStatus.EXITED,
             ProcessStatus.REPLACED,
@@ -223,15 +223,15 @@ class Attention:
             return False
         if not session.turn_active:
             return False
-        recent = (
+        has_recent_activity = (
             self.wall_clock() - session.last_hook_at
             < self.config.activity_fresh_seconds
             if session.last_hook_at is not None
             else session.quiet_seconds < self.config.activity_fresh_seconds
         )
-        return session.presence == ProcessStatus.ALIVE or recent
+        return session.presence == ProcessStatus.ALIVE or has_recent_activity
 
-    def update_eligible(
+    def is_update_eligible(
         self, update: WorkUpdate, snapshot: PetContext, *, check_in: bool = False
     ) -> bool:
         session = next(
@@ -243,7 +243,7 @@ class Attention:
         ):
             decision = "retired"
         elif check_in:
-            if session and self.live(session):
+            if session and self.is_working(session):
                 return True
             decision = "insufficient_liveness"
         elif any(
@@ -255,14 +255,14 @@ class Attention:
             if self.wall_clock() < update.ended_at + COMPLETION_GRACE_SECONDS:
                 return True
             decision = "expired"
-        elif session and self.live(session):
+        elif session and self.is_working(session):
             return True
         else:
             decision = "insufficient_liveness"
         log.debug("attention.ineligible", session=update.session, decision=decision)
         return False
 
-    def selection_eligible(
+    def is_selection_eligible(
         self, selection: AttentionSelection, snapshot: PetContext
     ) -> bool:
         if selection.reason in (
@@ -278,7 +278,7 @@ class Attention:
             return bool(
                 subject
                 and selection.update in subject.updates
-                and self.update_eligible(
+                and self.is_update_eligible(
                     selection.update,
                     snapshot,
                     check_in=selection.reason == SpeechReason.CHECK_IN,
@@ -287,16 +287,16 @@ class Attention:
         if selection.subject and selection.subject.updates:
             return False
         session = selection.focus_session
-        return bool(session and self.live(session))
+        return bool(session and self.is_working(session))
 
-    def routine_eligible(self, subject: WorkSubject, snapshot: PetContext) -> bool:
+    def is_routine_eligible(self, subject: WorkSubject, snapshot: PetContext) -> bool:
         if subject.updates:
             return any(
-                self.update_eligible(update, snapshot) for update in subject.updates
+                self.is_update_eligible(update, snapshot) for update in subject.updates
             )
-        if not self.is_new(subject):
+        if not self.has_unconsidered_changes(subject):
             return False
-        return any(self.live(session) for session in _sessions(subject, snapshot))
+        return any(self.is_working(session) for session in _sessions(subject, snapshot))
 
     def select(
         self,
@@ -308,7 +308,7 @@ class Attention:
         trigger = snapshot.trigger
         subject = None
         focus = None
-        others: tuple[SessionContext, ...] = ()
+        others: tuple[AgentSessionStatus, ...] = ()
         update = None
         automatic = reason not in (
             SpeechReason.EXPLICIT,
@@ -326,7 +326,7 @@ class Attention:
                 subject
                 for subject in snapshot.work
                 if reason != SpeechReason.ROUTINE
-                or self.routine_eligible(subject, snapshot)
+                or self.is_routine_eligible(subject, snapshot)
             ]
             candidates = []
             updates: dict[SessionIdentity, WorkUpdate] = {}
@@ -342,7 +342,7 @@ class Attention:
                             or value.session in eligible
                             or item.id in eligible
                         )
-                        and self.update_eligible(
+                        and self.is_update_eligible(
                             value, snapshot, check_in=reason == SpeechReason.CHECK_IN
                         )
                     ]
@@ -453,7 +453,7 @@ class Attention:
                 sessions = [
                     session
                     for session in snapshot.sessions
-                    if (not automatic or self.live(session))
+                    if (not automatic or self.is_working(session))
                     and (
                         not automatic
                         or not any(
@@ -537,7 +537,7 @@ class Attention:
             reason=reason,
             situation=situation,
             context=context,
-            supporting_facts=SelectionSupport.capture(subject, focus),
+            selected_state=SelectedWorkState.capture(subject, focus),
             update=update,
         )
 
@@ -577,7 +577,7 @@ class Attention:
                 *self.config.observation_seconds
             )
             if any(
-                self.routine_eligible(subject, snapshot) for subject in snapshot.work
+                self.is_routine_eligible(subject, snapshot) for subject in snapshot.work
             ):
                 return AttentionRequest(reason=SpeechReason.ROUTINE)
         if care is not None and not any(
@@ -588,18 +588,18 @@ class Attention:
             )
         return None
 
-    def restore(self, history: Mapping[SessionIdentity, HistoryRecord]) -> None:
+    def restore(self, history: Mapping[SessionIdentity, AttentionHistory]) -> None:
         self.histories = {
             identifier: record.model_copy() for identifier, record in history.items()
         }
         self.sequence = max((row.last_selected for row in history.values()), default=0)
 
-    def is_new(self, subject: WorkSubject) -> bool:
+    def has_unconsidered_changes(self, subject: WorkSubject) -> bool:
         return self.history(subject.id).considered_subject_revision != subject.revision
 
     def consideration(
         self, subject: WorkSubject | None, update: WorkUpdate | None = None
-    ) -> dict[SessionIdentity, HistoryRecord]:
+    ) -> dict[SessionIdentity, AttentionHistory]:
         records = {}
         if subject:
             record = self.history(subject.id).model_copy()
@@ -618,16 +618,16 @@ class Attention:
     ) -> None:
         self.histories.update(self.consideration(subject, update))
 
-    def history(self, identifier: SessionIdentity) -> HistoryRecord:
-        return self.histories.get(identifier, HistoryRecord())
+    def history(self, identifier: SessionIdentity) -> AttentionHistory:
+        return self.histories.get(identifier, AttentionHistory())
 
     def mark_selected(self, subject_id: SessionIdentity) -> None:
         self.sequence = max(self.clock(), self.sequence + 0.000001)
-        record = self.histories.setdefault(subject_id, HistoryRecord())
+        record = self.histories.setdefault(subject_id, AttentionHistory())
         record.last_selected = self.sequence
         log.debug("attention.selected", session=subject_id)
 
-    def allowed(self, reason: SpeechReason, trigger: Trigger | None = None) -> bool:
+    def can_speak(self, reason: SpeechReason, trigger: Trigger | None = None) -> bool:
         if (
             reason in (SpeechReason.CLICK, SpeechReason.EXPLICIT)
             or isinstance(trigger, ReactionTrigger)
@@ -639,7 +639,7 @@ class Attention:
             >= self.config.behavior.automatic_speech_cooldown_seconds
         )
 
-    def scheduled(self, subject_id: SessionIdentity | None = None) -> None:
+    def mark_scheduled(self, subject_id: SessionIdentity | None = None) -> None:
         self.last_attempt = self.clock()
         self.next_observation = self.last_attempt + self.rng.uniform(
             *self.config.observation_seconds

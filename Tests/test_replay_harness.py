@@ -17,8 +17,8 @@ from pet_daemon.domain import (
 from pet_daemon.identity import SessionIdentity
 from pet_daemon.replay import FixtureModel, ReplayClock, ReplayHarness
 from pet_daemon.runtime import HookEvent, ProcessIdentity, WaitingKind
+from pet_daemon.work.evidence import ExecutionStatus
 from pet_daemon.work.models import ExecutionEvidence, ProgressEvidence
-from pet_daemon.work.views import ExecutionView
 
 
 def test_scheduler_persists_only_renderer_accepted_speech() -> None:
@@ -311,9 +311,9 @@ def test_wait_kind_controls_scheduled_and_clicked_commentary(
                 SessionIdentity(source=SessionSource.CLAUDE, native_id="parser")
             ]
             assert session.waiting
-            assert not session.working
+            assert not session.is_working
             assert session.waiting_kind == waiting_kind
-            assert session.waiting_for_input == (
+            assert session.is_waiting_for_input == (
                 waiting_kind != WaitingKind.PERMISSION_CHECK
             )
             assert any(
@@ -348,7 +348,7 @@ def test_wait_kind_controls_scheduled_and_clicked_commentary(
                 )
             activity = replay.app.context().work[0].story.activity
             assert any(
-                isinstance(item.details, ExecutionView)
+                isinstance(item.details, ExecutionStatus)
                 and item.details.execution == "waiting"
                 for item in activity
             ) == (waiting_kind != WaitingKind.PERMISSION_CHECK)

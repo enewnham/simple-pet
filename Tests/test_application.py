@@ -44,6 +44,7 @@ from pet_daemon.sources import RepositoryTracker
 from pet_daemon.sources.hooks import normalize_hook
 from pet_daemon.storage import Memory
 from pet_daemon.work import WorkStory
+from pet_daemon.work.evidence import ReportedProgress, WorkAssociation
 from pet_daemon.work.models import RelatedLink
 from pet_daemon.work.observations import (
     BranchObservation,
@@ -52,7 +53,6 @@ from pet_daemon.work.observations import (
     PullRequest,
     RepositoryObservation,
 )
-from pet_daemon.work.views import AssociationView, ProgressView
 from Tests.fixtures import require, story_response
 
 
@@ -148,7 +148,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             random.Random(0),
             self.packets.append,
         )
-        behavior.renderer_status(
+        behavior.update_renderer_status(
             {
                 "x": 100,
                 "y": 100,
@@ -405,7 +405,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertTrue(child.finished)
         self.assertEqual(child.outcome, ExecutionOutcome.SUCCESS)
-        reports = self.memory.recent(
+        reports = self.memory.recent_events(
             session=SessionIdentity(source=SessionSource.CODEX, native_id="examples"),
             limit=10,
         )
@@ -569,7 +569,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         report = next(
             report
             for report in work.activity
-            if isinstance(report.details, ProgressView)
+            if isinstance(report.details, ReportedProgress)
             and report.details.reported_progress == "The parser changes are ready."
         )
         self.assertEqual(require(report.context).pull_request, reported_pr.url)
@@ -587,7 +587,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         first_report = next(
             report
             for report in require(first_selection.subject).story.activity
-            if isinstance(report.details, ProgressView)
+            if isinstance(report.details, ReportedProgress)
             and report.details.reported_progress == "Tests pass"
         )
         self.assertEqual(
@@ -631,7 +631,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         latest_report = next(
             report
             for report in snapshot.work[0].story.activity
-            if isinstance(report.details, ProgressView)
+            if isinstance(report.details, ReportedProgress)
             and report.details.reported_progress == "Tests pass"
         )
         self.assertEqual(
@@ -750,7 +750,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(child_pr.title, artifact_titles)
         self.assertTrue(
             any(
-                isinstance(evidence.details, AssociationView)
+                isinstance(evidence.details, WorkAssociation)
                 and "stack" in evidence.details.association
                 for artifact in subjects[0].story.artifacts
                 for evidence in artifact.evidence
@@ -773,7 +773,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("artifacts", json.dumps(payload))
         self.assertNotIn(child_pr.url, json.dumps(payload))
         self.assertEqual(self.memory.speech(), [])
-        self.assertTrue(self.attention.is_new(require(selection.subject)))
+        self.assertTrue(
+            self.attention.has_unconsidered_changes(require(selection.subject))
+        )
         self.assertTrue(self.app.delivery.has_pending())
         self.accept(packet)
         self.accept(packet)
@@ -786,7 +788,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             [item.text for item in self.memory.speech()], [self.model.text]
         )
         self.assertFalse(self.app.delivery.has_pending())
-        self.assertFalse(self.attention.is_new(self.app.context().work[0]))
+        self.assertFalse(
+            self.attention.has_unconsidered_changes(self.app.context().work[0])
+        )
 
     async def test_child_location_comes_from_observed_hooks_and_parent_is_canonical(
         self,
@@ -872,7 +876,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.memory.speech()), 1)
         self.restart_attention_and_sessions()
         self.assertFalse(
-            self.attention.routine_eligible(
+            self.attention.is_routine_eligible(
                 self.app.context().work[0], self.app.context()
             )
         )
@@ -885,7 +889,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         snapshot = self.app.context()
-        self.assertFalse(self.attention.routine_eligible(snapshot.work[0], snapshot))
+        self.assertFalse(self.attention.is_routine_eligible(snapshot.work[0], snapshot))
         await self.app.comment(SpeechReason.COMPLETION)
         self.assertEqual(len(self.model.requests), 1)
         self.now += 7200
@@ -905,7 +909,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         snapshot = self.app.context()
         selection = self.attention.select(snapshot)
         self.assertIsNotNone(selection.update)
-        self.assertTrue(self.attention.selection_eligible(selection, snapshot))
+        self.assertTrue(self.attention.is_selection_eligible(selection, snapshot))
         self.provider.publish(
             HookEvent(
                 source=SessionSource.CODEX,
@@ -1000,7 +1004,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             "failed",
         )
         self.assertTrue(
-            self.attention.selection_eligible(selection, self.app.context())
+            self.attention.is_selection_eligible(selection, self.app.context())
         )
         self.assertEqual(self.memory.speech(), [])
 
@@ -1036,7 +1040,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         selection = self.attention.select(snapshot, SpeechReason.COMPLETION)
         self.assertIsNone(selection.update)
-        self.assertFalse(self.attention.selection_eligible(selection, snapshot))
+        self.assertFalse(self.attention.is_selection_eligible(selection, snapshot))
         child_snapshot = self.app.context(
             SessionTrigger(
                 session_id=SessionIdentity(
@@ -1050,7 +1054,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             SessionIdentity(source=SessionSource.CODEX, native_id="child"),
         )
         self.assertTrue(
-            self.attention.selection_eligible(child_selection, child_snapshot)
+            self.attention.is_selection_eligible(child_selection, child_snapshot)
         )
 
     async def test_live_parent_cannot_revive_consumed_child_completion(self) -> None:
@@ -1083,7 +1087,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         selection = self.attention.select(snapshot, SpeechReason.COMPLETION)
         self.assertIsNone(selection.update)
-        self.assertFalse(self.attention.selection_eligible(selection, snapshot))
+        self.assertFalse(self.attention.is_selection_eligible(selection, snapshot))
 
     async def test_pending_delivery_defers_other_work_and_queued_automatic_generation(
         self,
@@ -1123,7 +1127,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.now += max(self.config.observation_seconds)
         restored.next_observation = self.now
-        self.assertTrue(restored.is_new(require(selection.subject)))
+        self.assertTrue(restored.has_unconsidered_changes(require(selection.subject)))
         self.assertIsNotNone(
             restored.request(
                 self.app.context(), delivery_pending=self.app.delivery.has_pending()
@@ -1144,7 +1148,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             self.memory.load_attention_history(),
             wall_clock=self.clock,
         )
-        self.assertFalse(restored.is_new(self.app.context().work[0]))
+        self.assertFalse(restored.has_unconsidered_changes(self.app.context().work[0]))
         self.report("Added examples for escaped delimiters.")
         self.model.text = "The examples cover escaped delimiters."
         packet, _ = await self.submit_commentary()
@@ -1164,8 +1168,10 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             self.memory.load_attention_history(),
             wall_clock=self.clock,
         )
-        self.assertTrue(restored.is_new(self.app.context().work[0]))
-        self.assertTrue(self.attention.is_new(self.app.context().work[0]))
+        self.assertTrue(restored.has_unconsidered_changes(self.app.context().work[0]))
+        self.assertTrue(
+            self.attention.has_unconsidered_changes(self.app.context().work[0])
+        )
         self.assertEqual(self.memory.speech(), [])
 
     async def test_late_acceptance_records_captured_story_without_suppressing_new_report(
@@ -1177,7 +1183,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.accept(packet)
         outcome = require(self.memory.message_outcome(packet["delivery_id"]))
         self.assertEqual(outcome.revision, require(selection.subject).revision)
-        self.assertTrue(self.attention.is_new(self.app.context().work[0]))
+        self.assertTrue(
+            self.attention.has_unconsidered_changes(self.app.context().work[0])
+        )
         self.assertEqual(len(self.memory.speech()), 1)
 
     async def test_reset_rejects_old_acceptance_and_callbacks(self) -> None:
@@ -1203,11 +1211,15 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             self.accept(packet)
         self.assertIsNone(self.memory.message_outcome(packet["delivery_id"]))
         self.assertEqual(self.memory.speech(), [])
-        self.assertTrue(self.attention.is_new(self.app.context().work[0]))
+        self.assertTrue(
+            self.attention.has_unconsidered_changes(self.app.context().work[0])
+        )
         self.assertTrue(self.app.delivery.has_pending())
         self.memory.db.execute("DROP TRIGGER reject_speech")
         self.accept(packet)
-        self.assertFalse(self.attention.is_new(self.app.context().work[0]))
+        self.assertFalse(
+            self.attention.has_unconsidered_changes(self.app.context().work[0])
+        )
 
     async def test_basic_pr_state_refresh_preserves_consideration(self) -> None:
         packet, _ = await self.submit_commentary()
@@ -1225,7 +1237,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         subject = self.app.context().work[0]
-        self.assertFalse(self.attention.is_new(subject))
+        self.assertFalse(self.attention.has_unconsidered_changes(subject))
         self.attention.next_observation = self.now
         self.assertIsNone(self.attention.request(self.app.context()))
         self.assertIn("MERGED", str(subject.story))

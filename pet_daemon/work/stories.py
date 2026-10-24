@@ -1,28 +1,22 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
 from ..domain import (
     ArtifactKind,
     CollectionKind,
-    EvidenceKind,
     EvidenceSource,
-    ExecutionOutcome,
     LinkRelationship,
-    PullRequestState,
-    WorkSubjectKind,
 )
 from ..identity import SessionIdentity
 from ..repository_identity import (
-    RemoteRepository,
     RepositoryIdentity,
     repository_columns,
 )
-from ..runtime import SessionContext, SwarmActivity
 from .association import TERMINAL_EVENTS, enclosing_checkout, references, report_context
+from .evidence import CommentaryEvidence, commentary_evidence
 from .models import (
     ArtifactReference,
     AvailabilityEvidence,
@@ -40,86 +34,9 @@ from .models import (
     StackAssociation,
     WorkFacts,
 )
-from .observations import GitObservation, RepositoryTarget
+from .observations import RepositoryTarget
 from .serialization import payload_record
 from .validation import canonical, normalize_reference
-
-
-class PresentedPullRequest(BaseModel):
-    url: str
-    title: str
-    state: PullRequestState
-    is_draft: bool | None
-
-
-class GitEvidenceView(BaseModel):
-    type: Literal["GitEvidenceView"] = "GitEvidenceView"
-    repository: str | None
-    branch: str
-    output_present: bool
-    conflicts: bool
-    behind: bool
-
-
-class PullRequestEvidenceView(BaseModel):
-    type: Literal["PullRequestEvidenceView"] = "PullRequestEvidenceView"
-    output: PresentedPullRequest
-
-
-class MissingPullRequestView(BaseModel):
-    type: Literal["MissingPullRequestView"] = "MissingPullRequestView"
-    pull_request_found: bool = False
-
-
-class ExecutionView(BaseModel):
-    type: Literal["ExecutionView"] = "ExecutionView"
-    execution: str
-    reported_progress: str | None
-    reported_execution_outcome: ExecutionOutcome | None
-
-
-class AvailabilityView(BaseModel):
-    type: Literal["AvailabilityView"] = "AvailabilityView"
-    uncertainty: tuple[str, ...]
-
-
-class IntentView(BaseModel):
-    type: Literal["IntentView"] = "IntentView"
-    text: str
-
-
-class ProgressView(BaseModel):
-    type: Literal["ProgressView"] = "ProgressView"
-    reported_progress: str
-
-
-class AssociationView(BaseModel):
-    type: Literal["AssociationView"] = "AssociationView"
-    association: str
-    authorship: str = "Association does not establish authorship."
-
-
-type EvidenceDetails = Annotated[
-    (
-        GitEvidenceView
-        | PullRequestEvidenceView
-        | MissingPullRequestView
-        | ExecutionView
-        | AvailabilityView
-        | IntentView
-        | ProgressView
-        | AssociationView
-    ),
-    Field(discriminator="type"),
-]
-
-
-class EvidenceView(BaseModel):
-    source: EvidenceSource
-    kind: EvidenceKind
-    details: EvidenceDetails
-    observed_at: float | None = None
-    context: ReportContext | None = None
 
 
 class ArtifactContext(BaseModel):
@@ -128,13 +45,13 @@ class ArtifactContext(BaseModel):
     title: str = ""
     repository: RepositoryIdentity | None = None
     revision: str = ""
-    evidence: tuple[EvidenceView, ...] = ()
+    evidence: tuple[CommentaryEvidence, ...] = ()
 
 
 class SessionContribution(BaseModel):
     scope: str
-    requests: tuple[EvidenceView, ...] = ()
-    activity: tuple[EvidenceView, ...] = ()
+    requests: tuple[CommentaryEvidence, ...] = ()
+    activity: tuple[CommentaryEvidence, ...] = ()
     context: ReportContext | None = None
     session: SessionIdentity = Field()
 
@@ -143,130 +60,10 @@ class WorkStory(BaseModel):
     id: SessionIdentity
     intent: str
     revision: str
-    requests: tuple[EvidenceView, ...] = ()
-    activity: tuple[EvidenceView, ...] = ()
+    requests: tuple[CommentaryEvidence, ...] = ()
+    activity: tuple[CommentaryEvidence, ...] = ()
     artifacts: tuple[ArtifactContext, ...] = ()
     sessions: tuple[SessionContribution, ...] = ()
-
-
-class WorkUpdate(BaseModel):
-    session: SessionIdentity
-    revision: str
-    observed_at: float
-    ended_at: float | None = None
-    aliases: tuple[SessionIdentity, ...] = ()
-
-
-class WorkSubject(BaseModel):
-    id: SessionIdentity
-    kind: WorkSubjectKind
-    changed_at: float
-    revision: str
-    story: WorkStory
-    sessions: tuple[SessionIdentity, ...] = ()
-    updates: tuple[WorkUpdate, ...] = ()
-
-
-def project_evidence(record: EvidenceRecord) -> EvidenceView | None:
-    source, kind, payload = record.source, record.kind, record.payload
-    details: EvidenceDetails
-    match payload:
-        case GitObservation():
-            details = GitEvidenceView(
-                repository=payload.repository.value
-                if isinstance(payload.repository, RemoteRepository)
-                else None,
-                branch=payload.branch,
-                output_present=bool(
-                    payload.staged
-                    or payload.unstaged
-                    or payload.untracked
-                    or payload.ahead
-                ),
-                conflicts=bool(payload.conflicts),
-                behind=bool(payload.behind),
-            )
-        case GitHubEvidence():
-            pr = payload.pr
-            if pr:
-                details = PullRequestEvidenceView(
-                    output=PresentedPullRequest(
-                        url=pr.url, title=pr.title, state=pr.state, is_draft=pr.is_draft
-                    )
-                )
-            else:
-                details = MissingPullRequestView()
-        case ExecutionEvidence() if not payload.event.startswith("tool_"):
-            ended = payload.event in {
-                "turn_done",
-                "turn_error",
-                "subagent_done",
-                "interrupt",
-                "session_end",
-            }
-            execution = (
-                "waiting"
-                if payload.event == "waiting"
-                else "turn ended"
-                if ended
-                else "in progress"
-            )
-            details = ExecutionView(
-                execution=execution,
-                reported_progress=" ".join(payload.progress.split())[:800]
-                if payload.progress
-                else None,
-                reported_execution_outcome=payload.outcome
-                if ended and payload.outcome
-                else None,
-            )
-        case AvailabilityEvidence():
-            unavailable = tuple(
-                name
-                for name, error in (
-                    ("local", payload.local_error),
-                    ("github", payload.github_error),
-                )
-                if error
-            )
-            if not unavailable:
-                return None
-            details = AvailabilityView(
-                uncertainty=tuple(
-                    f"{name} observation unavailable" for name in unavailable
-                )
-            )
-        case IntentEvidence():
-            details = IntentView(text=" ".join(payload.text.split())[:1000])
-        case ProgressEvidence():
-            details = ProgressView(
-                reported_progress=" ".join(payload.text.split())[:800]
-            )
-        case CheckoutAssociation():
-            details = AssociationView(
-                association="The agent session used this checkout."
-            )
-        case PullRequestAssociation():
-            details = AssociationView(
-                association="The pull request matches the observed branch."
-            )
-        case ReferenceAssociation():
-            details = AssociationView(
-                association="The reported text explicitly references this URL."
-            )
-        case StackAssociation():
-            details = AssociationView(
-                association="The pull requests share an observed stack."
-            )
-        case _:
-            return None
-    return EvidenceView(
-        source=source,
-        kind=kind,
-        details=details,
-        observed_at=record.observed_at,
-        context=record.context,
-    )
 
 
 def current_context(state: WorkFacts, agent: SessionRecord) -> ReportContext:
@@ -275,14 +72,16 @@ def current_context(state: WorkFacts, agent: SessionRecord) -> ReportContext:
         and isinstance(agent.execution.payload, ExecutionEvidence)
         and agent.execution.payload.event in TERMINAL_EVENTS
     ):
-        return resolve_context(state, agent.execution.context)
+        return resolve_report_pull_request(state, agent.execution.context)
     checkout = enclosing_checkout(state.checkouts, agent.location)
     local = checkout.local if checkout else None
     branch = state.branches.get((local.repository, local.branch)) if local else None
     return report_context(agent.location, checkout, branch)
 
 
-def resolve_context(state: WorkFacts, context: ReportContext) -> ReportContext:
+def resolve_report_pull_request(
+    state: WorkFacts, context: ReportContext
+) -> ReportContext:
     if context.pull_request or not context.repository or not context.branch:
         return context
     branch = state.branches.get((context.repository, context.branch))
@@ -297,7 +96,7 @@ def resolve_context(state: WorkFacts, context: ReportContext) -> ReportContext:
 
 def report_record(state: WorkFacts, report: SessionReport) -> EvidenceRecord:
     record = report.record()
-    record.context = resolve_context(state, report.context)
+    record.context = resolve_report_pull_request(state, report.context)
     return record
 
 
@@ -341,11 +140,11 @@ def session_work(state: WorkFacts, agent: SessionRecord) -> WorkStory:
         tuple[str, str, RepositoryIdentity | None], tuple[EvidenceRecord, ...]
     ] = {}
 
-    def evidence(records: tuple[EvidenceRecord, ...]) -> tuple[EvidenceView, ...]:
+    def evidence(records: tuple[EvidenceRecord, ...]) -> tuple[CommentaryEvidence, ...]:
         return tuple(
             value
             for record in records
-            if (value := project_evidence(record)) is not None
+            if (value := commentary_evidence(record)) is not None
         )
 
     def add(value: ArtifactReference, records: tuple[EvidenceRecord, ...]) -> None:
@@ -427,7 +226,7 @@ def session_work(state: WorkFacts, agent: SessionRecord) -> WorkStory:
                     )
 
     for context, current in contexts:
-        context = resolve_context(state, context)
+        context = resolve_report_pull_request(state, context)
         if context.repository and context.branch:
             records = (
                 EvidenceRecord(
@@ -562,7 +361,7 @@ def collection_targets(state: WorkFacts) -> tuple[RepositoryTarget, ...]:
             (*agent.reports, agent.execution) if agent.execution else agent.reports
         )
         for report in reports:
-            context = resolve_context(state, report.context)
+            context = resolve_report_pull_request(state, report.context)
             if context.repository and context.branch and not context.pull_request:
                 targets["branch", context.branch, context.repository] = (
                     RepositoryTarget(
@@ -589,172 +388,5 @@ def collection_targets(state: WorkFacts) -> tuple[RepositoryTarget, ...]:
     )
 
 
-def runtime_revision(
-    session: SessionContext,
-) -> tuple[int, bool, str | None, bool, bool]:
-    return (
-        session.generation,
-        session.turn_active,
-        session.outcome,
-        session.waiting_for_input,
-        session.activity_uncertain,
-    )
-
-
 def revision_key(value: object) -> str:
     return hashlib.sha256(canonical(value).encode()).hexdigest()
-
-
-def work_update(agent: SessionRecord, story: WorkStory) -> WorkUpdate:
-    from .narrative import semantic_revision
-
-    execution = agent.execution
-    ended_at = (
-        execution.observed_at
-        if execution
-        and isinstance(execution.payload, ExecutionEvidence)
-        and execution.payload.event in TERMINAL_EVENTS
-        else None
-    )
-    return WorkUpdate(
-        session=agent.id,
-        revision=revision_key(
-            (
-                semantic_revision(story),
-                execution.observed_at if execution else None,
-                tuple(record.observed_at for record in story.requests),
-            )
-        ),
-        observed_at=max(
-            (record.observed_at or 0 for record in (*story.requests, *story.activity)),
-            default=0,
-        ),
-        ended_at=ended_at,
-        aliases=agent.aliases,
-    )
-
-
-def connected_work(
-    state: WorkFacts, activity: SwarmActivity
-) -> tuple[WorkSubject, ...]:
-    runtime = {session.id: session for session in activity.sessions}
-    groups: dict[SessionIdentity, set[SessionIdentity]] = {}
-    for identifier in (*state.sessions, *runtime):
-        root = state.aliases.get(identifier, identifier)
-        seen: set[SessionIdentity] = set()
-        while root not in seen:
-            seen.add(root)
-            agent = state.sessions.get(root)
-            session = runtime.get(root)
-            parent = agent.parent if agent else session.parent if session else None
-            if not parent:
-                break
-            root = state.aliases.get(parent, parent)
-        else:
-            root = min(seen)
-        groups.setdefault(root, set()).add(identifier)
-
-    subjects = []
-    for root, identifiers in sorted(groups.items()):
-        stories = {
-            identifier: session_work(state, agent)
-            for identifier in sorted(identifiers)
-            if (agent := state.sessions.get(identifier))
-        }
-        root_session = runtime.get(root)
-        root_story = stories.get(root) or WorkStory(
-            id=root, intent=root_session.goal if root_session else "", revision=""
-        )
-        children = tuple(
-            SessionContribution(
-                scope=story.intent,
-                requests=story.requests,
-                activity=story.activity,
-                context=current_context(state, state.sessions[identifier]),
-                session=identifier,
-            )
-            for identifier, story in stories.items()
-            if identifier != root
-        )
-        artifacts: dict[
-            tuple[str, str, RepositoryIdentity | None], ArtifactContext
-        ] = {}
-        for story in stories.values():
-            for artifact in story.artifacts:
-                key = artifact.kind, artifact.ref, artifact.repository
-                previous = artifacts.get(key)
-                if previous:
-                    combined = [*previous.evidence]
-                    for record in artifact.evidence:
-                        if record not in combined:
-                            combined.append(record)
-                    artifact.evidence = tuple(combined)
-                artifacts[key] = artifact
-        if len(stories) == 1 and root in stories:
-            revision = root_story.revision
-        elif stories:
-            revision = revision_key(
-                tuple((name, story.revision) for name, story in stories.items())
-            )
-        else:
-            revision = revision_key(
-                tuple(
-                    (name, runtime_revision(runtime[name]), runtime[name].progress)
-                    for name in sorted(identifiers)
-                    if name in runtime
-                )
-            )
-        story = root_story.model_copy()
-        story.revision = revision
-        story.sessions = children
-        story.artifacts = tuple(
-            artifact
-            for _, artifact in sorted(
-                artifacts.items(),
-                key=lambda item: (
-                    item[0][0],
-                    item[0][1],
-                    repository_columns(item[0][2]),
-                ),
-            )
-        )
-        names = identifiers | {
-            alias for alias, target in state.aliases.items() if target in identifiers
-        }
-        changed_at = max(
-            (
-                *(runtime[name].changed_at for name in identifiers if name in runtime),
-                *(
-                    state.sessions[name].changed_at
-                    for name in identifiers
-                    if name in state.sessions
-                ),
-                0,
-            )
-        )
-        subjects.append(
-            WorkSubject(
-                id=root,
-                kind=WorkSubjectKind.WORK if stories else WorkSubjectKind.SESSION,
-                changed_at=changed_at,
-                revision=revision,
-                story=story,
-                sessions=tuple(sorted(names)),
-                updates=tuple(
-                    work_update(state.sessions[identifier], member)
-                    for identifier, member in stories.items()
-                ),
-            )
-        )
-    return tuple(sorted(subjects, key=lambda item: (-item.changed_at, item.id)))
-
-
-from ..runtime import PetContext, SessionReaction
-
-_runtime_types = {
-    "SessionReaction": SessionReaction,
-    "WorkStory": WorkStory,
-    "WorkSubject": WorkSubject,
-}
-for _runtime_model in (SessionContext, SwarmActivity, PetContext):
-    _runtime_model.model_rebuild(_types_namespace=_runtime_types)

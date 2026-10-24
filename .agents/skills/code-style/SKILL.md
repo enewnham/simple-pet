@@ -1,6 +1,6 @@
 ---
 name: code-style
-description: Apply Simple Pet's code conventions when implementing, refactoring, or reviewing Python, Swift, or integration scripts. Use for choices about representation, decomposition, state, boundaries, and effects.
+description: Apply Simple Pet's code conventions when implementing, refactoring, or reviewing Python, Swift, or integration scripts. Use for choices about naming, representation, decomposition, state, boundaries, and effects.
 ---
 
 # Code style
@@ -12,6 +12,33 @@ architecture described in AGENTS.md have their own sources.
 
 Read [references/examples.md](references/examples.md) when a convention needs a
 concrete example or when deciding whether an existing pattern fits new code.
+
+## Name the meaning and responsibility
+
+- Name classes for the concepts they represent or responsibilities they own.
+  Name files and modules for the cohesive subject or responsibility they contain.
+  A name should explain the code without requiring knowledge of its processing
+  stage or representation. Avoid `View`, `Projection`, `Presented`, or `Prepared`
+  when they only describe how another object was transformed.
+- Read a name in its namespace. Keep conventional names such as `Candidate`,
+  `Policy`, and `Cognition` when the surrounding module supplies their meaning.
+  Add qualification to resolve ambiguity, rather than repeating context.
+  Keep familiar names such as `Context` when they describe the role accurately.
+  Prefer the shortest clear name over a description of all its fields or callers.
+- Name functions for the fact they return or the action they perform. Expose
+  meaningful effects such as generating text, recording history, or updating
+  state. Use `mark_` when recording that something happened. Keep query names
+  distinct from commands that change state.
+- Name boolean query methods and properties as questions. Use `is_` for state
+  or classification, `has_` for presence, `can_` for capability or permission,
+  and `should_` for a policy recommendation. Use Python snake case and Swift
+  equivalents such as `isWorking` and `hasPending`. Commands that return success
+  keep action names such as `send` and `acknowledge`. Preserve names required by
+  framework APIs and external contracts.
+- Examine the responsibility when a name is hard to state. Replacing a generic
+  suffix with another generic suffix does not establish a useful concept. Share
+  domain records when differences concern only serialization, and define a
+  separate type when it represents a distinct contract or meaning.
 
 ## Choose vocabulary by ownership
 

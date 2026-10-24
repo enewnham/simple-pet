@@ -69,7 +69,7 @@ class ReactionTests(unittest.TestCase):
         self.event("intent", goal="Build it")
         terminal = self.event("turn_done")[0]
         self.assertEqual(self.event("session_end"), [])
-        self.assertTrue(self.reactions.relevant(terminal, self.sessions))
+        self.assertTrue(self.reactions.is_relevant(terminal, self.sessions))
 
     def test_failed_turn_and_cancellation_have_distinct_reactions(self) -> None:
         self.event("intent", goal="Fix checks")
@@ -88,12 +88,12 @@ class ReactionTests(unittest.TestCase):
         ]
         trouble = next(item for item in reactions if item.kind == "trouble")
         captured = trouble
-        self.assertTrue(self.reactions.relevant(captured, self.sessions))
+        self.assertTrue(self.reactions.is_relevant(captured, self.sessions))
         self.event("tool_start", session="temporary", call="retry", tool="pytest")
         self.event("tool_done", session="temporary", call="retry")
         self.fail_tool("another", session="temporary")
         self.event("session_start", session="native", aliases=["temporary"])
-        self.assertFalse(self.reactions.relevant(captured, self.sessions))
+        self.assertFalse(self.reactions.is_relevant(captured, self.sessions))
 
     def test_another_recovery_supersedes_the_first_in_the_same_turn(self) -> None:
         self.event("intent", goal="Fix checks")
@@ -101,21 +101,21 @@ class ReactionTests(unittest.TestCase):
         self.event("tool_start", call="retry", tool="pytest")
         recovery = self.event("tool_done", call="retry")[0]
         captured = recovery
-        self.assertTrue(self.reactions.relevant(captured, self.sessions))
+        self.assertTrue(self.reactions.is_relevant(captured, self.sessions))
         self.fail_tool("another")
         self.event("tool_start", call="retry-again", tool="pytest")
         self.event("tool_done", call="retry-again")
-        self.assertFalse(self.reactions.relevant(captured, self.sessions))
+        self.assertFalse(self.reactions.is_relevant(captured, self.sessions))
 
     def test_waiting_reaction_is_replaced_after_input_resumes(self) -> None:
         self.event("intent", goal="Choose an approach")
         waiting = self.event("waiting", call="read")[0]
         self.assertEqual(self.event("waiting", call="read"), [])
         captured = waiting
-        self.assertTrue(self.reactions.relevant(captured, self.sessions))
+        self.assertTrue(self.reactions.is_relevant(captured, self.sessions))
         self.event("tool_start", call="read", tool="Read")
         self.event("waiting")
-        self.assertFalse(self.reactions.relevant(captured, self.sessions))
+        self.assertFalse(self.reactions.is_relevant(captured, self.sessions))
 
     def test_wait_kind_changes_restart_timing_and_replace_the_reaction(self) -> None:
         self.event("intent", goal="Inspect checks")
@@ -129,10 +129,10 @@ class ReactionTests(unittest.TestCase):
         session = self.sessions.by_id[
             SessionIdentity(source=SessionSource.CLAUDE, native_id="one")
         ]
-        self.assertTrue(session.waiting_for_input)
+        self.assertTrue(session.is_waiting_for_input)
         self.assertEqual(session.waiting_since, self.now)
-        self.assertFalse(self.reactions.relevant(internal, self.sessions))
-        self.assertTrue(self.reactions.relevant(permission, self.sessions))
+        self.assertFalse(self.reactions.is_relevant(internal, self.sessions))
+        self.assertTrue(self.reactions.is_relevant(permission, self.sessions))
         self.now += 10
         self.assertEqual(
             self.event("waiting", call="check", waiting_kind=WaitingKind.PERMISSION), []
@@ -142,15 +142,15 @@ class ReactionTests(unittest.TestCase):
             "waiting", call="check", waiting_kind=WaitingKind.QUESTION
         )[0]
         self.assertEqual(session.waiting_since, self.now)
-        self.assertFalse(self.reactions.relevant(permission, self.sessions))
-        self.assertTrue(self.reactions.relevant(question, self.sessions))
+        self.assertFalse(self.reactions.is_relevant(permission, self.sessions))
+        self.assertTrue(self.reactions.is_relevant(question, self.sessions))
         check = self.event(
             "waiting", call="check", waiting_kind=WaitingKind.PERMISSION_CHECK
         )[0]
         self.assertTrue(session.waiting)
-        self.assertFalse(session.waiting_for_input)
-        self.assertFalse(self.reactions.relevant(question, self.sessions))
-        self.assertTrue(self.reactions.relevant(check, self.sessions))
+        self.assertFalse(session.is_waiting_for_input)
+        self.assertFalse(self.reactions.is_relevant(question, self.sessions))
+        self.assertTrue(self.reactions.is_relevant(check, self.sessions))
 
     def test_alias_merge_preserves_promoted_failure(self) -> None:
         self.event("intent", session="temporary", goal="Fix checks")
@@ -166,17 +166,17 @@ class ReactionTests(unittest.TestCase):
         )
         assert promoted is not None
         captured = promoted
-        self.assertTrue(self.reactions.relevant(captured, self.sessions))
+        self.assertTrue(self.reactions.is_relevant(captured, self.sessions))
 
     def test_new_turn_supersedes_outcome_while_other_session_continues(self) -> None:
         self.event("intent", goal="Fix checks")
         self.event("intent", session="two", goal="Inspect code")
         outcome = self.event("turn_done")[0]
         captured = outcome
-        self.assertTrue(self.sessions.active)
-        self.assertTrue(self.reactions.relevant(captured, self.sessions))
+        self.assertTrue(self.sessions.is_active)
+        self.assertTrue(self.reactions.is_relevant(captured, self.sessions))
         self.event("intent", goal="Next task")
-        self.assertFalse(self.reactions.relevant(captured, self.sessions))
+        self.assertFalse(self.reactions.is_relevant(captured, self.sessions))
 
     def test_new_turn_discards_old_reaction_state_before_an_alias_merge(self) -> None:
         self.event("intent", session="temporary", goal="First task")
@@ -200,7 +200,7 @@ class ReactionTests(unittest.TestCase):
         self.assertNotEqual(first.serial, second.serial)
         self.assertEqual(self.event("waiting", call="second"), [])
         captured = first
-        self.assertFalse(self.reactions.relevant(captured, self.sessions))
+        self.assertFalse(self.reactions.is_relevant(captured, self.sessions))
 
     def test_merging_active_aliases_preserves_waiting_without_another_reminder(
         self,
@@ -217,5 +217,5 @@ class ReactionTests(unittest.TestCase):
         self.assertTrue(lane.waiting)
         self.assertEqual(lane.waiting_call, "question")
         captured = waiting
-        self.assertTrue(self.reactions.relevant(captured, self.sessions))
+        self.assertTrue(self.reactions.is_relevant(captured, self.sessions))
         self.assertEqual(self.event("waiting", session="native", call="question"), [])

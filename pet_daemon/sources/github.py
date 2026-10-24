@@ -191,7 +191,7 @@ async def observe(
         for item in candidates
         if item.head_repository == repository and item.head_branch == branch
     ]
-    opened = [item for item in matches if item.pending]
+    opened = [item for item in matches if item.is_open]
     if len(opened) > 1:
         raise RuntimeError(
             "Multiple open pull requests match the repository and branch"

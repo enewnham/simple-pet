@@ -6,7 +6,7 @@ from pathlib import Path
 from pet_daemon.domain import SessionSource, SpeechReason
 from pet_daemon.identity import SessionIdentity
 from pet_daemon.storage import Memory
-from pet_daemon.storage.memory import HistoryRecord
+from pet_daemon.storage.memory import AttentionHistory
 from pet_daemon.storage.migrations import SCHEMA_VERSION
 from pet_daemon.work.models import IntentEvidence
 from pet_daemon.work.narrative import NarrativeStatement, WorkNarrative
@@ -70,7 +70,7 @@ class StoryStorageTests(unittest.TestCase):
         self.memory.record_speech("Inspecting", SpeechReason.ROUTINE)
         self.memory.save_attention_history(
             SessionIdentity(source=SessionSource.CODEX, native_id="root"),
-            HistoryRecord(
+            AttentionHistory(
                 last_selected=100, considered_subject_revision="acknowledged"
             ),
         )
@@ -151,7 +151,7 @@ class StoryStorageTests(unittest.TestCase):
                 self.memory.work.record_session(renamed)
                 self.memory.observe_session_context(renamed)
             self.memory.save_attention_history(
-                identity, HistoryRecord(last_selected=index + 1)
+                identity, AttentionHistory(last_selected=index + 1)
             )
             self.memory.save_narrative(
                 self.narrative().model_copy(update={"subject_id": identity})
@@ -185,7 +185,7 @@ class StoryStorageTests(unittest.TestCase):
             self.assertEqual(context.initial_request, f"Child {source}")
             self.assertEqual(
                 self.memory.load_attention_history()[identity],
-                HistoryRecord(last_selected=index + 1),
+                AttentionHistory(last_selected=index + 1),
             )
             narrative = self.memory.load_narrative(identity)
             self.assertIsNotNone(narrative)

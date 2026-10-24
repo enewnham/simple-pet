@@ -233,7 +233,7 @@ class Daemon:
     async def close(self) -> None:
         log.info(
             "daemon.stopping",
-            snapshot=self.application.sessions.activity_view().model_dump(),
+            snapshot=self.application.sessions.activity().model_dump(),
             sessions=len(self.application.sessions.by_id),
         )
         if self.loop_task:

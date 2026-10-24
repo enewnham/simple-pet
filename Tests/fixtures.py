@@ -13,10 +13,10 @@ from pet_daemon.domain import (
 from pet_daemon.identity import SessionIdentity
 from pet_daemon.runtime import (
     ActiveTool,
+    AgentSessionStatus,
     FailureSnapshot,
     PetContext,
     ProcessIdentity,
-    SessionContext,
     SwarmActivity,
     Trigger,
     UserSentiment,
@@ -126,7 +126,7 @@ class SessionOptions(TypedDict, total=False):
     user_sentiment: UserSentiment
 
 
-def session_snapshot(**values: Unpack[SessionOptions]) -> SessionContext:
+def session_snapshot(**values: Unpack[SessionOptions]) -> AgentSessionStatus:
     identity = values.get(
         "id", SessionIdentity(source=SessionSource.COMMAND, native_id="fixture")
     )
@@ -135,11 +135,11 @@ def session_snapshot(**values: Unpack[SessionOptions]) -> SessionContext:
     sessions.handle({"event": "session_start", "source": source, "session": name})
     if values.get("waiting_for_input"):
         sessions.handle({"event": "waiting", "source": source, "session": name})
-    snapshot = sessions.activity_view().sessions[0]
+    snapshot = sessions.activity().sessions[0]
     return snapshot.model_copy(update=dict(**values))
 
 
-def sessions_snapshot(*sessions: SessionContext) -> SwarmActivity:
+def sessions_snapshot(*sessions: AgentSessionStatus) -> SwarmActivity:
     return SwarmActivity(activity=PetState.IDLE, sessions=sessions)
 
 

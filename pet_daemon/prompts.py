@@ -57,7 +57,7 @@ def _rank(unit: tuple[str, bool]) -> int:
     return 1 if ACTION_ANYWHERE.search(text) else 0
 
 
-def _fits(text: str, limit: int, max_bytes: int | None) -> bool:
+def _is_within_budget(text: str, limit: int, max_bytes: int | None) -> bool:
     return len(text) <= limit and (max_bytes is None or _byte_cost(text) <= max_bytes)
 
 
@@ -70,24 +70,24 @@ def _shorten(
 ) -> str:
     prefix = "[omitted] " if preceding else ""
     complete = prefix + text + (" [omitted]" if following else "")
-    if _fits(complete, limit, max_bytes):
+    if _is_within_budget(complete, limit, max_bytes):
         return complete
     low, high = 0, min(len(text), limit)
     while low < high:
         middle = (low + high + 1) // 2
         suffix = " [omitted]" if following or middle < len(text) else ""
         candidate = prefix + text[:middle] + suffix
-        if _fits(candidate, limit, max_bytes):
+        if _is_within_budget(candidate, limit, max_bytes):
             low = middle
         else:
             high = middle - 1
     if low:
         suffix = " [omitted]" if following or low < len(text) else ""
         return prefix + text[:low] + suffix
-    return "[omitted]" if _fits("[omitted]", limit, max_bytes) else ""
+    return "[omitted]" if _is_within_budget("[omitted]", limit, max_bytes) else ""
 
 
-def select_prompt(
+def request_excerpt(
     text: object, limit: int = PROMPT_MAX_CHARS, max_bytes: int | None = None
 ) -> str:
     """Select prose within character and JSON string byte budgets."""
@@ -98,7 +98,7 @@ def select_prompt(
         or (max_bytes is not None and max_bytes < 2)
     ):
         return ""
-    if _fits(text, limit, max_bytes):
+    if _is_within_budget(text, limit, max_bytes):
         return text
 
     units = _units(text)
@@ -130,7 +130,7 @@ def select_prompt(
             parts.append("[omitted]")
         return " ".join(parts)
 
-    if anchors and not _fits(render({anchors[0]}), limit, max_bytes):
+    if anchors and not _is_within_budget(render({anchors[0]}), limit, max_bytes):
         index = preferred
         return _shorten(
             units[index][0],
@@ -142,7 +142,7 @@ def select_prompt(
 
     for index in anchors + ranked:
         candidate = render(selected | {index})
-        if _fits(candidate, limit, max_bytes):
+        if _is_within_budget(candidate, limit, max_bytes):
             selected.add(index)
     if selected:
         return render(selected)

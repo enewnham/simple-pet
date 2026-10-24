@@ -8,8 +8,8 @@ from typing import Unpack
 
 from pet_daemon.attention import Attention, AttentionSelection
 from pet_daemon.commentary import Cognition
-from pet_daemon.commentary.context import CommentaryPayload, PreparedCommentary
 from pet_daemon.commentary.contracts import ModelRequest
+from pet_daemon.commentary.request import CommentaryPayload, CommentaryRequest
 from pet_daemon.config import Config
 from pet_daemon.domain import (
     Activity,
@@ -38,6 +38,12 @@ from pet_daemon.runtime import (
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.storage import Memory
 from pet_daemon.work import WorkSubject
+from pet_daemon.work.evidence import (
+    CommentaryEvidence,
+    ExecutionStatus,
+    ReportedProgress,
+    UserIntent,
+)
 from pet_daemon.work.history import build_session_entry
 from pet_daemon.work.narrative import (
     NarrativeStatement,
@@ -51,15 +57,8 @@ from pet_daemon.work.observations import (
     PullRequest,
     PullRequestObservation,
 )
-from pet_daemon.work.views import (
-    ArtifactContext,
-    EvidenceView,
-    ExecutionView,
-    IntentView,
-    ProgressView,
-    SessionContribution,
-    WorkUpdate,
-)
+from pet_daemon.work.shared_work import WorkUpdate
+from pet_daemon.work.stories import ArtifactContext, SessionContribution
 from Tests.fixtures import (
     SessionOptions,
     capture_snapshot,
@@ -122,13 +121,13 @@ class ContextTests(unittest.TestCase):
 
     def prepare(
         self, reason: SpeechReason = SpeechReason.ROUTINE, context: str | None = None
-    ) -> PreparedCommentary:
+    ) -> CommentaryRequest:
         selection = self.attention.select(self.current_snapshot(), reason, context)
         return self.cognition.prompts.prepare(
             self.current_snapshot(), selection, self.cognition.request
         )
 
-    def payload(self, prepared: PreparedCommentary) -> CommentaryPayload:
+    def payload(self, prepared: CommentaryRequest) -> CommentaryPayload:
         return json.loads(prepared.request["messages"][0]["content"])
 
     def test_validated_story_keeps_selected_progress_and_aged_support(
@@ -171,9 +170,9 @@ class ContextTests(unittest.TestCase):
             payload["earlier_context"][-1]["reported_progress"],
             "The agent reports compatibility checks are running.",
         )
-        self.assertTrue(prepared.support.valid(snapshot))
+        self.assertTrue(prepared.conditions.is_valid(snapshot))
         self.update_session(progress="Compatibility check failed")
-        self.assertFalse(prepared.support.valid(self.current_snapshot()))
+        self.assertFalse(prepared.conditions.is_valid(self.current_snapshot()))
 
     def test_cached_narrative_ages_follow_wall_time_without_changing_support(
         self,
@@ -211,7 +210,7 @@ class ContextTests(unittest.TestCase):
         )
         report = self.payload(later)["earlier_context"][-1]
         self.assertEqual(report["age"], "2 hours ago")
-        self.assertEqual(prepared.support, later.support)
+        self.assertEqual(prepared.conditions, later.conditions)
         self.assertEqual(
             cached,
             self.memory.load_narrative(
@@ -225,10 +224,10 @@ class ContextTests(unittest.TestCase):
         self.output()
         subject = self.work[0]
         requests = tuple(
-            EvidenceView(
+            CommentaryEvidence(
                 source=EvidenceSource.USER,
                 kind=EvidenceKind.INTENT,
-                details=IntentView(text=f"Decision {index}"),
+                details=UserIntent(text=f"Decision {index}"),
                 observed_at=900 + index,
             )
             for index in range(7)
@@ -251,7 +250,7 @@ class ContextTests(unittest.TestCase):
             snapshot, selection, self.cognition.request, narrative=narrative
         )
         raw = self.cognition.prompts.prompt(snapshot, selection)
-        self.assertTrue(prepared.support.valid(snapshot))
+        self.assertTrue(prepared.conditions.is_valid(snapshot))
         self.work = (
             subject.model_copy(
                 update={
@@ -260,7 +259,7 @@ class ContextTests(unittest.TestCase):
                             "requests": (
                                 requests[0].model_copy(
                                     update={
-                                        "details": IntentView(
+                                        "details": UserIntent(
                                             text="Corrected compatibility decision"
                                         )
                                     }
@@ -276,7 +275,7 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(
             raw, self.cognition.prompts.prompt(current, selection.refresh(current))
         )
-        self.assertFalse(prepared.support.valid(current))
+        self.assertFalse(prepared.conditions.is_valid(current))
 
     def test_spoken_narrative_statements_are_omitted_without_empty_values(self) -> None:
         utterance = "I checked the parser."
@@ -401,7 +400,7 @@ class ContextTests(unittest.TestCase):
         )
         prepared = self.prepare()
         self.update_session(1, progress="Renderer completed", turn_active=False)
-        self.assertTrue(prepared.support.valid(self.current_snapshot()))
+        self.assertTrue(prepared.conditions.is_valid(self.current_snapshot()))
 
     def test_manifest_ignores_a_request_omitted_by_the_budget(self) -> None:
         self.config.prompt_target_bytes = 1
@@ -412,23 +411,23 @@ class ContextTests(unittest.TestCase):
                 *self.snapshot.sessions[0].recent_requests[1:],
             )
         )
-        self.assertTrue(prepared.support.valid(self.current_snapshot()))
+        self.assertTrue(prepared.conditions.is_valid(self.current_snapshot()))
 
     def test_manifest_rejects_changed_included_progress(self) -> None:
         prepared = self.prepare()
         self.update_session(progress="Parser verification complete")
-        self.assertFalse(prepared.support.valid(self.current_snapshot()))
+        self.assertFalse(prepared.conditions.is_valid(self.current_snapshot()))
 
     def test_manifest_ignores_elapsed_time_and_metadata(self) -> None:
         prepared = self.prepare()
         self.update_session(duration_seconds=300, quiet_seconds=150, changed_at=1200)
-        self.assertTrue(prepared.support.valid(self.current_snapshot()))
+        self.assertTrue(prepared.conditions.is_valid(self.current_snapshot()))
 
     def test_process_presence_metadata_does_not_supersede_ongoing_work(self) -> None:
         self.update_session(presence=ProcessStatus.UNKNOWN)
         prepared = self.prepare()
         self.update_session(presence=ProcessStatus.ALIVE)
-        self.assertTrue(prepared.support.valid(self.current_snapshot()))
+        self.assertTrue(prepared.conditions.is_valid(self.current_snapshot()))
 
     def test_historical_work_projection_keeps_its_request_without_a_live_session(
         self,
@@ -462,12 +461,12 @@ class ContextTests(unittest.TestCase):
     def test_manifest_rejects_a_superseded_runtime_transition(self) -> None:
         prepared = self.prepare()
         self.update_session(turn_active=False, outcome=ExecutionOutcome.SUCCESS)
-        self.assertFalse(prepared.support.valid(self.current_snapshot()))
+        self.assertFalse(prepared.conditions.is_valid(self.current_snapshot()))
 
     def test_quiet_greeting_remains_valid_without_session_context(self) -> None:
         self.snapshot = self.snapshot.model_copy(update={"sessions": ()})
         prepared = self.prepare(SpeechReason.CLICK)
-        self.assertTrue(prepared.support.valid(self.current_snapshot()))
+        self.assertTrue(prepared.conditions.is_valid(self.current_snapshot()))
 
     def test_explicit_context_stays_in_data_and_keeps_work_out_of_the_prompt(
         self,
@@ -494,7 +493,7 @@ class ContextTests(unittest.TestCase):
         state: PullRequestState = PullRequestState.OPEN,
         is_draft: bool = True,
     ) -> None:
-        if not self.memory.recent(
+        if not self.memory.recent_events(
             session=SessionIdentity(source=SessionSource.COMMAND, native_id="parser"),
             event_types=("intent",),
         ):
@@ -568,13 +567,13 @@ class ContextTests(unittest.TestCase):
         self.output()
         prepared = self.prepare()
         self.output(head="two")
-        self.assertTrue(prepared.support.valid(self.current_snapshot()))
+        self.assertTrue(prepared.conditions.is_valid(self.current_snapshot()))
 
     def test_omitted_pull_request_state_does_not_invalidate_commentary(self) -> None:
         self.output()
         prepared = self.prepare()
         self.output(state=PullRequestState.MERGED)
-        self.assertTrue(prepared.support.valid(self.current_snapshot()))
+        self.assertTrue(prepared.conditions.is_valid(self.current_snapshot()))
 
     def test_pull_request_refresh_keeps_artifact_metadata_out_of_commentary(
         self,
@@ -617,7 +616,7 @@ class ContextTests(unittest.TestCase):
             )
             for subject in self.work
         )
-        self.assertTrue(prepared.support.valid(self.current_snapshot()))
+        self.assertTrue(prepared.conditions.is_valid(self.current_snapshot()))
 
     def test_disconnected_focus_invalidates_the_captured_subject(self) -> None:
         self.output()
@@ -625,7 +624,7 @@ class ContextTests(unittest.TestCase):
         self.work = tuple(
             subject.model_copy(update={"sessions": ()}) for subject in self.work
         )
-        self.assertFalse(prepared.support.valid(self.current_snapshot()))
+        self.assertFalse(prepared.conditions.is_valid(self.current_snapshot()))
 
     def test_selected_work_context_is_supplied_once(self) -> None:
         self.output()
@@ -646,11 +645,11 @@ class ContextTests(unittest.TestCase):
         prepared = self.cognition.prompts.prepare(
             snapshot, selection, self.cognition.request
         )
-        self.assertTrue(prepared.support.valid(snapshot))
+        self.assertTrue(prepared.conditions.is_valid(snapshot))
         resumed = capture_snapshot(
             sessions_snapshot(session_snapshot(turn_active=True))
         )
-        self.assertFalse(prepared.support.valid(resumed))
+        self.assertFalse(prepared.conditions.is_valid(resumed))
 
     def test_new_input_wait_invalidates_a_quiet_greeting(self) -> None:
         self.snapshot = sessions_snapshot()
@@ -658,12 +657,12 @@ class ContextTests(unittest.TestCase):
         waiting = capture_snapshot(
             sessions_snapshot(session_snapshot(waiting_for_input=True))
         )
-        self.assertFalse(prepared.support.valid(waiting))
+        self.assertFalse(prepared.conditions.is_valid(waiting))
 
     def test_summary_saved_from_the_same_result_preserves_commentary(self) -> None:
         prepared = self.prepare()
         self.update_session(summary="The parser preserves its public API.")
-        self.assertTrue(prepared.support.valid(self.current_snapshot()))
+        self.assertTrue(prepared.conditions.is_valid(self.current_snapshot()))
 
     def test_commentary_omits_cached_summaries_empty_fields_and_artifacts(self) -> None:
         self.output()
@@ -696,18 +695,18 @@ class ContextTests(unittest.TestCase):
                     "story": subject.story.model_copy(
                         update={
                             "requests": (
-                                EvidenceView(
+                                CommentaryEvidence(
                                     source=EvidenceSource.USER,
                                     kind=EvidenceKind.INTENT,
-                                    details=IntentView(text="Build a log explorer"),
+                                    details=UserIntent(text="Build a log explorer"),
                                     observed_at=900,
                                 ),
                             ),
                             "activity": (
-                                EvidenceView(
+                                CommentaryEvidence(
                                     source=EvidenceSource.SOURCE,
                                     kind=EvidenceKind.PROGRESS,
-                                    details=ProgressView(
+                                    details=ReportedProgress(
                                         reported_progress="Finished simplifying log labels"
                                     ),
                                     observed_at=800,
@@ -720,18 +719,18 @@ class ContextTests(unittest.TestCase):
                                         source=SessionSource.COMMAND, native_id="audit"
                                     ),
                                     requests=(
-                                        EvidenceView(
+                                        CommentaryEvidence(
                                             source=EvidenceSource.SOURCE,
                                             kind=EvidenceKind.INTENT,
-                                            details=IntentView(text="Audit tests"),
+                                            details=UserIntent(text="Audit tests"),
                                             observed_at=750,
                                         ),
                                     ),
                                     activity=(
-                                        EvidenceView(
+                                        CommentaryEvidence(
                                             source=EvidenceSource.SOURCE,
                                             kind=EvidenceKind.PROGRESS,
-                                            details=ProgressView(
+                                            details=ReportedProgress(
                                                 reported_progress="Found two redundant assertions"
                                             ),
                                             observed_at=850,
@@ -815,7 +814,7 @@ class ContextTests(unittest.TestCase):
                 ),
             )
         )
-        self.assertFalse(prepared.support.valid(self.current_snapshot()))
+        self.assertFalse(prepared.conditions.is_valid(self.current_snapshot()))
 
     def test_selected_terminal_failure_preserves_the_failed_call(self) -> None:
         self.output()
@@ -823,10 +822,10 @@ class ContextTests(unittest.TestCase):
         story = subject.story.model_copy(
             update={
                 "activity": (
-                    EvidenceView(
+                    CommentaryEvidence(
                         source=EvidenceSource.SOURCE,
                         kind=EvidenceKind.EXECUTION,
-                        details=ExecutionView(
+                        details=ExecutionStatus(
                             execution="turn ended",
                             reported_progress=None,
                             reported_execution_outcome=ExecutionOutcome.ERROR,
@@ -862,10 +861,10 @@ class ContextTests(unittest.TestCase):
         story = subject.story.model_copy(
             update={
                 "activity": (
-                    EvidenceView(
+                    CommentaryEvidence(
                         source=EvidenceSource.SOURCE,
                         kind=EvidenceKind.EXECUTION,
-                        details=ExecutionView(
+                        details=ExecutionStatus(
                             execution="turn ended",
                             reported_progress="Parser checks passed",
                             reported_execution_outcome=ExecutionOutcome.SUCCESS,
@@ -904,10 +903,10 @@ class ContextTests(unittest.TestCase):
         story = subject.story.model_copy(
             update={
                 "activity": (
-                    EvidenceView(
+                    CommentaryEvidence(
                         source=EvidenceSource.SOURCE,
                         kind=EvidenceKind.EXECUTION,
-                        details=ExecutionView(
+                        details=ExecutionStatus(
                             execution="turn ended",
                             reported_progress="Parent checks passed",
                             reported_execution_outcome=ExecutionOutcome.SUCCESS,
@@ -922,10 +921,10 @@ class ContextTests(unittest.TestCase):
                             source=SessionSource.COMMAND, native_id="child"
                         ),
                         activity=(
-                            EvidenceView(
+                            CommentaryEvidence(
                                 source=EvidenceSource.SOURCE,
                                 kind=EvidenceKind.PROGRESS,
-                                details=ProgressView(
+                                details=ReportedProgress(
                                     reported_progress="Child is inspecting escape handling"
                                 ),
                                 observed_at=940,
@@ -973,10 +972,10 @@ class ContextTests(unittest.TestCase):
             update={
                 "intent": "Build parser",
                 "activity": (
-                    EvidenceView(
+                    CommentaryEvidence(
                         source=EvidenceSource.SOURCE,
                         kind=EvidenceKind.PROGRESS,
-                        details=ProgressView(
+                        details=ReportedProgress(
                             reported_progress="Parser compatibility checks passed"
                         ),
                         observed_at=700,
@@ -987,10 +986,10 @@ class ContextTests(unittest.TestCase):
                         scope="current task",
                         session=related,
                         activity=(
-                            EvidenceView(
+                            CommentaryEvidence(
                                 source=EvidenceSource.SOURCE,
                                 kind=EvidenceKind.PROGRESS,
-                                details=ProgressView(
+                                details=ReportedProgress(
                                     reported_progress="Escape checks passed"
                                 ),
                                 observed_at=940,
@@ -1052,22 +1051,24 @@ class ContextTests(unittest.TestCase):
 
     def test_child_report_keeps_the_assignment_observed_before_its_result(self) -> None:
         self.output()
-        report = EvidenceView(
+        report = CommentaryEvidence(
             source=EvidenceSource.SOURCE,
             kind=EvidenceKind.PROGRESS,
-            details=ProgressView(reported_progress="Found two redundant assertions"),
+            details=ReportedProgress(
+                reported_progress="Found two redundant assertions"
+            ),
             observed_at=850,
         )
-        earlier_assignment = EvidenceView(
+        earlier_assignment = CommentaryEvidence(
             source=EvidenceSource.SOURCE,
             kind=EvidenceKind.INTENT,
-            details=IntentView(text="Audit tests"),
+            details=UserIntent(text="Audit tests"),
             observed_at=800,
         )
-        current_assignment = EvidenceView(
+        current_assignment = CommentaryEvidence(
             source=EvidenceSource.SOURCE,
             kind=EvidenceKind.INTENT,
-            details=IntentView(text="Check the explorer website"),
+            details=UserIntent(text="Check the explorer website"),
             observed_at=900,
         )
         child = SessionContribution(
@@ -1150,26 +1151,26 @@ class ContextTests(unittest.TestCase):
         self,
     ) -> None:
         self.output()
-        progress = EvidenceView(
+        progress = CommentaryEvidence(
             source=EvidenceSource.SOURCE,
             kind=EvidenceKind.PROGRESS,
-            details=ProgressView(reported_progress="Checked parser compatibility"),
+            details=ReportedProgress(reported_progress="Checked parser compatibility"),
             observed_at=800,
         )
-        ended = EvidenceView(
+        ended = CommentaryEvidence(
             source=EvidenceSource.SOURCE,
             kind=EvidenceKind.EXECUTION,
-            details=ExecutionView(
+            details=ExecutionStatus(
                 execution="turn ended",
                 reported_progress="Checked parser compatibility",
                 reported_execution_outcome=ExecutionOutcome.CANCELLED,
             ),
             observed_at=800,
         )
-        request = EvidenceView(
+        request = CommentaryEvidence(
             source=EvidenceSource.USER,
             kind=EvidenceKind.INTENT,
-            details=IntentView(text="Build a log explorer"),
+            details=UserIntent(text="Build a log explorer"),
             observed_at=900,
         )
         self.work = tuple(
@@ -1204,16 +1205,16 @@ class ContextTests(unittest.TestCase):
         self,
     ) -> None:
         self.output()
-        original_request = EvidenceView(
+        original_request = CommentaryEvidence(
             source=EvidenceSource.USER,
             kind=EvidenceKind.INTENT,
-            details=IntentView(text="Build a log explorer"),
+            details=UserIntent(text="Build a log explorer"),
             observed_at=700,
         )
-        followup = EvidenceView(
+        followup = CommentaryEvidence(
             source=EvidenceSource.USER,
             kind=EvidenceKind.INTENT,
-            details=IntentView(text="proceed"),
+            details=UserIntent(text="proceed"),
             observed_at=900,
         )
         children = tuple(
@@ -1223,10 +1224,10 @@ class ContextTests(unittest.TestCase):
                     source=SessionSource.COMMAND, native_id=f"child-{index}"
                 ),
                 activity=(
-                    EvidenceView(
+                    CommentaryEvidence(
                         source=EvidenceSource.SOURCE,
                         kind=EvidenceKind.PROGRESS,
-                        details=ProgressView(
+                        details=ReportedProgress(
                             reported_progress=f"Report {index}: "
                             + "Checked parser behavior. " * 8
                         ),

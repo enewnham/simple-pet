@@ -46,14 +46,14 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
             sessions.apply_process_status(
                 await tracker.refresh(sessions.process_owners())
             )
-            self.assertTrue(sessions.active)
-            self.assertEqual(sessions.activity_view().sessions[0].presence, "alive")
+            self.assertTrue(sessions.is_active)
+            self.assertEqual(sessions.activity().sessions[0].presence, "alive")
             child.terminate()
             await child.wait()
             sessions.apply_process_status(
                 await tracker.refresh(sessions.process_owners())
             )
-            self.assertFalse(sessions.active)
+            self.assertFalse(sessions.is_active)
             self.assertIsNone(
                 sessions.by_id[
                     SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
@@ -113,7 +113,7 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
         ):
             results = await ProcessTracker().refresh(sessions.process_owners())
         sessions.apply_process_status(results)
-        self.assertTrue(sessions.active)
+        self.assertTrue(sessions.is_active)
         self.assertEqual(
             sessions.by_id[
                 SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
@@ -187,24 +187,24 @@ class FreshnessTests(unittest.TestCase):
         self.sessions.apply_process_status({owner: ProcessStatus.ALIVE})
         self.now += 7200
         self.sessions.prune()
-        self.assertTrue(self.sessions.working)
-        self.assertTrue(self.sessions.engaged)
-        self.assertTrue(self.sessions.active)
-        self.assertFalse(self.sessions.activity_view().sessions[0].activity_uncertain)
+        self.assertTrue(self.sessions.is_working)
+        self.assertTrue(self.sessions.is_engaged)
+        self.assertTrue(self.sessions.is_active)
+        self.assertFalse(self.sessions.activity().sessions[0].activity_uncertain)
 
     def test_ownerless_calls_and_waits_need_recent_hooks(self) -> None:
         self.event("intent")
         self.event("tool_start", call="long", tool="build")
         self.now += 299
-        self.assertTrue(self.sessions.working)
+        self.assertTrue(self.sessions.is_working)
         self.now += 1
-        self.assertFalse(self.sessions.working)
-        self.assertFalse(self.sessions.engaged)
+        self.assertFalse(self.sessions.is_working)
+        self.assertFalse(self.sessions.is_engaged)
         self.event("tool_done", call="long")
         self.event("waiting", call="answer")
-        self.assertTrue(self.sessions.engaged)
+        self.assertTrue(self.sessions.is_engaged)
         self.now += 300
-        self.assertFalse(self.sessions.engaged)
+        self.assertFalse(self.sessions.is_engaged)
         self.assertEqual(self.sessions.check_in_due(30), [])
 
     def test_owner_exit_preserves_result_and_closure_does_not_revive_it(self) -> None:
@@ -229,8 +229,8 @@ class FreshnessTests(unittest.TestCase):
         self.event("intent")
         self.event("tool_start", call="long", tool="build")
         wall += 300
-        self.assertFalse(self.sessions.engaged)
-        self.assertTrue(self.sessions.active)
+        self.assertFalse(self.sessions.is_engaged)
+        self.assertTrue(self.sessions.is_active)
 
     def test_owner_exit_retires_an_inherited_child_without_claiming_success(
         self,
@@ -253,14 +253,14 @@ class FreshnessTests(unittest.TestCase):
             owner,
         )
         self.sessions.apply_process_status({owner: ProcessStatus.EXITED})
-        self.assertFalse(self.sessions.active)
-        self.assertFalse(self.sessions.clean_convergence)
+        self.assertFalse(self.sessions.is_active)
+        self.assertFalse(self.sessions.has_successful_convergence)
 
     def test_ownerless_turn_still_expires_after_missing_terminal_signal(self) -> None:
         self.event("intent")
         self.now += 3600
         self.sessions.prune()
-        self.assertFalse(self.sessions.active)
+        self.assertFalse(self.sessions.is_active)
         self.assertIsNone(
             self.sessions.by_id[
                 SessionIdentity(source=SessionSource.CLAUDE, native_id="main")

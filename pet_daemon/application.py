@@ -10,11 +10,11 @@ import structlog
 
 from .attention import Attention, AttentionSelection
 from .behavior.controller import Behavior
-from .commentary import Cognition, CommentarySupport
+from .commentary import Cognition, SpeechConditions
 from .commentary.cognition import StoryUnavailable
 from .commentary.usage import collect_usage
 from .config import Config
-from .delivery import DeliveryOutcome, MessageSupport, SpeechDelivery, SpeechMessage
+from .delivery import DeliveryConditions, DeliveryOutcome, SpeechDelivery, SpeechMessage
 from .domain import DeliveryStatus, SpeechReason
 from .identity import SessionIdentity
 from .logging import get_logger
@@ -111,7 +111,7 @@ class Application:
             ),
             clock=clock,
             on_outcome=self.delivery_outcome,
-            valid=self.delivery_valid,
+            valid=self.is_delivery_valid,
         )
 
     def clear_memory(self) -> None:
@@ -175,10 +175,10 @@ class Application:
         log.debug("speech.requested", context=context, ttl=ttl)
 
     def queue(self, reason: SpeechReason, trigger: Trigger | None = None) -> None:
-        self.attention.queue(reason, trigger, self.sessions.failed)
+        self.attention.queue(reason, trigger, self.sessions.has_current_failures)
 
     def context(self, trigger: Trigger | None = None) -> PetContext:
-        runtime = self.sessions.activity_view()
+        runtime = self.sessions.activity()
         for session in runtime.sessions:
             context = self.memory.context(session.id)
             if context:
@@ -201,7 +201,7 @@ class Application:
         return PetContext(
             activity=runtime.activity,
             sessions=runtime.sessions,
-            sleeping=self.behavior.sleeping,
+            sleeping=self.behavior.is_sleeping,
             trigger=trigger,
             work=subjects,
             convergence=runtime.convergence,
@@ -286,7 +286,7 @@ class Application:
             except sqlite3.Error as error:
                 log.warning("renderer.acceptance_failed", error=str(error))
         elif feedback == "status":
-            if self.behavior.renderer_status(packet):
+            if self.behavior.update_renderer_status(packet):
                 status = self.behavior.status
                 assert status is not None
                 self.system_sleep_changed(status.system_sleeping)
@@ -322,7 +322,7 @@ class Application:
         self.attention.pending = None
 
     def click(self) -> None:
-        self.behavior.satisfy()
+        self.behavior.defer_care()
         self.behavior.wake("click")
         self.behavior.react("click", self.sessions)
         if self.task and self.reason == SpeechReason.CLICK and not self.task.done():
@@ -372,7 +372,7 @@ class Application:
                         snapshot,
                         selection,
                         refresh=lambda: self.context(trigger),
-                        eligible=self.attention.selection_eligible,
+                        eligible=self.attention.is_selection_eligible,
                     ),
                     timeout=self.config.request_timeout,
                 )
@@ -382,7 +382,7 @@ class Application:
                 if (
                     epoch != self.revision
                     or history_epoch != self.history_epoch
-                    or not self.selection_valid(result.prepared.support, trigger)
+                    or not self.is_selection_valid(result.request.conditions, trigger)
                 ):
                     outcome = "discarded"
                     log.info(
@@ -391,7 +391,7 @@ class Application:
                         subject=selection.id,
                     )
                     return
-                selection = result.prepared.selection
+                selection = result.request.selection
                 if result.speak is None:
                     self.mark_considered(selection)
                     outcome = "silent"
@@ -413,8 +413,8 @@ class Application:
                             if selection.subject
                             else None,
                             history_epoch=history_epoch,
-                            support=MessageSupport(
-                                commentary=result.prepared.support,
+                            conditions=DeliveryConditions(
+                                commentary=result.request.conditions,
                                 trigger=trigger,
                                 request_epoch=epoch,
                             ),
@@ -449,17 +449,17 @@ class Application:
                     **(tokens.model_dump() if tokens is not None else {}),
                 )
 
-    def selection_valid(
-        self, support: CommentarySupport, trigger: Trigger | None
+    def is_selection_valid(
+        self, conditions: SpeechConditions, trigger: Trigger | None
     ) -> bool:
-        if isinstance(trigger, ReactionTrigger) and not self.reactions.relevant(
+        if isinstance(trigger, ReactionTrigger) and not self.reactions.is_relevant(
             trigger.reaction, self.sessions
         ):
             return False
         snapshot = self.context(trigger)
-        return self.attention.selection_eligible(
-            support.selection, snapshot
-        ) and support.valid(snapshot)
+        return self.attention.is_selection_eligible(
+            conditions.selection, snapshot
+        ) and conditions.is_valid(snapshot)
 
     def mark_considered(self, selection: AttentionSelection) -> None:
         records = self.attention.consideration(selection.subject, selection.update)
@@ -474,13 +474,13 @@ class Application:
                 subject_id, self.attention.history(subject_id)
             )
 
-    def delivery_valid(self, message: SpeechMessage) -> bool:
-        support = message.support
-        assert support is not None
+    def is_delivery_valid(self, message: SpeechMessage) -> bool:
+        conditions = message.conditions
+        assert conditions is not None
         return (
             message.history_epoch == self.history_epoch
-            and support.request_epoch == self.revision
-            and self.selection_valid(support.commentary, support.trigger)
+            and conditions.request_epoch == self.revision
+            and self.is_selection_valid(conditions.commentary, conditions.trigger)
         )
 
     def delivery_outcome(self, outcome: DeliveryOutcome) -> None:
@@ -492,7 +492,9 @@ class Application:
             None,
         )
         current = subject is not None and subject.revision == message.revision
-        selection = message.support.commentary.selection if message.support else None
+        selection = (
+            message.conditions.commentary.selection if message.conditions else None
+        )
         update = selection.update if selection else None
         update_current = bool(subject and update and update in subject.updates)
         considered_subject = subject if current else None
@@ -569,7 +571,7 @@ class Application:
             key
             for key in self.sessions.check_in_due(self.config.idle_message_seconds)
             if not self.sessions.by_id[key].parent
-            or self.sessions.by_id[key].waiting_for_input
+            or self.sessions.by_id[key].is_waiting_for_input
         )
         request = self.attention.request(
             snapshot,
@@ -577,7 +579,7 @@ class Application:
             manual=self.manual,
             clicked=self.clicked,
             care=self.behavior.care_remark,
-            reaction_relevant=lambda trigger: self.reactions.relevant(
+            reaction_relevant=lambda trigger: self.reactions.is_relevant(
                 trigger, self.sessions
             ),
             delivery_pending=self.delivery.has_pending(),
@@ -590,17 +592,17 @@ class Application:
             self.clicked = False
         elif request.reason == SpeechReason.CARE:
             self.behavior.care_remark = None
-        if not self.attention.allowed(request.reason, request.trigger):
+        if not self.attention.can_speak(request.reason, request.trigger):
             return
         snapshot = self.context(request.trigger)
         selection = self.attention.select(
             snapshot, request.reason, request.context, request.eligible
         )
-        if not self.attention.selection_eligible(selection, snapshot):
+        if not self.attention.is_selection_eligible(selection, snapshot):
             return
         if request.reason == SpeechReason.CHECK_IN and selection.focus_session:
             self.sessions.by_id[selection.focus_session.id].last_check_in = now
-        self.attention.scheduled(selection.id)
+        self.attention.mark_scheduled(selection.id)
         self.persist_attention(selection.id)
         self.behavior.stop_movement()
         self.reason = request.reason

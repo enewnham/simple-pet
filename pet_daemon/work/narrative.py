@@ -2,14 +2,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..identity import SessionIdentity
 from ..types import JSONObject
-from .views import (
-    EvidenceView,
-    ExecutionView,
-    IntentView,
-    ProgressView,
-    WorkStory,
-    revision_key,
-)
+from .evidence import CommentaryEvidence, ExecutionStatus, ReportedProgress, UserIntent
+from .stories import WorkStory, revision_key
 
 
 class NarrativeStatement(BaseModel):
@@ -40,13 +34,15 @@ class WorkNarrative(BaseModel):
 
 
 def semantic_revision(story: WorkStory) -> str:
-    def facts(records: tuple[EvidenceView, ...]) -> tuple[tuple[object, ...], ...]:
+    def facts(
+        records: tuple[CommentaryEvidence, ...],
+    ) -> tuple[tuple[object, ...], ...]:
         result = []
         for record in records:
             match record.details:
-                case IntentView(text=text) | ProgressView(reported_progress=text):
+                case UserIntent(text=text) | ReportedProgress(reported_progress=text):
                     result.append((record.kind, text))
-                case ExecutionView(
+                case ExecutionStatus(
                     execution="turn ended",
                     reported_progress=progress,
                     reported_execution_outcome=outcome,
