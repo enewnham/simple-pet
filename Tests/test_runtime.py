@@ -1319,7 +1319,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         schema = self.requests[0]["output_config"]["format"]["schema"]
         properties = schema["properties"]
         assert isinstance(properties, dict)
-        self.assertEqual(set(properties), {"speak"})
+        self.assertEqual(set(properties), {"speak", "mentions", "memory", "ongoing"})
         self.assertEqual(schema["required"], ["speak"])
         speak = properties["speak"]
         assert isinstance(speak, dict)

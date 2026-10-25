@@ -112,8 +112,10 @@ for the agents' reports.
 The pet maintains a short work story from user requests and scoped agent reports before
 generating commentary. Quoted text, code blocks, and tables are excluded from reports.
 Recent pet remarks stay local for repetition checks and are excluded from model prompts.
-The pet reacts to each reported result at most once, within five minutes of the turn ending.
-It also comments on live work and current waits.
+Related sessions can draw on remembered decisions and reports. The pet reacts to recent
+results and live work, and can recall where we left off during quiet periods or an idle
+click. Recollections grow less frequent as their evidence ages. Finished work recedes as
+the conversation moves on.
 
 Remembered work and speech are stored locally. Use the commands below to clear them.
 

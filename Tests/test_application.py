@@ -97,6 +97,12 @@ class FixtureModel:
         self.text: str | None = (
             "The parser preserves escaped delimiters inside quoted fields."
         )
+        self.response: (
+            Callable[[ModelRequest, SpeechReason], dict[str, object]] | None
+        ) = None
+        self.narrative_response: Callable[[ModelRequest], dict[str, object]] | None = (
+            None
+        )
 
     async def complete(
         self, request: ModelRequest, reason: SpeechReason | ModelPurpose
@@ -105,10 +111,14 @@ class FixtureModel:
             self.story_requests.append(request)
             if self.before_response:
                 self.before_response(reason)
+            if self.narrative_response:
+                return self.narrative_response(request)
             return story_response(request)
         self.requests.append((request, reason))
         if self.before_response:
             self.before_response(reason)
+        if self.response:
+            return self.response(request, reason)
         return {"speak": self.text}
 
 
@@ -349,7 +359,6 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             )
         self.now += self.config.activity_fresh_seconds
         self.app.tick()
-        self.assertIsNone(self.app.task)
         self.assertEqual(self.app.sessions.check_in_due(10), [])
 
     async def test_child_lifecycle_retains_reports_without_interrupting_the_root(
@@ -1439,3 +1448,629 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             "accepted",
         )
         self.assertEqual(len(self.memory.speech()), 1)
+
+    async def test_new_related_work_recalls_an_earlier_report_without_a_recall_request(
+        self,
+    ) -> None:
+        earlier = "The quoted-field parser preserves escaped delimiters."
+        self.report(earlier)
+        self.complete_turn()
+        self.attention.pending = None
+        self.now += 3600
+        self.provider.publish(
+            HookEvent(
+                source=SessionSource.CODEX,
+                session="verification",
+                event=HookEventKind.INTENT,
+                goal="Verify escaped delimiters in quoted fields",
+                repo="/fixture/parser",
+            )
+        )
+        self.attention.next_observation = self.now
+        self.app.tick()
+        await require(self.app.task)
+
+        self.assertEqual(self.model.requests[-1][1], SpeechReason.PROMPT)
+        story_payload = json.loads(
+            self.model.story_requests[-1]["messages"][0]["content"]
+        )
+        evidence = story_payload["current_moment"]["evidence"]
+        self.assertTrue(any(item.get("text") == earlier for item in evidence))
+        speech_payload = json.loads(
+            self.model.requests[-1][0]["messages"][0]["content"]
+        )
+        self.assertIn(earlier, json.dumps(speech_payload))
+
+    async def test_new_request_in_another_conversation_preserves_queued_completion(
+        self,
+    ) -> None:
+        self.report("The quoted-field parser preserves escaped delimiters.")
+        self.complete_turn()
+        snapshot = self.app.context()
+        selected = self.attention.select(snapshot, SpeechReason.COMPLETION)
+        self.assertEqual(require(selected.update).session.native_id, "parser")
+
+        self.now += 1
+        self.provider.publish(
+            HookEvent(
+                source=SessionSource.CODEX,
+                session="billing",
+                event=HookEventKind.INTENT,
+                goal="Investigate billing totals",
+                repo="/fixture/billing",
+            )
+        )
+        await self.app.comment(
+            SpeechReason.COMPLETION, snapshot=snapshot, selection=selected
+        )
+
+        emitted = require(
+            next(
+                (
+                    packet
+                    for packet in reversed(self.packets)
+                    if "delivery_id" in packet
+                ),
+                None,
+            )
+        )
+        packet: SpeechPacket = {
+            "text": emitted["text"],
+            "ttl": emitted["ttl"],
+            "delivery_id": emitted["delivery_id"],
+        }
+        self.assertEqual(self.model.requests[-1][1], SpeechReason.COMPLETION)
+        self.accept(packet)
+        self.assertEqual(
+            require(self.memory.message_outcome(packet["delivery_id"])).outcome,
+            DeliveryStatus.ACCEPTED,
+        )
+
+    async def test_unrelated_text_match_does_not_cancel_parser_delivery(self) -> None:
+        peer = SessionIdentity(source=SessionSource.CODEX, native_id="telemetry")
+        repository = "https://example.test/team/parser"
+        self.provider.publish(
+            HookEvent(
+                source=peer.source,
+                session=peer.native_id,
+                event=HookEventKind.INTENT,
+                goal="Investigate quoted field telemetry",
+                repo="/fixture/telemetry",
+                repository=repository,
+            )
+        )
+        self.provider.publish(
+            HookEvent(
+                source=peer.source,
+                session=peer.native_id,
+                event=HookEventKind.PROGRESS,
+                progress="The quoted field telemetry samples are indexed.",
+                repo="/fixture/telemetry",
+                repository=repository,
+            )
+        )
+        self.report("The quoted field parser preserves escaped delimiters.")
+        snapshot = self.app.context()
+        parser = SessionIdentity(source=SessionSource.CODEX, native_id="parser")
+        subject = next(item for item in snapshot.work if item.id == parser)
+        self.assertTrue(
+            any(
+                item.payload.session == peer
+                for item in self.memory.context_reports(subject)
+            )
+        )
+        selection = self.attention.select(snapshot, eligible=(parser,))
+        await self.app.comment(
+            SpeechReason.ROUTINE, snapshot=snapshot, selection=selection
+        )
+        emitted = next(item for item in reversed(self.packets) if "delivery_id" in item)
+        packet: SpeechPacket = {
+            "text": emitted["text"],
+            "ttl": emitted["ttl"],
+            "delivery_id": emitted["delivery_id"],
+        }
+        message = self.app.delivery.deliveries[packet["delivery_id"]].message
+
+        self.now += 1
+        self.provider.publish(
+            HookEvent(
+                source=peer.source,
+                session=peer.native_id,
+                event=HookEventKind.PROGRESS,
+                progress="The quoted field telemetry chart updates correctly.",
+                repo="/fixture/telemetry",
+                repository=repository,
+            )
+        )
+        self.assertTrue(self.app.is_delivery_valid(message))
+        self.app.delivery.tick()
+        self.assertTrue(self.app.delivery.has_pending())
+        self.accept(packet)
+        self.assertEqual(
+            require(self.memory.message_outcome(packet["delivery_id"])).outcome,
+            DeliveryStatus.ACCEPTED,
+        )
+
+    async def test_any_report_on_a_cited_request_scope_cancels_pending_delivery(
+        self,
+    ) -> None:
+        peer = SessionIdentity(source=SessionSource.CODEX, native_id="telemetry")
+        repository = "https://example.test/team/parser"
+        reported = "The quoted field parser still needs a multiline escape check."
+        self.provider.publish(
+            HookEvent(
+                source=peer.source,
+                session=peer.native_id,
+                event=HookEventKind.INTENT,
+                goal="Check quoted field telemetry",
+                repo="/fixture/telemetry",
+                repository=repository,
+            )
+        )
+        self.provider.publish(
+            HookEvent(
+                source=peer.source,
+                session=peer.native_id,
+                event=HookEventKind.PROGRESS,
+                progress=reported,
+                repo="/fixture/telemetry",
+                repository=repository,
+            )
+        )
+        self.report("The quoted field parser handles escaped delimiters.")
+        cited: list[str] = []
+
+        def cite_peer(request: ModelRequest) -> dict[str, object]:
+            payload = json.loads(request["messages"][0]["content"])
+            evidence = payload["current_moment"]["evidence"]
+            latest = payload["current_work"]["latest_request_source"]
+            intent = next(item for item in evidence if item["id"] == latest)
+            source = next(
+                item
+                for item in evidence
+                if item.get("text") == reported
+                and item.get("reporter", {}).get("native_id") == peer.native_id
+            )
+            cited.append(source["id"])
+            return {
+                "intent": {"text": intent["text"], "sources": [latest]},
+                "decisions": [],
+                "progress": [{"text": reported, "sources": [source["id"]]}],
+            }
+
+        def mention_peer(
+            request: ModelRequest, reason: SpeechReason
+        ) -> dict[str, object]:
+            return {
+                "speak": "The multiline escape check is still open.",
+                "mentions": [cited[0]],
+            }
+
+        self.model.narrative_response = cite_peer
+        self.model.response = mention_peer
+        snapshot = self.app.context()
+        parser = SessionIdentity(source=SessionSource.CODEX, native_id="parser")
+        selection = self.attention.select(snapshot, eligible=(parser,))
+        await self.app.comment(
+            SpeechReason.ROUTINE, snapshot=snapshot, selection=selection
+        )
+        emitted = next(item for item in reversed(self.packets) if "delivery_id" in item)
+        message = self.app.delivery.deliveries[emitted["delivery_id"]].message
+        self.assertEqual(message.mentioned_sources, (cited[0],))
+        self.assertTrue(self.app.is_delivery_valid(message))
+
+        self.now += 1
+        self.provider.publish(
+            HookEvent(
+                source=peer.source,
+                session=peer.native_id,
+                event=HookEventKind.PROGRESS,
+                progress="Telemetry sampling frequency is five seconds.",
+                repo="/fixture/telemetry",
+                repository=repository,
+            )
+        )
+        current = next(item for item in self.app.context().work if item.id == parser)
+        self.assertEqual(current.revision, require(selection.subject).revision)
+        self.assertFalse(self.app.is_delivery_valid(message))
+        self.app.delivery.tick()
+        self.assertFalse(self.app.delivery.has_pending())
+        self.assertIsNone(self.memory.message_outcome(emitted["delivery_id"]))
+
+    async def test_idle_reflection_records_the_selected_report_and_silence(
+        self,
+    ) -> None:
+        self.config.behavior.naps = False
+        self.config.behavior.care = False
+        report = "The quoted-field parser still needs a multiline escape check."
+        self.report(report)
+        self.complete_turn()
+        self.attention.pending = None
+        self.attention.next_observation = self.now + 10_000
+        selected: list[str] = []
+
+        def recall(request: ModelRequest, reason: SpeechReason) -> dict[str, object]:
+            self.assertEqual(reason, SpeechReason.CHECK_IN)
+            payload = json.loads(request["messages"][0]["content"])
+            candidates = [
+                item["memory_candidate"]
+                for item in payload.get("earlier_context", ())
+                if "memory_candidate" in item
+            ]
+            candidate = next(item for item in candidates if item["text"] == report)
+            identifier = candidate["id"]
+            selected.append(identifier)
+            if len(selected) == 1:
+                return {
+                    "speak": "The multiline escape check is still open.",
+                    "mentions": [identifier],
+                    "memory": identifier,
+                    "ongoing": True,
+                }
+            return {"speak": None, "memory": identifier, "ongoing": True}
+
+        self.model.response = recall
+        self.now += 299
+        self.app.tick()
+        self.assertIsNone(self.app.task)
+        self.now += 1
+        self.app.tick()
+        await require(self.app.task)
+        emitted = next(
+            packet for packet in reversed(self.packets) if "delivery_id" in packet
+        )
+        packet: SpeechPacket = {
+            "text": emitted["text"],
+            "ttl": emitted["ttl"],
+            "delivery_id": emitted["delivery_id"],
+        }
+        self.assertEqual(packet["text"], "The multiline escape check is still open.")
+        self.assertIsNone(self.memory.load_source_attention().get(selected[0]))
+        self.accept(packet)
+        recorded = require(self.memory.load_source_attention().get(selected[0]))
+        self.assertEqual(recorded.considered_at, self.now)
+        self.assertEqual(recorded.mentioned_at, self.now)
+
+        self.now += 899
+        self.app.tick()
+        self.assertEqual(len(selected), 1)
+        self.now += 1
+        self.app.tick()
+        await require(self.app.task)
+        self.assertEqual(selected, [selected[0], selected[0]])
+        self.assertEqual(len(self.memory.speech()), 1)
+        recorded = require(self.memory.load_source_attention().get(selected[0]))
+        self.assertEqual(recorded.considered_at, self.now)
+        self.assertEqual(recorded.mentioned_at, self.now - 900)
+        self.assertEqual(set(self.memory.load_source_attention()), {selected[0]})
+
+        self.restart_attention_and_sessions()
+        self.attention.restore_sources(self.memory.load_source_attention())
+        self.assertEqual(self.attention.sources[selected[0]], recorded)
+
+    async def test_idle_reflection_uses_older_work_when_preferred_has_no_memory(
+        self,
+    ) -> None:
+        self.config.behavior.naps = False
+        self.config.behavior.care = False
+        remaining = "The docs still need an accessibility example."
+        self.now += 1
+        self.provider.publish(
+            HookEvent(
+                source=SessionSource.CODEX,
+                session="docs",
+                event=HookEventKind.INTENT,
+                goal="Document accessibility examples",
+                repo="/fixture/docs",
+            )
+        )
+        self.report(remaining, session="docs")
+        self.now += 1
+        self.provider.publish(
+            HookEvent(
+                source=SessionSource.CODEX,
+                session="parser",
+                event=HookEventKind.INTENT,
+                goal="Review quoted-field parser behavior",
+                repo="/fixture/parser",
+            )
+        )
+        self.attention.pending = None
+        self.now += 3600
+        self.attention.next_observation = self.now + 10_000
+        selected: list[str] = []
+        older_candidates: list[list[str]] = []
+
+        def respond(request: ModelRequest, reason: SpeechReason) -> dict[str, object]:
+            self.assertEqual(reason, SpeechReason.CHECK_IN)
+            payload = json.loads(request["messages"][0]["content"])
+            work = payload["current_work"]["request"]
+            if work == "Review quoted-field parser behavior":
+                return {"speak": None, "memory": None}
+            self.assertEqual(work, "Document accessibility examples")
+            if not older_candidates:
+                self.assertEqual(self.memory.load_source_attention(), {})
+            candidates = [
+                item["memory_candidate"]
+                for item in payload.get("earlier_context", ())
+                if "memory_candidate" in item
+            ]
+            older_candidates.append([item["id"] for item in candidates])
+            selected_report = next(
+                (item for item in candidates if item["text"] == remaining), None
+            )
+            if selected_report is None:
+                return {"speak": None, "memory": None}
+            selected.append(selected_report["id"])
+            return {
+                "speak": "The accessibility example is still on the docs list.",
+                "mentions": [selected_report["id"]],
+                "memory": selected_report["id"],
+                "ongoing": True,
+            }
+
+        self.model.response = respond
+        self.app.tick()
+        await require(self.app.task)
+        requests = [
+            json.loads(request["messages"][0]["content"])
+            for request, _ in self.model.requests
+        ]
+        self.assertEqual(
+            [item["current_work"]["request"] for item in requests],
+            ["Review quoted-field parser behavior", "Document accessibility examples"],
+        )
+        self.assertEqual(len(selected), 1)
+        emitted = next(item for item in reversed(self.packets) if "delivery_id" in item)
+        packet: SpeechPacket = {
+            "text": emitted["text"],
+            "ttl": emitted["ttl"],
+            "delivery_id": emitted["delivery_id"],
+        }
+        self.assertEqual(self.memory.load_source_attention(), {})
+        self.accept(packet)
+        considered = require(self.memory.load_source_attention().get(selected[0]))
+        self.assertEqual(considered.considered_at, self.now)
+        self.assertEqual(set(self.memory.load_source_attention()), {selected[0]})
+
+        self.now += 900
+        self.app.tick()
+        await require(self.app.task)
+        self.assertEqual(len(self.model.requests), 4)
+        self.assertNotIn(selected[0], older_candidates[-1])
+        self.assertEqual(len(self.memory.speech()), 1)
+        self.assertEqual(self.memory.load_source_attention()[selected[0]], considered)
+
+    async def test_new_activity_during_idle_generation_discards_the_reflection(
+        self,
+    ) -> None:
+        report = "The quoted-field parser still needs a multiline escape check."
+        self.report(report)
+        self.complete_turn()
+        self.attention.pending = None
+        self.attention.next_observation = self.now + 10_000
+        self.now += 300
+
+        def publish_progress(reason: SpeechReason | ModelPurpose) -> None:
+            if reason == SpeechReason.CHECK_IN:
+                self.report("The multiline escape check passed.")
+
+        self.model.before_response = publish_progress
+        self.model.response = lambda request, reason: {"speak": None}
+        self.app.tick()
+        await require(self.app.task)
+        self.assertFalse(any("delivery_id" in packet for packet in self.packets))
+        self.assertEqual(self.memory.load_source_attention(), {})
+
+    async def test_later_completion_excludes_an_uncited_older_remaining_step(
+        self,
+    ) -> None:
+        self.config.behavior.naps = False
+        remaining = "The parser still needs the multiline escape check."
+        completed = "The multiline escape check passed and parser work is complete."
+        self.report(remaining)
+        self.now += 1
+        self.report(completed)
+        self.complete_turn()
+        self.attention.pending = None
+        self.attention.next_observation = self.now + 10_000
+        older_source: list[str] = []
+
+        def corrected_story(request: ModelRequest) -> dict[str, object]:
+            payload = json.loads(request["messages"][0]["content"])
+            evidence = payload["current_moment"]["evidence"]
+            old = next(item for item in evidence if item.get("text") == remaining)
+            later = next(item for item in evidence if item.get("text") == completed)
+            older_source.append(old["id"])
+            latest = payload["current_work"]["latest_request_source"]
+            intent = next(item for item in evidence if item["id"] == latest)
+            return {
+                "intent": {"text": intent["text"], "sources": [latest]},
+                "decisions": [],
+                "progress": [{"text": completed, "sources": [later["id"]]}],
+            }
+
+        def cite_old(request: ModelRequest, reason: SpeechReason) -> dict[str, object]:
+            self.assertEqual(reason, SpeechReason.CHECK_IN)
+            payload = json.loads(request["messages"][0]["content"])
+            candidates = [
+                item["memory_candidate"]
+                for item in payload.get("earlier_context", ())
+                if "memory_candidate" in item
+            ]
+            self.assertTrue(any(item["text"] == completed for item in candidates))
+            self.assertFalse(any(item["id"] == older_source[0] for item in candidates))
+            return {
+                "speak": "The multiline escape check still needs work.",
+                "mentions": [older_source[0]],
+                "memory": older_source[0],
+                "ongoing": True,
+            }
+
+        self.model.narrative_response = corrected_story
+        self.model.response = cite_old
+        self.now += 300
+        self.app.tick()
+        await require(self.app.task)
+
+        self.assertEqual(len(older_source), 1)
+        self.assertFalse(any("delivery_id" in packet for packet in self.packets))
+        self.assertEqual(self.memory.load_source_attention(), {})
+        parser = SessionIdentity(source=SessionSource.CODEX, native_id="parser")
+        narrative = require(self.memory.load_narrative(parser))
+        self.assertIn(older_source[0], narrative.sources)
+        self.assertEqual(narrative.progress[0].text, completed)
+
+    async def test_explicit_idle_click_does_not_rearm_an_old_report_for_automatic_speech(
+        self,
+    ) -> None:
+        self.config.behavior.naps = False
+        self.config.behavior.care = False
+        report = "The parser still needs the multiline escape check."
+        self.report(report)
+        self.complete_turn()
+        self.attention.pending = None
+        self.attention.next_observation = self.now + 200_000
+        self.now += 86_400
+        selected: list[str] = []
+        automatic_candidates: list[list[dict[str, object]]] = []
+
+        def respond(request: ModelRequest, reason: SpeechReason) -> dict[str, object]:
+            payload = json.loads(request["messages"][0]["content"])
+            candidates = [
+                item["memory_candidate"]
+                for item in payload.get("earlier_context", ())
+                if "memory_candidate" in item
+            ]
+            if reason == SpeechReason.CLICK:
+                candidate = next(item for item in candidates if item["text"] == report)
+                identifier = candidate["id"]
+                selected.append(identifier)
+                return {
+                    "speak": "The multiline escape check is still on the list.",
+                    "mentions": [identifier],
+                    "memory": identifier,
+                    "ongoing": True,
+                }
+            self.assertEqual(reason, SpeechReason.CHECK_IN)
+            automatic_candidates.append(candidates)
+            return {"speak": None}
+
+        self.model.response = respond
+        self.app.click()
+        self.app.tick()
+        await require(self.app.task)
+        emitted = next(
+            packet for packet in reversed(self.packets) if "delivery_id" in packet
+        )
+        packet: SpeechPacket = {
+            "text": emitted["text"],
+            "ttl": emitted["ttl"],
+            "delivery_id": emitted["delivery_id"],
+        }
+        self.accept(packet)
+        mentioned = require(self.memory.load_source_attention().get(selected[0]))
+        self.assertEqual(mentioned.mentioned_at, self.now)
+
+        self.now += 900
+        self.app.tick()
+        await require(self.app.task)
+        self.assertEqual(len(automatic_candidates), 1)
+        self.assertNotIn(selected[0], [item["id"] for item in automatic_candidates[0]])
+        self.assertEqual(len(self.memory.speech()), 1)
+        self.assertEqual(self.memory.load_source_attention()[selected[0]], mentioned)
+
+    async def test_silent_reflection_keeps_its_interval_after_restart(self) -> None:
+        self.config.behavior.naps = False
+        self.config.behavior.care = False
+        self.report("The quoted-field parser check passed.")
+        self.complete_turn()
+        self.attention.pending = None
+        self.attention.next_observation = self.now + 10_000
+        self.model.response = lambda request, reason: {"speak": None, "memory": None}
+
+        self.now += 300
+        self.app.tick()
+        await require(self.app.task)
+        self.assertEqual(self.model.requests[-1][1], SpeechReason.CHECK_IN)
+        self.assertEqual(len(self.model.requests), 1)
+        self.assertEqual(self.memory.load_source_attention(), {})
+        parser = SessionIdentity(source=SessionSource.CODEX, native_id="parser")
+        history = require(self.memory.load_attention_history().get(parser))
+        self.assertEqual(history.last_reflection_at, self.now)
+
+        self.restart_attention_and_sessions()
+        self.attention.next_observation = self.now + 10_000
+        self.now += 899
+        self.app.tick()
+        self.assertEqual(len(self.model.requests), 1)
+        self.now += 1
+        self.app.tick()
+        await require(self.app.task)
+        self.assertEqual(len(self.model.requests), 2)
+        self.assertEqual(self.model.requests[-1][1], SpeechReason.CHECK_IN)
+        self.assertEqual(self.memory.load_source_attention(), {})
+
+    async def test_failed_idle_delivery_keeps_the_selected_report_retryable(
+        self,
+    ) -> None:
+        self.config.behavior.naps = False
+        self.config.behavior.care = False
+        report = "The parser still needs the multiline escape check."
+        self.report(report)
+        self.complete_turn()
+        self.attention.pending = None
+        self.attention.next_observation = self.now + 10_000
+        selected: list[str] = []
+
+        def recall(request: ModelRequest, reason: SpeechReason) -> dict[str, object]:
+            payload = json.loads(request["messages"][0]["content"])
+            candidate = next(
+                item["memory_candidate"]
+                for item in payload.get("earlier_context", ())
+                if "memory_candidate" in item
+                and item["memory_candidate"]["text"] == report
+            )
+            selected.append(candidate["id"])
+            return {
+                "speak": "The multiline escape check remains open.",
+                "mentions": [candidate["id"]],
+                "memory": candidate["id"],
+                "ongoing": True,
+            }
+
+        self.model.response = recall
+        self.now += 300
+        self.app.tick()
+        await require(self.app.task)
+        first = next(
+            packet for packet in reversed(self.packets) if "delivery_id" in packet
+        )
+        for _ in range(2):
+            self.now += 2
+            self.app.delivery.tick()
+        self.assertEqual(
+            require(self.memory.message_outcome(first["delivery_id"])).outcome,
+            DeliveryStatus.FAILED,
+        )
+        self.assertEqual(self.memory.load_source_attention(), {})
+
+        self.now += 896
+        self.app.tick()
+        await require(self.app.task)
+        second = next(
+            packet for packet in reversed(self.packets) if "delivery_id" in packet
+        )
+        self.assertNotEqual(second["delivery_id"], first["delivery_id"])
+        self.assertEqual(selected, [selected[0], selected[0]])
+        self.assertEqual(self.memory.load_source_attention(), {})
+        self.accept(
+            {
+                "text": second["text"],
+                "ttl": second["ttl"],
+                "delivery_id": second["delivery_id"],
+            }
+        )
+        attention = require(self.memory.load_source_attention().get(selected[0]))
+        self.assertEqual(attention.considered_at, self.now)
+        self.assertEqual(attention.mentioned_at, self.now)

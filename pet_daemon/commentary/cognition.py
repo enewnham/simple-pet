@@ -9,17 +9,17 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..attention import AttentionSelection
 from ..config import Config
-from ..domain import ModelPurpose, SpeechReason
+from ..domain import ModelPurpose, SpeechReason, SpeechSituation
 from ..logging import get_logger
 from ..runtime import PetContext
 from ..storage import Memory
 from ..types import JSONObject
-from ..work.narrative import WorkNarrative, semantic_revision
+from ..work.narrative import SelectedMemory, WorkNarrative, semantic_revision
 from . import story
 from .contracts import ModelRequest
 from .model import ModelClient
 from .repetition import RepeatMatch, repeat_match
-from .request import CommentaryRequest, PromptBuilder
+from .request import CommentaryRequest, PromptBuilder, SpeechConditions
 
 log = get_logger("pet-daemon")
 
@@ -31,6 +31,7 @@ class StoryUnavailable(RuntimeError):
 class CommentaryResult(BaseModel):
     speak: str | None
     request: CommentaryRequest
+    mentions: tuple[str, ...] = ()
 
 
 class SpeechResponse(BaseModel):
@@ -38,11 +39,24 @@ class SpeechResponse(BaseModel):
     speak: str | None = Field(
         description="One brief spoken remark, or null for silence."
     )
+    mentions: tuple[str, ...] = Field(
+        default=(), description="Source IDs actually expressed in the spoken remark."
+    )
+    memory: str | None = Field(
+        default=None, description="One eligible source ID chosen for idle recollection."
+    )
+    ongoing: bool = Field(
+        default=False,
+        description="Whether that source explicitly reports ongoing, paused, or remaining work.",
+    )
 
 
 class RequiredSpeechResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     speak: str = Field(description="One brief spoken remark.")
+    mentions: tuple[str, ...] = ()
+    memory: str | None = None
+    ongoing: bool = False
 
     @field_validator("speak")
     @classmethod
@@ -115,10 +129,16 @@ class Cognition:
         )
         if narrative_request is None:
             return None
-        existing = self.memory.load_narrative(narrative_request.subject_id)
+        transient = selection.subject is None
+        existing = (
+            None
+            if transient
+            else self.memory.load_narrative(narrative_request.subject_id)
+        )
         if (
             existing is not None
             and existing.revision == narrative_request.revision
+            and existing.context_revision == narrative_request.context_revision
             and existing.sources == narrative_request.sources
             and narrative_request.latest_request_source in existing.intent.sources
         ):
@@ -130,15 +150,20 @@ class Cognition:
             refreshed = selection.refresh(current)
             if (
                 not selection.is_valid(current)
-                or (
-                    semantic_revision(refreshed.subject.story)
-                    if refreshed.subject
-                    else ""
+                or selection.subject is not None
+                and (
+                    refreshed.subject is None
+                    or semantic_revision(refreshed.subject.story, related=False)
+                    != semantic_revision(selection.subject.story, related=False)
                 )
-                != narrative_request.revision
             ):
                 raise StoryUnavailable("Work changed during story generation")
-            self.memory.save_narrative(narrative)
+            if (
+                not transient
+                and story.context_revision(refreshed, self.memory)
+                == narrative_request.context_revision
+            ):
+                self.memory.save_narrative(narrative)
             return narrative
         except StoryUnavailable:
             raise
@@ -157,6 +182,7 @@ class Cognition:
         selection: AttentionSelection,
         refresh: Callable[[], PetContext] | None = None,
         eligible: Callable[[AttentionSelection, PetContext], bool] | None = None,
+        memory_eligible: Callable[[SelectedMemory], bool] | None = None,
     ) -> CommentaryResult:
         snapshot = refresh() if refresh else snapshot
         if eligible and not eligible(selection, snapshot):
@@ -167,6 +193,8 @@ class Cognition:
             SpeechReason.EXPLICIT,
             SpeechReason.CARE,
         )
+        if selection.situation == SpeechSituation.IDLE_REFLECTION:
+            explicit = False
         manual = selection.context is not None or reason in (
             SpeechReason.CLICK,
             SpeechReason.EXPLICIT,
@@ -193,9 +221,53 @@ class Cognition:
             narrative=narrative,
             basic=basic,
             excluded=tuple(record.text for record in self.memory.speech(limit=256)),
+            memory_eligible=memory_eligible,
         )
         raw_result = await self.complete(commentary_request.request, reason)
-        speech = self.validate_speech(raw_result, explicit)
+        response = self.validate_speech(raw_result, explicit)
+        speech = response.speak
+        mentions = tuple(dict.fromkeys(response.mentions))
+        if speech is None and mentions:
+            raise StoryUnavailable("Silent commentary cited work")
+        if response.memory is None and response.ongoing:
+            raise StoryUnavailable("Ongoing work needs a cited memory")
+        if any(ref not in commentary_request.source_ids for ref in mentions):
+            raise StoryUnavailable("Speech cited unavailable evidence")
+        if response.memory is not None:
+            options = commentary_request.memory_options.get(response.memory)
+            source = narrative.sources.get(response.memory) if narrative else None
+            observed_at = source.get("observed_at") if source else None
+            if (
+                selection.situation != SpeechSituation.IDLE_REFLECTION
+                or options is None
+                or speech is not None
+                and response.memory not in mentions
+                or not isinstance(observed_at, (int, float))
+                or not options[int(response.ongoing)]
+            ):
+                raise StoryUnavailable("Idle memory was not supported by the prompt")
+            memory = SelectedMemory(
+                key=response.memory,
+                observed_at=observed_at,
+                is_ongoing=response.ongoing,
+            )
+            if memory_eligible and not memory_eligible(memory):
+                raise StoryUnavailable("Idle memory is no longer eligible")
+            selection = selection.model_copy(update={"memory": memory})
+            commentary_request = commentary_request.model_copy(
+                update={
+                    "selection": selection,
+                    "conditions": commentary_request.conditions.model_copy(
+                        update={"selection": selection}
+                    ),
+                }
+            )
+        elif (
+            selection.situation == SpeechSituation.IDLE_REFLECTION
+            and reason != SpeechReason.CLICK
+            and speech
+        ):
+            raise StoryUnavailable("Idle reflection needs a supported memory")
         match = await self.find_repetition(speech)
         if match:
             log.info(
@@ -207,19 +279,48 @@ class Cognition:
             )
             if not manual:
                 speech = None
+                mentions = ()
         log.debug(
             "observation.decision",
             reason=reason,
             speaks=speech is not None,
             decision={"speak": speech},
         )
-        return CommentaryResult(speak=speech, request=commentary_request)
+        supporting = (*mentions, *((selection.memory.key,) if selection.memory else ()))
+        revisions = {
+            key: revision
+            for key in supporting
+            if narrative is not None
+            and isinstance(
+                revision := narrative.sources.get(key, {}).get("scope_revision"), str
+            )
+        }
+        commentary_request = commentary_request.model_copy(
+            update={
+                "conditions": commentary_request.conditions.model_copy(
+                    update={"source_scope_revisions": revisions}
+                )
+            }
+        )
+        if not self.are_source_scopes_valid(commentary_request.conditions):
+            raise StoryUnavailable("Supporting work changed during speech generation")
+        return CommentaryResult(
+            speak=speech, request=commentary_request, mentions=mentions
+        )
+
+    def are_source_scopes_valid(self, conditions: SpeechConditions) -> bool:
+        return (
+            self.memory.source_scope_revisions(tuple(conditions.source_scope_revisions))
+            == conditions.source_scope_revisions
+        )
 
     async def find_repetition(self, text: str | None) -> RepeatMatch | None:
         if not text or not text.strip():
             return None
         return await repeat_match(text, [row.text for row in self.memory.speech()])
 
-    def validate_speech(self, result: dict[str, object], required: bool) -> str | None:
+    def validate_speech(
+        self, result: dict[str, object], required: bool
+    ) -> SpeechResponse | RequiredSpeechResponse:
         response = RequiredSpeechResponse if required else SpeechResponse
-        return response.model_validate(result).speak
+        return response.model_validate(result)

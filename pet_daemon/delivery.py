@@ -39,6 +39,7 @@ class SpeechMessage(BaseModel):
     history_epoch: int = 0
     message_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     conditions: DeliveryConditions | None = None
+    mentioned_sources: tuple[str, ...] = ()
 
 
 class DeliveryOutcome(BaseModel):

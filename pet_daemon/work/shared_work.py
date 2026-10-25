@@ -46,6 +46,7 @@ class WorkSubject(BaseModel):
     story: WorkStory
     sessions: tuple[SessionIdentity, ...] = ()
     updates: tuple[WorkUpdate, ...] = ()
+    parent: SessionIdentity | None = None
 
 
 def runtime_revision(
@@ -301,6 +302,13 @@ def shared_work(state: WorkFacts, activity: SwarmActivity) -> tuple[WorkSubject,
                 story=story,
                 sessions=tuple(sorted(names)),
                 updates=updates,
+                parent=(
+                    state.aliases.get(agent.parent, agent.parent)
+                    if agent and agent.parent
+                    else session.parent
+                    if session
+                    else None
+                ),
             )
         )
     return tuple(sorted(subjects, key=lambda item: (-item.changed_at, item.id)))

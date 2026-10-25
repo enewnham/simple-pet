@@ -9,7 +9,11 @@ from typing import Unpack
 from pet_daemon.attention import Attention, AttentionSelection
 from pet_daemon.commentary import Cognition
 from pet_daemon.commentary.contracts import ModelRequest
-from pet_daemon.commentary.request import CommentaryPayload, CommentaryRequest
+from pet_daemon.commentary.request import (
+    CommentaryPayload,
+    CommentaryRequest,
+    _record_source_ids,
+)
 from pet_daemon.commentary.story import prepare as prepare_story
 from pet_daemon.config import Config
 from pet_daemon.domain import (
@@ -26,7 +30,7 @@ from pet_daemon.domain import (
     SpeechReason,
     SpeechSituation,
 )
-from pet_daemon.identity import SessionIdentity
+from pet_daemon.identity import SessionIdentity, session_data
 from pet_daemon.repository_identity import RemoteRepository
 from pet_daemon.runtime import (
     ActiveTool,
@@ -241,6 +245,37 @@ class ContextTests(unittest.TestCase):
         )
         self.assertTrue(prepared.conditions.is_valid(snapshot))
 
+    def test_waiting_question_does_not_cite_an_earlier_result(self) -> None:
+        self.finished_work()
+        question = "Should we keep the legacy endpoint?"
+        self.update_session(
+            waiting_for_input=True,
+            waiting_kind=WaitingKind.QUESTION,
+            waiting_prompt=question,
+            waiting_seconds=10,
+        )
+        snapshot = self.current_snapshot()
+        selection = self.attention.select(snapshot, SpeechReason.CLICK)
+        story_request = prepare_story(
+            snapshot, selection, self.memory, self.cognition.request
+        )
+        assert story_request is not None
+        narrative = WorkNarrative(
+            subject_id=story_request.subject_id,
+            revision=story_request.revision,
+            intent=NarrativeStatement(
+                text="Check parser compatibility.",
+                sources=(story_request.latest_request_source,),
+            ),
+            sources=story_request.sources,
+        )
+        prepared = self.cognition.prompts.prepare(
+            snapshot, selection, self.cognition.request, narrative=narrative
+        )
+        moment = self.payload(prepared)["current_moment"]
+        self.assertEqual(moment["reported_progress"], question)
+        self.assertNotIn("source_ids", moment)
+
     def test_truncated_report_keeps_a_summary_of_the_omitted_result(self) -> None:
         self.finished_work()
         self.record_hook(
@@ -251,7 +286,7 @@ class ContextTests(unittest.TestCase):
                 goal="Check desktop compatibility",
             )
         )
-        report = "Checked parser compatibility. " * 22 + "Desktop check failed."
+        report = "Checked parser compatibility. " * 30 + "Desktop check failed."
         self.record_hook(
             HookEvent(
                 source=SessionSource.COMMAND,
@@ -293,6 +328,10 @@ class ContextTests(unittest.TestCase):
         excerpt = payload["current_moment"]["reported_progress"]
         assert isinstance(excerpt, str)
         self.assertNotIn("Desktop check failed.", excerpt)
+        moment_ids = payload["current_moment"]["source_ids"]
+        assert isinstance(moment_ids, list)
+        self.assertEqual(set(moment_ids), set(report_ids))
+        self.assertEqual(set(report_ids) & set(prepared.source_ids), set(report_ids))
         self.assertTrue(
             any(
                 item.get("reported_progress") == "Desktop check failed."
@@ -300,6 +339,37 @@ class ContextTests(unittest.TestCase):
             )
         )
         self.assertTrue(prepared.conditions.is_valid(snapshot))
+
+    def test_source_ids_keep_equal_reports_separate_by_reporter_and_time(self) -> None:
+        root = SessionIdentity(source=SessionSource.COMMAND, native_id="parser")
+        peer = SessionIdentity(source=SessionSource.COMMAND, native_id="peer")
+        record = CommentaryEvidence(
+            source=EvidenceSource.SOURCE,
+            kind=EvidenceKind.PROGRESS,
+            details=ReportedProgress(reported_progress="Compatibility checks passed."),
+            observed_at=1000,
+        )
+        report = {
+            "kind": "reported_progress",
+            "text": "Compatibility checks passed.",
+            "scope": "current task",
+            "observed_at": 1000,
+            "origin": session_data(root),
+        }
+        narrative = WorkNarrative(
+            subject_id=root,
+            revision="revision",
+            intent=NarrativeStatement(text="Check compatibility.", sources=("root",)),
+            sources={
+                "root": report,
+                "peer": {**report, "origin": session_data(peer)},
+                "earlier": {**report, "observed_at": 900},
+            },
+        )
+        self.assertEqual(
+            _record_source_ids(record, root, ("reported_progress",), narrative, ()),
+            ["root"],
+        )
 
     def prepare(
         self, reason: SpeechReason = SpeechReason.ROUTINE, context: str | None = None

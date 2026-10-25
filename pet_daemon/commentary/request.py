@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import TypedDict, cast
 
 from anthropic.types import CacheControlEphemeralParam, TextBlockParam
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..attention import AttentionSelection
 from ..config import Config
@@ -25,7 +25,12 @@ from ..work.evidence import (
     ReportedProgress,
     UserIntent,
 )
-from ..work.narrative import NarrativeStatement, WorkNarrative, semantic_revision
+from ..work.narrative import (
+    NarrativeStatement,
+    SelectedMemory,
+    WorkNarrative,
+    semantic_revision,
+)
 from ..work.stories import SessionContribution, WorkStory
 from .contracts import ModelRequest, RequestFactory
 from .observations import describe_observation
@@ -34,6 +39,8 @@ INSTRUCTIONS = """
 <role>
 You are a desktop pet working alongside the developer. The supplied tasks and work are yours.
 Several tasks may progress at once. This message selects one task and one moment to react to.
+Coding agents execute and shepherd the work. Express what we are attempting, meaningful
+developments, reported outcomes, and where we left off.
 Offer one short spoken reaction to that moment. Follow the persona and speak in first person.
 The speech bubble contains only words you would say aloud. Leave gestures to animation.
 Omit stage directions, emotes, physical narration, internal IDs, source names, hook events,
@@ -51,11 +58,18 @@ current_work describes your selected task and its latest request. current_moment
 the event, activity, or recorded result prompting this remark. earlier_context supplies
 relevant memories of requests, decisions, and results. Other tasks can continue alongside
 this one. Use human-readable ages to judge freshness.
+Source IDs identify supporting observations. Keep them out of speech. In mentions, return
+only IDs whose observations you actually used in your spoken remark. Return an empty list
+for silence or a remark without a supplied source.
+For a selected idle candidate that yields silence, keep its memory ID with empty mentions.
+Use memory null when no useful candidate was selected.
 
 Ground your remarks in the supplied observations. Preserve their scope, timing, outcomes,
 and uncertainty. Describe causes, blockers, needs, and next actions only when the context
 supports them. Do not invent obligations for the developer. When there is no meaningful
 reaction to offer, silence is appropriate.
+Recollections describe what a source last reported. Without current corroboration, use
+last-known wording such as "We last left this at..." rather than claiming current activity.
 
 React to one meaningful detail in the selected moment. Follow the persona for personality
 and humor. Do not recite a status report. Omit publication mechanics, PR details, commit
@@ -98,6 +112,7 @@ SITUATIONS: dict[SpeechSituation, str] = {
     SpeechSituation.CHECK_IN_WAITING: "Give a brief remark about the supplied wait.",
     SpeechSituation.CHECK_IN_RUNNING: "Give a brief remark about the running call and its elapsed time.",
     SpeechSituation.CHECK_IN_QUIET: "Give a brief remark about the quiet time during this work.",
+    SpeechSituation.IDLE_REFLECTION: "Recall one useful source-backed detail from the selected work, or choose silence. Prefer a specific decision, result, or explicitly reported remaining step. Account for its age and later reports. Do not infer unfinished work from a missing completion report or create an obligation. Set memory to the one source ID chosen from an eligible memory candidate. Set ongoing true only if that source explicitly reports ongoing, paused, or remaining work. If no candidate supports a useful remark, return silence with memory null.",
 }
 CARE_SITUATIONS = frozenset(
     {
@@ -165,6 +180,43 @@ def _reported_outcome(record: CommentaryEvidence) -> ExecutionOutcome | None:
     )
 
 
+def _record_source_ids(
+    record: CommentaryEvidence,
+    origin: SessionIdentity,
+    kinds: tuple[str, ...],
+    narrative: WorkNarrative | None,
+    excluded: Sequence[str],
+) -> list[str]:
+    if narrative is None or record.observed_at is None:
+        return []
+    original = _request_text(record) or _reported_progress(record)
+    text = work_prose(original, 1200, excluded)
+    if not text:
+        return []
+    candidates = [
+        (identifier, source)
+        for identifier, source in narrative.sources.items()
+        if source.get("kind") in kinds
+        and source.get("observed_at") == record.observed_at
+        and isinstance(source_text := source.get("text"), str)
+        and (source_text.startswith(text) or text.startswith(source_text))
+    ]
+    expected = session_data(origin)
+    accepted_origins = (
+        (None, expected) if origin == narrative.subject_id else (expected,)
+    )
+    matching_origin = [
+        item for item in candidates if item[1].get("origin") in accepted_origins
+    ]
+    candidates = matching_origin
+    if any(
+        len([item for item in candidates if item[1].get("kind") == kind]) > 1
+        for kind in kinds
+    ):
+        return []
+    return [identifier for identifier, _ in candidates]
+
+
 def _add_earlier(
     earlier: list[JSONObject],
     timestamp: float,
@@ -175,6 +227,7 @@ def _add_earlier(
     scope: str = "",
     outcome: ExecutionOutcome | None = None,
     origin: SessionIdentity | None = None,
+    source_ids: Sequence[str] = (),
 ) -> None:
     if not text:
         return
@@ -182,6 +235,8 @@ def _add_earlier(
     if not text:
         return
     item: JSONObject = {field: text}
+    if source_ids:
+        item["source_ids"] = list(source_ids)
     if origin is not None:
         item["reporter"] = {
             "source": origin.source.value,
@@ -205,6 +260,7 @@ def _current_work(
     selected_child: SessionContribution | None,
     requests: tuple[CommentaryEvidence, ...],
     excluded: Sequence[str],
+    narrative: WorkNarrative | None = None,
 ) -> JSONObject:
     focus = selection.focus_session
     latest = requests[-1] if requests else None
@@ -220,6 +276,13 @@ def _current_work(
         prose = request_excerpt(prose_text(request, excluded))
         if prose:
             current_work["request"] = prose
+            if latest is not None and story is not None:
+                origin = selected_child.session if selected_child else story.id
+                ids = _record_source_ids(
+                    latest, origin, ("request",), narrative, excluded
+                )
+                if ids:
+                    current_work["source_ids"] = cast(JSONValue, ids)
     if focus and focus.repo:
         current_work["project"] = bounded(Path(focus.repo).name, 120)
     return current_work
@@ -228,6 +291,13 @@ def _current_work(
 def _current_moment(
     selection: AttentionSelection, excluded: Sequence[str]
 ) -> JSONObject:
+    if selection.context:
+        return {
+            "kind": "explicit_context",
+            "text": work_prose(selection.context, 2000, excluded),
+        }
+    if selection.situation == SpeechSituation.IDLE_REFLECTION:
+        return {"kind": "quiet_time"}
     focus = selection.focus_session
     situation = selection.situation
     moment: JSONObject = {"kind": "work_update"}
@@ -361,9 +431,11 @@ def _story_reports(
     excluded: Sequence[str],
     earlier: list[JSONObject],
     moment: JSONObject,
-) -> tuple[str, float | None]:
+    narrative: WorkNarrative | None = None,
+) -> tuple[str, float | None, list[str]]:
     current_report = ""
     current_observed_at: float | None = None
+    current_ids: list[str] = []
     selected_origin = selection.update.session if selection.update else story.id
     groups = [(story.id, story.activity, story.requests)]
     groups.extend(
@@ -396,6 +468,13 @@ def _story_reports(
             ):
                 current_report = text
                 current_observed_at = observed_at
+                current_ids = _record_source_ids(
+                    record,
+                    origin,
+                    ("reported_progress", "turn_ended"),
+                    narrative,
+                    excluded,
+                )
             else:
                 _add_earlier(
                     earlier,
@@ -407,8 +486,15 @@ def _story_reports(
                     scope,
                     _reported_outcome(record),
                     origin,
+                    _record_source_ids(
+                        record,
+                        origin,
+                        ("reported_progress", "turn_ended"),
+                        narrative,
+                        excluded,
+                    ),
                 )
-    return current_report, current_observed_at
+    return current_report, current_observed_at, current_ids
 
 
 def _distinct_reports(
@@ -448,6 +534,7 @@ def commentary_facts(
     selection: AttentionSelection,
     timestamp: float,
     excluded: Sequence[str] = (),
+    narrative: WorkNarrative | None = None,
 ) -> CommentaryPayload:
     payload: CommentaryPayload = {}
     situation = selection.situation
@@ -456,14 +543,7 @@ def commentary_facts(
         if snapshot.sleeping:
             payload["current_moment"]["sleeping"] = True
         return payload
-    if selection.context:
-        return {
-            "current_moment": {
-                "kind": "explicit_context",
-                "text": work_prose(selection.context, 2000, excluded),
-            }
-        }
-    if selection.reason == SpeechReason.EXPLICIT:
+    if selection.reason == SpeechReason.EXPLICIT and not selection.context:
         return payload
     focus = selection.focus_session
     story = (
@@ -488,7 +568,9 @@ def commentary_facts(
     requests = (
         selected_child.requests if selected_child else story.requests if story else ()
     )
-    current_work = _current_work(selection, story, selected_child, requests, excluded)
+    current_work = _current_work(
+        selection, story, selected_child, requests, excluded, narrative
+    )
     if current_work:
         payload["current_work"] = current_work
     earlier: list[JSONObject] = []
@@ -501,8 +583,14 @@ def commentary_facts(
                 _request_text(previous),
                 "request",
                 previous.observed_at,
+                source_ids=_record_source_ids(
+                    previous, story.id, ("request",), narrative, excluded
+                ),
             )
     if requests:
+        request_origin = (
+            selected_child.session if selected_child else story.id if story else None
+        )
         for previous in requests[-4:-1]:
             _add_earlier(
                 earlier,
@@ -511,6 +599,11 @@ def commentary_facts(
                 _request_text(previous),
                 "request",
                 previous.observed_at,
+                source_ids=_record_source_ids(
+                    previous, request_origin, ("request",), narrative, excluded
+                )
+                if request_origin
+                else (),
             )
     elif focus:
         for previous in focus.recent_requests[-4:-1]:
@@ -521,13 +614,14 @@ def commentary_facts(
                 request_excerpt(prose_text(previous, excluded)),
                 "request",
             )
-    moment = _current_moment(selection, excluded)
+    moment: JSONObject = _current_moment(selection, excluded)
     latest = requests[-1] if requests else None
     cutoff = latest.observed_at if latest else None
     current_report = ""
     current_observed_at: float | None = None
-    if story:
-        current_report, current_observed_at = _story_reports(
+    current_ids: list[str] = []
+    if story and situation != SpeechSituation.IDLE_REFLECTION:
+        current_report, current_observed_at, current_ids = _story_reports(
             selection,
             story,
             selected_child,
@@ -536,10 +630,13 @@ def commentary_facts(
             excluded,
             earlier,
             moment,
+            narrative,
         )
     elif focus and situation not in (SpeechSituation.PROMPT, SpeechSituation.FAILURE):
         current_report = focus.progress
     if focus and focus.waiting_for_input:
+        if focus.waiting_prompt != current_report:
+            current_ids = []
         current_report = focus.waiting_prompt or ""
     if current_report and situation not in (
         SpeechSituation.PROMPT,
@@ -548,6 +645,8 @@ def commentary_facts(
         prose = work_prose(current_report, 600, excluded)
         if prose:
             moment["reported_progress"] = prose
+            if current_ids:
+                moment["source_ids"] = cast(JSONValue, current_ids)
             age = (
                 duration(timestamp - current_observed_at)
                 if current_observed_at is not None
@@ -589,6 +688,7 @@ class SpeechConditions(BaseModel):
     selection: AttentionSelection
     payload: CommentaryPayload
     narrative_revision: str | None = None
+    source_scope_revisions: dict[str, str] = Field(default_factory=dict)
 
     def is_valid(self, snapshot: PetContext) -> bool:
         if self.selection.situation in CARE_SITUATIONS:
@@ -603,12 +703,20 @@ class SpeechConditions(BaseModel):
                 and not session.activity_uncertain
                 for session in snapshot.sessions
             )
+        if self.selection.situation == SpeechSituation.IDLE_REFLECTION and any(
+            session.waiting_for_input
+            or session.turn_active
+            and not session.activity_uncertain
+            for session in snapshot.sessions
+        ):
+            return False
         if not self.selection.is_valid(snapshot):
             return False
         refreshed = self.selection.refresh(snapshot)
         if self.narrative_revision is not None and (
             refreshed.subject is None
-            or semantic_revision(refreshed.subject.story) != self.narrative_revision
+            or semantic_revision(refreshed.subject.story, related=False)
+            != self.narrative_revision
         ):
             return False
         if self.selection.situation == SpeechSituation.FAILURE:
@@ -645,17 +753,17 @@ class SpeechConditions(BaseModel):
                 return False
         current = stable_payload(commentary_facts(snapshot, refreshed, 0))
         expected = stable_payload(self.payload)
-        expected_earlier = expected.pop("earlier_context", [])
-        actual_earlier = current.pop("earlier_context", [])
-        return expected == current and all(
-            item in actual_earlier for item in expected_earlier
-        )
+        expected.pop("earlier_context", None)
+        current.pop("earlier_context", None)
+        return expected == current
 
 
 class CommentaryRequest(BaseModel):
     selection: AttentionSelection
     request: ModelRequest
     conditions: SpeechConditions
+    source_ids: tuple[str, ...] = ()
+    memory_options: dict[str, tuple[bool, bool]] = Field(default_factory=dict)
 
 
 def _narrative_item(
@@ -670,7 +778,7 @@ def _narrative_item(
     text = work_prose(statement.text, 400, excluded)
     if not text:
         return None
-    item: JSONObject = {field: text}
+    item: JSONObject = {field: text, "source_ids": list(statement.sources)}
     sources = [
         narrative.sources[ref] for ref in statement.sources if ref in narrative.sources
     ]
@@ -736,19 +844,85 @@ def _current_report_sources(
     text = _reported_progress(current)
     if work_prose(text, len(text), excluded) != moment["reported_progress"]:
         return set()
-    return {
-        identifier
-        for identifier, source in narrative.sources.items()
-        if source.get("kind") in ("reported_progress", "turn_ended")
-        and source.get("text") == text
-        and source.get("observed_at") == current.observed_at
-        and source.get("origin")
-        in (
-            (None, session_data(origin))
-            if origin == story.id
-            else (session_data(origin),)
+    return set(
+        _record_source_ids(
+            current,
+            origin,
+            ("reported_progress", "turn_ended"),
+            narrative,
+            excluded,
         )
-    }
+    )
+
+
+def _memory_candidates(
+    narrative: WorkNarrative,
+    clock: Callable[[], float],
+    excluded: Sequence[str],
+    eligible: Callable[[SelectedMemory], bool] | None,
+) -> list[JSONObject]:
+    candidates: dict[str, JSONObject] = {}
+    statements = (
+        ("intent", narrative.intent),
+        *(("decision", item) for item in narrative.decisions),
+        *(("progress", item) for item in narrative.progress),
+    )
+    for category, statement in statements:
+        interpretation = work_prose(statement.text, 400, excluded)
+        if not interpretation:
+            continue
+        for identifier in statement.sources:
+            source = narrative.sources.get(identifier)
+            if source is None:
+                continue
+            observed_at = source.get("observed_at")
+            original = source.get("text")
+            if not isinstance(observed_at, (int, float)) or not isinstance(
+                original, str
+            ):
+                continue
+            text = work_prose(original, 600, excluded)
+            if not text:
+                continue
+            progress_report = category == "progress" and source.get("kind") in (
+                "reported_progress",
+                "turn_ended",
+            )
+            candidate = candidates.get(identifier)
+            if candidate is None:
+                recent = SelectedMemory(key=identifier, observed_at=observed_at)
+                ongoing = recent.model_copy(update={"is_ongoing": True})
+                allowed_recent = eligible(recent) if eligible else True
+                allowed_ongoing = progress_report and (
+                    eligible(ongoing) if eligible else True
+                )
+                if not allowed_recent and not allowed_ongoing:
+                    continue
+                candidate = {
+                    "id": identifier,
+                    "kind": source["kind"],
+                    "text": text,
+                    "scope": source["scope"],
+                    "eligible_recent": allowed_recent,
+                    "eligible_ongoing": allowed_ongoing,
+                    "interpretations": [],
+                }
+                if origin := source.get("origin"):
+                    candidate["reporter"] = origin
+                if age := duration(clock() - observed_at):
+                    candidate["age"] = age + " ago"
+                if outcome := source.get("outcome"):
+                    candidate["outcome"] = outcome
+                candidates[identifier] = candidate
+            elif progress_report and not candidate["eligible_ongoing"]:
+                ongoing = SelectedMemory(
+                    key=identifier, observed_at=observed_at, is_ongoing=True
+                )
+                candidate["eligible_ongoing"] = eligible(ongoing) if eligible else True
+            interpretations = candidate["interpretations"]
+            if isinstance(interpretations, list):
+                interpretations.append({"category": category, "text": interpretation})
+    return list(candidates.values())
 
 
 class PromptBuilder:
@@ -758,6 +932,10 @@ class PromptBuilder:
 
     def situation(self, selection: AttentionSelection) -> str:
         direction = SITUATIONS[selection.situation]
+        if selection.situation == SpeechSituation.IDLE_REFLECTION:
+            direction += " A later resolution or cancellation disqualifies the earlier remaining step."
+            if selection.reason == SpeechReason.CLICK:
+                direction += " This recollection was requested with a click. If no memory is useful, a brief playful greeting with memory null is appropriate."
         if selection.situation == SpeechSituation.COMPLETION:
             outcome = (
                 selection.focus_session.outcome if selection.focus_session else None
@@ -790,10 +968,13 @@ class PromptBuilder:
         *,
         basic: bool = False,
         excluded: Sequence[str] = (),
+        memory_eligible: Callable[[SelectedMemory], bool] | None = None,
     ) -> CommentaryPayload:
-        payload = commentary_facts(snapshot, selection, self.clock(), excluded)
-        if narrative is not None and "current_work" in payload:
-            work = payload["current_work"]
+        payload = commentary_facts(
+            snapshot, selection, self.clock(), excluded, narrative
+        )
+        if narrative is not None:
+            work = payload.setdefault("current_work", {})
             intent = work_prose(narrative.intent.text, 400, excluded)
             child_update = (
                 selection.update is not None
@@ -802,6 +983,7 @@ class PromptBuilder:
             )
             if intent and not child_update:
                 work["story"] = intent
+                work["story_source_ids"] = list(narrative.intent.sources)
             earlier = payload.setdefault("earlier_context", [])
             current_sources = _current_report_sources(
                 selection, narrative, payload.get("current_moment", {}), excluded
@@ -830,6 +1012,15 @@ class PromptBuilder:
                         earlier.append(item)
             if not earlier:
                 payload.pop("earlier_context", None)
+            if selection.situation == SpeechSituation.IDLE_REFLECTION:
+                candidates = _memory_candidates(
+                    narrative, self.clock, excluded, memory_eligible
+                )
+                if candidates:
+                    payload.setdefault("earlier_context", []).extend(
+                        {"memory_candidate": candidate, "source_ids": [candidate["id"]]}
+                        for candidate in candidates
+                    )
         elif basic:
             payload.pop("earlier_context", None)
             moment = payload.get("current_moment", {})
@@ -851,9 +1042,15 @@ class PromptBuilder:
         narrative: WorkNarrative | None = None,
         basic: bool = False,
         excluded: Sequence[str] = (),
+        memory_eligible: Callable[[SelectedMemory], bool] | None = None,
     ) -> CommentaryRequest:
         payload = self.prompt(
-            snapshot, selection, narrative, basic=basic, excluded=excluded
+            snapshot,
+            selection,
+            narrative,
+            basic=basic,
+            excluded=excluded,
+            memory_eligible=memory_eligible,
         )
         system = self.system(selection)
         selected = deepcopy(payload)
@@ -874,15 +1071,39 @@ class PromptBuilder:
         request = make_request(
             model_payload(selected), system, speech_required=speech_required
         )
+        ids: list[str] = []
+        for item in (
+            selected.get("current_work", {}),
+            selected.get("current_moment", {}),
+            *selected.get("earlier_context", ()),
+        ):
+            for field in ("source_ids", "story_source_ids"):
+                refs = item.get(field)
+                if isinstance(refs, list | tuple):
+                    ids.extend(ref for ref in refs if isinstance(ref, str))
+        options: dict[str, tuple[bool, bool]] = {}
+        for item in selected.get("earlier_context", ()):
+            candidate = item.get("memory_candidate")
+            if isinstance(candidate, dict) and isinstance(
+                identifier := candidate.get("id"), str
+            ):
+                options[identifier] = (
+                    candidate.get("eligible_recent") is True,
+                    candidate.get("eligible_ongoing") is True,
+                )
         return CommentaryRequest(
             selection=selection,
             request=request,
+            source_ids=tuple(dict.fromkeys(ids)),
+            memory_options=options,
             conditions=SpeechConditions(
                 selection=selection,
                 payload=commentary_facts(snapshot, selection, self.clock())
                 if narrative is not None or basic
                 else deepcopy(selected),
-                narrative_revision=narrative.revision
+                narrative_revision=semantic_revision(
+                    selection.subject.story, related=False
+                )
                 if narrative is not None and selection.subject is not None
                 else None,
             ),

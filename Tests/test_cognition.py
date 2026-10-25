@@ -10,7 +10,7 @@ from typing import cast
 import anthropic
 import httpx
 
-from pet_daemon.attention import Attention
+from pet_daemon.attention import Attention, AttentionSelection
 from pet_daemon.behavior.sprites import Pack
 from pet_daemon.commentary.cognition import (
     Cognition,
@@ -21,16 +21,22 @@ from pet_daemon.commentary.model import AnthropicModelClient
 from pet_daemon.commentary.request import INSTRUCTIONS
 from pet_daemon.commentary.story import StoryResponse
 from pet_daemon.config import Config
-from pet_daemon.domain import CareKind, PetState, SessionSource, SpeechReason
+from pet_daemon.domain import (
+    CareKind,
+    PetState,
+    SessionSource,
+    SpeechReason,
+    SpeechSituation,
+)
 from pet_daemon.identity import SessionIdentity
 from pet_daemon.runtime import CareTrigger, HookEventKind, PetContext, SessionTrigger
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources.hooks import HookEvent
 from pet_daemon.storage import Memory
 from pet_daemon.types import JSONValue
-from pet_daemon.work.history import build_session_entry
+from pet_daemon.work.history import build_session_entry, report_source_key
 from pet_daemon.work.narrative import NarrativeStatement
-from Tests.fixtures import capture_snapshot
+from Tests.fixtures import capture_snapshot, sessions_snapshot
 
 
 class Clock:
@@ -272,7 +278,9 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("cache_control", body)
         schema = body["output_config"]["format"]["schema"]
-        self.assertEqual(set(schema["properties"]), {"speak"})
+        self.assertEqual(
+            set(schema["properties"]), {"speak", "mentions", "memory", "ongoing"}
+        )
         self.assertEqual(schema["required"], ["speak"])
         self.assertFalse(schema["additionalProperties"])
         snapshot = json.loads(body["messages"][-1]["content"])
@@ -347,7 +355,8 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(text, json.dumps(body["system"]))
         payload = json.loads(body["messages"][0]["content"])
         self.assertEqual(payload["current_moment"]["text"], text)
-        self.assertNotIn("current_work", payload)
+        self.assertIn("current_work", payload)
+        self.assertIn("source_ids", payload["current_work"])
         self.assertNotIn("focus_opportunity", payload)
 
     async def test_click_greets_only_when_all_sessions_are_inactive(self) -> None:
@@ -880,7 +889,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(phrase, system)
         self.assertEqual(body["output_config"]["format"]["type"], "json_schema")
 
-    async def test_idle_click_and_care_keep_work_history_out_of_commentary(
+    async def test_idle_click_uses_narrative_work_while_care_stays_with_quiet_time(
         self,
     ) -> None:
         self.handle(
@@ -914,14 +923,22 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 self.responses.append(({"speak": "A little stretch."}, "end_turn"))
                 await self.generate_for_context(snapshot, reason)
                 payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
-                self.assertEqual(
-                    payload,
-                    {
-                        "current_moment": {
-                            "event": "There is no confirmed active work to react to."
-                        }
-                    },
-                )
+                if reason == SpeechReason.CLICK:
+                    self.assertIn("current_work", payload)
+                    self.assertIn("earlier_context", payload)
+                    self.assertEqual(
+                        payload["current_moment"]["event"],
+                        "There is no confirmed active work to react to.",
+                    )
+                else:
+                    self.assertEqual(
+                        payload,
+                        {
+                            "current_moment": {
+                                "event": "There is no confirmed active work to react to."
+                            }
+                        },
+                    )
                 self.assertNotIn("Old checklist", json.dumps(payload))
                 self.assertNotIn("Old task report", json.dumps(payload))
                 self.assertNotIn("A recent spoken line", json.dumps(payload))
@@ -1020,6 +1037,373 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             spoken_context["current_work"]["story"], "Follow the current request."
         )
         self.assertNotIn("A child confirmed", json.dumps(spoken_context))
+
+    async def test_cached_story_refreshes_when_retrieved_reports_change(self) -> None:
+        snapshot = self.snapshot()
+        selection = self.attention.select(snapshot, SpeechReason.ROUTINE)
+        first = await self.cognition.update_work_narrative(snapshot, selection)
+        assert first is not None
+        self.handle(
+            {
+                "source": "claude",
+                "session": "worker",
+                "event": "progress",
+                "progress": "Cancellation checks remain unverified.",
+            }
+        )
+        second = await self.cognition.update_work_narrative(
+            snapshot, selection, refresh=lambda: snapshot
+        )
+        assert second is not None
+        self.assertEqual(first.revision, second.revision)
+        self.assertNotEqual(first.context_revision, second.context_revision)
+        self.assertEqual(self.call_kinds, ["story", "story"])
+
+    async def test_explicit_recall_speaks_from_retained_reports_without_live_work(
+        self,
+    ) -> None:
+        self.clock.now = 5000
+        self.handle(
+            {
+                "source": "claude",
+                "session": "archived-parser",
+                "event": "intent",
+                "goal": "Implement parser recovery",
+            }
+        )
+        self.clock.now = 5100
+        self.handle(
+            {
+                "source": "claude",
+                "session": "archived-parser",
+                "event": "progress",
+                "progress": "Parser recovery remains unverified.",
+            }
+        )
+        self.clock.now = 5200
+        self.handle(
+            {
+                "source": "claude",
+                "session": "archived-parser",
+                "event": "turn_done",
+                "progress": "Parser recovery checks passed; task complete.",
+            }
+        )
+        self.clock.now = 5300
+        self.handle(
+            {
+                "source": "claude",
+                "session": "unrelated",
+                "event": "intent",
+                "goal": "Review formatter colors",
+            }
+        )
+        self.clock.now = 100000
+        snapshot = capture_snapshot(sessions_snapshot(), work=())
+        question = "What happened with parser recovery?"
+        selection = AttentionSelection(
+            subject=None,
+            focus_session=None,
+            context_sessions=(),
+            reason=SpeechReason.EXPLICIT,
+            situation=SpeechSituation.EXPLICIT,
+            context=question,
+        )
+        self.assertEqual(snapshot.sessions, ())
+        self.assertEqual(snapshot.work, ())
+        owner = SessionIdentity(
+            source=SessionSource.CLAUDE, native_id="archived-parser"
+        )
+        reports = self.memory.context_reports(None, question)
+        completion = next(
+            report
+            for report in reports
+            if getattr(report.payload, "progress", None)
+            == "Parser recovery checks passed; task complete."
+        )
+        completion_id = report_source_key(completion)
+        original_time = completion.observed_at
+        source_history = self.memory.load_source_attention()
+        next_observation = self.attention.next_observation
+
+        def story_answer() -> dict[str, object]:
+            payload = json.loads(self.story_requests[-1][1]["messages"][0]["content"])
+            evidence = payload["current_moment"]["evidence"]
+            self.assertIn(
+                "Parser recovery remains unverified.",
+                {item.get("text") for item in evidence},
+            )
+            self.assertIn(
+                "Parser recovery checks passed; task complete.",
+                {item.get("text") for item in evidence},
+            )
+            self.assertNotIn("Review formatter colors", json.dumps(payload))
+            return {
+                "intent": {
+                    "text": "Implement parser recovery.",
+                    "sources": [payload["current_work"]["latest_request_source"]],
+                },
+                "decisions": [],
+                "progress": [
+                    {
+                        "text": "Parser recovery checks passed; task complete.",
+                        "sources": [completion_id],
+                    }
+                ],
+            }
+
+        def speech_answer() -> tuple[dict[str, object], str]:
+            payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
+            self.assertEqual(payload["current_moment"]["text"], question)
+            self.assertNotIn("Review formatter colors", json.dumps(payload))
+            completion_item = next(
+                item
+                for item in payload["earlier_context"]
+                if item.get("reported_progress")
+                == "Parser recovery checks passed; task complete."
+            )
+            self.assertEqual(completion_item["source_ids"], [completion_id])
+            self.assertEqual(completion_item["age"], "1 day ago")
+            return (
+                {
+                    "speak": "The parser recovery checks passed, and the task is complete.",
+                    "mentions": [completion_id],
+                },
+                "end_turn",
+            )
+
+        self.story_response = story_answer
+        self.responses.append(speech_answer)
+        result = await self.cognition.generate_commentary(
+            snapshot, selection, refresh=lambda: snapshot
+        )
+        self.assertEqual(result.mentions, (completion_id,))
+        self.assertIn(completion_id, result.request.source_ids)
+        self.assertEqual(
+            result.request.conditions.source_scope_revisions,
+            self.memory.source_scope_revisions((completion_id,)),
+        )
+        self.assertEqual(result.request.selection.subject, None)
+        self.assertEqual(original_time, 5200)
+        self.assertIn(
+            completion_id,
+            {
+                report_source_key(report)
+                for report in self.memory.context_reports(None, question)
+                if report.observed_at == original_time
+            },
+        )
+        self.assertEqual(self.memory.load_source_attention(), source_history)
+        self.assertEqual(self.attention.next_observation, next_observation)
+        self.assertIsNone(self.memory.load_narrative(owner))
+
+    async def test_idle_recollection_tracks_the_one_spoken_source(self) -> None:
+        self.handle(
+            {
+                "source": "claude",
+                "session": "worker",
+                "event": "progress",
+                "progress": "I am implementing the next parser pass.",
+            }
+        )
+
+        def story_answer() -> dict[str, object]:
+            payload = json.loads(self.story_requests[-1][1]["messages"][0]["content"])
+            source = next(
+                item["id"]
+                for item in payload["current_moment"]["evidence"]
+                if item.get("text") == "I am implementing the next parser pass."
+            )
+            return {
+                "intent": {
+                    "text": "Refactor batch inserts.",
+                    "sources": [payload["current_work"]["latest_request_source"]],
+                },
+                "decisions": [],
+                "progress": [
+                    {
+                        "text": "I am implementing the next parser pass.",
+                        "sources": [source],
+                    }
+                ],
+            }
+
+        self.story_response = story_answer
+        self.handle(
+            {
+                "source": "claude",
+                "session": "worker",
+                "event": "turn_done",
+                "progress": "I am implementing the next parser pass.",
+            }
+        )
+        snapshot = self.snapshot()
+        selection = AttentionSelection(
+            subject=snapshot.work[0],
+            focus_session=None,
+            context_sessions=(),
+            reason=SpeechReason.CHECK_IN,
+            situation=SpeechSituation.IDLE_REFLECTION,
+        )
+
+        def answer() -> tuple[dict[str, object], str]:
+            payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
+            candidate = next(
+                item["memory_candidate"]
+                for item in payload["earlier_context"]
+                if item.get("memory_candidate", {}).get("text")
+                == "I am implementing the next parser pass."
+            )
+            self.assertFalse(candidate["eligible_recent"])
+            self.assertTrue(candidate["eligible_ongoing"])
+            self.assertEqual(
+                candidate["interpretations"],
+                [
+                    {
+                        "category": "progress",
+                        "text": "I am implementing the next parser pass.",
+                    }
+                ],
+            )
+            return (
+                {
+                    "speak": "I am working through the next parser pass.",
+                    "mentions": [candidate["id"]],
+                    "memory": candidate["id"],
+                    "ongoing": True,
+                },
+                "end_turn",
+            )
+
+        self.responses.append(answer)
+        result = await self.cognition.generate_commentary(
+            snapshot,
+            selection,
+            memory_eligible=lambda source: source.is_ongoing,
+        )
+        selected = result.request.selection.memory
+        assert selected is not None
+        self.assertEqual(result.mentions, (selected.key,))
+        self.assertTrue(selected.is_ongoing)
+        self.assertEqual(
+            result.request.conditions.selection.memory,
+            result.request.selection.memory,
+        )
+
+    async def test_silence_can_consider_one_memory_without_claiming_a_mention(
+        self,
+    ) -> None:
+        self.handle(
+            {
+                "source": "claude",
+                "session": "worker",
+                "event": "progress",
+                "progress": "Desktop compatibility remains unverified.",
+            }
+        )
+        self.handle(
+            {
+                "source": "claude",
+                "session": "worker",
+                "event": "turn_done",
+                "progress": "Desktop compatibility remains unverified.",
+            }
+        )
+
+        def story_answer() -> dict[str, object]:
+            payload = json.loads(self.story_requests[-1][1]["messages"][0]["content"])
+            source = next(
+                item["id"]
+                for item in payload["current_moment"]["evidence"]
+                if item.get("text") == "Desktop compatibility remains unverified."
+            )
+            return {
+                "intent": {
+                    "text": "Refactor batch inserts.",
+                    "sources": [payload["current_work"]["latest_request_source"]],
+                },
+                "decisions": [],
+                "progress": [
+                    {
+                        "text": "Desktop compatibility is unverified.",
+                        "sources": [source],
+                    }
+                ],
+            }
+
+        self.story_response = story_answer
+        snapshot = self.snapshot()
+        selection = AttentionSelection(
+            subject=snapshot.work[0],
+            focus_session=None,
+            context_sessions=(),
+            reason=SpeechReason.CHECK_IN,
+            situation=SpeechSituation.IDLE_REFLECTION,
+        )
+
+        def answer() -> tuple[dict[str, object], str]:
+            payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
+            candidate = next(
+                item["memory_candidate"]
+                for item in payload["earlier_context"]
+                if item.get("memory_candidate", {}).get("text")
+                == "Desktop compatibility remains unverified."
+            )
+            return (
+                {
+                    "speak": None,
+                    "mentions": [],
+                    "memory": candidate["id"],
+                    "ongoing": True,
+                },
+                "end_turn",
+            )
+
+        self.responses.append(answer)
+        result = await self.cognition.generate_commentary(
+            snapshot,
+            selection,
+            memory_eligible=lambda source: source.is_ongoing,
+        )
+        self.assertIsNone(result.speak)
+        self.assertEqual(result.mentions, ())
+        self.assertIsNotNone(result.request.selection.memory)
+
+    async def test_speech_rejects_a_source_absent_from_its_prompt(self) -> None:
+        self.responses.append(
+            ({"speak": "The checks passed.", "mentions": ["missing"]}, "end_turn")
+        )
+        with self.assertRaises(StoryUnavailable):
+            await self.generate_commentary()
+
+    async def test_long_current_report_keeps_a_usable_source_id(self) -> None:
+        report = "Checked parser compatibility. " * 30 + "Desktop check failed."
+        self.handle(
+            {
+                "source": "claude",
+                "session": "worker",
+                "event": "turn_done",
+                "progress": report,
+            }
+        )
+
+        def answer() -> tuple[dict[str, object], str]:
+            payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
+            moment = payload["current_moment"]
+            self.assertLess(len(moment["reported_progress"]), len(report))
+            self.assertTrue(moment["source_ids"])
+            return (
+                {
+                    "speak": "The desktop check failed.",
+                    "mentions": [moment["source_ids"][0]],
+                },
+                "end_turn",
+            )
+
+        self.responses.append(answer)
+        result = await self.generate_commentary(SpeechReason.COMPLETION)
+        self.assertEqual(len(result.mentions), 1)
+        self.assertIn(result.mentions[0], result.request.source_ids)
 
     async def test_stale_story_is_not_saved_or_spoken(self) -> None:
         def change_request() -> dict[str, object]:

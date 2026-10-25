@@ -40,11 +40,34 @@ from .work.observations import RepositoryObservation
 class FixtureModel:
     def __init__(self) -> None:
         self.speech: str | None = None
+        self.memory_contains: str | None = None
+        self.ongoing = False
+        self.progress_contains: list[str] | None = None
 
     async def complete(
         self, request: ModelRequest, reason: SpeechReason | ModelPurpose
     ) -> dict[str, object]:
         if reason != ModelPurpose.STORY:
+            if self.memory_contains is not None:
+                payload = json.loads(request["messages"][0]["content"])
+                memory = next(
+                    (
+                        candidate
+                        for item in payload.get("earlier_context", [])
+                        if (candidate := item.get("memory_candidate"))
+                        and self.memory_contains in candidate.get("text", "")
+                        and candidate.get(
+                            "eligible_ongoing" if self.ongoing else "eligible_recent"
+                        )
+                    ),
+                    None,
+                )
+                return {
+                    "speak": self.speech if memory else None,
+                    "memory": memory["id"] if memory else None,
+                    "ongoing": self.ongoing if memory else False,
+                    "mentions": [memory["id"]] if memory and self.speech else [],
+                }
             return {"speak": self.speech}
         payload = json.loads(request["messages"][0]["content"])
         latest = payload["current_work"]["latest_request_source"]
@@ -53,7 +76,20 @@ class FixtureModel:
         return {
             "intent": {"text": intent["text"][:400], "sources": [latest]},
             "decisions": [],
-            "progress": [],
+            "progress": [
+                {"text": source["text"][:400], "sources": [source["id"]]}
+                for source in sources
+                if source.get("event")
+                in (
+                    "A report describes progress on this work.",
+                    "The current work segment ended.",
+                )
+                and source.get("text")
+                and (
+                    self.progress_contains is None
+                    or any(text in source["text"] for text in self.progress_contains)
+                )
+            ][-4:],
         }
 
 
@@ -426,9 +462,16 @@ async def replay_sequence(
                 continue
             if replay.fixture_model is not None:
                 replay.fixture_model.speech = event.get("candidate_speech")
+                replay.fixture_model.memory_contains = event.get("memory_contains")
+                replay.fixture_model.ongoing = event.get("ongoing", False)
+                replay.fixture_model.progress_contains = event.get(
+                    "story_progress_contains"
+                )
             reason = SpeechReason(event["reason"])
             current = replay.app.context()
-            selection = replay.app.attention.select(current, reason)
+            selection = replay.app.attention.select(
+                current, reason, reflection=event.get("reflection", False)
+            )
             step: dict[str, Any] = {
                 "step": index,
                 "baseline": event.get("baseline"),

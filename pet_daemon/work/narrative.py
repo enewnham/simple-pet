@@ -27,13 +27,20 @@ class NarrativeStatement(BaseModel):
 class WorkNarrative(BaseModel):
     subject_id: SessionIdentity
     revision: str
+    context_revision: str = ""
     intent: NarrativeStatement
     decisions: tuple[NarrativeStatement, ...] = ()
     progress: tuple[NarrativeStatement, ...] = ()
     sources: dict[str, JSONObject] = Field(default_factory=dict)
 
 
-def semantic_revision(story: WorkStory) -> str:
+class SelectedMemory(BaseModel):
+    key: str
+    observed_at: float
+    is_ongoing: bool = False
+
+
+def semantic_revision(story: WorkStory, *, related: bool = True) -> str:
     def facts(
         records: tuple[CommentaryEvidence, ...],
     ) -> tuple[tuple[object, ...], ...]:
@@ -58,6 +65,7 @@ def semantic_revision(story: WorkStory) -> str:
             tuple(
                 (child.scope, facts(child.requests), facts(child.activity))
                 for child in story.sessions
+                if related
             ),
         )
     )

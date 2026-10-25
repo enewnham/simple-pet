@@ -1,0 +1,65 @@
+{
+  "name": "remembered_validation",
+  "review": "A sourced remaining check can be recollected after quiet time, stays spaced across restart, and leaves the narrative after its reported resolution. Story source selection is scripted at the model boundary.",
+  "events": [
+    {
+      "packets": [
+        {"source": "codex", "session": "parser", "event": "intent", "goal": "Improve quoted-field parsing."},
+        {"source": "codex", "session": "parser", "event": "turn_done", "progress": "Parser checks passed. Restart validation remains unchecked."}
+      ]
+    },
+    {
+      "after_seconds": 300,
+      "reason": "check_in",
+      "reflection": true,
+      "memory_contains": "Restart validation remains unchecked",
+      "ongoing": true,
+      "candidate_speech": "We last left restart validation unchecked.",
+      "expected_speech": true
+    },
+    {
+      "restart": true,
+      "after_seconds": 899,
+      "reason": "check_in",
+      "reflection": true,
+      "memory_contains": "Restart validation remains unchecked",
+      "ongoing": true,
+      "candidate_speech": "Restart validation was still outstanding.",
+      "expected_speech": false
+    },
+    {
+      "after_seconds": 1,
+      "reason": "check_in",
+      "reflection": true,
+      "memory_contains": "Restart validation remains unchecked",
+      "ongoing": true,
+      "expected_speech": false
+    },
+    {
+      "after_seconds": 3600,
+      "reason": "check_in",
+      "reflection": true,
+      "memory_contains": "Restart validation remains unchecked",
+      "ongoing": true,
+      "candidate_speech": "The last report left restart validation outstanding.",
+      "expected_speech": true
+    },
+    {
+      "after_seconds": 1,
+      "packets": [
+        {"source": "codex", "session": "parser", "event": "intent", "goal": "Validate the parser after restart."},
+        {"source": "codex", "session": "parser", "event": "turn_done", "progress": "Restart validation passed. Parser work is complete."}
+      ]
+    },
+    {
+      "after_seconds": 300,
+      "reason": "check_in",
+      "reflection": true,
+      "story_progress_contains": ["Restart validation passed"],
+      "memory_contains": "Restart validation remains unchecked",
+      "ongoing": true,
+      "candidate_speech": "Restart validation was still outstanding.",
+      "expected_speech": false
+    }
+  ]
+}

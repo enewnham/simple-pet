@@ -4,6 +4,7 @@ from contextlib import AbstractContextManager
 from ..identity import SessionIdentity
 from ..repository_identity import RepositoryIdentity, repository_columns
 from ..work.association import TERMINAL_EVENTS
+from ..work.history import report_prose
 from ..work.models import (
     ExecutionEvidence,
     IntentEvidence,
@@ -149,7 +150,7 @@ class SQLiteWorkRepository:
                 and recorded.context == report.context
             ):
                 return False
-        self.db.execute(
+        cursor = self.db.execute(
             "INSERT INTO work_reports(pet,source,session,kind,data,observed_at) VALUES (?,?,?,?,?,?)",
             (
                 self.pet,
@@ -159,6 +160,12 @@ class SQLiteWorkRepository:
                 report.observed_at,
             ),
         )
+        prose = report_prose(report)
+        if prose:
+            self.db.execute(
+                "INSERT INTO work_reports_fts(rowid,prose) VALUES (?,?)",
+                (cursor.lastrowid, prose),
+            )
         return True
 
     def bind_alias(self, alias: SessionIdentity, session: SessionIdentity) -> None:

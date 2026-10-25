@@ -26,13 +26,41 @@ from .runtime import (
     Trigger,
 )
 from .sessions.reactions import ReactionKind, SessionReaction
-from .storage.memory import AttentionHistory
+from .storage.memory import AttentionHistory, SourceAttention
 from .work import WorkSubject
+from .work.narrative import SelectedMemory
 from .work.shared_work import WorkUpdate
 
 log = get_logger("pet-daemon")
 
 COMPLETION_GRACE_SECONDS = 300
+IDLE_REFLECTION_DELAY_SECONDS = 300
+IDLE_REFLECTION_INTERVAL_SECONDS = 900
+COMPLETION_REFLECTION_SECONDS = 900
+
+
+def memory_spacing(age: float) -> float:
+    if age < 3600:
+        return 900
+    if age < 86400:
+        return 3600
+    return 86400
+
+
+def _latest_request(subject: WorkSubject) -> float:
+    return max(
+        (record.observed_at or 0 for record in subject.story.requests), default=0
+    )
+
+
+def _conversation(snapshot: PetContext) -> WorkSubject | None:
+    roots = [subject for subject in snapshot.work if subject.parent is None]
+    if not roots:
+        return None
+    return max(
+        roots,
+        key=lambda subject: (_latest_request(subject), subject.changed_at, subject.id),
+    )
 
 
 class AttentionRequest(BaseModel):
@@ -41,6 +69,7 @@ class AttentionRequest(BaseModel):
     ttl: float | None = None
     trigger: Trigger | None = None
     eligible: frozenset[SessionIdentity] | None = None
+    reflection: bool = False
 
 
 class SelectedWorkState(BaseModel):
@@ -75,6 +104,8 @@ class AttentionSelection(BaseModel):
     context: str | None = None
     selected_state: SelectedWorkState = SelectedWorkState()
     update: WorkUpdate | None = None
+    memory: SelectedMemory | None = None
+    quiet_revision: tuple[tuple[SessionIdentity, float], ...] = ()
 
     @property
     def id(self) -> SessionIdentity | None:
@@ -87,6 +118,8 @@ class AttentionSelection(BaseModel):
         )
 
     def is_valid(self, snapshot: PetContext) -> bool:
+        if self.quiet_revision and self.quiet_revision != activity_revision(snapshot):
+            return False
         current = self.refresh(snapshot)
         if self.subject is not None and current.subject is None:
             return False
@@ -140,6 +173,24 @@ def _sessions(subject: WorkSubject, snapshot: PetContext) -> list[AgentSessionSt
     return [session for session in snapshot.sessions if session.id in identifiers]
 
 
+def activity_revision(
+    snapshot: PetContext,
+) -> tuple[tuple[SessionIdentity, float], ...]:
+    times = {
+        subject.id: max(
+            (
+                record.observed_at or 0
+                for record in (*subject.story.requests, *subject.story.activity)
+            ),
+            default=0,
+        )
+        for subject in snapshot.work
+    }
+    for session in snapshot.sessions:
+        times[session.id] = max(times.get(session.id, 0), session.last_hook_at)
+    return tuple(sorted(times.items()))
+
+
 def _session_tier(session: AgentSessionStatus) -> int:
     if session.waiting_for_input:
         return 0
@@ -176,6 +227,8 @@ class Attention:
         self.last_attempt = float("-inf")
         self.next_observation = clock() + rng.uniform(*config.observation_seconds)
         self.histories: dict[SessionIdentity, AttentionHistory] = {}
+        self.sources: dict[str, SourceAttention] = {}
+        self.last_reflection_at = float("-inf")
         self.sequence: float = 0
         if history:
             self.restore(history)
@@ -187,6 +240,8 @@ class Attention:
             *self.config.observation_seconds
         )
         self.histories.clear()
+        self.sources.clear()
+        self.last_reflection_at = float("-inf")
         self.sequence = 0
 
     def queue(
@@ -252,6 +307,11 @@ class Attention:
         ):
             decision = "consumed"
         elif update.ended_at is not None:
+            subject = next(
+                (item for item in snapshot.work if update in item.updates), None
+            )
+            if subject is not None and update.ended_at < _latest_request(subject):
+                return False
             if self.wall_clock() < update.ended_at + COMPLETION_GRACE_SECONDS:
                 return True
             decision = "expired"
@@ -259,7 +319,19 @@ class Attention:
             return True
         else:
             decision = "insufficient_liveness"
-        log.debug("attention.ineligible", session=update.session, decision=decision)
+        log.debug(
+            "attention.ineligible",
+            detail="payload",
+            session=update.session,
+            decision=decision,
+            check_in=check_in,
+            runtime_session_present=session is not None,
+            presence=session.presence if session else None,
+            retired=session.retired if session else None,
+            turn_active=session.turn_active if session else None,
+            update_observed_at=update.observed_at,
+            update_ended_at=update.ended_at,
+        )
         return False
 
     def is_selection_eligible(
@@ -271,6 +343,16 @@ class Attention:
             SpeechReason.CARE,
         ):
             return True
+        if selection.situation == SpeechSituation.IDLE_REFLECTION:
+            return (
+                selection.subject is not None
+                and self.is_quiet(snapshot)
+                and selection.is_valid(snapshot)
+                and (
+                    selection.memory is None
+                    or self.is_memory_eligible(selection.memory)
+                )
+            )
         if selection.update is not None:
             subject = next(
                 (item for item in snapshot.work if item.id == selection.id), None
@@ -304,7 +386,11 @@ class Attention:
         reason: SpeechReason = SpeechReason.ROUTINE,
         context: str | None = None,
         eligible: Collection[SessionIdentity] | None = None,
+        *,
+        reflection: bool = False,
     ) -> AttentionSelection:
+        if reflection or context is not None:
+            return self.select_recollection(snapshot, reason, context)
         trigger = snapshot.trigger
         subject = None
         focus = None
@@ -495,7 +581,7 @@ class Attention:
                 or (session.turn_active and not session.activity_uncertain)
                 for session in ((focus, *others) if focus else ())
             ):
-                subject, focus, others = None, None, ()
+                return self.select_recollection(snapshot, reason)
         situation: SpeechSituation
         if context is not None:
             situation = SpeechSituation.EXPLICIT
@@ -541,6 +627,87 @@ class Attention:
             update=update,
         )
 
+    def select_recollection(
+        self,
+        snapshot: PetContext,
+        reason: SpeechReason,
+        context: str | None = None,
+        *,
+        subject: WorkSubject | None = None,
+    ) -> AttentionSelection:
+        subject = subject or _conversation(snapshot)
+        return AttentionSelection(
+            subject=subject,
+            focus_session=None,
+            context_sessions=(),
+            reason=reason,
+            context=context,
+            situation=SpeechSituation.EXPLICIT
+            if context is not None
+            else SpeechSituation.IDLE_REFLECTION
+            if subject
+            else SpeechSituation.CLICK_IDLE,
+            selected_state=SelectedWorkState.capture(subject, None),
+            quiet_revision=() if context is not None else activity_revision(snapshot),
+        )
+
+    def recollection_alternatives(
+        self, snapshot: PetContext, selection: AttentionSelection
+    ) -> tuple[AttentionSelection, ...]:
+        subjects = sorted(
+            (
+                subject
+                for subject in snapshot.work
+                if subject.parent is None and subject.id != selection.id
+            ),
+            key=lambda subject: (
+                self.history(subject.id).last_selected,
+                -subject.changed_at,
+                subject.id,
+            ),
+        )
+        return tuple(
+            self.select_recollection(snapshot, selection.reason, subject=subject)
+            for subject in subjects
+        )
+
+    def is_quiet(self, snapshot: PetContext) -> bool:
+        if any(
+            (session.active_tools or session.waiting_for_input)
+            and not session.retired
+            and session.presence not in (ProcessStatus.EXITED, ProcessStatus.REPLACED)
+            for session in snapshot.sessions
+        ):
+            return False
+        activity = activity_revision(snapshot)
+        return (
+            bool(activity)
+            and self.wall_clock() - max(at for _, at in activity)
+            >= IDLE_REFLECTION_DELAY_SECONDS
+        )
+
+    def is_memory_eligible(self, memory: SelectedMemory) -> bool:
+        age = self.wall_clock() - memory.observed_at
+        history = self.sources.get(memory.key, SourceAttention())
+        if not memory.is_ongoing:
+            return (
+                age < COMPLETION_REFLECTION_SECONDS
+                and history.considered_at is None
+                and history.mentioned_at is None
+            )
+        previous = max(
+            (
+                value
+                for value in (history.considered_at, history.mentioned_at)
+                if value is not None
+            ),
+            default=None,
+        )
+        return previous is None or self.wall_clock() - previous >= memory_spacing(age)
+
+    def restore_sources(self, histories: Mapping[str, SourceAttention]) -> None:
+        self.sources = {key: history.model_copy() for key, history in histories.items()}
+
     def request(
         self,
         snapshot: PetContext,
@@ -568,7 +735,12 @@ class Attention:
                 trigger.reaction
             ):
                 return AttentionRequest(reason=reason, trigger=trigger)
-        if check_in:
+        live_check_in = any(
+            session.id in check_in
+            and (session.waiting_for_input or session.active_tools)
+            for session in snapshot.sessions
+        )
+        if live_check_in or check_in and not self.is_quiet(snapshot):
             return AttentionRequest(
                 reason=SpeechReason.CHECK_IN, eligible=frozenset(check_in)
             )
@@ -580,6 +752,18 @@ class Attention:
                 self.is_routine_eligible(subject, snapshot) for subject in snapshot.work
             ):
                 return AttentionRequest(reason=SpeechReason.ROUTINE)
+        if (
+            self.is_quiet(snapshot)
+            and _conversation(snapshot) is not None
+            and self.wall_clock() - self.last_reflection_at
+            >= IDLE_REFLECTION_INTERVAL_SECONDS
+        ):
+            self.last_reflection_at = self.wall_clock()
+            conversation = _conversation(snapshot)
+            assert conversation is not None
+            history = self.histories.setdefault(conversation.id, AttentionHistory())
+            history.last_reflection_at = self.last_reflection_at
+            return AttentionRequest(reason=SpeechReason.CHECK_IN, reflection=True)
         if care is not None and not any(
             session.turn_active for session in snapshot.sessions
         ):
@@ -593,6 +777,14 @@ class Attention:
             identifier: record.model_copy() for identifier, record in history.items()
         }
         self.sequence = max((row.last_selected for row in history.values()), default=0)
+        self.last_reflection_at = max(
+            (
+                row.last_reflection_at
+                for row in history.values()
+                if row.last_reflection_at is not None
+            ),
+            default=float("-inf"),
+        )
 
     def has_unconsidered_changes(self, subject: WorkSubject) -> bool:
         return self.history(subject.id).considered_subject_revision != subject.revision

@@ -11,11 +11,11 @@ import structlog
 from .attention import Attention, AttentionSelection
 from .behavior.controller import Behavior
 from .commentary import Cognition, SpeechConditions
-from .commentary.cognition import StoryUnavailable
+from .commentary.cognition import CommentaryResult, StoryUnavailable
 from .commentary.usage import collect_usage
 from .config import Config
 from .delivery import DeliveryConditions, DeliveryOutcome, SpeechDelivery, SpeechMessage
-from .domain import DeliveryStatus, SpeechReason
+from .domain import DeliveryStatus, SpeechReason, SpeechSituation
 from .identity import SessionIdentity
 from .logging import get_logger
 from .runtime import (
@@ -31,7 +31,13 @@ from .sessions.processes import ProcessTracker
 from .sessions.reactions import SessionReactions
 from .sessions.tracking import Sessions
 from .storage import Memory
-from .work.history import SessionContext, build_session_entry
+from .work.history import (
+    SessionContext,
+    build_session_entry,
+    report_prose,
+    report_source_key,
+)
+from .work.models import ExecutionEvidence, ProgressEvidence
 from .work.observations import RepositoryObservation
 
 log = get_logger("pet-daemon")
@@ -88,6 +94,7 @@ class Application:
         self.clicked = False
         self.last_speech: tuple[str, float] | None = None
         self.attention.restore(memory.load_attention_history())
+        self.attention.restore_sources(memory.load_source_attention())
         self.process_task: asyncio.Task[None] | None = None
         self.next_prune = 0
         self.reconciling = False
@@ -328,6 +335,45 @@ class Application:
         self.clicked = True
         log.debug("speech.requested", reason="click")
 
+    async def generate_commentary(
+        self,
+        snapshot: PetContext,
+        selection: AttentionSelection,
+        trigger: Trigger | None,
+    ) -> CommentaryResult:
+        reflection = selection.situation == SpeechSituation.IDLE_REFLECTION
+        alternatives = (
+            self.attention.recollection_alternatives(snapshot, selection)
+            if reflection
+            else ()
+        )
+        preferred: CommentaryResult | None = None
+        for index, choice in enumerate((selection, *alternatives)):
+            if index:
+                assert choice.id is not None
+                self.attention.mark_selected(choice.id)
+                self.persist_attention(choice.id)
+            automatic = choice.reason != SpeechReason.CLICK
+            result = await self.cognition.generate_commentary(
+                snapshot,
+                choice,
+                refresh=lambda: self.context(trigger),
+                eligible=self.attention.is_selection_eligible,
+                memory_eligible=(
+                    lambda source, ongoing_only=bool(index), automatic=automatic: (
+                        (not ongoing_only or source.is_ongoing)
+                        and (not automatic or self.attention.is_memory_eligible(source))
+                    )
+                )
+                if reflection
+                else None,
+            )
+            preferred = preferred or result
+            if not reflection or result.request.selection.memory is not None:
+                return result
+        assert preferred is not None
+        return preferred
+
     async def comment(
         self,
         reason: SpeechReason,
@@ -365,12 +411,7 @@ class Application:
             log.debug("observation.started", reason=reason, subject=selection.id)
             try:
                 result = await asyncio.wait_for(
-                    self.cognition.generate_commentary(
-                        snapshot,
-                        selection,
-                        refresh=lambda: self.context(trigger),
-                        eligible=self.attention.is_selection_eligible,
-                    ),
+                    self.generate_commentary(snapshot, selection, trigger),
                     timeout=self.config.request_timeout,
                 )
                 if sessions is not self.sessions:
@@ -410,6 +451,7 @@ class Application:
                             if selection.subject
                             else None,
                             history_epoch=history_epoch,
+                            mentioned_sources=result.mentions,
                             conditions=DeliveryConditions(
                                 commentary=result.request.conditions,
                                 trigger=trigger,
@@ -453,16 +495,52 @@ class Application:
         ):
             return False
         snapshot = self.context(trigger)
-        return self.attention.is_selection_eligible(
-            conditions.selection, snapshot
-        ) and conditions.is_valid(snapshot)
+        return (
+            self.attention.is_selection_eligible(conditions.selection, snapshot)
+            and conditions.is_valid(snapshot)
+            and self.cognition.are_source_scopes_valid(conditions)
+        )
+
+    def selected_sources(self, selection: AttentionSelection) -> tuple[str, ...]:
+        if selection.memory is not None:
+            return (selection.memory.key,)
+        if selection.update is None or selection.situation in (
+            SpeechSituation.PROMPT,
+            SpeechSituation.FAILURE,
+        ):
+            return ()
+        reports = tuple(
+            report
+            for report in self.memory.narrative_reports((selection.update.session,))
+            if report.observed_at == selection.update.observed_at
+            and (
+                isinstance(report.payload, ProgressEvidence)
+                or isinstance(report.payload, ExecutionEvidence)
+                and report.payload.event
+                in {"turn_done", "turn_error", "subagent_done", "interrupt"}
+            )
+        )
+        latest = max(reports, key=lambda report: report.observed_at, default=None)
+        if latest is None:
+            return ()
+        return tuple(
+            report_source_key(report)
+            for report in reports
+            if report.observed_at == latest.observed_at
+            and report_prose(report) == report_prose(latest)
+        )
 
     def mark_considered(self, selection: AttentionSelection) -> None:
-        records = self.attention.consideration(selection.subject, selection.update)
+        reflection = selection.situation == SpeechSituation.IDLE_REFLECTION
+        subject = None if reflection else selection.subject
+        update = None if reflection else selection.update
+        records = self.attention.consideration(subject, update)
         with self.memory.transaction():
             for identifier, history in records.items():
                 self.memory.save_attention_history(identifier, history)
-        self.attention.mark_considered(selection.subject, selection.update)
+            self.memory.record_source_consideration(self.selected_sources(selection))
+        self.attention.mark_considered(subject, update)
+        self.attention.restore_sources(self.memory.load_source_attention())
 
     def persist_attention(self, subject_id: SessionIdentity | None) -> None:
         if subject_id is not None:
@@ -497,6 +575,8 @@ class Application:
             (selection.subject if selection else subject) if current else None
         )
         considered_update = update if update_current else None
+        if selection and selection.situation == SpeechSituation.IDLE_REFLECTION:
+            considered_subject, considered_update = None, None
         if outcome.status == DeliveryStatus.ACCEPTED:
             records = self.attention.consideration(
                 considered_subject, considered_update
@@ -511,6 +591,11 @@ class Application:
                 )
                 for identifier, history in records.items():
                     self.memory.save_attention_history(identifier, history)
+                self.memory.record_source_mentions(message.mentioned_sources)
+                if selection:
+                    self.memory.record_source_consideration(
+                        self.selected_sources(selection)
+                    )
             self.last_speech = (message.text, self.clock())
             self.attention.last_attempt = self.clock()
         elif outcome.status == DeliveryStatus.FAILED:
@@ -527,6 +612,7 @@ class Application:
                 return
         if outcome.status == DeliveryStatus.ACCEPTED:
             self.attention.mark_considered(considered_subject, considered_update)
+            self.attention.restore_sources(self.memory.load_source_attention())
         log.info(
             "speech.delivery",
             message=message.message_id,
@@ -597,7 +683,11 @@ class Application:
             return
         snapshot = self.context(request.trigger)
         selection = self.attention.select(
-            snapshot, request.reason, request.context, request.eligible
+            snapshot,
+            request.reason,
+            request.context,
+            request.eligible,
+            reflection=request.reflection,
         )
         if not self.attention.is_selection_eligible(selection, snapshot):
             return

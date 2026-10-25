@@ -18,6 +18,7 @@ from ..work.evidence import (
     ReportedProgress,
     UserIntent,
 )
+from ..work.history import report_source_key
 from ..work.models import (
     ExecutionEvidence,
     IntentEvidence,
@@ -45,6 +46,8 @@ equivalent records of the same observation and may also be cited. Preserve corre
 cancellations, uncertainty, and partial failures. Earlier requests may supply decisions only while relevant to the latest
 request. Keep each result within the task named by its scope. A reported result establishes
 only what the report says succeeded. A completed turn can leave the task incomplete.
+When explicit_context asks about earlier work, retain the supplied evidence that answers
+that query as background. Keep the latest request controlling current intent.
 Omit publication mechanics, branch names, commit hashes, PR details, quotations, jokes,
 and unrelated historical work. Keep intent within 400 characters, at most four decisions,
 and at most four progress statements of at most 400 characters each. Return empty arrays
@@ -55,6 +58,7 @@ when nothing is relevant.
 class WorkNarrativeRequest(BaseModel):
     subject_id: SessionIdentity
     revision: str
+    context_revision: str = ""
     sources: dict[str, JSONObject]
     request: ModelRequest
     latest_request_source: str
@@ -86,6 +90,7 @@ class _NarrativeSources:
         outcome: str | None = None,
         origin: SessionIdentity | None = None,
         observed_at: float | None = None,
+        source_key: str | None = None,
     ) -> None:
         prose = work_prose(text, limit=1200, excluded=self.excluded)
         source: JSONObject = {"kind": kind, "scope": scope}
@@ -95,7 +100,7 @@ class _NarrativeSources:
             source["outcome"] = outcome
         if not prose and not outcome:
             return
-        identifier = revision_key((source, origin, observed_at, text))[:24]
+        identifier = source_key or revision_key((source, origin, observed_at, text))
         if observed_at is not None:
             source["observed_at"] = observed_at
         if origin is not None:
@@ -138,6 +143,7 @@ def _collect_reports(
                     scope,
                     origin=identity,
                     observed_at=report.observed_at,
+                    source_key=report_source_key(report),
                 )
             case ProgressEvidence(session=_, text=text):
                 collector.add(
@@ -146,6 +152,7 @@ def _collect_reports(
                     scope,
                     origin=identity,
                     observed_at=report.observed_at,
+                    source_key=report_source_key(report),
                 )
             case ExecutionEvidence(
                 session=_, event=event, outcome=outcome, tool_name=_, progress=progress
@@ -162,6 +169,7 @@ def _collect_reports(
                     outcome,
                     origin=identity,
                     observed_at=report.observed_at,
+                    source_key=report_source_key(report),
                 )
 
 
@@ -336,6 +344,7 @@ def _evidence(
     identifier: str, source: JSONObject, clock: Callable[[], float]
 ) -> JSONObject:
     item = {"id": identifier, **source}
+    item.pop("scope_revision", None)
     observed_at = item.pop("observed_at", None)
     origin = item.pop("origin", None)
     if origin is not None:
@@ -390,6 +399,16 @@ def _story_payload(
     return payload
 
 
+def context_revision(selection: AttentionSelection, memory: Memory) -> str:
+    subject = selection.subject
+    if subject is None and not selection.context:
+        return ""
+    reports = memory.context_reports(subject, selection.context)
+    return revision_key(
+        (selection.context, tuple(report_source_key(report) for report in reports))
+    )
+
+
 def prepare(
     snapshot: PetContext,
     selection: AttentionSelection,
@@ -399,35 +418,30 @@ def prepare(
     target_bytes: int = 12000,
 ) -> WorkNarrativeRequest | None:
     subject = selection.subject
-    if subject is None:
+    if subject is None and not selection.context:
         return None
     excluded = tuple(record.text for record in memory.speech(limit=256))
-    reports = memory.narrative_reports(subject.sessions or (subject.id,))
+    reports = memory.context_reports(subject, selection.context)
+    if subject is None and not reports:
+        return None
     aliases = memory.session_aliases()
-    root = aliases.get(subject.id, subject.id)
+    root_id = subject.id if subject else reports[0].payload.session
+    root = aliases.get(root_id, root_id)
     collector = _NarrativeSources(root, excluded)
     _collect_reports(collector, reports, aliases)
-    observed_at = (
-        selection.update.observed_at
-        if selection.update
-        else max(
-            (
-                record.observed_at or 0
-                for record in (*subject.story.requests, *subject.story.activity)
-            ),
-            default=0,
-        )
-    )
-    _collect_reports(
-        collector, memory.related_reports(subject.id, observed_at), aliases
-    )
-    if not collector.sources:
+    if not collector.sources and subject is not None:
         _collect_records(
             collector,
             (*subject.story.requests, *subject.story.activity),
             "current task",
         )
-    for related in subject.story.sessions:
+    for related in subject.story.sessions if subject else ():
+        identity = aliases.get(related.session, related.session)
+        if any(
+            source.get("origin") == session_data(identity)
+            for source in collector.sources.values()
+        ):
+            continue
         assignment = work_prose(related.scope, limit=300, excluded=excluded)
         _collect_records(
             collector,
@@ -435,21 +449,28 @@ def prepare(
             assignment or "related task",
             related.session,
         )
-    if not collector.latest_request_source:
+    if not collector.latest_request_source and subject is not None:
         collector.add("request", subject.story.intent, "current task")
     if not collector.latest_request_source:
         return None
-    previous = memory.load_narrative(subject.id)
+    previous = memory.load_narrative(subject.id) if subject else None
     sources = _retain_sources(collector, previous, target_bytes, memory.clock)
+    for key, revision in memory.source_scope_revisions(tuple(sources)).items():
+        sources[key]["scope_revision"] = revision
     payload = _story_payload(collector, sources, previous, memory.clock, target_bytes)
+    if selection.context:
+        payload["explicit_context"] = work_prose(selection.context, 2000, excluded)
     request = make_request(payload, [{"type": "text", "text": INSTRUCTIONS}])
     request["output_config"]["format"]["schema"] = cast(
         JSONObject, transform_schema(StoryResponse)
     )
     request["max_tokens"] = max(request["max_tokens"], 1400)
     return WorkNarrativeRequest(
-        subject_id=subject.id,
-        revision=semantic_revision(subject.story),
+        subject_id=subject.id if subject else root,
+        revision=semantic_revision(subject.story) if subject else "",
+        context_revision=revision_key(
+            (selection.context, tuple(report_source_key(report) for report in reports))
+        ),
         sources=sources,
         request=request,
         latest_request_source=collector.latest_request_source,
@@ -466,6 +487,7 @@ def validate(raw: dict[str, object], request: WorkNarrativeRequest) -> WorkNarra
     return WorkNarrative(
         subject_id=request.subject_id,
         revision=request.revision,
+        context_revision=request.context_revision,
         intent=response.intent,
         decisions=response.decisions,
         progress=response.progress,

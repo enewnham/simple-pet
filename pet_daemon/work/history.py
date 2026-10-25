@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from typing import TYPE_CHECKING
 
@@ -12,6 +14,7 @@ from ..prose import work_prose
 from ..repository_identity import RepositoryIdentity, parse_remote_repository
 from ..runtime import WaitingKind
 from ..sessions.activity import activity
+from .models import ExecutionEvidence, IntentEvidence, ProgressEvidence, SessionReport
 
 if TYPE_CHECKING:
     from ..runtime import HookEvent
@@ -23,7 +26,7 @@ class HistoryDetails(BaseModel):
     progress: str | None = None
 
 
-HISTORY_SEARCH_STOP_WORDS = {
+REPORT_SEARCH_STOP_WORDS = {
     "please",
     "continue",
     "failed",
@@ -42,12 +45,6 @@ class SessionEntry(BaseModel):
     details: HistoryDetails
     goal: str
     explicit_goal: str
-
-
-class RecallQuery(BaseModel):
-    repository: RepositoryIdentity | None
-    session: SessionIdentity
-    terms: tuple[str, ...]
 
 
 class SessionContext(BaseModel):
@@ -113,23 +110,41 @@ def build_session_entry(
     )
 
 
-def build_recall_query(
-    event: HookEvent | None, *, repository: RepositoryIdentity | None
-) -> RecallQuery | None:
-    if not event or event.event != "intent" or not repository or not event.goal:
-        return None
-    tokens = re.findall(r"[\w]+", event.goal)
-    search_terms = tuple(
+def report_prose(report: SessionReport) -> str:
+    payload = report.payload
+    if isinstance(payload, IntentEvidence | ProgressEvidence):
+        return payload.text
+    if isinstance(payload, ExecutionEvidence) and payload.event in {
+        "turn_done",
+        "turn_error",
+        "subagent_done",
+        "interrupt",
+    }:
+        return payload.progress or " ".join(
+            part
+            for part in (
+                payload.event.replace("_", " "),
+                payload.outcome.value if payload.outcome else "",
+            )
+            if part
+        )
+    return ""
+
+
+def report_search_terms(text: str) -> tuple[str, ...]:
+    return tuple(
         dict.fromkeys(
             token.lower()
-            for token in tokens
-            if len(token) >= 5 and token.lower() not in HISTORY_SEARCH_STOP_WORDS
+            for token in re.findall(r"[\w]+", text)
+            if len(token) >= 5 and token.lower() not in REPORT_SEARCH_STOP_WORDS
         )
-    )[:3]
-    if not search_terms:
-        return None
-    return RecallQuery(
-        repository=repository,
-        session=event.subject,
-        terms=search_terms,
     )
+
+
+def report_source_key(report: SessionReport) -> str:
+    source = {
+        "payload": report.payload.model_dump(mode="json"),
+        "observed_at": report.observed_at,
+    }
+    encoded = json.dumps(source, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()

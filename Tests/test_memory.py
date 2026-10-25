@@ -21,6 +21,7 @@ from pet_daemon.storage import Memory
 from pet_daemon.storage.memory import (
     AttentionHistory,
     ContextRecord,
+    SourceAttention,
 )
 from pet_daemon.storage.migrations import SCHEMA_VERSION
 from pet_daemon.types import JSONValue
@@ -28,8 +29,14 @@ from pet_daemon.work.evidence import ReportedProgress, UserIntent
 from pet_daemon.work.history import (
     HistoryDetails,
     SessionContext,
-    build_recall_query,
     build_session_entry,
+    report_source_key,
+)
+from pet_daemon.work.models import (
+    ExecutionEvidence,
+    IntentEvidence,
+    ReportContext,
+    SessionReport,
 )
 from pet_daemon.work.observations import (
     CheckoutObservation,
@@ -545,122 +552,195 @@ class MemoryTests(unittest.TestCase):
         )
         self.assertIsNone(self.memory.recent_events()[-1].details.activity)
 
-    def test_recall_matches_older_goals_within_the_repository(self) -> None:
-        self.memory.close()
-        self.memory = Memory(
-            self.path, "fixture", clock=lambda: self.now, max_events=100
-        )
-        self.event("", event="intent", goal="Refactor parser tokenization")
-        self.event(
-            "",
-            event="intent",
-            repo="/repo/other",
-            repository="github.com/team/other",
-            goal="Refactor parser tokenization",
-        )
-        self.event("", event="intent", goal="Improve billing invoices")
-        for index in range(6):
-            self.event(f"Recent progress {index}")
-        recalled = self.memory.recall(
-            build_recall_query(
-                normalize_hook(
-                    {
-                        "source": "codex",
-                        "session": "one",
-                        "event": "intent",
-                        "repo": "/repo/parser",
-                        "goal": "Refactor parser tokenization",
-                    }
-                ),
-                repository=RemoteRepository(value="github.com/team/parser"),
-            )
-        )
-        self.assertEqual(len(recalled), 1)
-        self.assertIn("parser tokenization", recalled[0].goal)
-        self.assertEqual(recalled[0].working_directory, "/repo/parser")
-        self.assertNotIn(
-            recalled[0].id, [event.id for event in self.memory.recent_events()]
-        )
-
-    def test_recall_matches_observed_repository_across_worktrees(self) -> None:
-        self.memory.max_events = 100
-        checkout = self.observe_checkout()
-        local = require(checkout.local)
-        self.memory.work.observe(
-            checkout.model_copy(
-                update={
-                    "worktree": "/work/parser-review",
-                    "local": local.model_copy(
-                        update={"worktree": "/work/parser-review", "branch": "review"}
-                    ),
-                }
-            )
-        )
-        for location in ("/repo/parser/src", "/work/parser-review"):
-            self.memory.record_event(
-                build_session_entry(
-                    HookEvent(
-                        source=SessionSource.CODEX,
-                        session="one",
-                        event=HookEventKind.INTENT,
-                        repo=location,
-                        goal="Refactor parser tokenization",
-                    )
-                )
-            )
-        self.event(
-            "",
-            event="intent",
-            repository="github.com/team/unrelated",
-            goal="Refactor parser tokenization",
-        )
-        for index in range(6):
-            self.event(f"Recent progress {index}")
-        request = build_recall_query(
-            HookEvent(
-                source=SessionSource.CODEX,
-                session="one",
-                event=HookEventKind.INTENT,
-                repo="/another/worktree",
-                repository="github.com/team/unrelated",
-                goal="Refactor parser tokenization",
-            ),
-            repository=RemoteRepository(value="github.com/team/project"),
-        )
-        recalled = self.memory.recall(request)
-        self.assertEqual(
-            {entry.working_directory for entry in recalled},
-            {"/repo/parser/src", "/work/parser-review"},
-        )
-        self.assertEqual(
-            {entry.repository for entry in recalled},
-            {RemoteRepository(value="github.com/team/project")},
-        )
-
-    def test_recall_requires_repository_identity_and_ignores_repeated_terms(
+    def test_context_reports_retrieve_matching_sessions_and_later_outcomes(
         self,
     ) -> None:
-        event = HookEvent(
-            source=SessionSource.CODEX,
-            session="one",
-            event=HookEventKind.INTENT,
-            repo="/repo/parser",
-            goal="Parser parser PARSER tokenization",
+        def report(
+            session: str, event: HookEventKind, text: str, repository: str
+        ) -> None:
+            self.now += 1
+            self.ingest(
+                HookEvent(
+                    source=SessionSource.CODEX,
+                    session=session,
+                    event=event,
+                    repo=f"/work/{session}",
+                    repository=repository,
+                    goal=text if event == HookEventKind.INTENT else None,
+                    progress=text if event != HookEventKind.INTENT else None,
+                )
+            )
+
+        repo = "github.com/team/parser"
+        report("older", HookEventKind.INTENT, "Improve parser tokenization", repo)
+        report(
+            "other",
+            HookEventKind.INTENT,
+            "Improve parser tokenization",
+            "github.com/team/other",
         )
-        self.assertIsNone(build_recall_query(event, repository=None))
-        request = require(
-            build_recall_query(
-                event, repository=RemoteRepository(value="github.com/team/parser")
+        report("selected", HookEventKind.INTENT, "Check parser tokenization", repo)
+        subject = next(
+            subject
+            for subject in self.memory.connected_work(sessions_snapshot())
+            if subject.id.native_id == "selected"
+        )
+        report(
+            "older", HookEventKind.PROGRESS, "Parser tokenization is corrected", repo
+        )
+        report("older", HookEventKind.TURN_DONE, "Parser checks passed", repo)
+        reports = self.memory.context_reports(subject)
+        kinds = [
+            (item.payload.session.native_id, item.payload.kind.value)
+            for item in reports
+        ]
+        self.assertEqual(kinds[:2], [("older", "intent"), ("selected", "intent")])
+        self.assertIn(("older", "execution"), kinds)
+        self.assertEqual(kinds.count(("older", "progress")), 2)
+        self.assertNotIn("other", {item.payload.session.native_id for item in reports})
+
+    def test_context_reports_include_parent_progress_without_text_match(self) -> None:
+        for session, parent, event, text in (
+            ("parent", None, HookEventKind.INTENT, "Improve request dispatch"),
+            ("child", "parent", HookEventKind.INTENT, "Inspect socket lifecycle"),
+            ("child", "parent", HookEventKind.PROGRESS, "The socket closes cleanly"),
+        ):
+            self.now += 1
+            self.ingest(
+                HookEvent(
+                    source=SessionSource.CODEX,
+                    session=session,
+                    parent=parent,
+                    event=event,
+                    repo="/work/project",
+                    repository="github.com/team/project",
+                    goal=text if event == HookEventKind.INTENT else None,
+                    progress=text if event == HookEventKind.PROGRESS else None,
+                )
+            )
+        subject = next(
+            item
+            for item in self.memory.connected_work(sessions_snapshot())
+            if item.id.native_id == "parent"
+        )
+        reports = self.memory.context_reports(subject)
+        self.assertEqual(
+            [item.payload.session.native_id for item in reports],
+            ["parent", "child", "child"],
+        )
+
+    def test_context_reports_search_latest_progress_or_explicit_query(self) -> None:
+        for session, text in (
+            ("parser", "Inspect parser tokenization"),
+            ("billing", "Inspect billing invoices"),
+            ("selected", "Inspect parser tokenization"),
+        ):
+            self.now += 1
+            self.ingest(
+                HookEvent(
+                    source=SessionSource.CODEX,
+                    session=session,
+                    event=HookEventKind.INTENT,
+                    repo=f"/work/{session}",
+                    repository="github.com/team/project",
+                    goal=text,
+                )
+            )
+        self.now += 1
+        self.ingest(
+            HookEvent(
+                source=SessionSource.CODEX,
+                session="selected",
+                event=HookEventKind.PROGRESS,
+                repo="/work/selected",
+                repository="github.com/team/project",
+                progress="Investigating billing invoices",
             )
         )
-        self.assertEqual(request.terms, ("parser", "tokenization"))
-        self.assertIsNotNone(
-            build_recall_query(
-                event.model_copy(update={"repo": None}), repository=request.repository
-            )
+        subject = next(
+            item
+            for item in self.memory.connected_work(sessions_snapshot())
+            if item.id.native_id == "selected"
         )
-        self.memory.record_event(build_session_entry(event))
-        self.assertIsNone(self.memory.recent_events()[0].repository)
+        default = self.memory.context_reports(subject)
+        explicit = self.memory.context_reports(subject, "parser tokenization")
+        self.assertEqual(
+            {item.payload.session.native_id for item in default},
+            {"selected", "billing"},
+        )
+        self.assertEqual(
+            {item.payload.session.native_id for item in explicit},
+            {"selected", "parser"},
+        )
+
+    def test_context_reports_do_not_match_tool_traces(self) -> None:
+        repository = "github.com/team/project"
+        for session, goal in (
+            ("tool", "Inspect socket lifecycle"),
+            ("selected", "Inspect parser tokenization"),
+        ):
+            self.now += 1
+            self.ingest(
+                HookEvent(
+                    source=SessionSource.CODEX,
+                    session=session,
+                    event=HookEventKind.INTENT,
+                    repo=f"/work/{session}",
+                    repository=repository,
+                    goal=goal,
+                )
+            )
+        with self.memory.transaction():
+            self.memory.work.repository.append_report(
+                SessionReport(
+                    payload=ExecutionEvidence(
+                        session=SessionIdentity(
+                            source=SessionSource.CODEX, native_id="tool"
+                        ),
+                        event="tool_done",
+                        outcome=ExecutionOutcome.SUCCESS,
+                        tool_name="rg",
+                        progress="parser tokenization",
+                    ),
+                    context=ReportContext(
+                        repository=RemoteRepository(value=repository)
+                    ),
+                    observed_at=self.now,
+                )
+            )
+        subject = next(
+            item
+            for item in self.memory.connected_work(sessions_snapshot())
+            if item.id.native_id == "selected"
+        )
+        self.assertEqual(
+            {
+                item.payload.session.native_id
+                for item in self.memory.context_reports(subject)
+            },
+            {"selected"},
+        )
+
+    def test_report_source_key_uses_original_evidence(self) -> None:
+        payload = IntentEvidence(
+            session=SessionIdentity(source=SessionSource.CODEX, native_id="one"),
+            text="Inspect parser tokenization",
+        )
+        original = SessionReport(
+            payload=payload,
+            context=ReportContext(checkout="/work/one"),
+            observed_at=123,
+        )
+        presented_elsewhere = original.model_copy(
+            update={"context": ReportContext(checkout="/work/two")}
+        )
+        self.assertEqual(
+            report_source_key(original), report_source_key(presented_elsewhere)
+        )
+        self.assertNotEqual(
+            report_source_key(original),
+            report_source_key(original.model_copy(update={"observed_at": 124})),
+        )
 
     def test_session_details_preserve_delimiters_and_provenance_after_restart(
         self,
@@ -681,38 +761,6 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(
             entry.repository, RemoteRepository(value="github.com/team/parser")
         )
-
-    def test_recall_requires_an_explicit_goal_at_task_start(self) -> None:
-        self.memory.close()
-        self.memory = Memory(
-            self.path, "fixture", clock=lambda: self.now, max_events=100
-        )
-        self.event("", event="intent", goal="Refactor parser tokenization")
-        for index in range(6):
-            self.event(f"Recent progress {index}")
-        for event in (
-            {"event": "tool_error", "goal": "Refactor parser tokenization"},
-            {"event": "progress", "progress": "Refactor parser tokenization"},
-            {"event": "intent", "detail": "Refactor parser tokenization"},
-            {"event": "intent", "goal": ""},
-        ):
-            with self.subTest(event=event):
-                self.assertEqual(
-                    self.memory.recall(
-                        build_recall_query(
-                            normalize_hook(
-                                {
-                                    "source": "codex",
-                                    "session": "one",
-                                    "repo": "/repo/parser",
-                                    **event,
-                                }
-                            ),
-                            repository=RemoteRepository(value="github.com/team/parser"),
-                        )
-                    ),
-                    [],
-                )
 
     def test_failure_facts_exclude_injected_diagnostics(self) -> None:
         self.event(
@@ -1277,6 +1325,53 @@ class MemoryTests(unittest.TestCase):
         finally:
             other.close()
 
+    def test_reflection_opportunity_survives_restart_without_source_mention(
+        self,
+    ) -> None:
+        identifier = SessionIdentity(source=SessionSource.CODEX, native_id="quiet")
+        self.memory.save_attention_history(
+            identifier, AttentionHistory(last_reflection_at=500)
+        )
+        self.memory.save_attention_history(
+            identifier, AttentionHistory(last_reflection_at=400)
+        )
+        self.memory.save_attention_history(identifier, AttentionHistory())
+        self.memory.close()
+        self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
+        self.assertEqual(
+            self.memory.load_attention_history()[identifier].last_reflection_at,
+            500,
+        )
+        self.assertEqual(self.memory.load_source_attention(), {})
+        other = Memory(self.path, "other-pet", clock=lambda: self.now)
+        try:
+            self.assertEqual(other.load_attention_history(), {})
+            self.memory.clear()
+            self.assertEqual(self.memory.load_attention_history(), {})
+        finally:
+            other.close()
+
+    def test_source_attention_survives_restart_and_is_pet_scoped(self) -> None:
+        self.memory.record_source_consideration(["source-one", "source-one"], 10)
+        self.memory.record_source_mentions(["source-one"], 20)
+        self.memory.record_source_mentions(["source-one"], 15)
+        self.memory.record_source_consideration(["source-one"], 5)
+        self.now = 2_000_000_000
+        self.memory.prune()
+        self.memory.close()
+        self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
+        self.assertEqual(
+            self.memory.load_source_attention(),
+            {"source-one": SourceAttention(considered_at=10, mentioned_at=20)},
+        )
+        other = Memory(self.path, "other-pet", clock=lambda: self.now)
+        try:
+            self.assertEqual(other.load_source_attention(), {})
+            self.memory.clear()
+            self.assertEqual(self.memory.load_source_attention(), {})
+        finally:
+            other.close()
+
     def test_version_changes_rebuild_local_memory_and_search(self) -> None:
         for version in (0, 6):
             with self.subTest(version=version):
@@ -1322,17 +1417,24 @@ class MemoryTests(unittest.TestCase):
                         "SELECT name FROM sqlite_master WHERE name='work_updates'"
                     ).fetchone()
                 )
-                self.event("Parser validation completed", goal="Validate parser")
+                self.ingest(
+                    HookEvent(
+                        source=SessionSource.CODEX,
+                        session="one",
+                        event=HookEventKind.INTENT,
+                        goal="Validate parser",
+                    )
+                )
                 self.assertEqual(
                     self.memory.db.execute(
-                        "SELECT COUNT(*) FROM events_fts WHERE events_fts MATCH 'Validate'"
+                        "SELECT COUNT(*) FROM work_reports_fts WHERE work_reports_fts MATCH 'Validate'"
                     ).fetchone()[0],
                     1,
                 )
                 self.memory.clear()
                 self.assertEqual(
                     self.memory.db.execute(
-                        "SELECT COUNT(*) FROM events_fts WHERE events_fts MATCH 'Validate'"
+                        "SELECT COUNT(*) FROM work_reports_fts WHERE work_reports_fts MATCH 'Validate'"
                     ).fetchone()[0],
                     0,
                 )

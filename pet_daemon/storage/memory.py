@@ -1,7 +1,7 @@
 import json
 import sqlite3
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from pathlib import Path
 
@@ -18,8 +18,14 @@ from ..repository_identity import (
 )
 from ..runtime import SwarmActivity
 from ..work import WorkIngestion
-from ..work.history import HistoryDetails, RecallQuery, SessionEntry
-from ..work.models import IntentEvidence, SessionReport
+from ..work.history import (
+    HistoryDetails,
+    SessionEntry,
+    report_prose,
+    report_search_terms,
+    report_source_key,
+)
+from ..work.models import IntentEvidence, ProgressEvidence, SessionReport
 from ..work.narrative import WorkNarrative
 from ..work.observations import (
     RepositoryObservation,
@@ -27,7 +33,7 @@ from ..work.observations import (
     SessionObservation,
 )
 from ..work.shared_work import WorkSubject, related_reports, shared_work
-from ..work.stories import collection_targets
+from ..work.stories import collection_targets, revision_key
 from .identities import (
     optional_session_from_row,
     optional_session_values,
@@ -44,8 +50,14 @@ log = get_logger("pet-daemon")
 
 class AttentionHistory(BaseModel):
     last_selected: float = 0
+    last_reflection_at: float | None = None
     considered_subject_revision: str | None = None
     considered_session_revision: str | None = None
+
+
+class SourceAttention(BaseModel):
+    considered_at: float | None = None
+    mentioned_at: float | None = None
 
 
 class EventRecord(BaseModel):
@@ -130,7 +142,7 @@ class Memory:
 
     def load_attention_history(self) -> dict[SessionIdentity, AttentionHistory]:
         rows = self.db.execute(
-            "SELECT subject_source,subject_session,last_selected,considered_subject_revision,considered_session_revision FROM attention_history WHERE pet=?",
+            "SELECT subject_source,subject_session,last_selected,last_reflection_at,considered_subject_revision,considered_session_revision FROM attention_history WHERE pet=?",
             (self.pet,),
         ).fetchall()
         return {
@@ -139,6 +151,39 @@ class Memory:
             )
             for row in rows
         }
+
+    def load_source_attention(self) -> dict[str, SourceAttention]:
+        rows = self.db.execute(
+            "SELECT source_key,considered_at,mentioned_at FROM attention_sources WHERE pet=?",
+            (self.pet,),
+        )
+        return {
+            row["source_key"]: SourceAttention.model_validate(dict(row)) for row in rows
+        }
+
+    def record_source_consideration(
+        self, keys: Sequence[str], timestamp: float | None = None
+    ) -> None:
+        considered_at = self.clock() if timestamp is None else timestamp
+        with self.transaction():
+            self.db.executemany(
+                """INSERT INTO attention_sources(pet,source_key,considered_at) VALUES (?,?,?)
+                ON CONFLICT(pet,source_key) DO UPDATE SET
+                considered_at=MAX(COALESCE(attention_sources.considered_at,excluded.considered_at),excluded.considered_at)""",
+                ((self.pet, key, considered_at) for key in dict.fromkeys(keys)),
+            )
+
+    def record_source_mentions(
+        self, keys: Sequence[str], timestamp: float | None = None
+    ) -> None:
+        mentioned_at = self.clock() if timestamp is None else timestamp
+        with self.transaction():
+            self.db.executemany(
+                """INSERT INTO attention_sources(pet,source_key,mentioned_at) VALUES (?,?,?)
+                ON CONFLICT(pet,source_key) DO UPDATE SET
+                mentioned_at=MAX(COALESCE(attention_sources.mentioned_at,excluded.mentioned_at),excluded.mentioned_at)""",
+                ((self.pet, key, mentioned_at) for key in dict.fromkeys(keys)),
+            )
 
     def load_narrative(self, subject_id: SessionIdentity) -> WorkNarrative | None:
         row = self.db.execute(
@@ -180,20 +225,163 @@ class Memory:
         )
         return tuple(SessionReport.model_validate_json(row["data"]) for row in rows)
 
-    def related_reports(
-        self, session: SessionIdentity, observed_at: float
+    def context_reports(
+        self, subject: WorkSubject | None, query: str | None = None
     ) -> tuple[SessionReport, ...]:
         state = self._work_repository.load()
         reports = self.narrative_reports(tuple(state.sessions))
-        return related_reports(state, session, reports, observed_at)
+        if subject is None:
+            ranked = self._recollection_sessions(query, state.aliases)
+            with_intent = {
+                state.aliases.get(report.payload.session, report.payload.session)
+                for report in reports
+                if isinstance(report.payload, IntentEvidence)
+            }
+            selected = next(
+                (identity for identity in ranked if identity in with_intent),
+                None,
+            )
+            if selected is None:
+                return ()
+        else:
+            selected = state.aliases.get(subject.id, subject.id)
+        if selected not in state.sessions:
+            return ()
+        own = tuple(
+            report
+            for report in reports
+            if state.aliases.get(report.payload.session, report.payload.session)
+            == selected
+            and report_prose(report)
+        )
+        latest = next(
+            (
+                report
+                for report in reversed(own)
+                if isinstance(report.payload, IntentEvidence | ProgressEvidence)
+            ),
+            None,
+        )
+        if latest is None:
+            return own
+
+        linked = related_reports(state, selected, reports, float("inf"))
+        sessions = {
+            selected,
+            *(
+                state.aliases.get(report.payload.session, report.payload.session)
+                for report in linked
+            ),
+        }
+        repository = latest.context.repository
+        payload = latest.payload
+        assert isinstance(payload, IntentEvidence | ProgressEvidence)
+        terms = report_search_terms(query if query is not None else payload.text)[:3]
+        if repository and terms and subject is not None:
+            expression = " OR ".join(f'"{term}"' for term in terms)
+            rows = self.db.execute(
+                """SELECT work_reports.data FROM work_reports_fts
+                JOIN work_reports ON work_reports.id=work_reports_fts.rowid
+                WHERE work_reports_fts MATCH ? AND work_reports.pet=?""",
+                (expression, self.pet),
+            )
+            for row in rows:
+                report = SessionReport.model_validate_json(row["data"])
+                if report.context.repository != repository:
+                    continue
+                matched = set(terms) & set(report_search_terms(report_prose(report)))
+                if len(matched) >= min(2, len(terms)):
+                    sessions.add(
+                        state.aliases.get(
+                            report.payload.session, report.payload.session
+                        )
+                    )
+        if subject is None:
+            other_reports = tuple(
+                report
+                for report in reports
+                if state.aliases.get(report.payload.session, report.payload.session)
+                in sessions
+                and state.aliases.get(report.payload.session, report.payload.session)
+                != selected
+                and report_prose(report)
+            )
+            return (*own, *other_reports)
+        return tuple(
+            report
+            for report in reports
+            if state.aliases.get(report.payload.session, report.payload.session)
+            in sessions
+            and report_prose(report)
+        )
+
+    def _recollection_sessions(
+        self,
+        query: str | None,
+        aliases: Mapping[SessionIdentity, SessionIdentity],
+    ) -> tuple[SessionIdentity, ...]:
+        terms = report_search_terms(query or "")[:8]
+        if not terms:
+            return ()
+        expression = " OR ".join(f'"{term}"' for term in terms)
+        rows = self.db.execute(
+            """SELECT work_reports.data FROM work_reports_fts
+            JOIN work_reports ON work_reports.id=work_reports_fts.rowid
+            WHERE work_reports_fts MATCH ? AND work_reports.pet=?""",
+            (expression, self.pet),
+        )
+        scores: dict[SessionIdentity, tuple[int, float]] = {}
+        for row in rows:
+            report = SessionReport.model_validate_json(row["data"])
+            matched = len(set(terms) & set(report_search_terms(report_prose(report))))
+            if not matched:
+                continue
+            identity = aliases.get(report.payload.session, report.payload.session)
+            score = (matched, report.observed_at)
+            if score > scores.get(identity, (0, 0)):
+                scores[identity] = score
+        ranked = sorted(
+            scores, key=lambda identity: (scores[identity], identity), reverse=True
+        )
+        return tuple(ranked)
+
+    def source_scope_revisions(self, keys: Sequence[str]) -> dict[str, str]:
+        """Invalidate conservatively on any report in a cited source's request scope."""
+        if not keys:
+            return {}
+        state = self._work_repository.load()
+        reports = self.narrative_reports(tuple(state.sessions))
+        assignments: dict[SessionIdentity, str] = {}
+        groups: dict[tuple[SessionIdentity, str], list[str]] = {}
+        scopes: dict[str, tuple[SessionIdentity, str]] = {}
+        for report in reports:
+            if not report_prose(report):
+                continue
+            origin = state.aliases.get(report.payload.session, report.payload.session)
+            key = report_source_key(report)
+            if isinstance(report.payload, IntentEvidence):
+                assignments[origin] = key
+            scope = origin, assignments.get(origin, "")
+            groups.setdefault(scope, []).append(key)
+            scopes[key] = scope
+        return {
+            key: revision_key(tuple(groups[scopes[key]]))
+            for key in keys
+            if key in scopes
+        }
 
     def save_attention_history(
         self, subject_id: SessionIdentity, history: AttentionHistory
     ) -> None:
         with self.transaction():
             self.db.execute(
-                """INSERT INTO attention_history VALUES (?,?,?,?,?,?,?) ON CONFLICT(pet,subject_source,subject_session) DO UPDATE SET
+                """INSERT INTO attention_history VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(pet,subject_source,subject_session) DO UPDATE SET
                 last_selected=excluded.last_selected,
+                last_reflection_at=CASE
+                    WHEN attention_history.last_reflection_at IS NULL THEN excluded.last_reflection_at
+                    WHEN excluded.last_reflection_at IS NULL THEN attention_history.last_reflection_at
+                    ELSE MAX(attention_history.last_reflection_at,excluded.last_reflection_at)
+                END,
                 considered_subject_revision=excluded.considered_subject_revision,
                 considered_session_revision=excluded.considered_session_revision,
                 updated_at=excluded.updated_at""",
@@ -201,6 +389,7 @@ class Memory:
                     self.pet,
                     *session_values(subject_id),
                     history.last_selected,
+                    history.last_reflection_at,
                     history.considered_subject_revision,
                     history.considered_session_revision,
                     self.clock(),
@@ -435,27 +624,6 @@ class Memory:
         )
         return EventRecord.model_validate(data)
 
-    def recall(self, request: RecallQuery | None, limit: int = 2) -> list[EventRecord]:
-        if request is None:
-            return []
-        query = " AND ".join('"' + term + '"' for term in request.terms)
-        excluded = [row.id for row in self.recent_events()]
-        placeholders = ",".join("?" for _ in excluded)
-        rows = self.db.execute(
-            f"""SELECT e.* FROM events_fts JOIN events e ON e.id=events_fts.rowid
-            WHERE events_fts MATCH ? AND e.pet=? AND e.repository_kind=? AND e.repository_value=? AND e.id NOT IN ({placeholders})
-            ORDER BY (e.source=? AND e.session=?) DESC, bm25(events_fts), e.id DESC LIMIT ?""",
-            (
-                query,
-                self.pet,
-                *repository_columns(request.repository),
-                *excluded,
-                *session_values(request.session),
-                limit,
-            ),
-        ).fetchall()
-        return [self._event_record(row) for row in rows]
-
     def projects(self, repos: Iterable[str]) -> list[ProjectRecord]:
         result = []
         for repo in list(dict.fromkeys(repos))[:3]:
@@ -586,6 +754,7 @@ class Memory:
                 "speech",
                 "contexts",
                 "attention_history",
+                "attention_sources",
                 "message_outcomes",
                 "work_narratives",
             ):

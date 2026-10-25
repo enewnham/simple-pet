@@ -2,7 +2,7 @@ import sqlite3
 
 from .transactions import transaction
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 
 MEMORY_SCHEMA = """
@@ -16,13 +16,6 @@ MEMORY_SCHEMA = """
             CREATE INDEX IF NOT EXISTS events_scope ON events(pet, working_directory, id);
             CREATE INDEX IF NOT EXISTS events_repository ON events(pet, repository_kind, repository_value, id);
             CREATE INDEX IF NOT EXISTS events_age ON events(timestamp);
-            CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(goal, content=events, content_rowid=id);
-            CREATE TRIGGER IF NOT EXISTS events_insert AFTER INSERT ON events BEGIN
-                INSERT INTO events_fts(rowid, goal) VALUES (new.id, new.goal);
-            END;
-            CREATE TRIGGER IF NOT EXISTS events_delete AFTER DELETE ON events BEGIN
-                INSERT INTO events_fts(events_fts, rowid, goal) VALUES ('delete', old.id, old.goal);
-            END;
             CREATE TABLE IF NOT EXISTS projects (
                 pet TEXT NOT NULL, repo TEXT NOT NULL, goal TEXT NOT NULL,
                 last_request TEXT NOT NULL, timestamp REAL NOT NULL,
@@ -51,6 +44,10 @@ WORK_SCHEMA = """
         kind TEXT NOT NULL, data TEXT NOT NULL,
         observed_at REAL NOT NULL);
     CREATE INDEX IF NOT EXISTS reports_session ON work_reports(pet,source,session,id);
+    CREATE VIRTUAL TABLE IF NOT EXISTS work_reports_fts USING fts5(prose);
+    CREATE TRIGGER IF NOT EXISTS work_reports_delete AFTER DELETE ON work_reports BEGIN
+        DELETE FROM work_reports_fts WHERE rowid=old.id;
+    END;
     CREATE TABLE IF NOT EXISTS work_aliases (
         pet TEXT NOT NULL, alias_source TEXT NOT NULL, alias_session TEXT NOT NULL, source TEXT NOT NULL, session TEXT NOT NULL,
         PRIMARY KEY(pet,alias_source,alias_session));
@@ -68,8 +65,13 @@ WORK_SCHEMA = """
 DELIVERY_SCHEMA = """
             CREATE TABLE IF NOT EXISTS attention_history (
                 pet TEXT NOT NULL, subject_source TEXT NOT NULL, subject_session TEXT NOT NULL, last_selected REAL NOT NULL,
+                last_reflection_at REAL,
                 considered_subject_revision TEXT, considered_session_revision TEXT,
                 updated_at REAL NOT NULL, PRIMARY KEY(pet,subject_source,subject_session));
+            CREATE TABLE IF NOT EXISTS attention_sources (
+                pet TEXT NOT NULL, source_key TEXT NOT NULL,
+                considered_at REAL, mentioned_at REAL,
+                PRIMARY KEY(pet,source_key));
             CREATE TABLE IF NOT EXISTS message_outcomes (
                 pet TEXT NOT NULL, message_id TEXT NOT NULL, outcome TEXT NOT NULL,
                 text TEXT NOT NULL, reason TEXT NOT NULL, timestamp REAL NOT NULL,
@@ -104,6 +106,7 @@ DROP_SCHEMA = """
     DROP TABLE IF EXISTS work_items;
     DROP TABLE IF EXISTS work_sessions;
     DROP TABLE IF EXISTS work_reports;
+    DROP TABLE IF EXISTS work_reports_fts;
     DROP TABLE IF EXISTS work_memberships;
     DROP TABLE IF EXISTS work_aliases;
     DROP TABLE IF EXISTS work_artifacts;
@@ -116,6 +119,7 @@ DROP_SCHEMA = """
     DROP TABLE IF EXISTS work_opportunities;
     DROP TABLE IF EXISTS work_surfacings;
     DROP TABLE IF EXISTS attention_history;
+    DROP TABLE IF EXISTS attention_sources;
     DROP TABLE IF EXISTS message_outcomes;
     DROP TABLE IF EXISTS work_updates;
     DROP TABLE IF EXISTS work_decisions;

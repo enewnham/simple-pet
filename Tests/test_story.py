@@ -24,6 +24,7 @@ from pet_daemon.domain import (
 from pet_daemon.identity import SessionIdentity, session_data
 from pet_daemon.storage import Memory
 from pet_daemon.work.evidence import CommentaryEvidence, UserIntent
+from pet_daemon.work.history import report_source_key
 from pet_daemon.work.models import ExecutionEvidence, IntentEvidence, ProgressEvidence
 from pet_daemon.work.narrative import (
     NarrativeStatement,
@@ -73,7 +74,9 @@ class StoryTests(unittest.TestCase):
             SessionObservation(session=identity, parent=parent, reports=reports)
         )
 
-    def prepared(self, *, target_bytes: int = 12000) -> WorkNarrativeRequest:
+    def prepared(
+        self, *, target_bytes: int = 12000, context: str | None = None
+    ) -> WorkNarrativeRequest:
         focus = session_snapshot(
             id=SessionIdentity(source=SessionSource.CODEX, native_id="root")
         )
@@ -88,6 +91,7 @@ class StoryTests(unittest.TestCase):
             context_sessions=(),
             reason=SpeechReason.ROUTINE,
             situation=SpeechSituation.ROUTINE,
+            context=context,
         )
         return require(
             prepare(
@@ -98,6 +102,26 @@ class StoryTests(unittest.TestCase):
                 target_bytes=target_bytes,
             )
         )
+
+    def test_explicit_recall_keeps_its_query_separate_from_current_intent(self) -> None:
+        root = SessionIdentity(source=SessionSource.CODEX, native_id="root")
+        self.add(
+            IntentEvidence(session=root, text="Check parser compatibility"),
+            ProgressEvidence(session=root, text="Parser compatibility checks passed"),
+            IntentEvidence(session=root, text="Investigate billing totals"),
+        )
+        question = "What did we report about parser compatibility?"
+        recalled = self.prepared(context=question)
+        other_query = self.prepared(context="What did we ask about billing?")
+        payload = json.loads(recalled.request["messages"][0]["content"])
+        self.assertEqual(payload["explicit_context"], question)
+        selected = payload["current_work"]["latest_request_source"]
+        self.assertEqual(
+            recalled.sources[selected]["text"], "Investigate billing totals"
+        )
+        self.assertEqual(recalled.sources, other_query.sources)
+        self.assertNotEqual(recalled.context_revision, other_query.context_revision)
+        self.assertEqual(self.memory.load_source_attention(), {})
 
     def test_story_sources_preserve_observation_time_across_later_requests(
         self,
@@ -338,7 +362,7 @@ class StoryTests(unittest.TestCase):
                 self.assertIn("Critical regression", payload)
                 self.assertLessEqual(len(payload.encode()), budget)
 
-    def test_tool_hooks_do_not_advance_the_selected_memory_cutoff(self) -> None:
+    def test_later_related_reports_remain_available_after_tool_hooks(self) -> None:
         root = SessionIdentity(source=SessionSource.CODEX, native_id="root")
         peer = SessionIdentity(source=SessionSource.CODEX, native_id="restoration")
         self.memory.work.clock = lambda: 1000
@@ -361,12 +385,12 @@ class StoryTests(unittest.TestCase):
             )
         )
         prepared = self.prepared()
-        self.assertNotIn(
+        self.assertIn(
             "Restoration checks passed.", prepared.request["messages"][0]["content"]
         )
         self.assertTrue(
-            all(
-                source.get("origin") != session_data(peer)
+            any(
+                source.get("origin") == session_data(peer)
                 for source in prepared.sources.values()
             )
         )
@@ -409,7 +433,7 @@ class StoryTests(unittest.TestCase):
         self.assertEqual(subject.story.sessions, ())
         self.memory.clock = lambda: 200000
         history = self.memory.load_attention_history()
-        original_reports = self.memory.related_reports(root, 200000)
+        original_reports = self.memory.context_reports(subject)
         first = self.prepared()
         payload = json.loads(first.request["messages"][0]["content"])
         evidence = payload["current_moment"]["evidence"]
@@ -436,8 +460,102 @@ class StoryTests(unittest.TestCase):
         )
         self.assertEqual(later_unfinished["age"], "3 days ago")
         self.assertEqual(first.sources, later.sources)
-        self.assertEqual(self.memory.related_reports(root, 200000), original_reports)
+        self.assertEqual(self.memory.context_reports(subject), original_reports)
         self.assertEqual(self.memory.load_attention_history(), history)
+
+    def test_later_related_result_changes_context_without_changing_selected_story(
+        self,
+    ) -> None:
+        root = SessionIdentity(source=SessionSource.CODEX, native_id="root")
+        peer = SessionIdentity(source=SessionSource.CODEX, native_id="peer")
+        ticket = "https://linear.app/team/issue/ENG-42/session-context"
+        self.add(
+            IntentEvidence(session=peer, text=f"Check storage for {ticket}"),
+            session=peer,
+        )
+        self.add(IntentEvidence(session=root, text=f"Continue work on {ticket}"))
+        first = self.prepared()
+        self.add(
+            ProgressEvidence(session=peer, text="Storage checks passed."),
+            session=peer,
+        )
+        second = self.prepared()
+        self.assertEqual(first.revision, second.revision)
+        self.assertNotEqual(first.context_revision, second.context_revision)
+        report = next(
+            report
+            for report in self.memory.context_reports(
+                next(
+                    item
+                    for item in self.memory.connected_work(sessions_snapshot())
+                    if item.id == root
+                )
+            )
+            if isinstance(report.payload, ProgressEvidence)
+            and report.payload.session == peer
+        )
+        self.assertIn(report_source_key(report), second.sources)
+        self.assertNotIn(report_source_key(report), first.sources)
+
+    def test_explicit_recollection_finds_retained_history_without_live_work(
+        self,
+    ) -> None:
+        root = SessionIdentity(source=SessionSource.CODEX, native_id="parser")
+        unrelated = SessionIdentity(source=SessionSource.CODEX, native_id="formatter")
+        self.memory.work.clock = lambda: 100
+        self.add(
+            IntentEvidence(session=root, text="Implement parser recovery"), session=root
+        )
+        self.memory.work.clock = lambda: 200
+        self.add(
+            ProgressEvidence(session=root, text="Parser recovery remains unverified."),
+            session=root,
+        )
+        self.memory.work.clock = lambda: 300
+        self.add(
+            ExecutionEvidence(
+                session=root,
+                event="turn_done",
+                outcome=ExecutionOutcome.SUCCESS,
+                tool_name=None,
+                progress="Parser recovery checks passed; task complete.",
+            ),
+            session=root,
+        )
+        self.memory.work.clock = lambda: 400
+        self.add(
+            IntentEvidence(session=unrelated, text="Review formatter colors"),
+            session=unrelated,
+        )
+        snapshot = capture_snapshot(sessions_snapshot(), work=())
+        selection = AttentionSelection(
+            subject=None,
+            focus_session=None,
+            context_sessions=(),
+            reason=SpeechReason.EXPLICIT,
+            situation=SpeechSituation.EXPLICIT,
+            context="What happened with parser recovery?",
+        )
+        first = require(
+            prepare(snapshot, selection, self.memory, self.cognition.request)
+        )
+        texts = {source.get("text") for source in first.sources.values()}
+        self.assertIn("Implement parser recovery", texts)
+        self.assertIn("Parser recovery remains unverified.", texts)
+        self.assertIn("Parser recovery checks passed; task complete.", texts)
+        self.assertNotIn("Review formatter colors", texts)
+        self.assertEqual(first.subject_id, root)
+        self.assertEqual(first.revision, "")
+        self.assertEqual(first.sources[first.latest_request_source]["observed_at"], 100)
+        self.assertIsNone(self.memory.load_narrative(root))
+        self.assertEqual(self.memory.load_source_attention(), {})
+        self.memory.clock = lambda: 2000
+        second = require(
+            prepare(snapshot, selection, self.memory, self.cognition.request)
+        )
+        self.assertEqual(first.context_revision, second.context_revision)
+        self.assertEqual(first.sources, second.sources)
+        self.assertEqual(self.memory.load_source_attention(), {})
 
     def test_child_alias_keeps_historical_report_assignments(self) -> None:
         self.add(

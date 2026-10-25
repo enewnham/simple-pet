@@ -1,0 +1,21 @@
+{
+  "name": "related_session_memory",
+  "review": "An ordinary request in a new related session receives retained parser decisions and reports without a recall question.",
+  "events": [
+    {
+      "packets": [
+        {"source": "codex", "session": "earlier", "event": "intent", "repo": "/fixture/parser", "repository": "github.com/team/parser", "goal": "Refine parser tokens."},
+        {"source": "codex", "session": "earlier", "event": "turn_done", "repo": "/fixture/parser", "repository": "github.com/team/parser", "progress": "Keep parser tokens immutable so quoted-field validation can reuse them."}
+      ]
+    },
+    {
+      "after_seconds": 7200,
+      "packets": [
+        {"source": "codex", "session": "followup", "event": "intent", "repo": "/fixture/parser", "repository": "github.com/team/parser", "goal": "Extend parser tokens for quoted fields."}
+      ],
+      "reason": "prompt",
+      "candidate_speech": "I'll keep those parser tokens immutable while extending quoted fields.",
+      "expected_speech": true
+    }
+  ]
+}

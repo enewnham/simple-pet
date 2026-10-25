@@ -95,6 +95,7 @@ class SpeechSituation(StrEnum):
     CHECK_IN_WAITING = "check_in_waiting"
     CHECK_IN_RUNNING = "check_in_running"
     CHECK_IN_QUIET = "check_in_quiet"
+    IDLE_REFLECTION = "idle_reflection"
 
 
 class DeliveryStatus(StrEnum):
