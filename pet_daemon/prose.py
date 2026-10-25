@@ -19,6 +19,24 @@ def exclude_speech(text: str, excluded: Sequence[str] = ()) -> str:
     )
 
 
+def _collapse_omissions(text: str) -> str:
+    lines = []
+    omitted = False
+    has_prose = False
+    for line in text.splitlines():
+        if line.strip() == _MARKER:
+            omitted = True
+        elif line.strip():
+            if omitted and has_prose:
+                lines.append(_MARKER)
+            lines.append(line)
+            omitted = False
+            has_prose = True
+        elif not omitted:
+            lines.append(line)
+    return "\n".join(lines).strip()
+
+
 def prose_text(text: str | None, excluded: Sequence[str] = ()) -> str:
     if not text:
         return ""
@@ -32,10 +50,14 @@ def prose_text(text: str | None, excluded: Sequence[str] = ()) -> str:
             delimiter = stripped[:3]
             if not fence:
                 fence = delimiter
+                paragraphs.append(_MARKER)
             elif delimiter == fence:
                 fence = ""
             continue
-        if fence or stripped.startswith(">") or line.startswith(("    ", "\t")):
+        if fence or stripped.startswith(">"):
+            continue
+        if line.startswith(("    ", "\t")):
+            paragraphs.append(_MARKER if stripped else "")
             continue
         separator = lines[index + 1].strip() if index + 1 < len(lines) else ""
         if "|" in stripped and re.fullmatch(
@@ -44,6 +66,7 @@ def prose_text(text: str | None, excluded: Sequence[str] = ()) -> str:
             table = True
         if table:
             if "|" in stripped:
+                paragraphs.append(_MARKER)
                 continue
             table = False
         if "|" in stripped and (
@@ -51,10 +74,11 @@ def prose_text(text: str | None, excluded: Sequence[str] = ()) -> str:
             or stripped.endswith("|")
             or re.fullmatch(r"[\s|:\-]+", stripped)
         ):
+            paragraphs.append(_MARKER)
             continue
         stripped = re.sub(r"^\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)", "", stripped)
         paragraphs.append(stripped)
-    return exclude_speech("\n".join(paragraphs), excluded)
+    return _collapse_omissions(exclude_speech("\n".join(paragraphs), excluded))
 
 
 def work_prose(text: str | None, limit: int = 800, excluded: Sequence[str] = ()) -> str:
@@ -77,4 +101,5 @@ def work_prose(text: str | None, limit: int = 800, excluded: Sequence[str] = ())
     excerpt = " ".join(complete)
     if not excerpt:
         excerpt = prose[:available].rsplit(" ", 1)[0]
-    return f"{excerpt} {_MARKER}".strip()[:limit]
+    suffix = "" if excerpt.endswith(_MARKER) else f" {_MARKER}"
+    return f"{excerpt}{suffix}".strip()[:limit]

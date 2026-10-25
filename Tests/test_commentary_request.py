@@ -10,6 +10,7 @@ from pet_daemon.attention import Attention, AttentionSelection
 from pet_daemon.commentary import Cognition
 from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.commentary.request import CommentaryPayload, CommentaryRequest
+from pet_daemon.commentary.story import prepare as prepare_story
 from pet_daemon.config import Config
 from pet_daemon.domain import (
     Activity,
@@ -30,6 +31,7 @@ from pet_daemon.repository_identity import RemoteRepository
 from pet_daemon.runtime import (
     ActiveTool,
     CareTrigger,
+    FailureSnapshot,
     HookEvent,
     HookEventKind,
     PetContext,
@@ -101,7 +103,7 @@ class ContextTests(unittest.TestCase):
             )
         )
         self.work: tuple[WorkSubject, ...] = ()
-        self.sessions = Sessions(lambda: 1000)
+        self.sessions = Sessions(lambda: 1000, wall_clock=lambda: 1000)
 
     def record_hook(self, hook: HookEvent) -> None:
         result = self.sessions.apply(hook)
@@ -118,6 +120,186 @@ class ContextTests(unittest.TestCase):
 
     def current_snapshot(self) -> PetContext:
         return capture_snapshot(self.snapshot, work=self.work)
+
+    def finished_work(
+        self, outcome: ExecutionOutcome = ExecutionOutcome.SUCCESS
+    ) -> None:
+        self.attention.wall_clock = lambda: 1000
+        self.record_hook(
+            HookEvent(
+                source=SessionSource.COMMAND,
+                session="parser",
+                event=HookEventKind.INTENT,
+                goal="Check parser compatibility",
+            )
+        )
+        self.record_hook(
+            HookEvent(
+                source=SessionSource.COMMAND,
+                session="parser",
+                event=HookEventKind.TURN_DONE,
+                progress="Parser checks passed; desktop behavior remains unverified.",
+                outcome=outcome,
+            )
+        )
+        self.snapshot = self.sessions.activity()
+        self.work = self.memory.connected_work(self.snapshot)
+
+    def test_execution_descriptions_preserve_results_and_validity_facts(self) -> None:
+        cases = (
+            (ExecutionOutcome.SUCCESS, "without a reported execution error"),
+            (ExecutionOutcome.ERROR, "with a reported execution error"),
+            (ExecutionOutcome.CANCELLED, "was cancelled"),
+            (ExecutionOutcome.STALE, "its result is unknown"),
+        )
+        for outcome, meaning in cases:
+            with self.subTest(outcome=outcome):
+                self.finished_work(outcome)
+                prepared = self.prepare(SpeechReason.COMPLETION)
+                moment = self.payload(prepared)["current_moment"]
+                self.assertEqual(moment["event"], "The current work segment ended.")
+                self.assertIn(meaning, str(moment["execution"]))
+                if outcome == ExecutionOutcome.SUCCESS:
+                    self.assertIn(
+                        "does not establish task completion", str(moment["execution"])
+                    )
+                self.assertNotIn("outcome", moment)
+                self.assertEqual(
+                    prepared.conditions.payload["current_moment"]["outcome"], outcome
+                )
+                self.assertTrue(prepared.conditions.is_valid(self.current_snapshot()))
+                self.update_session(outcome=None, turn_active=True)
+                self.assertFalse(prepared.conditions.is_valid(self.current_snapshot()))
+
+    def test_failed_operations_describe_the_activity_without_diagnosing_a_cause(
+        self,
+    ) -> None:
+        for activity, meaning in (
+            (Activity.TESTING, "test execution"),
+            (Activity.SOURCE, "coding tool execution"),
+        ):
+            with self.subTest(activity=activity):
+                self.update_session(
+                    failure=FailureSnapshot(
+                        activity=activity,
+                        count=1,
+                        goal="Check compatibility",
+                        resolved=False,
+                        current_turn=True,
+                        seconds_ago=0,
+                    )
+                )
+                moment = self.payload(self.prepare(SpeechReason.FAILURE))[
+                    "current_moment"
+                ]
+                self.assertEqual(moment["event"], "An operation reported a failure.")
+                self.assertEqual(moment["operation"], meaning)
+                self.assertNotIn("cause", moment)
+
+    def test_current_report_and_its_cached_paraphrase_are_sent_once(self) -> None:
+        self.finished_work()
+        snapshot = self.current_snapshot()
+        selection = self.attention.select(snapshot, SpeechReason.COMPLETION)
+        story_request = prepare_story(
+            snapshot, selection, self.memory, self.cognition.request
+        )
+        assert story_request is not None
+        report_ids = tuple(
+            identifier
+            for identifier, source in story_request.sources.items()
+            if source["kind"] in ("reported_progress", "turn_ended")
+        )
+        self.assertEqual(len(report_ids), 2)
+        narrative = WorkNarrative(
+            subject_id=story_request.subject_id,
+            revision=story_request.revision,
+            intent=NarrativeStatement(
+                text="Check parser compatibility.",
+                sources=(story_request.latest_request_source,),
+            ),
+            progress=(
+                NarrativeStatement(
+                    text="I verified compatibility; the desktop remains unverified.",
+                    sources=report_ids,
+                ),
+            ),
+            sources=story_request.sources,
+        )
+        prepared = self.cognition.prompts.prepare(
+            snapshot, selection, self.cognition.request, narrative=narrative
+        )
+        payload = self.payload(prepared)
+        self.assertEqual(
+            payload["current_moment"]["reported_progress"],
+            "Parser checks passed; desktop behavior remains unverified.",
+        )
+        self.assertFalse(
+            any(
+                "reported_progress" in item
+                for item in payload.get("earlier_context", [])
+            )
+        )
+        self.assertTrue(prepared.conditions.is_valid(snapshot))
+
+    def test_truncated_report_keeps_a_summary_of_the_omitted_result(self) -> None:
+        self.finished_work()
+        self.record_hook(
+            HookEvent(
+                source=SessionSource.COMMAND,
+                session="parser",
+                event=HookEventKind.INTENT,
+                goal="Check desktop compatibility",
+            )
+        )
+        report = "Checked parser compatibility. " * 22 + "Desktop check failed."
+        self.record_hook(
+            HookEvent(
+                source=SessionSource.COMMAND,
+                session="parser",
+                event=HookEventKind.TURN_DONE,
+                progress=report,
+            )
+        )
+        self.snapshot = self.sessions.activity()
+        self.work = self.memory.connected_work(self.snapshot)
+        snapshot = self.current_snapshot()
+        selection = self.attention.select(snapshot, SpeechReason.COMPLETION)
+        story_request = prepare_story(
+            snapshot, selection, self.memory, self.cognition.request
+        )
+        assert story_request is not None
+        report_ids = tuple(
+            identifier
+            for identifier, source in story_request.sources.items()
+            if source.get("text") == report
+        )
+        self.assertEqual(len(report_ids), 2)
+        narrative = WorkNarrative(
+            subject_id=story_request.subject_id,
+            revision=story_request.revision,
+            intent=NarrativeStatement(
+                text="Check desktop compatibility.",
+                sources=(story_request.latest_request_source,),
+            ),
+            progress=(
+                NarrativeStatement(text="Desktop check failed.", sources=report_ids),
+            ),
+            sources=story_request.sources,
+        )
+        prepared = self.cognition.prompts.prepare(
+            snapshot, selection, self.cognition.request, narrative=narrative
+        )
+        payload = self.payload(prepared)
+        excerpt = payload["current_moment"]["reported_progress"]
+        assert isinstance(excerpt, str)
+        self.assertNotIn("Desktop check failed.", excerpt)
+        self.assertTrue(
+            any(
+                item.get("reported_progress") == "Desktop check failed."
+                for item in payload["earlier_context"]
+            )
+        )
+        self.assertTrue(prepared.conditions.is_valid(snapshot))
 
     def prepare(
         self, reason: SpeechReason = SpeechReason.ROUTINE, context: str | None = None
@@ -477,7 +659,7 @@ class ContextTests(unittest.TestCase):
             payload,
             {
                 "current_moment": {
-                    "kind": "explicit_context",
+                    "event": "The developer supplied context for a reaction.",
                     "text": "Inspect the parser result",
                 }
             },
@@ -772,7 +954,9 @@ class ContextTests(unittest.TestCase):
             progress="Finished an older task",
         )
         moment = self.payload(self.prepare())["current_moment"]
-        self.assertEqual(moment["kind"], "input_requested")
+        self.assertEqual(
+            moment["event"], "The work is waiting for an answer to a question."
+        )
         self.assertEqual(moment["reported_progress"], "Which examples should I use?")
         self.update_session(
             waiting_kind=WaitingKind.PERMISSION,
@@ -780,7 +964,10 @@ class ContextTests(unittest.TestCase):
             waiting_tool="Run the local browser check",
         )
         moment = self.payload(self.prepare())["current_moment"]
-        self.assertEqual(moment["kind"], "permission_request")
+        self.assertEqual(
+            moment["event"],
+            "The work is waiting for the developer to approve an operation.",
+        )
         self.assertEqual(moment["tool"], "Run the local browser check")
         self.assertNotIn("reported_progress", moment)
 
@@ -1121,9 +1308,16 @@ class ContextTests(unittest.TestCase):
             snapshot, selection, self.cognition.request
         )
         moment = self.payload(prepared)["current_moment"]
-        self.assertEqual(moment["kind"], "work_update")
-        self.assertEqual(moment["state"], "quiet")
-        self.assertEqual(moment["outcome"], "cancelled")
+        self.assertEqual(
+            moment["event"], "An observation of the selected work is available."
+        )
+        self.assertEqual(
+            moment["activity"], "No current execution is confirmed for this work."
+        )
+        self.assertEqual(
+            moment["execution"],
+            "The work segment was cancelled. The report may describe partial progress.",
+        )
 
     def test_running_check_in_omits_an_unknown_tool_name(self) -> None:
         self.update_session(
@@ -1197,8 +1391,11 @@ class ContextTests(unittest.TestCase):
         )
         earlier = self.payload(self.prepare())["earlier_context"]
         self.assertEqual(len(earlier), 2)
-        self.assertEqual(earlier[0]["outcome"], "cancelled")
-        self.assertEqual(earlier[1]["outcome"], "cancelled")
+        self.assertEqual(
+            earlier[0]["execution"],
+            "The work segment was cancelled. The report may describe partial progress.",
+        )
+        self.assertEqual(earlier[1]["execution"], earlier[0]["execution"])
         self.assertEqual(earlier[1]["scope"], "related task")
 
     def test_followup_keeps_its_prior_request_ahead_of_optional_child_reports(

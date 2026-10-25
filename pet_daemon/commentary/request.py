@@ -28,6 +28,7 @@ from ..work.evidence import (
 from ..work.narrative import NarrativeStatement, WorkNarrative, semantic_revision
 from ..work.stories import SessionContribution, WorkStory
 from .contracts import ModelRequest, RequestFactory
+from .observations import describe_observation
 
 INSTRUCTIONS = """
 <role>
@@ -59,10 +60,31 @@ reaction to offer, silence is appropriate.
 React to one meaningful detail in the selected moment. Follow the persona for personality
 and humor. Do not recite a status report. Omit publication mechanics, PR details, commit
 hashes, and branch names.
+React to the work rather than answering the developer's technical question or evaluating
+their explanation. A new message does not by itself establish that work has started.
+Read short follow-ups with the preceding exchange. Preserve the difference between a
+proposal, an accepted direction, and a reported result. Leave ambiguous intent uncertain.
+An execution ending does not establish that the requested task is complete. A reported
+result establishes only what the report says. [omitted] marks excluded content and cannot
+supply facts about that content.
 </observations>
+
+<examples>
+These examples illustrate factual scope and conversational behavior. Use the supplied
+persona for expression and personality rather than copying the examples' wording.
+
+Observation: The developer asks to investigate a behavior. No result is reported.
+Reply: "I'll look into that behavior."
+
+Observation: A report says a check passed. Other work remains unverified.
+Reply: "That check passed."
+
+Observation: The work is waiting for an answer to a question.
+Reply: "I still need that detail."
+</examples>
 """.strip()
 SITUATIONS: dict[SpeechSituation, str] = {
-    SpeechSituation.PROMPT: "Briefly acknowledge the latest request and what we are starting. Express intent using current_work.",
+    SpeechSituation.PROMPT: "React briefly to the latest message in the context of the preceding exchange. Express supported intent using current_work without answering technical questions or assuming work has started.",
     SpeechSituation.ROUTINE: "React briefly to the change in activity or progress.",
     SpeechSituation.COMPLETION: "React briefly to the result of this work segment.",
     SpeechSituation.FAILURE: "React briefly to the observed failed call.",
@@ -166,11 +188,6 @@ def _add_earlier(
     scope_text = work_prose(scope, 200, excluded)
     if scope_text:
         item["scope"] = scope_text
-    for previous in earlier:
-        if {key: value for key, value in previous.items() if key != "outcome"} == item:
-            if outcome is not None:
-                previous["outcome"] = outcome
-            return
     if outcome is not None:
         item["outcome"] = outcome
     earlier.append(item)
@@ -360,7 +377,7 @@ def _story_reports(
                 default=None,
             )
         )
-        reports = [record for record in activity if _reported_progress(record)]
+        reports = _distinct_reports(activity)
         selected_report = reports[-1] if reports and origin == selected_origin else None
         for record in reports:
             text = _reported_progress(record)
@@ -385,6 +402,38 @@ def _story_reports(
                     _reported_outcome(record),
                 )
     return current_report, current_observed_at
+
+
+def _distinct_reports(
+    activity: tuple[CommentaryEvidence, ...],
+) -> list[CommentaryEvidence]:
+    reports: list[CommentaryEvidence] = []
+    positions: dict[tuple[float, str], int] = {}
+    for record in activity:
+        text = _reported_progress(record)
+        if not text:
+            continue
+        if record.observed_at is None:
+            reports.append(record)
+            continue
+        key = (record.observed_at, text)
+        index = positions.get(key)
+        if index is None:
+            positions[key] = len(reports)
+            reports.append(record)
+            continue
+        previous = reports[index]
+        outcome = _reported_outcome(record)
+        previous_outcome = _reported_outcome(previous)
+        if record.context != previous.context or (
+            outcome is not None
+            and previous_outcome is not None
+            and outcome != previous_outcome
+        ):
+            reports.append(record)
+        elif isinstance(record.details, ExecutionStatus):
+            reports[index] = record
+    return reports
 
 
 def commentary_facts(
@@ -518,6 +567,17 @@ def stable_payload(payload: CommentaryPayload) -> CommentaryPayload:
     return result
 
 
+def model_payload(payload: CommentaryPayload) -> CommentaryPayload:
+    result = deepcopy(payload)
+    if "current_moment" in result:
+        result["current_moment"] = describe_observation(result["current_moment"])
+    if "earlier_context" in result:
+        result["earlier_context"] = [
+            describe_observation(item) for item in result["earlier_context"]
+        ]
+    return result
+
+
 class SpeechConditions(BaseModel):
     selection: AttentionSelection
     payload: CommentaryPayload
@@ -638,6 +698,45 @@ def _narrative_item(
     return item
 
 
+def _current_report_sources(
+    selection: AttentionSelection,
+    narrative: WorkNarrative,
+    moment: JSONObject,
+    excluded: Sequence[str],
+) -> set[str]:
+    if selection.subject is None or not moment.get("reported_progress"):
+        return set()
+    story = selection.subject.story
+    origin = selection.update.session if selection.update else story.id
+    activity = (
+        story.activity
+        if origin == story.id
+        else next(
+            (child.activity for child in story.sessions if child.session == origin), ()
+        )
+    )
+    reports = _distinct_reports(activity)
+    current = reports[-1] if reports else None
+    if current is None or current.observed_at is None:
+        return set()
+    text = _reported_progress(current)
+    if work_prose(text, len(text), excluded) != moment["reported_progress"]:
+        return set()
+    return {
+        identifier
+        for identifier, source in narrative.sources.items()
+        if source.get("kind") in ("reported_progress", "turn_ended")
+        and source.get("text") == text
+        and source.get("observed_at") == current.observed_at
+        and source.get("origin")
+        in (
+            (None, session_data(origin))
+            if origin == story.id
+            else (session_data(origin),)
+        )
+    }
+
+
 class PromptBuilder:
     def __init__(self, config: Config, clock: Callable[[], float]) -> None:
         self.config = config
@@ -690,12 +789,20 @@ class PromptBuilder:
             if intent and not child_update:
                 work["story"] = intent
             earlier = payload.setdefault("earlier_context", [])
+            current_sources = _current_report_sources(
+                selection, narrative, payload.get("current_moment", {}), excluded
+            )
             for field, statements in (
                 ("request", (narrative.intent,) if child_update else ()),
                 ("decision", narrative.decisions),
                 ("reported_progress", narrative.progress),
             ):
                 for statement in statements:
+                    if (
+                        field == "reported_progress"
+                        and set(statement.sources) <= current_sources
+                    ):
+                        continue
                     item = _narrative_item(
                         field,
                         statement,
@@ -743,12 +850,16 @@ class PromptBuilder:
             candidate["earlier_context"] = [
                 earlier[item] for item in sorted((*included, index))
             ]
-            request = make_request(candidate, system, speech_required=speech_required)
+            request = make_request(
+                model_payload(candidate), system, speech_required=speech_required
+            )
             if encoded_size(request) >= self.config.prompt_target_bytes:
                 break
             selected = candidate
             included.append(index)
-        request = make_request(selected, system, speech_required=speech_required)
+        request = make_request(
+            model_payload(selected), system, speech_required=speech_required
+        )
         return CommentaryRequest(
             selection=selection,
             request=request,

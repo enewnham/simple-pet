@@ -227,7 +227,8 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_custom_persona_keeps_shared_work_identity(self) -> None:
-        self.config.persona = "You are a gentle, curious woodland companion."
+        persona = "You are a gentle, curious woodland companion."
+        self.config.persona = persona
         await self.generate_commentary()
         prompt = self.requests[-1][1]["system"][0]["text"]
         self.assertTrue(
@@ -237,6 +238,11 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("snarky", prompt)
         self.assertEqual(prompt.split("\n\n", 1)[1], INSTRUCTIONS)
         self.assertIn("The supplied tasks and work are yours.", prompt)
+        self.assertGreater(prompt.index("<examples>"), prompt.index("</persona>"))
+        self.assertEqual(self.config.persona, persona)
+        for message in self.requests[-1][1]["messages"]:
+            self.assertNotIn("<examples>", message["content"])
+            self.assertNotIn("Reply:", message["content"])
         self.assertEqual(
             self.requests[-1][1]["system"][0]["cache_control"]["ttl"], "1h"
         )
@@ -275,7 +281,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sends_only_the_instruction_for_the_current_reason(self) -> None:
         directions = {
-            SpeechReason.PROMPT: "Briefly acknowledge the latest request and what we are starting. Express intent using current_work.",
+            SpeechReason.PROMPT: "React briefly to the latest message in the context of the preceding exchange. Express supported intent using current_work without answering technical questions or assuming work has started.",
             SpeechReason.ROUTINE: "React briefly to the change in activity or progress.",
             SpeechReason.COMPLETION: "React briefly to the result of this work segment.",
             SpeechReason.FAILURE: "React briefly to the observed failed call.",
@@ -389,7 +395,10 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                     "<request>\n" + direction + "\n</request>",
                 )
         payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
-        self.assertEqual(payload["current_moment"]["state"], "working")
+        self.assertEqual(
+            payload["current_moment"]["activity"],
+            "Execution is active for this work.",
+        )
 
     async def test_click_keeps_active_work_instruction_when_sessions_are_omitted(
         self,
@@ -428,7 +437,10 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         await self.generate_for_context(snapshot, SpeechReason.CLICK)
         body = self.requests[-1][1]
         payload = json.loads(body["messages"][0]["content"])
-        self.assertEqual(payload["current_moment"]["state"], "working")
+        self.assertEqual(
+            payload["current_moment"]["activity"],
+            "Execution is active for this work.",
+        )
         self.assertNotIn("other_sessions", payload)
         self.assertEqual(
             body["system"][1]["text"],
@@ -484,7 +496,10 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             payload["current_moment"]["reported_progress"],
             "Choose eager or lazy parsing",
         )
-        self.assertEqual(payload["current_moment"]["kind"], "input_requested")
+        self.assertEqual(
+            payload["current_moment"]["event"],
+            "The work is waiting for an answer to a question.",
+        )
         self.assertNotIn("other_sessions", payload)
         direction = body["system"][1]["text"]
         self.assertIn("React briefly to the supplied wait.", direction)
@@ -516,7 +531,9 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         await self.generate_commentary(SpeechReason.CLICK)
         body = self.requests[-1][1]
         payload = json.loads(body["messages"][0]["content"])
-        self.assertEqual(payload["current_moment"]["kind"], "waiting")
+        self.assertEqual(
+            payload["current_moment"]["event"], "The work is waiting for input."
+        )
         self.assertNotIn("reported_progress", payload["current_moment"])
         self.assertIn(
             "Do not invent obligations for the developer.",
@@ -897,7 +914,14 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 self.responses.append(({"speak": "A little stretch."}, "end_turn"))
                 await self.generate_for_context(snapshot, reason)
                 payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
-                self.assertEqual(payload, {"current_moment": {"kind": "quiet_time"}})
+                self.assertEqual(
+                    payload,
+                    {
+                        "current_moment": {
+                            "event": "There is no confirmed active work to react to."
+                        }
+                    },
+                )
                 self.assertNotIn("Old checklist", json.dumps(payload))
                 self.assertNotIn("Old task report", json.dumps(payload))
                 self.assertNotIn("A recent spoken line", json.dumps(payload))
