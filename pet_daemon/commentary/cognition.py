@@ -119,6 +119,7 @@ class Cognition:
         if (
             existing is not None
             and existing.revision == narrative_request.revision
+            and existing.sources == narrative_request.sources
             and narrative_request.latest_request_source in existing.intent.sources
         ):
             return existing

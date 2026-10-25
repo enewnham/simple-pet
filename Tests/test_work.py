@@ -250,7 +250,7 @@ class WorkTests(unittest.TestCase):
             ReportedProgress(reported_progress="Covered escapes"),
         )
 
-    def test_explicit_alias_keeps_one_family_with_the_latest_report(
+    def test_explicit_alias_keeps_one_session_with_the_latest_report(
         self,
     ) -> None:
         sessions = Sessions(lambda: self.now)
@@ -348,12 +348,19 @@ class WorkTests(unittest.TestCase):
         )
         subjects = self.memory.connected_work(sessions.activity())
         self.assertEqual(
-            tuple(subject.id for subject in subjects),
-            (SessionIdentity(source=SessionSource.CODEX, native_id="b"),),
+            {subject.id for subject in subjects},
+            {
+                SessionIdentity(source=SessionSource.CODEX, native_id="b"),
+                SessionIdentity(source=SessionSource.CODEX, native_id="child"),
+            },
         )
-        story = subjects[0].story
+        story = next(
+            subject.story for subject in subjects if subject.id.native_id == "b"
+        )
         self.assertEqual(story.intent, "Refined parser goal")
-        self.assertEqual(story.sessions[0].scope, "Check escapes")
+        child = next(subject for subject in subjects if subject.id.native_id == "child")
+        self.assertEqual(child.story.intent, "Check escapes")
+        self.assertEqual(child.sessions, (child.id,))
         reports = [
             record.details
             for record in story.activity
@@ -831,11 +838,16 @@ class WorkTests(unittest.TestCase):
 
         subjects = self.memory.connected_work(self.sessions.activity())
         self.assertEqual(
-            tuple(subject.id for subject in subjects),
-            (SessionIdentity(source=SessionSource.CODEX, native_id="root"),),
+            {subject.id for subject in subjects},
+            {
+                SessionIdentity(source=SessionSource.CODEX, native_id="root"),
+                SessionIdentity(source=SessionSource.CODEX, native_id="native"),
+            },
         )
-        child = subjects[0].story.sessions[0]
-        self.assertEqual(child.scope, "Cover escapes")
+        child = next(
+            subject.story for subject in subjects if subject.id.native_id == "native"
+        )
+        self.assertEqual(child.intent, "Cover escapes")
         report = next(
             record
             for record in child.activity

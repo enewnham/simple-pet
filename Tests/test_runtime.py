@@ -645,7 +645,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("repetition", payload)
         self.assertEqual(
             payload["current_moment"],
-            {"kind": "explicit_context", "text": "Look at the parser"},
+            {
+                "event": "The developer supplied context for a reaction.",
+                "text": "Look at the parser",
+            },
         )
 
     async def test_clear_speech_discards_pending_remark_and_preserves_session_context(
@@ -2153,7 +2156,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         moment = json.loads(body["messages"][0]["content"])["current_moment"]
-        self.assertEqual(moment, {"kind": "failed_call", "operation": "testing"})
+        self.assertEqual(
+            moment,
+            {
+                "event": "An operation reported a failure.",
+                "operation": "test execution",
+            },
+        )
 
     async def test_failed_renderer_delivery_is_absent_from_memory(self) -> None:
         Path(self.config.overlay_socket).unlink()
@@ -2179,7 +2188,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         speech = await self.packet(lambda packet: "text" in packet, timeout=2)
         snapshot = json.loads(self.requests[0]["messages"][-1]["content"])
         self.assertEqual(request_reason(self.requests[-1]), "completion")
-        self.assertEqual(snapshot["current_moment"]["outcome"], "success")
+        self.assertEqual(
+            snapshot["current_moment"]["execution"],
+            "The work segment ended without a reported execution error. This alone does not establish task completion.",
+        )
         self.assertEqual(
             snapshot["current_moment"]["reported_progress"], "Checks passed"
         )
@@ -2300,7 +2312,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.entered.wait(), 10)
         snapshot = json.loads(self.requests[0]["messages"][-1]["content"])
         self.assertEqual(request_reason(self.requests[0]), "check_in")
-        self.assertEqual(snapshot["current_moment"]["kind"], "waiting")
+        self.assertEqual(
+            snapshot["current_moment"]["event"], "The work is waiting for input."
+        )
         self.event("progress", source="claude", progress="Investigating the strategy")
         await self.wait_for(
             lambda: (
@@ -2350,7 +2364,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         snapshot = json.loads(self.requests[0]["messages"][-1]["content"])
         self.assertEqual(request_reason(self.requests[-1]), "check_in")
-        self.assertEqual(snapshot["current_moment"]["kind"], "waiting")
+        self.assertEqual(
+            snapshot["current_moment"]["event"], "The work is waiting for input."
+        )
         self.assertNotIn("activity", snapshot)
         self.assertEqual(snapshot["current_moment"]["elapsed"], "less than a minute")
         self.assertEqual(speech["text"], self.speech)
@@ -2636,7 +2652,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.comment(SpeechReason.FAILURE)
         snapshot = json.loads(self.requests[-1]["messages"][-1]["content"])
         self.assertEqual(
-            snapshot["current_moment"], {"kind": "failed_call", "operation": "command"}
+            snapshot["current_moment"],
+            {
+                "event": "An operation reported a failure.",
+                "operation": "command execution",
+            },
         )
         self.assertNotIn("Exit code", json.dumps(snapshot))
 

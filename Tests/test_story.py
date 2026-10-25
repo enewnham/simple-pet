@@ -78,7 +78,9 @@ class StoryTests(unittest.TestCase):
             id=SessionIdentity(source=SessionSource.CODEX, native_id="root")
         )
         swarm = sessions_snapshot(focus)
-        subject = self.memory.connected_work(swarm)[0]
+        subject = next(
+            item for item in self.memory.connected_work(swarm) if item.id == focus.id
+        )
         snapshot = capture_snapshot(swarm, work=(subject,))
         selection = AttentionSelection(
             subject=subject,
@@ -336,13 +338,115 @@ class StoryTests(unittest.TestCase):
                 self.assertIn("Critical regression", payload)
                 self.assertLessEqual(len(payload.encode()), budget)
 
-    def test_child_alias_keeps_assignment_at_report_time(self) -> None:
+    def test_tool_hooks_do_not_advance_the_selected_memory_cutoff(self) -> None:
+        root = SessionIdentity(source=SessionSource.CODEX, native_id="root")
+        peer = SessionIdentity(source=SessionSource.CODEX, native_id="restoration")
+        self.memory.work.clock = lambda: 1000
+        self.add(IntentEvidence(session=root, text="Implement session storage"))
+        self.memory.work.clock = lambda: 1100
+        self.add(
+            IntentEvidence(session=peer, text="Restore stored sessions"),
+            ProgressEvidence(session=peer, text="Restoration checks passed."),
+            session=peer,
+            parent=root,
+        )
+        self.memory.work.clock = lambda: 1200
+        self.add(
+            ExecutionEvidence(
+                session=root,
+                event="tool_start",
+                outcome=None,
+                tool_name="Bash",
+                progress=None,
+            )
+        )
+        prepared = self.prepared()
+        self.assertNotIn(
+            "Restoration checks passed.", prepared.request["messages"][0]["content"]
+        )
+        self.assertTrue(
+            all(
+                source.get("origin") != session_data(peer)
+                for source in prepared.sources.values()
+            )
+        )
+
+    def test_related_history_retains_old_decisions_and_unfinished_work(self) -> None:
+        root = SessionIdentity(source=SessionSource.CODEX, native_id="root")
+        storage = SessionIdentity(source=SessionSource.CODEX, native_id="storage")
+        restoration = SessionIdentity(
+            source=SessionSource.CODEX, native_id="restoration"
+        )
+        unrelated = SessionIdentity(source=SessionSource.CODEX, native_id="unrelated")
+        ticket = "https://linear.app/team/issue/ENG-42/session-context"
+        decision = f"Keep session metadata and reports in one transaction for {ticket}"
+        assignment = f"Restore session records for {ticket}"
+        unfinished = "Restoration remains unfinished pending cancellation checks."
+        self.memory.work.clock = lambda: 27000
+        self.add(IntentEvidence(session=storage, text=decision), session=storage)
+        self.memory.work.clock = lambda: 27010
+        self.add(
+            IntentEvidence(session=restoration, text=assignment),
+            session=restoration,
+        )
+        self.memory.work.clock = lambda: 27020
+        self.add(
+            ProgressEvidence(session=restoration, text=unfinished),
+            session=restoration,
+        )
+        self.add(
+            IntentEvidence(session=unrelated, text="Review an unrelated formatter"),
+            ProgressEvidence(session=unrelated, text="Formatter work remains blocked."),
+            session=unrelated,
+        )
+        self.memory.work.clock = lambda: 200000
+        self.add(IntentEvidence(session=root, text=f"Continue work on {ticket}"))
+        subject = next(
+            item
+            for item in self.memory.connected_work(sessions_snapshot())
+            if item.id == root
+        )
+        self.assertEqual(subject.story.sessions, ())
+        self.memory.clock = lambda: 200000
+        history = self.memory.load_attention_history()
+        original_reports = self.memory.related_reports(root, 200000)
+        first = self.prepared()
+        payload = json.loads(first.request["messages"][0]["content"])
+        evidence = payload["current_moment"]["evidence"]
+        decision_item = next(item for item in evidence if item.get("text") == decision)
+        unfinished_item = next(
+            item for item in evidence if item.get("text") == unfinished
+        )
+        self.assertEqual(decision_item["scope"], decision)
+        self.assertEqual(decision_item["reporter"], session_data(storage))
+        self.assertEqual(decision_item["age"], "2 days ago")
+        self.assertEqual(unfinished_item["scope"], assignment)
+        self.assertEqual(unfinished_item["reporter"], session_data(restoration))
+        self.assertEqual(unfinished_item["age"], "2 days ago")
+        self.assertNotIn("Formatter work remains blocked.", json.dumps(payload))
+        self.assertEqual(first.sources[decision_item["id"]]["observed_at"], 27000)
+        self.assertEqual(first.sources[unfinished_item["id"]]["observed_at"], 27020)
+        self.memory.clock = lambda: 286400
+        later = self.prepared()
+        later_payload = json.loads(later.request["messages"][0]["content"])
+        later_unfinished = next(
+            item
+            for item in later_payload["current_moment"]["evidence"]
+            if item.get("text") == unfinished
+        )
+        self.assertEqual(later_unfinished["age"], "3 days ago")
+        self.assertEqual(first.sources, later.sources)
+        self.assertEqual(self.memory.related_reports(root, 200000), original_reports)
+        self.assertEqual(self.memory.load_attention_history(), history)
+
+    def test_child_alias_keeps_historical_report_assignments(self) -> None:
         self.add(
             IntentEvidence(
                 session=SessionIdentity(source=SessionSource.CODEX, native_id="root"),
                 text="Improve parser",
             )
         )
+        self.memory.work.clock = lambda: 800
         self.add(
             IntentEvidence(
                 session=SessionIdentity(source=SessionSource.CODEX, native_id="old"),
@@ -351,6 +455,7 @@ class StoryTests(unittest.TestCase):
             session=SessionIdentity(source=SessionSource.CODEX, native_id="old"),
             parent=SessionIdentity(source=SessionSource.CODEX, native_id="root"),
         )
+        self.memory.work.clock = lambda: 850
         self.memory.work.record_session(
             SessionObservation(
                 session=SessionIdentity(source=SessionSource.CODEX, native_id="native"),
@@ -365,11 +470,22 @@ class StoryTests(unittest.TestCase):
                 ),
             )
         )
+        self.memory.work.clock = lambda: 900
         self.add(
             IntentEvidence(
                 session=SessionIdentity(source=SessionSource.CODEX, native_id="native"),
                 text="Audit cancellation",
             ),
+            session=SessionIdentity(source=SessionSource.CODEX, native_id="native"),
+        )
+        first_reports = {
+            source["text"]: source["scope"]
+            for source in self.prepared().sources.values()
+            if source["kind"] == "reported_progress"
+        }
+        self.assertEqual(first_reports["Escape checks passed"], "Audit escapes")
+        self.memory.work.clock = lambda: 950
+        self.add(
             ProgressEvidence(
                 session=SessionIdentity(source=SessionSource.CODEX, native_id="native"),
                 text="Cancellation checks passed",
@@ -460,6 +576,13 @@ class StoryTests(unittest.TestCase):
             ),
             session=SessionIdentity(source=SessionSource.CODEX, native_id="child"),
             parent=SessionIdentity(source=SessionSource.CODEX, native_id="root"),
+        )
+        self.add(
+            ProgressEvidence(
+                session=SessionIdentity(source=SessionSource.CODEX, native_id="child"),
+                text="Escape checks passed",
+            ),
+            session=SessionIdentity(source=SessionSource.CODEX, native_id="child"),
         )
         prepared = self.prepared()
         self.assertEqual(

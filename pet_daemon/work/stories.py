@@ -309,6 +309,14 @@ class _StoryArtifacts:
         )
 
 
+def context_artifacts(
+    state: WorkFacts, context: ReportContext
+) -> tuple[ArtifactContext, ...]:
+    artifacts = _StoryArtifacts(state)
+    artifacts.add_context(context, False)
+    return artifacts.contexts()
+
+
 def session_work(state: WorkFacts, agent: SessionRecord) -> WorkStory:
     request_reports = tuple(
         report for report in agent.reports if isinstance(report.payload, IntentEvidence)

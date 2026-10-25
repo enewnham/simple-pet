@@ -934,10 +934,12 @@ class ContextTests(unittest.TestCase):
             [
                 {
                     "reported_progress": "Finished simplifying log labels",
+                    "reporter": {"source": "cli", "native_id": "parser"},
                     "age": "3 minutes ago",
                 },
                 {
                     "reported_progress": "Found two redundant assertions",
+                    "reporter": {"source": "cli", "native_id": "audit"},
                     "age": "2 minutes ago",
                     "scope": "Audit tests",
                 },

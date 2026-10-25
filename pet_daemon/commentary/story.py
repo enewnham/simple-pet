@@ -171,9 +171,14 @@ def _collect_records(
     scope: str,
     origin: SessionIdentity | None = None,
 ) -> None:
-    for record in records:
+    for record in sorted(records, key=lambda value: value.observed_at or 0):
         match record.details:
             case UserIntent(text=text):
+                if origin is not None and origin != collector.root:
+                    scope = (
+                        work_prose(text, limit=300, excluded=collector.excluded)
+                        or scope
+                    )
                 collector.add(
                     "request",
                     text,
@@ -332,7 +337,9 @@ def _evidence(
 ) -> JSONObject:
     item = {"id": identifier, **source}
     observed_at = item.pop("observed_at", None)
-    item.pop("origin", None)
+    origin = item.pop("origin", None)
+    if origin is not None:
+        item["reporter"] = origin
     if isinstance(observed_at, (int, float)):
         age = duration(clock() - observed_at)
         if age:
@@ -400,21 +407,34 @@ def prepare(
     root = aliases.get(subject.id, subject.id)
     collector = _NarrativeSources(root, excluded)
     _collect_reports(collector, reports, aliases)
+    observed_at = (
+        selection.update.observed_at
+        if selection.update
+        else max(
+            (
+                record.observed_at or 0
+                for record in (*subject.story.requests, *subject.story.activity)
+            ),
+            default=0,
+        )
+    )
+    _collect_reports(
+        collector, memory.related_reports(subject.id, observed_at), aliases
+    )
     if not collector.sources:
         _collect_records(
             collector,
             (*subject.story.requests, *subject.story.activity),
             "current task",
         )
-    if not reports:
-        for child in subject.story.sessions:
-            assignment = work_prose(child.scope, limit=300, excluded=excluded)
-            _collect_records(
-                collector,
-                (*child.requests, *child.activity),
-                assignment or "related task",
-                child.session,
-            )
+    for related in subject.story.sessions:
+        assignment = work_prose(related.scope, limit=300, excluded=excluded)
+        _collect_records(
+            collector,
+            (*related.requests, *related.activity),
+            assignment or "related task",
+            related.session,
+        )
     if not collector.latest_request_source:
         collector.add("request", subject.story.intent, "current task")
     if not collector.latest_request_source:

@@ -26,7 +26,7 @@ from ..work.observations import (
     RepositoryTarget,
     SessionObservation,
 )
-from ..work.shared_work import WorkSubject, shared_work
+from ..work.shared_work import WorkSubject, related_reports, shared_work
 from ..work.stories import collection_targets
 from .identities import (
     optional_session_from_row,
@@ -179,6 +179,13 @@ class Memory:
             (self.pet, *values),
         )
         return tuple(SessionReport.model_validate_json(row["data"]) for row in rows)
+
+    def related_reports(
+        self, session: SessionIdentity, observed_at: float
+    ) -> tuple[SessionReport, ...]:
+        state = self._work_repository.load()
+        reports = self.narrative_reports(tuple(state.sessions))
+        return related_reports(state, session, reports, observed_at)
 
     def save_attention_history(
         self, subject_id: SessionIdentity, history: AttentionHistory

@@ -18,7 +18,7 @@ from ..identity import SessionIdentity, session_data
 from ..prompts import bounded, request_excerpt
 from ..prose import prose_text, work_prose
 from ..runtime import PetContext, WaitingKind
-from ..types import JSONObject
+from ..types import JSONObject, JSONValue
 from ..work.evidence import (
     CommentaryEvidence,
     ExecutionStatus,
@@ -174,6 +174,7 @@ def _add_earlier(
     observed_at: float | None = None,
     scope: str = "",
     outcome: ExecutionOutcome | None = None,
+    origin: SessionIdentity | None = None,
 ) -> None:
     if not text:
         return
@@ -181,6 +182,11 @@ def _add_earlier(
     if not text:
         return
     item: JSONObject = {field: text}
+    if origin is not None:
+        item["reporter"] = {
+            "source": origin.source.value,
+            "native_id": origin.native_id,
+        }
     if observed_at is not None:
         age = duration(timestamp - observed_at)
         if age:
@@ -359,7 +365,7 @@ def _story_reports(
     current_report = ""
     current_observed_at: float | None = None
     selected_origin = selection.update.session if selection.update else story.id
-    groups = [(story.id, story.activity, ())]
+    groups = [(story.id, story.activity, story.requests)]
     groups.extend(
         (child.session, child.activity, child.requests) for child in story.sessions
     )
@@ -400,6 +406,7 @@ def _story_reports(
                     observed_at,
                     scope,
                     _reported_outcome(record),
+                    origin,
                 )
     return current_report, current_observed_at
 
@@ -667,6 +674,13 @@ def _narrative_item(
     sources = [
         narrative.sources[ref] for ref in statement.sources if ref in narrative.sources
     ]
+    reporters: list[JSONValue] = []
+    for source in sources:
+        origin = source.get("origin")
+        if isinstance(origin, dict) and origin not in reporters:
+            reporters.append(origin)
+    if reporters:
+        item["reporters"] = reporters
     observed = [
         value
         for source in sources

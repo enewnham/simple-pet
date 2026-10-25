@@ -90,6 +90,36 @@ class AttentionTests(unittest.TestCase):
         self.assertFalse(self.attention.is_routine_eligible(snapshot.work[0], snapshot))
         self.assertFalse(self.attention.is_selection_eligible(selected, snapshot))
 
+    def test_considered_related_update_remains_available_as_background(self) -> None:
+        root = SessionIdentity(source=SessionSource.COMMAND, native_id="root")
+        peer = SessionIdentity(source=SessionSource.COMMAND, native_id="peer")
+        own_update = WorkUpdate(session=root, revision="own", observed_at=0)
+        peer_update = WorkUpdate(session=peer, revision="peer", observed_at=0)
+        snapshot = self.snapshot(session_snapshot(id=root, turn_active=True))
+        subject = snapshot.work[0].model_copy(
+            update={
+                "updates": (own_update,),
+                "story": snapshot.work[0].story.model_copy(
+                    update={
+                        "sessions": (
+                            SessionContribution(scope="Check storage", session=peer),
+                        )
+                    }
+                ),
+            }
+        )
+        snapshot = snapshot.model_copy(update={"work": (subject,)})
+        self.attention.mark_considered(None, peer_update)
+        selected = self.attention.select(snapshot)
+        self.assertEqual(
+            [item.session for item in require(selected.subject).story.sessions], [peer]
+        )
+        refreshed = selected.refresh(snapshot)
+        self.assertEqual(
+            require(refreshed.subject).story.sessions,
+            require(selected.subject).story.sessions,
+        )
+
     def test_click_consideration_keeps_pending_member_updates_eligible(self) -> None:
         update = WorkUpdate(
             session=SessionIdentity(source=SessionSource.COMMAND, native_id="root"),

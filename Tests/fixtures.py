@@ -35,7 +35,12 @@ def story_response(request: ModelRequest) -> dict[str, object]:
     progress = [
         {"text": item["text"][:400], "sources": [item["id"]]}
         for item in evidence
-        if item["kind"] in ("reported_progress", "turn_ended") and item.get("text")
+        if item["event"]
+        in (
+            "A report describes progress on this work.",
+            "The current work segment ended.",
+        )
+        and item.get("text")
     ][-4:]
     return {
         "intent": {"text": source["text"][:400], "sources": [latest]},

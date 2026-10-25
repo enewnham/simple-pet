@@ -48,7 +48,10 @@ def test_scheduler_persists_only_renderer_accepted_speech() -> None:
             payload = json.loads(
                 replay.model.calls[-1]["request"]["messages"][0]["content"]
             )
-            assert payload["current_moment"]["kind"] == "request_received"
+            assert (
+                payload["current_moment"]["event"]
+                == "The developer sent a message about this work."
+            )
             assert any(
                 item.get("animation", {}).get("id") == "review"
                 for item in replay.packets
@@ -236,14 +239,19 @@ def claude_hook() -> Callable[[str, Mapping[str, object]], HookEvent]:
 
 
 @pytest.mark.parametrize(
-    ("event", "extra", "waiting_kind", "moment_kind"),
+    ("event", "extra", "waiting_kind", "moment_event"),
     [
-        ("PermissionRequest", {}, WaitingKind.PERMISSION_CHECK, "work_update"),
+        (
+            "PermissionRequest",
+            {},
+            WaitingKind.PERMISSION_CHECK,
+            "An observation of the selected work is available.",
+        ),
         (
             "Notification",
             {"notification_type": "permission_prompt"},
             WaitingKind.PERMISSION,
-            "permission_request",
+            "The work is waiting for the developer to approve an operation.",
         ),
         (
             "PreToolUse",
@@ -254,7 +262,7 @@ def claude_hook() -> Callable[[str, Mapping[str, object]], HookEvent]:
                 },
             },
             WaitingKind.QUESTION,
-            "input_requested",
+            "The work is waiting for an answer to a question.",
         ),
     ],
 )
@@ -263,7 +271,7 @@ def test_wait_kind_controls_scheduled_and_clicked_commentary(
     event: str,
     extra: Mapping[str, object],
     waiting_kind: WaitingKind,
-    moment_kind: str,
+    moment_event: str,
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
@@ -327,20 +335,20 @@ def test_wait_kind_controls_scheduled_and_clicked_commentary(
                 payload = json.loads(
                     replay.model.calls[-1]["request"]["messages"][0]["content"]
                 )
-                assert payload["current_moment"]["kind"] == moment_kind
+                assert payload["current_moment"]["event"] == moment_event
             replay.receive({"kind": "renderer", "event": "click"})
             await replay.advance(0)
             assert replay.model.calls[-1]["purpose"] == "click"
             payload = json.loads(
                 replay.model.calls[-1]["request"]["messages"][0]["content"]
             )
-            assert payload["current_moment"]["kind"] == moment_kind
+            assert payload["current_moment"]["event"] == moment_event
             await replay.advance(10, tick_seconds=1)
             assert replay.model.calls[-1]["purpose"] == "check_in"
             payload = json.loads(
                 replay.model.calls[-1]["request"]["messages"][0]["content"]
             )
-            assert payload["current_moment"]["kind"] == moment_kind
+            assert payload["current_moment"]["event"] == moment_event
             if waiting_kind == WaitingKind.QUESTION:
                 assert (
                     payload["current_moment"]["reported_progress"]
@@ -392,8 +400,13 @@ def test_wait_kind_controls_scheduled_and_clicked_commentary(
             payload = json.loads(
                 replay.model.calls[-1]["request"]["messages"][0]["content"]
             )
-            assert payload["current_moment"]["kind"] == "turn_ended"
-            assert payload["current_moment"]["outcome"] == "success"
+            assert (
+                payload["current_moment"]["event"] == "The current work segment ended."
+            )
+            assert (
+                payload["current_moment"]["execution"]
+                == "The work segment ended without a reported execution error. This alone does not establish task completion."
+            )
             reports = replay.memory.narrative_reports(
                 (SessionIdentity(source=SessionSource.CLAUDE, native_id="parser"),)
             )
@@ -476,7 +489,10 @@ def test_child_check_ins_follow_requests_for_input(
                 payload = json.loads(
                     replay.model.calls[-1]["request"]["messages"][0]["content"]
                 )
-                assert payload["current_moment"]["kind"] == "permission_request"
+                assert (
+                    payload["current_moment"]["event"]
+                    == "The work is waiting for the developer to approve an operation."
+                )
                 assert payload["current_work"]["request"] == "Check escaped delimiters"
 
     asyncio.run(scenario())

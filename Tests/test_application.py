@@ -14,8 +14,14 @@ from pet_daemon.behavior.controller import Behavior
 from pet_daemon.behavior.sprites import Pack
 from pet_daemon.commentary import Cognition
 from pet_daemon.commentary.contracts import ModelRequest
+from pet_daemon.commentary.request import SpeechConditions
 from pet_daemon.config import Config
-from pet_daemon.delivery import DeliveryOutcome, SpeechPacket
+from pet_daemon.delivery import (
+    DeliveryConditions,
+    DeliveryOutcome,
+    SpeechMessage,
+    SpeechPacket,
+)
 from pet_daemon.domain import (
     ArtifactKind,
     DeliveryStatus,
@@ -442,7 +448,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         await require(self.app.task)
         self.assertEqual(self.model.requests[-1][1], SpeechReason.CHECK_IN)
         payload = json.loads(self.model.requests[-1][0]["messages"][0]["content"])
-        self.assertEqual(payload["current_moment"]["kind"], "waiting")
+        self.assertEqual(
+            payload["current_moment"]["event"], "The work is waiting for input."
+        )
         self.assertEqual(
             payload["current_moment"]["reported_progress"],
             "Which quoted-field examples should I document?",
@@ -735,24 +743,21 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.now += 1
         self.report(child_report, session="examples")
         subjects = self.app.context().work
-        self.assertEqual(len(subjects), 1)
-        self.assertEqual(
-            subjects[0].sessions,
-            (
-                SessionIdentity(source=SessionSource.CODEX, native_id="examples"),
-                SessionIdentity(source=SessionSource.CODEX, native_id="parser"),
-            ),
+        self.assertEqual(len(subjects), 2)
+        child_subject = next(
+            item for item in subjects if item.id.native_id == "examples"
         )
-        self.assertIsInstance(subjects[0].story, WorkStory)
-        self.assertEqual(subjects[0].story.intent, "Improve quoted-field parsing")
-        artifact_titles = {artifact.title for artifact in subjects[0].story.artifacts}
+        self.assertEqual(child_subject.sessions, (child_subject.id,))
+        self.assertIsInstance(child_subject.story, WorkStory)
+        self.assertEqual(child_subject.story.intent, "Document quoted-field examples")
+        artifact_titles = {artifact.title for artifact in child_subject.story.artifacts}
         self.assertIn(parent_pr.title, artifact_titles)
         self.assertIn(child_pr.title, artifact_titles)
         self.assertTrue(
             any(
                 isinstance(evidence.details, WorkAssociation)
                 and "stack" in evidence.details.association
-                for artifact in subjects[0].story.artifacts
+                for artifact in child_subject.story.artifacts
                 for evidence in artifact.evidence
             )
         )
@@ -766,7 +771,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         child_sources = [
             item
             for item in story_payload["current_moment"]["evidence"]
-            if item["scope"] == "Document quoted-field examples"
+            if item["scope"] == "current task"
         ]
         self.assertIn(child_report, json.dumps(child_sources))
         self.assertNotIn(parent_report, json.dumps(child_sources))
@@ -818,18 +823,12 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             ].repo,
             "/fixture/parser",
         )
-        subject = self.app.context().work[0]
-        self.assertEqual(
-            subject.id, SessionIdentity(source=SessionSource.CODEX, native_id="parser")
+        subject = next(
+            item for item in self.app.context().work if item.id.native_id == "examples"
         )
-        self.assertTrue(
-            {
-                SessionIdentity(source=SessionSource.CODEX, native_id="examples"),
-                SessionIdentity(source=SessionSource.CODEX, native_id="parser"),
-            }
-            <= set(subject.sessions)
-        )
-        self.assertEqual(require(subject.story.sessions[0].context).checkout, "")
+        self.assertEqual(subject.sessions, (subject.id,))
+        parent = require(self.app.sessions.by_id[subject.id].parent)
+        self.assertEqual(parent.native_id, "parser")
         self.provider.publish(
             HookEvent(
                 source=SessionSource.CODEX,
@@ -839,9 +838,14 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 progress="Documented the quoted-field examples.",
             )
         )
-        child = self.app.context().work[0].story.sessions[0]
-        self.assertEqual(require(child.context).checkout, "/fixture/parser-examples")
-        self.assertEqual(len(self.app.context().work), 1)
+        child = next(
+            item for item in self.app.context().work if item.id.native_id == "examples"
+        )
+        self.assertEqual(
+            require(child.story.activity[0].context).checkout,
+            "/fixture/parser-examples",
+        )
+        self.assertEqual(len(self.app.context().work), 2)
 
     def complete_turn(self, session: str = "parser") -> None:
         self.provider.publish(
@@ -1187,6 +1191,129 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             self.attention.has_unconsidered_changes(self.app.context().work[0])
         )
         self.assertEqual(len(self.memory.speech()), 1)
+
+    async def test_background_report_remains_eligible_after_selected_speech_is_accepted(
+        self,
+    ) -> None:
+        peer_id = SessionIdentity(source=SessionSource.CODEX, native_id="restoration")
+        selected_id = SessionIdentity(source=SessionSource.CODEX, native_id="storage")
+        peer_report = "Restoration checks passed."
+        selected_report = "Storage writes retain session context."
+        for session, goal, report in (
+            (peer_id, "Restore session records", peer_report),
+            (selected_id, "Implement session storage", selected_report),
+        ):
+            self.now += 1
+            self.provider.publish(
+                HookEvent(
+                    source=session.source,
+                    session=session.native_id,
+                    event=HookEventKind.INTENT,
+                    goal=goal,
+                    repo="/fixture/parser",
+                )
+            )
+            self.provider.publish(
+                HookEvent(
+                    source=session.source,
+                    session=session.native_id,
+                    event=HookEventKind.TURN_DONE,
+                    progress=report,
+                    outcome=ExecutionOutcome.SUCCESS,
+                )
+            )
+        snapshot = self.app.context()
+        selection = self.attention.select(snapshot, eligible=(selected_id,))
+        self.assertEqual(require(selection.update).session, selected_id)
+        self.assertEqual(
+            [item.session for item in require(selection.subject).story.sessions],
+            [peer_id],
+        )
+        peer = next(subject for subject in snapshot.work if subject.id == peer_id)
+        peer_history = self.memory.load_attention_history().get(peer_id)
+        self.assertTrue(self.attention.is_update_eligible(peer.updates[0], snapshot))
+        self.model.text = "The storage checks passed."
+        await self.app.comment(
+            SpeechReason.ROUTINE, snapshot=snapshot, selection=selection
+        )
+        payload = json.loads(self.model.requests[-1][0]["messages"][0]["content"])
+        self.assertEqual(
+            payload["current_moment"]["reported_progress"], selected_report
+        )
+        self.assertIn(peer_report, json.dumps(payload["earlier_context"]))
+        emitted = next(
+            packet for packet in reversed(self.packets) if "delivery_id" in packet
+        )
+        packet: SpeechPacket = {
+            "text": emitted["text"],
+            "ttl": emitted["ttl"],
+            "delivery_id": emitted["delivery_id"],
+        }
+        self.assertEqual(packet["text"], "The storage checks passed.")
+        self.accept(packet)
+        self.assertEqual(
+            require(self.memory.message_outcome(packet["delivery_id"])).outcome,
+            DeliveryStatus.ACCEPTED,
+        )
+        self.assertEqual(
+            self.attention.history(selected_id).considered_session_revision,
+            require(selection.update).revision,
+        )
+        self.assertIsNone(self.attention.history(peer_id).considered_session_revision)
+        self.assertEqual(
+            self.memory.load_attention_history().get(peer_id), peer_history
+        )
+        current = self.app.context()
+        self.assertTrue(self.attention.is_update_eligible(peer.updates[0], current))
+        next_selection = self.attention.select(current, eligible=(peer_id,))
+        self.assertEqual(require(next_selection.update).session, peer_id)
+
+    async def test_acceptance_keeps_uncaptured_related_reports_eligible(self) -> None:
+        self.provider.publish(
+            HookEvent(
+                source=SessionSource.CODEX,
+                session="child",
+                event=HookEventKind.INTENT,
+                repo="/fixture/parser",
+                goal="Check parser restoration",
+            )
+        )
+        self.report("The parser preserves escaped delimiters.")
+        selected_id = SessionIdentity(source=SessionSource.CODEX, native_id="parser")
+        selection = self.attention.select(self.app.context(), eligible=(selected_id,))
+        message = SpeechMessage(
+            text="The parser keeps escaped delimiters intact.",
+            ttl=5,
+            reason=SpeechReason.ROUTINE,
+            selection_id="captured-related-context",
+            subject_id=selection.id,
+            revision=require(selection.subject).revision,
+            history_epoch=self.app.history_epoch,
+            conditions=DeliveryConditions(
+                commentary=SpeechConditions(selection=selection, payload={}),
+                trigger=None,
+                request_epoch=self.app.revision,
+            ),
+        )
+        self.assertEqual(require(selection.subject).story.sessions, ())
+        self.report("Restoration handles escaped delimiters.", session="child")
+        snapshot = self.app.context()
+        parent = next(
+            subject for subject in snapshot.work if subject.id.native_id == "parser"
+        )
+        child = next(
+            subject for subject in snapshot.work if subject.id.native_id == "child"
+        )
+        self.assertEqual(parent.revision, require(selection.subject).revision)
+        self.assertEqual([value.session for value in parent.story.sessions], [child.id])
+        self.app.delivery_outcome(
+            DeliveryOutcome(message=message, status=DeliveryStatus.ACCEPTED)
+        )
+        self.assertIsNone(self.attention.history(child.id).considered_session_revision)
+        self.assertTrue(
+            self.attention.is_update_eligible(child.updates[0], self.app.context())
+        )
+        self.assertIsNone(self.memory.load_attention_history().get(child.id))
 
     async def test_reset_rejects_old_acceptance_and_callbacks(self) -> None:
         packet, _ = await self.submit_commentary()

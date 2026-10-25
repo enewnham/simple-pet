@@ -32,7 +32,6 @@ from .sessions.reactions import SessionReactions
 from .sessions.tracking import Sessions
 from .storage import Memory
 from .work.history import SessionContext, build_session_entry
-from .work.narrative import semantic_revision
 from .work.observations import RepositoryObservation
 
 log = get_logger("pet-daemon")
@@ -189,8 +188,6 @@ class Application:
                 session.request_count = context.request_count
                 session.first_summary_attempted = context.first_summary_attempted
         subjects = self.memory.connected_work(runtime)
-        for subject in subjects:
-            subject.revision = semantic_revision(subject.story)
         stories = {
             session: subject.story
             for subject in subjects
@@ -496,7 +493,9 @@ class Application:
         )
         update = selection.update if selection else None
         update_current = bool(subject and update and update in subject.updates)
-        considered_subject = subject if current else None
+        considered_subject = (
+            (selection.subject if selection else subject) if current else None
+        )
         considered_update = update if update_current else None
         if outcome.status == DeliveryStatus.ACCEPTED:
             records = self.attention.consideration(

@@ -1,29 +1,30 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
-
 from pydantic import BaseModel
 
 from ..domain import (
+    ArtifactKind,
     WorkSubjectKind,
 )
 from ..identity import SessionIdentity
-from ..repository_identity import (
-    RepositoryIdentity,
-    repository_columns,
-)
 from ..runtime import AgentSessionStatus, SwarmActivity
 from .association import TERMINAL_EVENTS
+from .evidence import ExecutionStatus, ReportedProgress
 from .models import (
     ExecutionEvidence,
+    IntentEvidence,
+    ProgressEvidence,
+    ReportContext,
     SessionRecord,
+    SessionReport,
     WorkFacts,
 )
 from .stories import (
-    ArtifactContext,
     SessionContribution,
     WorkStory,
+    context_artifacts,
     current_context,
+    resolve_report_pull_request,
     revision_key,
     session_work,
 )
@@ -75,7 +76,7 @@ def work_update(agent: SessionRecord, story: WorkStory) -> WorkUpdate:
         revision=revision_key(
             (
                 semantic_revision(story),
-                execution.observed_at if execution else None,
+                ended_at,
                 tuple(record.observed_at for record in story.requests),
             )
         ),
@@ -88,122 +89,218 @@ def work_update(agent: SessionRecord, story: WorkStory) -> WorkUpdate:
     )
 
 
-def _session_families(
-    state: WorkFacts, runtime: dict[SessionIdentity, AgentSessionStatus]
-) -> dict[SessionIdentity, set[SessionIdentity]]:
-    groups: dict[SessionIdentity, set[SessionIdentity]] = {}
-    for identifier in (*state.sessions, *runtime):
-        root = state.aliases.get(identifier, identifier)
-        seen: set[SessionIdentity] = set()
-        while root not in seen:
-            seen.add(root)
-            agent = state.sessions.get(root)
-            session = runtime.get(root)
-            parent = agent.parent if agent else session.parent if session else None
-            if not parent:
-                break
-            root = state.aliases.get(parent, parent)
-        else:
-            root = min(seen)
-        groups.setdefault(root, set()).add(identifier)
-
-    return groups
+MAX_RELATED_SESSIONS = 3
+RELATED_REPORT_SECONDS = 3600
 
 
-def _merge_artifacts(stories: Iterable[WorkStory]) -> tuple[ArtifactContext, ...]:
-    artifacts: dict[tuple[str, str, RepositoryIdentity | None], ArtifactContext] = {}
-    for story in stories:
-        for artifact in story.artifacts:
-            key = artifact.kind, artifact.ref, artifact.repository
-            previous = artifacts.get(key)
-            if previous:
-                combined = [*previous.evidence]
-                for record in artifact.evidence:
-                    if record not in combined:
-                        combined.append(record)
-                artifact.evidence = tuple(combined)
-            artifacts[key] = artifact
-    return tuple(
-        artifact
-        for _, artifact in sorted(
-            artifacts.items(),
-            key=lambda item: (
-                item[0][0],
-                item[0][1],
-                repository_columns(item[0][2]),
-            ),
+def _connections(
+    state: WorkFacts, context: ReportContext
+) -> set[tuple[ArtifactKind, str]]:
+    return {
+        (artifact.kind, artifact.ref)
+        for artifact in context_artifacts(state, context)
+        if artifact.kind in (ArtifactKind.PULL_REQUEST, ArtifactKind.TICKET)
+    }
+
+
+def related_reports(
+    state: WorkFacts,
+    selected: SessionIdentity,
+    reports: tuple[SessionReport, ...],
+    observed_at: float,
+) -> tuple[SessionReport, ...]:
+    own = tuple(
+        report
+        for report in reports
+        if state.aliases.get(report.payload.session, report.payload.session) == selected
+        and report.observed_at <= observed_at
+        and not (
+            isinstance(report.payload, ExecutionEvidence)
+            and (
+                report.payload.event.startswith("tool_")
+                or report.payload.event == "session_end"
+            )
         )
     )
+    if not own:
+        return ()
+    latest = max(
+        own,
+        key=lambda report: (
+            report.observed_at,
+            isinstance(report.payload, ProgressEvidence),
+        ),
+    )
+    assignments: dict[SessionIdentity, SessionReport] = {}
+    connections = _connections(
+        state, resolve_report_pull_request(state, latest.context)
+    )
+    intent = next(
+        (
+            report
+            for report in reversed(own)
+            if isinstance(report.payload, IntentEvidence)
+        ),
+        None,
+    )
+    if intent:
+        connections |= _connections(
+            state, resolve_report_pull_request(state, intent.context)
+        )
+    agent = state.sessions[selected]
+    parent = state.aliases.get(agent.parent, agent.parent) if agent.parent else None
+    result: list[SessionReport] = []
+    for report in reports:
+        if report.observed_at > observed_at:
+            continue
+        identity = state.aliases.get(report.payload.session, report.payload.session)
+        if identity == selected:
+            continue
+        if isinstance(report.payload, IntentEvidence):
+            assignments[identity] = report
+        peer = state.sessions[identity]
+        peer_parent = (
+            state.aliases.get(peer.parent, peer.parent) if peer.parent else None
+        )
+        assignment = assignments.get(identity)
+        contexts = (
+            (report.context, assignment.context) if assignment else (report.context,)
+        )
+        links = {
+            link
+            for context in contexts
+            for link in _connections(state, resolve_report_pull_request(state, context))
+        }
+        if parent != identity and peer_parent != selected and not connections & links:
+            continue
+        if assignment and assignment not in result:
+            result.append(assignment)
+        if report not in result:
+            result.append(report)
+    return tuple(sorted(result, key=lambda report: report.observed_at))
+
+
+def _related_story(
+    state: WorkFacts,
+    agent: SessionRecord,
+    story: WorkStory,
+    stories: dict[SessionIdentity, WorkStory],
+) -> WorkStory:
+    moment = max(
+        (record.observed_at or 0 for record in (*story.requests, *story.activity)),
+        default=agent.changed_at,
+    )
+    latest = max(
+        tuple(reversed((*story.requests, *story.activity))),
+        key=lambda record: (
+            record.observed_at or 0,
+            isinstance(record.details, ReportedProgress),
+        ),
+        default=None,
+    )
+    context = (
+        latest.context if latest and latest.context else current_context(state, agent)
+    )
+    connections = _connections(state, context)
+    contributions = []
+    for identifier, other in stories.items():
+        if identifier == agent.id:
+            continue
+        peer = state.sessions[identifier]
+        parent = state.aliases.get(agent.parent, agent.parent) if agent.parent else None
+        peer_parent = (
+            state.aliases.get(peer.parent, peer.parent) if peer.parent else None
+        )
+        linked_parent = parent == identifier or peer_parent == agent.id
+        latest_request = max(
+            (record.observed_at or 0 for record in other.requests), default=0
+        )
+        activity = tuple(
+            record
+            for record in other.activity
+            if record.observed_at is not None
+            and moment - RELATED_REPORT_SECONDS <= record.observed_at <= moment
+            and record.observed_at >= latest_request
+            and (
+                isinstance(record.details, ReportedProgress)
+                or isinstance(record.details, ExecutionStatus)
+                and record.details.execution == "turn ended"
+            )
+            and (
+                linked_parent
+                or record.context is not None
+                and bool(connections & _connections(state, record.context))
+            )
+        )
+        if not activity:
+            continue
+        requests = tuple(
+            record
+            for record in other.requests
+            if record.observed_at is not None and record.observed_at <= moment
+        )
+        contributions.append(
+            SessionContribution(
+                scope=other.intent,
+                requests=requests,
+                activity=activity,
+                context=activity[-1].context,
+                session=identifier,
+            )
+        )
+    contributions.sort(
+        key=lambda item: (
+            -max(record.observed_at or 0 for record in item.activity),
+            item.session,
+        )
+    )
+    selected = tuple(contributions[:MAX_RELATED_SESSIONS])
+    return story.model_copy(update={"sessions": selected})
 
 
 def shared_work(state: WorkFacts, activity: SwarmActivity) -> tuple[WorkSubject, ...]:
     runtime = {session.id: session for session in activity.sessions}
+    stories = {
+        identifier: session_work(state, agent)
+        for identifier, agent in state.sessions.items()
+    }
     subjects = []
-    for root, identifiers in sorted(_session_families(state, runtime).items()):
-        stories = {
-            identifier: session_work(state, agent)
-            for identifier in sorted(identifiers)
-            if (agent := state.sessions.get(identifier))
-        }
-        root_session = runtime.get(root)
-        root_story = stories.get(root) or WorkStory(
-            id=root, intent=root_session.goal if root_session else "", revision=""
-        )
-        children = tuple(
-            SessionContribution(
-                scope=story.intent,
-                requests=story.requests,
-                activity=story.activity,
-                context=current_context(state, state.sessions[identifier]),
-                session=identifier,
-            )
-            for identifier, story in stories.items()
-            if identifier != root
-        )
-        if len(stories) == 1 and root in stories:
-            revision = root_story.revision
-        elif stories:
-            revision = revision_key(
-                tuple((name, story.revision) for name, story in stories.items())
-            )
+    for identifier in sorted(set(state.sessions) | set(runtime)):
+        if state.aliases.get(identifier, identifier) != identifier:
+            continue
+        agent = state.sessions.get(identifier)
+        session = runtime.get(identifier)
+        own_story = stories.get(identifier)
+        if agent and own_story:
+            story = _related_story(state, agent, own_story, stories)
+            updates = (work_update(agent, own_story),)
         else:
-            revision = revision_key(
-                tuple(
-                    (name, runtime_revision(runtime[name]), runtime[name].progress)
-                    for name in sorted(identifiers)
-                    if name in runtime
-                )
+            story = WorkStory(
+                id=identifier, intent=session.goal if session else "", revision=""
             )
-        story = root_story.model_copy()
-        story.revision = revision
-        story.sessions = children
-        story.artifacts = _merge_artifacts(stories.values())
-        names = identifiers | {
-            alias for alias, target in state.aliases.items() if target in identifiers
-        }
-        changed_at = max(
-            (
-                *(runtime[name].changed_at for name in identifiers if name in runtime),
-                *(
-                    state.sessions[name].changed_at
-                    for name in identifiers
-                    if name in state.sessions
-                ),
-                0,
+            updates = ()
+        revision = (
+            own_story.revision
+            if own_story
+            else revision_key(
+                (runtime_revision(session), session.progress) if session else ()
             )
         )
+        names = {identifier} | {
+            alias for alias, target in state.aliases.items() if target == identifier
+        }
         subjects.append(
             WorkSubject(
-                id=root,
-                kind=WorkSubjectKind.WORK if stories else WorkSubjectKind.SESSION,
-                changed_at=changed_at,
+                id=identifier,
+                kind=WorkSubjectKind.WORK if own_story else WorkSubjectKind.SESSION,
+                changed_at=max(
+                    agent.changed_at if agent else 0,
+                    session.changed_at if session else 0,
+                ),
                 revision=revision,
                 story=story,
                 sessions=tuple(sorted(names)),
-                updates=tuple(
-                    work_update(state.sessions[identifier], member)
-                    for identifier, member in stories.items()
-                ),
+                updates=updates,
             )
         )
     return tuple(sorted(subjects, key=lambda item: (-item.changed_at, item.id)))
