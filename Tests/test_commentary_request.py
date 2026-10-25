@@ -6,6 +6,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Unpack
 
+from pydantic import BaseModel
+
 from pet_daemon.attention import Attention, AttentionSelection
 from pet_daemon.commentary import Cognition
 from pet_daemon.commentary.context import (
@@ -82,7 +84,11 @@ from Tests.fixtures import (
 
 class NoRequestsModel:
     async def complete(
-        self, request: ModelRequest, reason: SpeechReason | ModelPurpose
+        self,
+        request: ModelRequest,
+        reason: SpeechReason | ModelPurpose,
+        *,
+        response_type: type[BaseModel],
     ) -> dict[str, object]:
         raise AssertionError("PromptBuilder preparation must not request model output")
 
@@ -1628,9 +1634,13 @@ class ContextTests(unittest.TestCase):
         )
         one_request_payload = deepcopy(payload)
         one_request_payload["earlier_context"] = payload["earlier_context"][:1]
-        one_request = self.cognition.request(
-            one_request_payload, prepared.request["system"]
-        )
+        one_request = deepcopy(prepared.request)
+        one_request["messages"] = [
+            {
+                "role": "user",
+                "content": json.dumps(one_request_payload, ensure_ascii=False),
+            }
+        ]
         self.config.prompt_target_bytes = (
             len(json.dumps(one_request, ensure_ascii=False).encode("utf-8")) + 1
         )

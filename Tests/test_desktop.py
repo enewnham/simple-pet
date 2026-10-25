@@ -8,10 +8,10 @@ import unittest
 from collections.abc import Callable
 from pathlib import Path
 
-import httpx
+import httpx2 as httpx
 from anthropic import AsyncAnthropic
 
-from pet_daemon.commentary.request import SITUATIONS
+from pet_daemon.commentary import reaction
 from pet_daemon.config import Config
 from pet_daemon.daemon import Daemon
 from pet_daemon.domain import SessionSource, SpeechSituation
@@ -63,7 +63,7 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                 ]
                 explicit = (
                     not summary
-                    and SITUATIONS[SpeechSituation.EXPLICIT]
+                    and reaction.DIRECTIONS[SpeechSituation.EXPLICIT]
                     in body["system"][-1]["text"]
                 )
                 if explicit:

@@ -8,17 +8,18 @@ from pathlib import Path
 from typing import cast
 
 import anthropic
-import httpx
+import httpx2 as httpx
 
 from pet_daemon.attention import Attention, AttentionSelection
 from pet_daemon.behavior.sprites import Pack
+from pet_daemon.commentary import conversation, reaction
 from pet_daemon.commentary.cognition import (
     Cognition,
     CommentaryResult,
     StoryUnavailable,
 )
+from pet_daemon.commentary.contracts import ActionOffer
 from pet_daemon.commentary.model import AnthropicModelClient
-from pet_daemon.commentary.request import INSTRUCTIONS
 from pet_daemon.commentary.story import StoryResponse
 from pet_daemon.config import Config
 from pet_daemon.domain import (
@@ -65,6 +66,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.story_response = None
         self.call_kinds = []
         self.responses = []
+        self.conversation_defaults = True
         self.client = anthropic.AsyncAnthropic(
             api_key="test-key",
             max_retries=0,
@@ -178,6 +180,16 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 "speak": None,
             }
             stop = "end_turn"
+        if (
+            self.conversation_defaults
+            and "headline" in body["output_config"]["format"]["schema"]["properties"]
+            and isinstance(result, dict)
+        ):
+            result.setdefault(
+                "headline", "A quiet moment" if result.get("speak") else ""
+            )
+            result.setdefault("context", "")
+            result.setdefault("choices", [])
         content = (
             result
             if isinstance(result, str)
@@ -242,7 +254,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("deadpan", prompt)
         self.assertNotIn("snarky", prompt)
-        self.assertEqual(prompt.split("\n\n", 1)[1], INSTRUCTIONS)
+        self.assertEqual(prompt.split("\n\n", 1)[1], reaction.INSTRUCTIONS)
         self.assertIn("The supplied tasks and work are yours.", prompt)
         self.assertGreater(prompt.index("<examples>"), prompt.index("</persona>"))
         self.assertEqual(self.config.persona, persona)
@@ -264,7 +276,10 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["thinking"], {"type": "disabled"})
         self.assertEqual(
             body["system"][0]["text"],
-            "<persona>\n" + self.config.persona + "\n</persona>\n\n" + INSTRUCTIONS,
+            "<persona>\n"
+            + self.config.persona
+            + "\n</persona>\n\n"
+            + reaction.INSTRUCTIONS,
         )
         self.assertIn(
             "The speech bubble contains only words you would say aloud",
@@ -278,14 +293,102 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("cache_control", body)
         schema = body["output_config"]["format"]["schema"]
-        self.assertEqual(
-            set(schema["properties"]), {"speak", "mentions", "memory", "ongoing"}
-        )
+        self.assertEqual(set(schema["properties"]), {"speak", "mentions"})
         self.assertEqual(schema["required"], ["speak"])
         self.assertFalse(schema["additionalProperties"])
         snapshot = json.loads(body["messages"][-1]["content"])
         self.assertEqual(snapshot["current_work"]["request"], "Refactor batch inserts")
         self.assertNotIn("pet", snapshot)
+
+    async def test_working_click_requests_speech_with_source_citations(self) -> None:
+        speech = "Clicking while I'm busy should still get you a reply."
+
+        def answer() -> tuple[dict[str, object], str]:
+            body = self.requests[-1][1]
+            payload = json.loads(body["messages"][0]["content"])
+            return (
+                {
+                    "speak": speech,
+                    "mentions": payload["current_work"]["source_ids"],
+                },
+                "end_turn",
+            )
+
+        self.responses.append(answer)
+        result = await self.generate_commentary(SpeechReason.CLICK)
+        schema = self.requests[-1][1]["output_config"]["format"]["schema"]
+        self.assertEqual(
+            set(schema["properties"]),
+            {"speak", "mentions", "headline", "context", "choices"},
+        )
+        self.assertIsNotNone(result.exchange)
+        self.assertEqual(
+            result.request.selection.situation, SpeechSituation.CLICK_WORKING
+        )
+        self.assertEqual(result.speak, speech)
+        report = self.memory.narrative_reports(
+            (SessionIdentity(source=SessionSource.CLAUDE, native_id="worker"),)
+        )[0]
+        self.assertEqual(result.mentions, (report_source_key(report),))
+
+    async def test_idle_click_retains_its_selected_memory(self) -> None:
+        self.handle({"source": "claude", "session": "worker", "event": "turn_done"})
+
+        def answer() -> tuple[dict[str, object], str]:
+            body = self.requests[-1][1]
+            payload = json.loads(body["messages"][0]["content"])
+            candidate = next(
+                item["memory_candidate"]
+                for item in payload["earlier_context"]
+                if "memory_candidate" in item
+            )
+            return (
+                {
+                    "speak": "We left off at the batch insert refactor.",
+                    "mentions": [candidate["id"]],
+                    "memory": candidate["id"],
+                    "ongoing": False,
+                    "headline": "Batch inserts, remembered",
+                    "context": "The last request concerned batch inserts.",
+                    "choices": [],
+                },
+                "end_turn",
+            )
+
+        self.responses.append(answer)
+        result = await self.generate_commentary(SpeechReason.CLICK)
+        schema = self.requests[-1][1]["output_config"]["format"]["schema"]
+        self.assertIn("memory", schema["properties"])
+        self.assertIn("ongoing", schema["properties"])
+        self.assertEqual(
+            result.request.selection.situation, SpeechSituation.IDLE_REFLECTION
+        )
+        selected = result.request.selection.memory
+        assert selected is not None
+        self.assertEqual(result.mentions, (selected.key,))
+        assert result.exchange is not None
+        self.assertEqual(result.exchange.headline, "Batch inserts, remembered")
+        self.assertEqual(
+            result.exchange.context, "The last request concerned batch inserts."
+        )
+
+    async def test_idle_recollection_requires_a_source_for_ongoing_work(self) -> None:
+        snapshot = self.snapshot()
+        selection = self.attention.select_recollection(snapshot, SpeechReason.CHECK_IN)
+        self.responses.append(
+            (
+                {
+                    "speak": "I am working through the next parser pass.",
+                    "memory": None,
+                    "ongoing": True,
+                },
+                "end_turn",
+            )
+        )
+        with self.assertRaisesRegex(
+            StoryUnavailable, "Ongoing work needs a cited memory"
+        ):
+            await self.cognition.generate_commentary(snapshot, selection)
 
     async def test_sends_only_the_instruction_for_the_current_reason(self) -> None:
         directions = {
@@ -363,7 +466,10 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         snapshot = self.snapshot()
         snapshot = snapshot.model_copy(update={"activity": "idle"})
         cases: list[tuple[PetContext, str]] = [
-            (snapshot, "Briefly acknowledge the developer while our work continues."),
+            (
+                snapshot,
+                "Offer a useful perspective on the current work and related memories. Respect confirmed activity and explicitly reported remaining work.",
+            ),
             (
                 PetContext(activity=PetState.IDLE, sessions=(), sleeping=False),
                 "Give the developer a casual greeting.",
@@ -392,7 +498,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         cases.append(
             (
                 completed_focus,
-                "Briefly acknowledge the developer while our work continues.",
+                "Offer a useful perspective on the current work and related memories. Respect confirmed activity and explicitly reported remaining work.",
             )
         )
         for state, direction in cases:
@@ -453,7 +559,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("other_sessions", payload)
         self.assertEqual(
             body["system"][1]["text"],
-            "<request>\nBriefly acknowledge the developer while our work continues.\n</request>",
+            "<request>\nOffer a useful perspective on the current work and related memories. Respect confirmed activity and explicitly reported remaining work.\n</request>",
         )
 
     async def test_click_surfaces_the_oldest_input_wait_among_parallel_sessions(
@@ -511,7 +617,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("other_sessions", payload)
         direction = body["system"][1]["text"]
-        self.assertIn("React briefly to the supplied wait.", direction)
+        self.assertIn("Help the developer understand the observed wait", direction)
         self.assertNotIn("while our work continues", direction)
         for reason in (
             SpeechReason.PROMPT,
@@ -550,7 +656,9 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             body["system"][0]["text"],
         )
 
-    async def test_care_speech_matches_the_activity_and_requires_a_line(self) -> None:
+    async def test_care_conversation_matches_the_moment_and_can_choose_silence(
+        self,
+    ) -> None:
         directions = {
             CareKind.EXERCISE: "stretch break",
             CareKind.ATTENTION: "casual greeting",
@@ -571,16 +679,17 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(
                     "Supply a nonempty line of speech", body["system"][1]["text"]
                 )
-                self.assertEqual(
-                    body["output_config"]["format"]["schema"]["properties"]["speak"][
-                        "type"
-                    ],
-                    "string",
-                )
-                for speech in (None, " "):
-                    self.responses.append(({"speak": speech}, "end_turn"))
-                    with self.assertRaises(ValueError):
-                        await self.generate_for_context(snapshot, SpeechReason.CARE)
+                schema = body["output_config"]["format"]["schema"]["properties"]
+                self.assertIn("headline", schema)
+                self.assertNotIn("memory", schema)
+                self.assertNotIn("ongoing", schema)
+                self.responses.append(({"speak": None}, "end_turn"))
+                result = await self.generate_for_context(snapshot, SpeechReason.CARE)
+                self.assertIsNone(result.speak)
+                self.assertIsNone(result.exchange)
+                self.responses.append(({"speak": " "}, "end_turn"))
+                with self.assertRaises(ValueError):
+                    await self.generate_for_context(snapshot, SpeechReason.CARE)
 
     async def test_check_in_selects_input_wait_running_call_or_quiet_work(self) -> None:
         cases = [
@@ -937,7 +1046,9 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                         {
                             "current_moment": {
                                 "event": "There is no confirmed active work to react to."
-                            }
+                            },
+                            "available_actions": [],
+                            "recent_mentions": [],
                         },
                     )
                 self.assertNotIn("Old checklist", json.dumps(payload))
@@ -1567,7 +1678,6 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         for reason, context in (
             (SpeechReason.EXPLICIT, None),
             (SpeechReason.EXPLICIT, "Please speak"),
-            (SpeechReason.CLICK, None),
             (SpeechReason.ROUTINE, "Please speak"),
         ):
             with self.subTest(reason=reason, context=context):
@@ -1575,6 +1685,279 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(ValueError):
                     await self.generate_commentary(reason, context)
         self.assertEqual(self.cognition.memory.speech(), [])
+
+    async def test_idle_exchange_composes_its_headline_and_contextual_choices(
+        self,
+    ) -> None:
+        snapshot = PetContext(activity=PetState.IDLE, sessions=(), sleeping=False)
+        selection = self.attention.select(snapshot, SpeechReason.CLICK)
+        offers = (
+            ActionOffer("more", "Another thread", "Recall a different work thread."),
+            ActionOffer("rounds", "Make the rounds", "Look across recorded work."),
+        )
+        self.responses.append(
+            (
+                {
+                    "speak": "I've got a few work stories tucked away.",
+                    "headline": "Stories on the shelf",
+                    "context": "We can look back whenever you feel like it.",
+                    "choices": [{"id": "rounds", "label": "Let's look around"}],
+                },
+                "end_turn",
+            )
+        )
+        result = await self.cognition.generate_commentary(
+            snapshot, selection, actions=offers
+        )
+        assert result.exchange is not None
+        self.assertEqual(result.exchange.headline, "Stories on the shelf")
+        self.assertEqual(
+            [(choice.id, choice.label) for choice in result.exchange.choices],
+            [("rounds", "Let's look around")],
+        )
+        body = self.requests[-1][1]
+        self.assertEqual(
+            body["system"][0]["text"],
+            "<persona>\n"
+            + self.config.persona
+            + "\n</persona>\n\n"
+            + conversation.INSTRUCTIONS,
+        )
+        payload = json.loads(body["messages"][0]["content"])
+        self.assertEqual(
+            payload["available_actions"],
+            [
+                {"id": offer.id, "label": offer.label, "description": offer.description}
+                for offer in offers
+            ],
+        )
+        self.assertNotIn(
+            "memory", body["output_config"]["format"]["schema"]["properties"]
+        )
+
+    async def test_activity_keeps_its_quip_schema_and_prompt(self) -> None:
+        self.responses.append(
+            ({"speak": "I'm following the batch insert work."}, "end_turn")
+        )
+        snapshot = self.snapshot()
+        selection = self.attention.select(snapshot, SpeechReason.ROUTINE)
+        result = await self.cognition.generate_commentary(
+            snapshot,
+            selection,
+            actions=(ActionOffer("more", "Another thread", "Recall another thread."),),
+        )
+        body = self.requests[-1][1]
+        self.assertEqual(
+            body["system"][0]["text"],
+            "<persona>\n"
+            + self.config.persona
+            + "\n</persona>\n\n"
+            + reaction.INSTRUCTIONS,
+        )
+        self.assertEqual(
+            set(body["output_config"]["format"]["schema"]["properties"]),
+            {"speak", "mentions"},
+        )
+        payload = json.loads(body["messages"][0]["content"])
+        self.assertNotIn("available_actions", payload)
+        self.assertNotIn("recent_mentions", payload)
+        self.assertIsNone(result.exchange)
+        self.responses.append(
+            (
+                {
+                    "speak": "Still working.",
+                    "headline": "A title",
+                    "context": "",
+                    "choices": [],
+                },
+                "end_turn",
+            )
+        )
+        with self.assertRaises(ValueError):
+            await self.cognition.generate_commentary(snapshot, selection)
+
+    async def test_idle_exchange_rejects_unavailable_or_invalid_choices(self) -> None:
+        snapshot = PetContext(activity=PetState.IDLE, sessions=(), sleeping=False)
+        selection = self.attention.select(snapshot, SpeechReason.CLICK)
+        offers = tuple(
+            ActionOffer(identifier, identifier, "Recall recorded work.")
+            for identifier in ("more", "rounds", "context")
+        )
+        cases = (
+            ([{"id": "unknown", "label": "Look here"}], StoryUnavailable),
+            (
+                [
+                    {"id": "more", "label": "A thread"},
+                    {"id": "more", "label": "Another one"},
+                ],
+                ValueError,
+            ),
+            ([{"id": offer.id, "label": offer.label} for offer in offers], ValueError),
+            ([{"id": "more", "label": " "}], ValueError),
+            (
+                [{"id": "more", "label": "Look", "command": "open somewhere"}],
+                ValueError,
+            ),
+        )
+        for choices, error in cases:
+            with self.subTest(choices=choices):
+                self.responses.append(
+                    (
+                        {
+                            "speak": "A quiet moment together.",
+                            "headline": "Between tasks",
+                            "context": "",
+                            "choices": choices,
+                        },
+                        "end_turn",
+                    )
+                )
+                with self.assertRaises(error):
+                    await self.cognition.generate_commentary(
+                        snapshot, selection, actions=offers
+                    )
+        self.assertEqual(self.memory.speech(), [])
+
+    async def test_spoken_idle_exchange_requires_a_headline(self) -> None:
+        snapshot = PetContext(activity=PetState.IDLE, sessions=(), sleeping=False)
+        selection = self.attention.select(snapshot, SpeechReason.CLICK)
+        self.conversation_defaults = False
+        for headline in (None, " "):
+            response = {"speak": "Hello there.", "context": "", "choices": []}
+            if headline is not None:
+                response["headline"] = headline
+            self.responses.append((response, "end_turn"))
+            with self.assertRaises(ValueError):
+                await self.cognition.generate_commentary(snapshot, selection)
+
+    async def test_work_choices_require_a_cited_point(self) -> None:
+        snapshot = PetContext(activity=PetState.IDLE, sessions=(), sleeping=False)
+        selection = self.attention.select(snapshot, SpeechReason.CLICK)
+        for action in (
+            "worktree",
+            "pull_request",
+            "session",
+            "context",
+            "tomorrow",
+            "handled",
+        ):
+            with self.subTest(action=action):
+                self.responses.append(
+                    (
+                        {
+                            "speak": "We can look back at a thread.",
+                            "headline": "A thread to revisit",
+                            "context": "",
+                            "choices": [{"id": action, "label": "Take a look"}],
+                        },
+                        "end_turn",
+                    )
+                )
+                with self.assertRaisesRegex(StoryUnavailable, "require a cited source"):
+                    await self.cognition.generate_commentary(
+                        snapshot,
+                        selection,
+                        actions=(
+                            ActionOffer(
+                                action, "Take a look", "Open the selected work."
+                            ),
+                        ),
+                    )
+
+    async def test_idle_exchange_receives_recent_source_mentions_without_spoken_copy(
+        self,
+    ) -> None:
+        self.handle(
+            {
+                "source": "claude",
+                "session": "worker",
+                "event": "turn_done",
+                "progress": "The parser checks passed.",
+            }
+        )
+
+        def remember_result() -> dict[str, object]:
+            payload = json.loads(self.story_requests[-1][1]["messages"][0]["content"])
+            report = next(
+                item
+                for item in payload["current_moment"]["evidence"]
+                if item.get("text") == "The parser checks passed."
+            )
+            return {
+                "intent": {
+                    "text": "Refactor batch inserts",
+                    "sources": [payload["current_work"]["latest_request_source"]],
+                },
+                "decisions": [],
+                "progress": [
+                    {"text": "The parser checks passed.", "sources": [report["id"]]}
+                ],
+            }
+
+        self.story_response = remember_result
+
+        def acknowledge() -> tuple[dict[str, object], str]:
+            payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
+            candidate = next(
+                item["memory_candidate"]
+                for item in payload["earlier_context"]
+                if "memory_candidate" in item
+                and item["memory_candidate"]["text"] == "The parser checks passed."
+            )
+            return {
+                "speak": "The agent reports that the parser checks passed.",
+                "headline": "Parser checks passed",
+                "context": "",
+                "choices": [],
+                "mentions": [candidate["id"]],
+                "memory": candidate["id"],
+                "ongoing": False,
+            }, "end_turn"
+
+        self.responses.append(acknowledge)
+        first = await self.generate_commentary(SpeechReason.CLICK)
+        self.memory.record_source_mentions(first.mentions)
+        self.clock.advance(60)
+        self.responses.append(({"speak": None}, "end_turn"))
+        second = await self.generate_commentary(SpeechReason.CLICK)
+        payload = json.loads(self.requests[-1][1]["messages"][0]["content"])
+        self.assertEqual(
+            payload["recent_mentions"],
+            [
+                {
+                    "source_id": second.request.citations.label(first.mentions[0]),
+                    "age": "1 minute ago",
+                }
+            ],
+        )
+        self.assertNotIn(first.speak, json.dumps(payload))
+        instructions = self.requests[-1][1]["system"][0]["text"]
+        self.assertIn(
+            "Avoid immediately repeating a freshly acknowledged result.", instructions
+        )
+        self.assertIn(
+            "A completed request\nand successful result should recede after one acknowledgment.",
+            instructions,
+        )
+        self.assertIn("Omit tomorrow and handled unless", instructions)
+        self.assertIsNone(second.exchange)
+
+    async def test_idle_exchange_rejects_unknown_evidence_in_its_context(self) -> None:
+        self.handle({"source": "claude", "session": "worker", "event": "turn_done"})
+        self.responses.append(
+            (
+                {
+                    "speak": "A quiet thought.",
+                    "headline": "A remembered detail",
+                    "context": "The agent reports a result.",
+                    "choices": [],
+                    "mentions": ["s999"],
+                },
+                "end_turn",
+            )
+        )
+        with self.assertRaisesRegex(StoryUnavailable, "unavailable evidence"):
+            await self.generate_commentary(SpeechReason.CLICK)
 
 
 if __name__ == "__main__":

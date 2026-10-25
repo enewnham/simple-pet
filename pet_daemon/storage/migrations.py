@@ -2,7 +2,7 @@ import sqlite3
 
 from .transactions import transaction
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 
 MEMORY_SCHEMA = """
@@ -71,6 +71,7 @@ DELIVERY_SCHEMA = """
             CREATE TABLE IF NOT EXISTS attention_sources (
                 pet TEXT NOT NULL, source_key TEXT NOT NULL,
                 considered_at REAL, mentioned_at REAL,
+                handled INTEGER NOT NULL DEFAULT 0, deferred_until REAL, engaged_at REAL, feedback_at REAL,
                 PRIMARY KEY(pet,source_key));
             CREATE TABLE IF NOT EXISTS message_outcomes (
                 pet TEXT NOT NULL, message_id TEXT NOT NULL, outcome TEXT NOT NULL,

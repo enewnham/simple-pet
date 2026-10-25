@@ -97,6 +97,18 @@ class SpeechSituation(StrEnum):
     CHECK_IN_QUIET = "check_in_quiet"
     IDLE_REFLECTION = "idle_reflection"
 
+    @property
+    def is_conversation(self) -> bool:
+        return self in {
+            SpeechSituation.CLICK_WORKING,
+            SpeechSituation.CLICK_WAITING,
+            SpeechSituation.CLICK_IDLE,
+            SpeechSituation.IDLE_REFLECTION,
+            SpeechSituation.CARE_EXERCISE,
+            SpeechSituation.CARE_ATTENTION,
+            SpeechSituation.CARE_CONSTERNATION,
+        }
+
 
 class DeliveryStatus(StrEnum):
     PENDING = "pending"

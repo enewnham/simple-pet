@@ -343,6 +343,20 @@ def test_wait_kind_controls_scheduled_and_clicked_commentary(
                 replay.model.calls[-1]["request"]["messages"][0]["content"]
             )
             assert payload["current_moment"]["event"] == moment_event
+            conversation = next(
+                packet["conversation"]
+                for packet in reversed(replay.packets)
+                if "conversation" in packet
+            )
+            assert isinstance(conversation, dict)
+            replay.receive(
+                {
+                    "kind": "renderer",
+                    "event": "interaction_dismissed",
+                    "interaction_id": conversation["id"],
+                    "revision": conversation["revision"],
+                }
+            )
             await replay.advance(10, tick_seconds=1)
             assert replay.model.calls[-1]["purpose"] == "check_in"
             payload = json.loads(

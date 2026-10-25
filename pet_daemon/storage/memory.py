@@ -4,6 +4,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -58,6 +59,9 @@ class AttentionHistory(BaseModel):
 class SourceAttention(BaseModel):
     considered_at: float | None = None
     mentioned_at: float | None = None
+    handled: bool = False
+    deferred_until: float | None = None
+    engaged_at: float | None = None
 
 
 class EventRecord(BaseModel):
@@ -154,7 +158,7 @@ class Memory:
 
     def load_source_attention(self) -> dict[str, SourceAttention]:
         rows = self.db.execute(
-            "SELECT source_key,considered_at,mentioned_at FROM attention_sources WHERE pet=?",
+            "SELECT source_key,considered_at,mentioned_at,handled,deferred_until,engaged_at FROM attention_sources WHERE pet=?",
             (self.pet,),
         )
         return {
@@ -184,6 +188,39 @@ class Memory:
                 mentioned_at=MAX(COALESCE(attention_sources.mentioned_at,excluded.mentioned_at),excluded.mentioned_at)""",
                 ((self.pet, key, mentioned_at) for key in dict.fromkeys(keys)),
             )
+
+    def record_source_feedback(
+        self,
+        keys: Sequence[str],
+        decision: Literal["handled", "tomorrow", "engaged"],
+        timestamp: float,
+        deferred_until: float | None = None,
+    ) -> None:
+        if decision == "tomorrow" and deferred_until is None:
+            raise ValueError("Tomorrow feedback requires a deadline")
+        with self.transaction():
+            for key in dict.fromkeys(keys):
+                self.db.execute(
+                    """INSERT INTO attention_sources(
+                        pet,source_key,handled,deferred_until,engaged_at,feedback_at
+                    ) VALUES (?,?,?,?,?,?)
+                    ON CONFLICT(pet,source_key) DO UPDATE SET
+                    handled=CASE WHEN ?='engaged' THEN attention_sources.handled ELSE excluded.handled END,
+                    deferred_until=CASE WHEN ?='engaged' THEN attention_sources.deferred_until ELSE excluded.deferred_until END,
+                    engaged_at=CASE WHEN ?='engaged' THEN excluded.engaged_at ELSE attention_sources.engaged_at END,
+                    feedback_at=excluded.feedback_at""",
+                    (
+                        self.pet,
+                        key,
+                        decision == "handled",
+                        deferred_until,
+                        timestamp if decision == "engaged" else None,
+                        timestamp,
+                        decision,
+                        decision,
+                        decision,
+                    ),
+                )
 
     def load_narrative(self, subject_id: SessionIdentity) -> WorkNarrative | None:
         row = self.db.execute(
@@ -507,6 +544,12 @@ class Memory:
             self.db.execute(
                 "DELETE FROM attention_history WHERE pet=? AND updated_at < ?",
                 (self.pet, cutoff),
+            )
+            self.db.execute(
+                """UPDATE attention_sources SET handled=0,deferred_until=NULL,
+                engaged_at=NULL,feedback_at=NULL WHERE pet=? AND feedback_at < ?
+                AND COALESCE(deferred_until,feedback_at) < ?""",
+                (self.pet, cutoff, cutoff),
             )
             self.db.execute(
                 "DELETE FROM message_outcomes WHERE pet=? AND timestamp < ?",

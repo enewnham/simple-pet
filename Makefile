@@ -1,4 +1,4 @@
-.PHONY: setup build importer run test test-python test-swift check lint lint-python lint-swift complexity complexity-python complexity-swift format assets clean
+.PHONY: setup build importer run demo test test-python test-swift check lint lint-python lint-swift complexity complexity-python complexity-swift format assets clean
 
 SWIFT_FLAGS ?= --disable-sandbox
 PYTHON_TEST_WORKERS ?= auto
@@ -24,6 +24,9 @@ importer: .build/debug/AssetImporter
 
 run: setup build
 	bin/pet-daemon
+
+demo: setup build
+	bin/pet-demo $(ARGS)
 
 ifneq ($(strip $(ARGS)),)
 test:
@@ -81,6 +84,7 @@ check: lint test
 	bash -n scripts/fetch-assets.sh
 	bash -n examples/pet-run
 	bash -n bin/pet-daemon
+	bash -n bin/pet-demo
 	bash -n bin/pet-notify
 	bash -n scripts/pet-hook
 

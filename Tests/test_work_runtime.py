@@ -8,7 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Unpack
 
-import httpx
+import httpx2 as httpx
 from anthropic import AsyncAnthropic
 
 from pet_daemon.commentary.contracts import ModelRequest

@@ -41,6 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var view: PetView?
     private var server: SocketServer?
     private var sender: SocketSender?
+    private var conversation: ConversationController?
     private var signals: [DispatchSourceSignal] = []
     private var workspaceObservers: [NSObjectProtocol] = []
     private var systemSleeping = false
@@ -63,6 +64,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             server = try SocketServer(path: options.socket) { [weak self] event in self?.receive(event) }
             let window = makePanel(view: view)
             panel = window
+            conversation = ConversationController(anchor: { [weak view] in
+                let frame = view?.petFrameInScreen ?? .zero
+                return NSRect(x: frame.minX + 52, y: frame.minY + 4, width: 96, height: 96)
+            }, send: { [weak self] in self?.sender?.send($0) })
+            conversation?.onVisibilityChange = { [weak self] in
+                self?.stopIfPaused()
+                self?.status(force: true)
+            }
             connectCallbacks(view: view)
             window.orderFrontRegardless()
             startLifecycleMonitoring()
@@ -105,7 +114,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.status(force: true)
         }
         view.onClick = { [weak self] in
+            self?.conversation?.requestFocus()
             self?.sender?.send(["kind": "renderer", "event": "click"])
+        }
+        view.onRounds = { [weak self] in
+            self?.conversation?.requestFocus()
+            self?.sender?.send(["kind": "renderer", "event": "rounds"])
         }
     }
 
@@ -149,11 +163,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let rect = view?.petFrameInScreen ?? panel.frame
         let dx = pointer.x - rect.midX
         let dy = pointer.y - (rect.minY + 52)
-        return dragging || menu || model.text != nil || model.sleeping || model.state == .error || hypot(dx, dy) <= options.pointerRadius
+        return dragging || menu || conversation?.isVisible == true || model.text != nil || model.sleeping || model.state == .error || hypot(dx, dy) <= options.pointerRadius
     }
 
     private func receive(_ event: PetEvent) {
-        if let deliveryID = model.apply(event) {
+        let acceptsSpeech = conversation?.receive(event) ?? false
+        if let deliveryID = model.apply(event, acceptsSpeech: acceptsSpeech) {
             sender?.send(["kind": "renderer", "event": "speech_accepted", "delivery_id": deliveryID])
         }
         if event.stopMotion == true { stopMotion() }
@@ -221,7 +236,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "width": petFrame.width, "height": petFrame.height,
             "screen": ["x": bounds.minX, "y": bounds.minY, "width": bounds.width, "height": bounds.height],
             "pointer": ["x": pointer.x, "y": pointer.y],
-            "dragging": dragging, "menu": menu, "speech": model.text != nil, "sleeping": model.sleeping,
+            "dragging": dragging, "menu": menu, "speech": model.text != nil || conversation?.isVisible == true, "sleeping": model.sleeping,
             "system_sleeping": systemSleeping
         ]
         let encoded = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
@@ -237,6 +252,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for observer in workspaceObservers { workspaceNotifications.removeObserver(observer) }
         workspaceObservers.removeAll()
         statusTimer?.invalidate()
+        conversation?.stop()
         stopMotion()
         server?.stop()
     }

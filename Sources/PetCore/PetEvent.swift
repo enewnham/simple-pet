@@ -29,17 +29,21 @@ public struct PetEvent: Decodable {
     public let stopMotion: Bool?
     public let sleeping: Bool?
     public let deliveryID: String?
+    public let conversation: Conversation?
+    public let dismissConversation: Bool?
     enum CodingKeys: String, CodingKey {
-        case state, text, ttl, animation, motion, sleeping
+        case state, text, ttl, animation, motion, sleeping, conversation
+        case dismissConversation = "dismiss_conversation"
         case stopMotion = "stop_motion"
         case deliveryID = "delivery_id"
     }
 
     public static func decode(_ data: Data) throws -> PetEvent {
         let event = try JSONDecoder().decode(PetEvent.self, from: data)
-        guard event.state != nil || event.text != nil || event.animation != nil || event.motion != nil || event.stopMotion == true || event.sleeping != nil else {
+        guard event.state != nil || event.text != nil || event.animation != nil || event.motion != nil || event.stopMotion == true || event.sleeping != nil || event.conversation != nil || event.dismissConversation == true else {
             throw EventError.invalid
         }
+        try event.conversation?.validate()
         if let ttl = event.ttl, !ttl.isFinite || ttl < 0 { throw EventError.invalid }
         if let deliveryID = event.deliveryID, UUID(uuidString: deliveryID) == nil { throw EventError.invalid }
         if let animation = event.animation {
@@ -76,7 +80,7 @@ public final class PetModel {
     }
 
     @discardableResult
-    public func apply(_ event: PetEvent) -> String? {
+    public func apply(_ event: PetEvent, acceptsSpeech: Bool = true) -> String? {
         dispatchPrecondition(condition: .onQueue(.main))
         if let state = event.state { self.state = state }
         if let sleeping = event.sleeping { self.sleeping = sleeping }
@@ -84,19 +88,27 @@ public final class PetModel {
             onChange?()
             return deliveryID
         }
+        guard acceptsSpeech else {
+            onChange?()
+            return nil
+        }
         var accepted: String?
-        if let input = event.text {
+        if event.conversation != nil {
+            expiration?.cancel()
+            expiration = nil
+            text = nil
+            if let deliveryID = event.deliveryID {
+                rememberDelivery(deliveryID)
+                accepted = deliveryID
+            }
+        } else if let input = event.text {
             expiration?.cancel()
             expiration = nil
             text = input.trimmingCharacters(in: .whitespacesAndNewlines)
             if text?.isEmpty == true || event.ttl == 0 { text = nil }
             if text != nil {
                 if let deliveryID = event.deliveryID {
-                    acceptedDeliveries.insert(deliveryID)
-                    deliveryOrder.append(deliveryID)
-                    if deliveryOrder.count > 256 {
-                        acceptedDeliveries.remove(deliveryOrder.removeFirst())
-                    }
+                    rememberDelivery(deliveryID)
                     accepted = deliveryID
                 }
                 let work = DispatchWorkItem { [weak self] in
@@ -110,6 +122,12 @@ public final class PetModel {
         onChange?()
         return accepted
     }
+    private func rememberDelivery(_ id: String) {
+        acceptedDeliveries.insert(id)
+        deliveryOrder.append(id)
+        if deliveryOrder.count > 256 { acceptedDeliveries.remove(deliveryOrder.removeFirst()) }
+    }
+
     deinit { expiration?.cancel() }
 }
 

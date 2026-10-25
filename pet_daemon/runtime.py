@@ -15,6 +15,7 @@ from .domain import (
     SessionSource,
 )
 from .identity import SessionIdentity
+from .types import JSONObject
 
 
 class HookEventKind(StrEnum):
@@ -65,6 +66,8 @@ class OverlayPacket(TypedDict, total=False):
     stop_motion: bool
     sleeping: bool
     state: PetState
+    conversation: JSONObject
+    dismiss_conversation: bool
 
 
 class Point(BaseModel):

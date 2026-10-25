@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "A native desktop pet with a local Haiku companion daemon"
 requires-python = ">=3.15"
 dependencies = [
-    "anthropic>=0.79,<1",
+    "anthropic>=1,<2",
     "nltk>=3.9.2,<4",
     "pydantic>=2.12,<3",
     "pyobjc-framework-naturallanguage>=12.2.2,<13",

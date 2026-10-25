@@ -687,6 +687,8 @@ class Attention:
         )
 
     def is_memory_eligible(self, memory: SelectedMemory) -> bool:
+        if not self.is_source_available(memory.key, memory.observed_at):
+            return False
         age = self.wall_clock() - memory.observed_at
         history = self.sources.get(memory.key, SourceAttention())
         if not memory.is_ongoing:
@@ -704,6 +706,17 @@ class Attention:
             default=None,
         )
         return previous is None or self.wall_clock() - previous >= memory_spacing(age)
+
+    def is_source_available(self, key: str, observed_at: float) -> bool:
+        history = self.sources.get(key, SourceAttention())
+        now = self.wall_clock()
+        if history.handled or (
+            history.deferred_until is not None and now < history.deferred_until
+        ):
+            return False
+        return history.engaged_at is None or now - history.engaged_at >= memory_spacing(
+            now - observed_at
+        )
 
     def restore_sources(self, histories: Mapping[str, SourceAttention]) -> None:
         self.sources = {key: history.model_copy() for key, history in histories.items()}

@@ -11,15 +11,15 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Unpack
 
-import httpx
+import httpx2 as httpx
 from anthropic import AsyncAnthropic
 
 from pet_daemon.behavior.sprites import Pack
 from pet_daemon.cli.hook import update
 from pet_daemon.cli.notify import encode
+from pet_daemon.commentary import conversation, reaction
 from pet_daemon.commentary.context import CommentaryPayload
 from pet_daemon.commentary.contracts import ModelRequest
-from pet_daemon.commentary.request import SITUATIONS
 from pet_daemon.config import Config
 from pet_daemon.daemon import Daemon, bind_socket
 from pet_daemon.domain import CareKind, SessionSource, SpeechReason, SpeechSituation
@@ -45,7 +45,10 @@ PNG = base64.b64decode(
 
 def request_reason(body: ModelRequest) -> str:
     instruction = body["system"][-1]["text"]
-    for situation, direction in SITUATIONS.items():
+    for situation, direction in (
+        *reaction.DIRECTIONS.items(),
+        *conversation.DIRECTIONS.items(),
+    ):
         if direction in instruction:
             return (
                 "check_in"
@@ -155,6 +158,17 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.speech = self.fixture_speech
             speech = self.speech_by_reason.get(reason, self.speech)
+            schema = body["output_config"]["format"]["schema"]
+            properties = schema.get("properties", {})
+            if isinstance(properties, dict) and "headline" in properties:
+                return reply(
+                    result={
+                        "speak": speech,
+                        "headline": "The parser checks" if speech is not None else "",
+                        "context": "",
+                        "choices": [],
+                    }
+                )
             return reply(speech)
 
         self.client = AsyncAnthropic(
@@ -1130,7 +1144,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.packet(lambda packet: packet.get("text") == self.speech)
         self.assertEqual(request_reason(self.requests[-1]), "care")
         self.assertIn(
-            SITUATIONS[SpeechSituation.CARE_EXERCISE],
+            conversation.DIRECTIONS[SpeechSituation.CARE_EXERCISE],
             self.requests[-1]["system"][-1]["text"],
         )
         self.send({"kind": "renderer", "event": "click"})
@@ -1322,11 +1336,15 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         schema = self.requests[0]["output_config"]["format"]["schema"]
         properties = schema["properties"]
         assert isinstance(properties, dict)
-        self.assertEqual(set(properties), {"speak", "mentions", "memory", "ongoing"})
-        self.assertEqual(schema["required"], ["speak"])
+        self.assertEqual(
+            set(properties), {"speak", "mentions", "headline", "context", "choices"}
+        )
+        required = schema["required"]
+        assert isinstance(required, list)
+        self.assertEqual(set(required), {"speak", "headline", "context"})
         speak = properties["speak"]
         assert isinstance(speak, dict)
-        self.assertEqual(speak["type"], "string")
+        self.assertEqual(speak["anyOf"], [{"type": "string"}, {"type": "null"}])
 
     async def test_napping_pauses_routine_commentary_and_click_wakes_for_speech(
         self,
@@ -1587,8 +1605,17 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.event("tool_start", call="checks", tool="pytest")
         await self.wait_for(lambda: self.daemon.application.sessions.is_active)
         self.send({"kind": "renderer", "event": "click"})
-        await self.packet(lambda packet: "text" in packet)
+        clicked = await self.packet(lambda packet: "text" in packet)
         await self.wait_for(lambda: self.daemon.application.task is None)
+        conversation = clicked["conversation"]
+        self.send(
+            {
+                "kind": "renderer",
+                "event": "interaction_dismissed",
+                "interaction_id": conversation["id"],
+                "revision": conversation["revision"],
+            }
+        )
         self.event("turn_done")
         await self.wait_for(
             lambda: self.daemon.application.attention.pending is not None
@@ -1708,6 +1735,16 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.comment(SpeechReason.CLICK)
         self.assertEqual(len(self.story_requests), 1)
         self.assertEqual(len(self.requests), 2)
+        interaction = self.daemon.application.interactions
+        self.send(
+            {
+                "kind": "renderer",
+                "event": "interaction_dismissed",
+                "interaction_id": interaction.identifier,
+                "revision": interaction.revision,
+            }
+        )
+        await self.wait_for(lambda: not interaction.is_interacting)
         await self.drain()
         self.event("intent", goal="Investigate the parser timeout")
         await self.packet(lambda packet: "text" in packet)

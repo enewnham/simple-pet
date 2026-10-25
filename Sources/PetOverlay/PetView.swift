@@ -16,6 +16,7 @@ final class PetView: NSView {
     var onPlayback: ((Int, String) -> Void)?
     var onInteraction: ((Bool, Bool) -> Void)?
     var onClick: (() -> Void)?
+    var onRounds: (() -> Void)?
     var onModelChange: (() -> Void)?
 
     init(model: PetModel, assets: URL) throws {
@@ -216,8 +217,13 @@ final class PetView: NSView {
         onInteraction?(false, true)
         defer { onInteraction?(false, false) }
         let menu = NSMenu()
+        let rounds = menu.addItem(withTitle: "Make the rounds", action: #selector(makeRounds), keyEquivalent: "")
+        rounds.target = self
+        menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Pet", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
+    @objc private func makeRounds() { onRounds?() }
+
     deinit { timer?.invalidate() }
 }

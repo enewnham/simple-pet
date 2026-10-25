@@ -23,6 +23,17 @@ struct PetOverlayTests {
         }
     }
 
+    @Test func workingSpeechKeepsTheLegacyBubbleAndPetPosition() throws {
+        try withFixture { fixture in
+            let originalPet = fixture.view.petFrameInScreen
+            try fixture.apply(["state": "working", "text": "The active build is running.", "ttl": 60])
+            #expect(fixture.model.state == .working)
+            #expect(fixture.text.string == "The active build is running.")
+            #expect(!fixture.scroll.isHidden)
+            #expect(fixture.view.petFrameInScreen == originalPet)
+        }
+    }
+
     @Test func activityPreservesScrollAndNewSpeechResetsIt() throws {
         try withFixture { fixture in
             try fixture.apply(["text": Self.longSpeech, "ttl": 60])

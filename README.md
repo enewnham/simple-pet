@@ -72,6 +72,23 @@ Story-generation requests are excluded. The viewer reads the log and its numbere
 rotations. Use ↑/↓ to select a request, Tab to move between panes, the mouse wheel
 to scroll, r to refresh, and q to quit.
 
+### Try saved work at a faster pace
+
+Run a second pet with your saved work, configured model, persona, and sprite pack:
+
+```sh
+make demo
+# Focus a saved thread and set the pace:
+make demo ARGS='--work "parser" --speed 10'
+```
+
+`--work` matches request or report text. Omit it to choose the most recent recorded
+thread. The demo uses `ANTHROPIC_API_KEY`, copies local memory to a temporary
+directory, and uses private sockets. The live pet can keep running. Timing advances
+at 10× speed by default, while reported facts retain their recorded timestamps.
+Click the pet and try its offered choices, or use Recent work for a tour. Restarting
+the demo resets its feedback to the saved copy. Press Ctrl-C to close it.
+
 ## Connect your agents
 
 Add the client and hook adapter to PATH before launching your coding tool:
@@ -116,6 +133,43 @@ Related sessions can draw on remembered decisions and reports. The pet reacts to
 results and live work, and can recall where we left off during quiet periods or an idle
 click. Recollections grow less frequent as their evidence ages. Finished work recedes as
 the conversation moves on.
+
+Automatic activity reactions stay brief. Clicking the pet opens a conversation,
+including while agents are working. A separate prompt composes its headline,
+remark, context, and up to two relevant responses from available actions.
+**Recent work** offers another thread or a brief tour of recent work and explicitly
+remaining threads. The right-click menu also offers rounds.
+
+Work commentary offers actions for its recorded worktree, PR, or session when a
+handler is configured. When offered, **Already handled** stops recalling that source,
+and **Tomorrow** defers it until 09:00 the next local day. Related sessions share
+feedback on the same source. Opening a destination briefly spaces out further
+recalls. A failed open leaves the action available to retry.
+
+`navigation.handlers` configures destination handlers. Worktrees and PRs use
+`/usr/bin/open` by default. Set a handler to `null` to hide its action. Sessions
+require an explicit handler and use their recorded source and native session ID:
+
+```json
+"navigation": {
+  "handlers": {
+    "worktree": {"uri_template": "vscode://file{path}"},
+    "pull_request": {"argv": ["/usr/bin/open", "{target}"]},
+    "session": null,
+    "timeout_seconds": 10
+  }
+}
+```
+
+This example opens checkouts in VS Code. A session handler must use the URI or
+executable supported by your session host.
+
+Each handler specifies either `uri_template` or `argv`. URI placeholders are
+percent encoded. `{path}` preserves directory separators for file URLs. Use
+`{target}` for a value inside a URI query. Other placeholders are `{session_id}`
+and `{source}`. Executable arguments substitute these
+values literally and receive the target as JSON on standard input. Executables
+run directly without a shell. The pet reports failed or timed-out opens.
 
 Remembered work and speech are stored locally. Use the commands below to clear them.
 

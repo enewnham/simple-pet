@@ -44,6 +44,7 @@ class ArchitectureTests(unittest.TestCase):
                 "asyncio",
                 "anthropic",
                 "httpx",
+                "httpx2",
                 "pet_daemon.storage",
                 "pet_daemon.sources",
                 "pet_daemon.commentary",

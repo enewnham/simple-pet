@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+from pydantic import BaseModel
+
 from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.commentary.usage import UsageTokens, request_usage
 from pet_daemon.domain import ModelPurpose, SpeechReason
@@ -24,7 +26,11 @@ class FailingModel(FixtureModel):
         self.calls = 0
 
     async def complete(
-        self, request: ModelRequest, reason: SpeechReason | ModelPurpose
+        self,
+        request: ModelRequest,
+        reason: SpeechReason | ModelPurpose,
+        *,
+        response_type: type[BaseModel],
     ) -> dict[str, object]:
         self.calls += 1
         usage = request_usage.get()
@@ -34,7 +40,7 @@ class FailingModel(FixtureModel):
             if self.error is not None:
                 raise self.error
             return {"intent": None, "decisions": [], "progress": []}
-        return await super().complete(request, reason)
+        return await super().complete(request, reason, response_type=response_type)
 
 
 class ReplayTests(unittest.IsolatedAsyncioTestCase):

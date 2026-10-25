@@ -1,9 +1,7 @@
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import cast
 
-from anthropic import transform_schema
 from pydantic import BaseModel, ConfigDict
 
 from ..attention import AttentionSelection
@@ -523,11 +521,9 @@ def prepare(
     request = make_request(
         context.payload(citations, memory.clock()),
         [{"type": "text", "text": INSTRUCTIONS}],
+        response=StoryResponse,
+        min_tokens=1400,
     )
-    request["output_config"]["format"]["schema"] = cast(
-        JSONObject, transform_schema(StoryResponse)
-    )
-    request["max_tokens"] = max(request["max_tokens"], 1400)
     return WorkNarrativeRequest(
         subject_id=subject.id if subject else root,
         revision=semantic_revision(subject.story) if subject else "",

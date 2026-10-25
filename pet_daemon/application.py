@@ -17,6 +17,7 @@ from .config import Config
 from .delivery import DeliveryConditions, DeliveryOutcome, SpeechDelivery, SpeechMessage
 from .domain import DeliveryStatus, SpeechReason, SpeechSituation
 from .identity import SessionIdentity
+from .interactions import Interactions
 from .logging import get_logger
 from .runtime import (
     HookEvent,
@@ -113,12 +114,34 @@ class Application:
                     "text": packet["text"],
                     "ttl": packet["ttl"],
                     "delivery_id": packet["delivery_id"],
+                    **(
+                        {"conversation": packet["conversation"]}
+                        if "conversation" in packet
+                        else {}
+                    ),
                 }
             ),
             clock=clock,
             on_outcome=self.delivery_outcome,
             valid=self.is_delivery_valid,
         )
+        self.interactions = Interactions(
+            config,
+            memory=memory,
+            attention=attention,
+            cognition=cognition,
+            context=self.context,
+            emit=emit,
+            more=lambda: self.click(more=True),
+            rounds=self.rounds,
+            displayed=self.interaction_displayed,
+            dismissed=self.preempt,
+            clock=clock,
+        )
+
+    def interaction_displayed(self, text: str) -> None:
+        self.last_speech = (text, self.clock())
+        self.attention.last_attempt = self.clock()
 
     def clear_memory(self) -> None:
         try:
@@ -127,6 +150,7 @@ class Application:
             log.exception("memory.clear_failed", error=str(error))
             return
         self.preempt()
+        self.interactions.clear()
         self.history_epoch += 1
         self.sessions = Sessions(
             self.clock,
@@ -157,6 +181,7 @@ class Application:
         if sleeping:
             self.behavior.suspend("system_sleep")
             self.preempt()
+            self.interactions.clear()
             for provider in self.providers:
                 provider.pause()
             if self.process_task:
@@ -177,6 +202,8 @@ class Application:
         self.behavior.wake("speech_request")
         self.behavior.stop_movement()
         self.preempt()
+        if self.interactions.identifier:
+            self.interactions.clear()
         self.manual = (context, ttl)
         log.debug("speech.requested", context=context, ttl=ttl)
 
@@ -283,6 +310,8 @@ class Application:
                 self.speak(context, ttl)
 
     def receive_renderer(self, packet: Mapping[str, object]) -> None:
+        if self.interactions.receive(packet):
+            return
         feedback = packet.get("event")
         if feedback == "speech_accepted":
             try:
@@ -300,6 +329,8 @@ class Application:
             self.system_sleep_changed(feedback == "system_sleep")
         elif feedback == "click":
             self.click()
+        elif feedback == "rounds":
+            self.rounds()
         else:
             self.behavior.completion(packet)
 
@@ -311,6 +342,7 @@ class Application:
             return
         self.history_epoch += 1
         self.delivery.clear()
+        self.interactions.clear()
         self.last_speech = None
         self.emit({"text": "", "ttl": 0})
         log.info("speech.cleared", pet=self.memory.pet)
@@ -325,15 +357,24 @@ class Application:
             self.task.cancel()
         self.attention.pending = None
 
-    def click(self) -> None:
+    def click(self, *, more: bool = False) -> None:
         self.behavior.defer_care()
         self.behavior.wake("click")
         self.behavior.react("click", self.sessions)
         if self.task and self.reason == SpeechReason.CLICK and not self.task.done():
             return
         self.preempt()
+        self.interactions.begin(more=more)
         self.clicked = True
         log.debug("speech.requested", reason="click")
+
+    def rounds(self) -> None:
+        self.behavior.wake("rounds")
+        self.behavior.stop_movement()
+        self.preempt()
+        self.clicked = False
+        self.reason = SpeechReason.CLICK
+        self.task = asyncio.create_task(self.interactions.show_rounds())
 
     async def generate_commentary(
         self,
@@ -359,9 +400,13 @@ class Application:
                 choice,
                 refresh=lambda: self.context(trigger),
                 eligible=self.attention.is_selection_eligible,
+                actions=self.interactions.offers(choice),
                 memory_eligible=(
                     lambda source, ongoing_only=bool(index), automatic=automatic: (
-                        (not ongoing_only or source.is_ongoing)
+                        self.attention.is_source_available(
+                            source.key, source.observed_at
+                        )
+                        and (not ongoing_only or source.is_ongoing)
                         and (not automatic or self.attention.is_memory_eligible(source))
                     )
                 )
@@ -430,9 +475,17 @@ class Application:
                     )
                     return
                 selection = result.request.selection
+                sources = self.selected_sources(selection)
+                if self.interactions.is_suppressed(result, sources):
+                    if reason == SpeechReason.CLICK:
+                        self.interactions.finish_empty()
+                    outcome = "suppressed"
+                    return
                 if result.speak is None:
                     self.mark_considered(selection)
                     outcome = "silent"
+                    if reason == SpeechReason.CLICK:
+                        self.interactions.finish_empty()
                 else:
                     seconds = self.speech_duration(result.speak) if ttl is None else ttl
                     if not result.speak.strip() or seconds == 0:
@@ -441,6 +494,11 @@ class Application:
                     else:
                         self.behavior.wake("speech")
                         self.behavior.stop_movement()
+                        conversation = self.interactions.decorate(
+                            result, sources, seconds
+                        )
+                        if conversation is None and self.interactions.identifier:
+                            self.interactions.clear(cancel_task=False)
                         message = SpeechMessage(
                             text=result.speak,
                             ttl=seconds,
@@ -452,6 +510,7 @@ class Application:
                             else None,
                             history_epoch=history_epoch,
                             mentioned_sources=result.mentions,
+                            conversation=conversation,
                             conditions=DeliveryConditions(
                                 commentary=result.request.conditions,
                                 trigger=trigger,
@@ -465,6 +524,10 @@ class Application:
                 log.info(
                     "observation.deferred", reason=str(error), subject=selection.id
                 )
+                if reason == SpeechReason.CLICK:
+                    self.interactions.finish_empty(
+                        "That thread changed. Ask me for another look."
+                    )
             except asyncio.CancelledError:
                 outcome = "cancelled"
                 raise
@@ -475,6 +538,10 @@ class Application:
                     session=focus_session,
                     error=str(error),
                 )
+                if reason == SpeechReason.CLICK:
+                    self.interactions.finish_empty(
+                        "I couldn't get the work context. Try again in a moment."
+                    )
             finally:
                 tokens = usage.get(reason)
                 log.info(
@@ -551,6 +618,12 @@ class Application:
     def is_delivery_valid(self, message: SpeechMessage) -> bool:
         conditions = message.conditions
         assert conditions is not None
+        conversation = message.conversation
+        if conversation is not None and (
+            conversation["id"] != self.interactions.identifier
+            or conversation["revision"] != self.interactions.revision
+        ):
+            return False
         return (
             message.history_epoch == self.history_epoch
             and conditions.request_epoch == self.revision
@@ -638,6 +711,7 @@ class Application:
                     self.process_task.result()
                 self.process_task = asyncio.create_task(self.probe_processes())
             self.delivery.tick()
+            self.interactions.delivery.tick()
         if now >= self.next_prune:
             self.sessions.prune()
             self.next_prune = now + 1
@@ -653,6 +727,12 @@ class Application:
         self._request_commentary(now)
 
     def _request_commentary(self, now: float) -> None:
+        if (
+            self.interactions.is_interacting
+            and not self.clicked
+            and self.manual is None
+        ):
+            return
         snapshot = self.context()
         check_in = tuple(
             key
@@ -689,6 +769,12 @@ class Application:
             request.eligible,
             reflection=request.reflection,
         )
+        if request.reason == SpeechReason.CLICK:
+            choice = self.interactions.choose(snapshot, selection)
+            if choice is None:
+                self.interactions.finish_empty()
+                return
+            selection = choice
         if not self.attention.is_selection_eligible(selection, snapshot):
             return
         if request.reason == SpeechReason.CHECK_IN and selection.focus_session:
@@ -710,6 +796,7 @@ class Application:
 
     async def close(self) -> None:
         self.delivery.close()
+        await self.interactions.close()
         tasks = [task for task in (self.task, self.process_task) if task]
         for task in tasks:
             task.cancel()

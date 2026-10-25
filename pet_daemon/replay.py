@@ -10,12 +10,13 @@ import random
 import sys
 import tempfile
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Self, cast
 
 import structlog
+from pydantic import BaseModel
 
 from .application import Application
 from .attention import Attention
@@ -34,6 +35,7 @@ from .sessions.reactions import SessionReactions
 from .sessions.tracking import Sessions
 from .sources.hooks import normalize_hook
 from .storage import Memory
+from .types import JSONObject
 from .work.observations import RepositoryObservation
 
 
@@ -45,6 +47,23 @@ class FixtureModel:
         self.progress_contains: list[str] | None = None
 
     async def complete(
+        self,
+        request: ModelRequest,
+        reason: SpeechReason | ModelPurpose,
+        *,
+        response_type: type[BaseModel],
+    ) -> dict[str, object]:
+        response = self.response(request, reason)
+        properties = request["output_config"]["format"]["schema"].get("properties", {})
+        if isinstance(properties, dict) and "headline" in properties:
+            response.update(
+                headline="Where we left off" if response.get("speak") else "",
+                context="",
+                choices=[],
+            )
+        return response
+
+    def response(
         self, request: ModelRequest, reason: SpeechReason | ModelPurpose
     ) -> dict[str, object]:
         if reason != ModelPurpose.STORY:
@@ -99,7 +118,11 @@ class RecordingModel:
         self.calls: list[dict[str, Any]] = []
 
     async def complete(
-        self, request: ModelRequest, reason: SpeechReason | ModelPurpose
+        self,
+        request: ModelRequest,
+        reason: SpeechReason | ModelPurpose,
+        *,
+        response_type: type[BaseModel],
     ) -> dict[str, object]:
         started = time.monotonic()
         call: dict[str, Any] = {
@@ -109,7 +132,9 @@ class RecordingModel:
         parent_usage = request_usage.get()
         with collect_usage() as usage:
             try:
-                response = await self.client.complete(request, reason)
+                response = await self.client.complete(
+                    request, reason, response_type=response_type
+                )
                 call["response"] = response
                 return response
             except Exception as error:
@@ -223,6 +248,7 @@ class ReplayHarness:
         monotonic_time: float = 1000,
         memory_file: Path | None = None,
         pack: Pack | None = None,
+        on_packet: Callable[[OverlayPacket], object] | None = None,
     ) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="pet-replay-")
         directory = Path(self.temporary.name)
@@ -233,6 +259,7 @@ class ReplayHarness:
             update={"memory_file": memory_file or directory / "memory.sqlite3"}
         )
         self.pack = pack or Pack(self.config.pet_dir)
+        self.on_packet = on_packet
         self.seed = seed
         self.clock = ReplayClock(monotonic_time, wall_time)
         offline = FixtureModel()
@@ -337,6 +364,8 @@ class ReplayHarness:
                 "wall_time": self.clock.wall(),
             }
         )
+        if self.on_packet is not None:
+            self.on_packet(packet)
 
     async def __aenter__(self) -> Self:
         self._context.__enter__()
@@ -437,6 +466,24 @@ class ReplayHarness:
         )
 
 
+def _normalize_conversation_ids(
+    conversation: JSONObject,
+    conversations: dict[str, str],
+    actions: dict[str, str],
+) -> None:
+    identifier = cast(str, conversation["id"])
+    conversation["id"] = conversations.setdefault(
+        identifier, f"replay-conversation-{len(conversations)}"
+    )
+    items = cast(Sequence[JSONObject], conversation["items"])
+    for group in (conversation, *items):
+        for action in cast(Sequence[JSONObject], group["actions"]):
+            identifier = cast(str, action["id"])
+            action["id"] = actions.setdefault(
+                identifier, f"replay-action-{len(actions)}"
+            )
+
+
 async def replay_sequence(
     fixture: dict[str, Any],
     *,
@@ -446,6 +493,8 @@ async def replay_sequence(
 ) -> dict[str, Any]:
     """Adapt reason-driven commentary fixtures to production application methods."""
     steps = []
+    conversation_ids: dict[str, str] = {}
+    action_ids: dict[str, str] = {}
     async with ReplayHarness(settings, client) as replay:
         if model:
             replay.config.model = model
@@ -546,6 +595,10 @@ async def replay_sequence(
             for packet in packets:
                 if "delivery_id" in packet:
                     packet["delivery_id"] = f"replay-{index}"
+                if "conversation" in packet:
+                    _normalize_conversation_ids(
+                        packet["conversation"], conversation_ids, action_ids
+                    )
             step["packets"] = packets
             steps.append(step)
     return {

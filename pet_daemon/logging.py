@@ -181,7 +181,7 @@ def configure(
         )
         handlers.append(file)
     logging.basicConfig(level=logging.DEBUG, handlers=handlers, force=True)
-    for name in ("httpx", "httpcore", "anthropic", "asyncio"):
+    for name in ("httpx", "httpcore", "httpx2", "httpcore2", "anthropic", "asyncio"):
         logging.getLogger(name).setLevel(logging.WARNING)
     if path is not None:
         log.info(

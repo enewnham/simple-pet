@@ -1,9 +1,18 @@
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Literal, Protocol, TypedDict
 
 from anthropic.types import TextBlockParam, ThinkingConfigDisabledParam
+from pydantic import BaseModel
 
 from ..types import JSONObject
+
+
+@dataclass(frozen=True)
+class ActionOffer:
+    id: str
+    label: str
+    description: str
 
 
 class UserMessage(TypedDict):
@@ -36,5 +45,7 @@ class RequestFactory(Protocol):
         self,
         payload: object,
         system: Sequence[TextBlockParam],
-        speech_required: bool = False,
+        *,
+        response: type[BaseModel],
+        min_tokens: int = 0,
     ) -> ModelRequest: ...

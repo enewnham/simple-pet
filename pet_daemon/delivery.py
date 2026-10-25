@@ -4,7 +4,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from pydantic import BaseModel, Field
 
@@ -13,6 +13,7 @@ from .domain import DeliveryStatus, SpeechReason
 from .identity import SessionIdentity
 from .logging import get_logger
 from .runtime import Trigger
+from .types import JSONObject
 
 log = get_logger("pet-daemon")
 
@@ -27,6 +28,7 @@ class SpeechPacket(TypedDict):
     text: str
     ttl: float
     delivery_id: str
+    conversation: NotRequired[JSONObject]
 
 
 class SpeechMessage(BaseModel):
@@ -40,6 +42,7 @@ class SpeechMessage(BaseModel):
     message_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     conditions: DeliveryConditions | None = None
     mentioned_sources: tuple[str, ...] = ()
+    conversation: JSONObject | None = None
 
 
 class DeliveryOutcome(BaseModel):
@@ -96,13 +99,14 @@ class SpeechDelivery:
         delivery.due = self.clock() + self.ack_timeout
         delivery.expires = self.clock() + message.ttl + 2 * self.ack_timeout
         try:
-            self.emit(
-                {
-                    "text": message.text,
-                    "ttl": message.ttl,
-                    "delivery_id": message.message_id,
-                }
-            )
+            packet: SpeechPacket = {
+                "text": message.text,
+                "ttl": message.ttl,
+                "delivery_id": message.message_id,
+            }
+            if message.conversation is not None:
+                packet["conversation"] = message.conversation
+            self.emit(packet)
         except OSError:
             log.exception(
                 "speech.send_failed",

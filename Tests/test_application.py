@@ -8,6 +8,8 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
+from pydantic import BaseModel
+
 from pet_daemon.application import Application
 from pet_daemon.attention import Attention, AttentionSelection
 from pet_daemon.behavior.controller import Behavior
@@ -50,6 +52,7 @@ from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources import RepositoryTracker
 from pet_daemon.sources.hooks import normalize_hook
 from pet_daemon.storage import Memory
+from pet_daemon.types import JSONObject
 from pet_daemon.work import WorkStory
 from pet_daemon.work.evidence import ReportedProgress, WorkAssociation
 from pet_daemon.work.models import RelatedLink
@@ -92,6 +95,10 @@ class FixtureModel:
     def __init__(self) -> None:
         self.requests = []
         self.story_requests = []
+        self.exchange_choices: tuple[str, ...] = ("context",)
+        self.choice_labels: dict[str, str] = {}
+        self.headline = "Escaped delimiters hold"
+        self.exchange_context = "The agent verified escaped delimiters while improving quoted-field parsing."
         self.before_response: Callable[[SpeechReason | ModelPurpose], None] | None = (
             None
         )
@@ -106,7 +113,11 @@ class FixtureModel:
         )
 
     async def complete(
-        self, request: ModelRequest, reason: SpeechReason | ModelPurpose
+        self,
+        request: ModelRequest,
+        reason: SpeechReason | ModelPurpose,
+        *,
+        response_type: type[BaseModel],
     ) -> dict[str, object]:
         if reason == ModelPurpose.STORY:
             self.story_requests.append(request)
@@ -118,9 +129,33 @@ class FixtureModel:
         self.requests.append((request, reason))
         if self.before_response:
             self.before_response(reason)
-        if self.response:
-            return self.response(request, reason)
-        return {"speak": self.text}
+        result = (
+            self.response(request, reason) if self.response else {"speak": self.text}
+        )
+        schema = request["output_config"]["format"]["schema"]
+        properties = schema.get("properties", {})
+        if isinstance(properties, dict) and "headline" in properties:
+            payload = json.loads(request["messages"][0]["content"])
+            available = {
+                action["id"]: action for action in payload.get("available_actions", [])
+            }
+            speaking = result.get("speak") is not None
+            result.setdefault("headline", self.headline if speaking else "")
+            result.setdefault("context", self.exchange_context if speaking else "")
+            result.setdefault(
+                "choices",
+                [
+                    {
+                        "id": identifier,
+                        "label": self.choice_labels.get(
+                            identifier, available[identifier]["label"]
+                        ),
+                    }
+                    for identifier in self.exchange_choices
+                    if speaking and identifier in available
+                ],
+            )
+        return result
 
 
 class ApplicationTests(unittest.IsolatedAsyncioTestCase):
@@ -1995,6 +2030,15 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         mentioned = require(self.memory.load_source_attention().get(source))
         self.assertEqual(mentioned.mentioned_at, self.now)
 
+        conversation = emitted["conversation"]
+        self.app.receive_renderer(
+            {
+                "event": "interaction_dismissed",
+                "interaction_id": conversation["id"],
+                "revision": conversation["revision"],
+            }
+        )
+
         self.now += 900
         self.app.tick()
         await require(self.app.task)
@@ -2101,3 +2145,608 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         attention = require(self.memory.load_source_attention().get(source))
         self.assertEqual(attention.considered_at, self.now)
         self.assertEqual(attention.mentioned_at, self.now)
+
+    def interaction_snapshot(self) -> JSONObject:
+        snapshot = json.loads(
+            json.dumps(
+                next(
+                    packet["conversation"]
+                    for packet in reversed(self.packets)
+                    if "conversation" in packet
+                )
+            )
+        )
+        assert isinstance(snapshot, dict)
+        return snapshot
+
+    def interaction_item(self, snapshot: JSONObject) -> JSONObject:
+        items = snapshot["items"]
+        assert isinstance(items, list)
+        item = items[0]
+        assert isinstance(item, dict)
+        return item
+
+    def interaction_choice(
+        self, item: JSONObject, kind: str, label: str | None = None
+    ) -> JSONObject:
+        actions = item["actions"]
+        assert isinstance(actions, list)
+        return next(
+            action
+            for action in actions
+            if isinstance(action, dict)
+            and action["kind"] == kind
+            and (label is None or action["label"] == label)
+        )
+
+    def interaction_action(self, snapshot: JSONObject, action: JSONObject) -> None:
+        self.app.receive_renderer(
+            {
+                "kind": "renderer",
+                "event": "interaction_action",
+                "interaction_id": snapshot["id"],
+                "revision": snapshot["revision"],
+                "action_id": action["id"],
+            }
+        )
+
+    def interaction_model_response(
+        self, request: ModelRequest, reason: SpeechReason
+    ) -> dict[str, object]:
+        payload = json.loads(request["messages"][0]["content"])
+        candidates = [
+            item["memory_candidate"]
+            for item in payload.get("earlier_context", [])
+            if "memory_candidate" in item
+        ]
+        if candidates:
+            candidate = next(
+                (
+                    item
+                    for item in reversed(candidates)
+                    if item["kind"] == "reported_progress"
+                ),
+                candidates[-1],
+            )
+            return {
+                "speak": self.model.text,
+                "mentions": [candidate["id"]],
+                "memory": candidate["id"],
+                "ongoing": candidate["eligible_ongoing"],
+            }
+        sources = payload.get("current_moment", {}).get("source_ids", [])
+        reports = [
+            item["source_ids"]
+            for item in payload.get("earlier_context", [])
+            if "reported_progress" in item and item.get("source_ids")
+        ]
+        return {
+            "speak": self.model.text,
+            "mentions": sources or (reports[-1] if reports else []),
+        }
+
+    async def test_active_work_automatic_commentary_keeps_the_short_speech_schema(
+        self,
+    ) -> None:
+        self.report("The parser preserves escaped delimiters.")
+        await self.app.comment(SpeechReason.ROUTINE)
+        packet = next(
+            packet for packet in reversed(self.packets) if "delivery_id" in packet
+        )
+        self.assertEqual(packet["text"], self.model.text)
+        self.assertNotIn("conversation", packet)
+        request = self.model.requests[-1][0]
+        schema = request["output_config"]["format"]["schema"]
+        properties = schema["properties"]
+        assert isinstance(properties, dict)
+        self.assertEqual(set(properties), {"speak", "mentions"})
+        payload = json.loads(request["messages"][0]["content"])
+        self.assertNotIn("available_actions", payload)
+
+    async def test_click_during_active_work_opens_a_conversation(self) -> None:
+        self.report("The parser preserves escaped delimiters.")
+        self.model.response = self.interaction_model_response
+        await self.app.comment(SpeechReason.CLICK)
+        snapshot = self.interaction_snapshot()
+        self.assertEqual(snapshot["headline"], self.model.headline)
+        self.assertEqual(self.interaction_item(snapshot)["text"], self.model.text)
+        self.assertTrue(snapshot["persistent"])
+
+    async def test_interaction_renders_model_choices_from_available_destinations(
+        self,
+    ) -> None:
+        self.model.exchange_choices = ("worktree", "context")
+        self.model.choice_labels = {
+            "worktree": "Take me there",
+            "context": "How did we get here?",
+        }
+        self.now += 1
+        self.report("The parser preserves escaped delimiters.")
+        self.complete_turn()
+        self.model.response = self.interaction_model_response
+        await self.app.comment(SpeechReason.CLICK)
+        snapshot = self.interaction_snapshot()
+        item = self.interaction_item(snapshot)
+        actions = item["actions"]
+        assert isinstance(actions, list)
+        self.assertEqual(
+            [
+                (action["kind"], action["label"])
+                for action in actions
+                if isinstance(action, dict)
+            ],
+            [
+                ("navigate", "Take me there"),
+                ("context", "How did we get here?"),
+            ],
+        )
+        payload = json.loads(self.model.requests[-1][0]["messages"][0]["content"])
+        self.assertEqual(
+            {action["id"] for action in payload["available_actions"]},
+            {
+                "worktree",
+                "pull_request",
+                "context",
+                "tomorrow",
+                "handled",
+                "more",
+                "rounds",
+            },
+        )
+        self.assertEqual(snapshot["headline"], self.model.headline)
+        self.assertEqual(snapshot["mode"], "thread")
+        self.assertTrue(snapshot["persistent"])
+        self.assertEqual(item["text"], self.model.text)
+        self.assertIsInstance(item["id"], str)
+
+    async def test_interaction_context_expands_the_attributed_narrative(self) -> None:
+        self.now += 1
+        self.report("The agent verified escaped delimiters inside quoted fields.")
+        self.complete_turn()
+        self.model.response = self.interaction_model_response
+        await self.app.comment(SpeechReason.CLICK)
+        snapshot = self.interaction_snapshot()
+        item = self.interaction_item(snapshot)
+        self.interaction_action(snapshot, self.interaction_choice(item, "context"))
+        expanded = self.interaction_snapshot()
+        self.assertEqual(expanded["mode"], "context")
+        self.assertEqual(expanded["id"], snapshot["id"])
+        before_revision, after_revision = snapshot["revision"], expanded["revision"]
+        assert isinstance(before_revision, int) and isinstance(after_revision, int)
+        self.assertGreater(after_revision, before_revision)
+        context = self.interaction_item(expanded)["context"]
+        self.assertIn(self.model.exchange_context, str(context))
+        self.assertIn("Agent report", str(context))
+        self.assertEqual(expanded["headline"], self.model.headline)
+        actions = item["actions"]
+        assert isinstance(actions, list)
+        self.assertEqual(
+            [action["kind"] for action in actions if isinstance(action, dict)],
+            ["context"],
+        )
+        self.assertEqual(self.memory.load_source_attention(), {})
+
+    async def test_interaction_tomorrow_defers_only_the_selected_source(self) -> None:
+        from pet_daemon.navigation import next_morning
+
+        self.model.exchange_choices = ("context", "tomorrow")
+        self.now += 1
+        self.report("The multiline escape check remains unverified.")
+        self.complete_turn()
+        self.model.response = self.interaction_model_response
+        await self.app.comment(SpeechReason.CLICK)
+        snapshot = self.interaction_snapshot()
+        item = self.interaction_item(snapshot)
+        source = str(item["id"])
+        deadline = next_morning(self.now)
+        self.interaction_action(snapshot, self.interaction_choice(item, "tomorrow"))
+        feedback = self.memory.load_source_attention()
+        self.assertEqual(set(feedback), {source})
+        self.assertEqual(feedback[source].deferred_until, deadline)
+        self.assertFalse(feedback[source].handled)
+        self.assertTrue(self.packets[-1].get("dismiss_conversation"))
+        self.assertFalse(self.attention.is_source_available(source, self.now))
+        self.now = deadline
+        self.assertTrue(self.attention.is_source_available(source, 1001))
+
+    async def test_interaction_handled_source_survives_application_restart(
+        self,
+    ) -> None:
+        self.model.exchange_choices = ("handled",)
+        self.now += 1
+        self.report("The multiline escape check remains unverified.")
+        self.complete_turn()
+        self.model.response = self.interaction_model_response
+        await self.app.comment(SpeechReason.CLICK)
+        snapshot = self.interaction_snapshot()
+        item = self.interaction_item(snapshot)
+        source = str(item["id"])
+        self.interaction_action(snapshot, self.interaction_choice(item, "handled"))
+        self.assertTrue(self.memory.load_source_attention()[source].handled)
+        behavior = self.app.behavior
+        await self.app.close()
+        self.memory.close()
+        self.memory = Memory(
+            Path(self.temporary.name) / "memory.sqlite3",
+            "fixture-pet",
+            clock=self.clock,
+        )
+        self.attention = Attention(
+            self.config, self.clock, random.Random(0), wall_clock=self.clock
+        )
+        self.app = Application(
+            self.config,
+            sessions=Sessions(self.clock, wall_clock=self.clock),
+            reactions=SessionReactions(),
+            attention=self.attention,
+            behavior=behavior,
+            cognition=Cognition(
+                self.model, self.config, memory=self.memory, clock=self.clock
+            ),
+            providers=(self.provider,),
+            processes=ProcessTracker(clock=self.clock),
+            memory=self.memory,
+            emit=self.packets.append,
+            clock=self.clock,
+            rng=random.Random(0),
+        )
+        self.provider.emit = self.app.ingest
+        self.model.response = self.interaction_model_response
+        self.assertTrue(self.memory.load_source_attention()[source].handled)
+        self.assertFalse(self.attention.is_source_available(source, self.now))
+        self.app.receive_renderer({"kind": "renderer", "event": "rounds"})
+        await require(self.app.task)
+        items = self.interaction_snapshot()["items"]
+        assert isinstance(items, list)
+        self.assertGreater(len(items), 0)
+        self.assertNotIn(
+            source, [item["id"] for item in items if isinstance(item, dict)]
+        )
+
+    async def test_interaction_navigation_records_engagement_and_finite_spacing(
+        self,
+    ) -> None:
+        from unittest.mock import patch
+
+        from pet_daemon.navigation import Navigator, OpenResult, Target
+
+        self.model.exchange_choices = ("pull_request",)
+        self.now += 1
+        reported_at = self.now
+        self.report("The parser preserves escaped delimiters.")
+        self.complete_turn()
+        self.model.response = self.interaction_model_response
+        await self.app.comment(SpeechReason.CLICK)
+        snapshot = self.interaction_snapshot()
+        item = self.interaction_item(snapshot)
+        source = str(item["id"])
+        opened = asyncio.Event()
+        targets: list[Target] = []
+
+        async def open_target(navigator: Navigator, target: Target) -> OpenResult:
+            targets.append(target)
+            opened.set()
+            return OpenResult(True)
+
+        with patch.object(Navigator, "open", open_target):
+            self.interaction_action(
+                snapshot, self.interaction_choice(item, "navigate", "See PR")
+            )
+            await asyncio.wait_for(opened.wait(), 1)
+        self.assertEqual(
+            [target.value for target in targets], [require(self.observation.pr).url]
+        )
+        feedback = self.memory.load_source_attention()[source]
+        self.assertEqual(feedback.engaged_at, self.now)
+        self.assertFalse(feedback.handled)
+        self.assertIsNone(feedback.deferred_until)
+        self.assertTrue(self.packets[-1].get("dismiss_conversation"))
+        self.assertFalse(self.attention.is_source_available(source, reported_at))
+        await self.app.comment(SpeechReason.CLICK)
+        remaining = self.interaction_snapshot()["items"]
+        assert isinstance(remaining, list)
+        self.assertNotIn(
+            source, [item["id"] for item in remaining if isinstance(item, dict)]
+        )
+        self.now += 900
+        self.assertTrue(self.attention.is_source_available(source, reported_at))
+        await self.app.comment(SpeechReason.CLICK)
+        self.assertEqual(
+            self.interaction_item(self.interaction_snapshot())["id"], source
+        )
+
+    async def test_interaction_navigation_failure_preserves_the_thread(self) -> None:
+        from unittest.mock import patch
+
+        from pet_daemon.navigation import Navigator, OpenResult, Target
+
+        self.model.exchange_choices = ("worktree",)
+        self.now += 1
+        self.report("The parser preserves escaped delimiters.")
+        self.complete_turn()
+        self.model.response = self.interaction_model_response
+        await self.app.comment(SpeechReason.CLICK)
+        snapshot = self.interaction_snapshot()
+        item = self.interaction_item(snapshot)
+        opened = asyncio.Event()
+        targets: list[Target] = []
+
+        async def open_target(navigator: Navigator, target: Target) -> OpenResult:
+            targets.append(target)
+            opened.set()
+            return OpenResult(False, "Checkout is unavailable")
+
+        with patch.object(Navigator, "open", open_target):
+            self.interaction_action(
+                snapshot, self.interaction_choice(item, "navigate", "Show worktree")
+            )
+            await asyncio.wait_for(opened.wait(), 1)
+        failed = self.interaction_snapshot()
+        self.assertEqual([target.value for target in targets], [self.checkout.worktree])
+        self.assertEqual(failed["id"], snapshot["id"])
+        self.assertEqual(failed["mode"], "thread")
+        self.assertEqual(self.interaction_item(failed)["id"], item["id"])
+        self.assertIn("isn't available", str(failed["error"]))
+        self.assertEqual(self.memory.load_source_attention(), {})
+
+    async def test_interaction_stale_and_unknown_actions_have_no_effect(self) -> None:
+        from unittest.mock import patch
+
+        from pet_daemon.navigation import Navigator, OpenResult, Target
+
+        self.model.exchange_choices = ("worktree", "handled")
+        self.now += 1
+        self.report("The parser preserves escaped delimiters.")
+        self.complete_turn()
+        self.model.response = self.interaction_model_response
+        await self.app.comment(SpeechReason.CLICK)
+        snapshot = self.interaction_snapshot()
+        item = self.interaction_item(snapshot)
+        opened: list[Target] = []
+
+        async def open_target(navigator: Navigator, target: Target) -> OpenResult:
+            opened.append(target)
+            return OpenResult(True)
+
+        with patch.object(Navigator, "open", open_target):
+            stale = dict(snapshot)
+            revision = snapshot["revision"]
+            assert isinstance(revision, int)
+            stale["revision"] = revision - 1
+            self.interaction_action(stale, self.interaction_choice(item, "navigate"))
+            self.interaction_action(
+                self.interaction_snapshot(), {"id": str(uuid.uuid4())}
+            )
+            replaced = dict(snapshot)
+            replaced["id"] = str(uuid.uuid4())
+            self.interaction_action(replaced, self.interaction_choice(item, "handled"))
+            await asyncio.sleep(0)
+        self.assertEqual(opened, [])
+        self.assertEqual(self.memory.load_source_attention(), {})
+        refreshed = self.interaction_snapshot()
+        self.assertEqual(refreshed["id"], snapshot["id"])
+        self.assertEqual(self.interaction_item(refreshed)["id"], item["id"])
+        self.assertIn("choose again", str(refreshed["error"]))
+
+    async def test_interaction_rounds_include_informative_and_remaining_reports(
+        self,
+    ) -> None:
+        self.now += 1
+        self.report("Escaped delimiters are preserved inside quoted fields.")
+        self.provider.publish(
+            HookEvent(
+                source=SessionSource.CODEX,
+                session="renderer",
+                event=HookEventKind.INTENT,
+                goal="Document renderer compatibility",
+                repo="/fixture/renderer",
+            )
+        )
+        self.now += 1
+        self.report("Desktop compatibility remains unverified.", session="renderer")
+        self.model.response = self.interaction_model_response
+        self.app.receive_renderer({"kind": "renderer", "event": "rounds"})
+        await require(self.app.task)
+        snapshot = self.interaction_snapshot()
+        self.assertEqual(snapshot["mode"], "rounds")
+        items = snapshot["items"]
+        assert isinstance(items, list)
+        self.assertEqual(len(items), 2)
+        texts = [item["text"] for item in items if isinstance(item, dict)]
+        self.assertIn(
+            "Last report: Escaped delimiters are preserved inside quoted fields.",
+            texts,
+        )
+        self.assertIn("Last report: Desktop compatibility remains unverified.", texts)
+        source_ids = [item["id"] for item in items if isinstance(item, dict)]
+        self.assertEqual(len(set(source_ids)), 2)
+        self.assertEqual(self.memory.load_source_attention(), {})
+
+    async def test_interaction_rounds_reuse_memory_and_return_to_a_single_row(
+        self,
+    ) -> None:
+        self.now += 1
+        self.report("Desktop validation remains unverified.")
+        self.app.rounds()
+        await require(self.app.task)
+        snapshot = self.interaction_snapshot()
+        item = self.interaction_item(snapshot)
+        self.interaction_action(snapshot, self.interaction_choice(item, "context"))
+        expanded = self.interaction_snapshot()
+        self.interaction_action(expanded, self.interaction_choice(expanded, "back"))
+        self.assertEqual(self.interaction_snapshot()["mode"], "rounds")
+        self.assertEqual(self.model.requests, [])
+
+    async def test_interaction_context_stops_the_earlier_delivery_retry(self) -> None:
+        self.now += 1
+        self.report("The parser preserves escaped delimiters.")
+        self.complete_turn()
+        self.model.response = self.interaction_model_response
+        await self.app.comment(SpeechReason.CLICK)
+        snapshot = self.interaction_snapshot()
+        self.interaction_action(
+            snapshot,
+            self.interaction_choice(self.interaction_item(snapshot), "context"),
+        )
+        count = len(self.packets)
+        self.now += 2
+        self.app.delivery.tick()
+        self.assertEqual(len(self.packets), count)
+        self.assertEqual(self.interaction_snapshot()["mode"], "context")
+
+    async def test_interaction_explicit_speech_releases_the_open_conversation(
+        self,
+    ) -> None:
+        self.now += 1
+        self.report("The parser preserves escaped delimiters.")
+        self.complete_turn()
+        self.model.response = self.interaction_model_response
+        await self.app.comment(SpeechReason.CLICK)
+        self.assertTrue(self.app.interactions.is_interacting)
+        self.app.speak("React to the next parser check.")
+        self.assertFalse(self.app.interactions.is_interacting)
+        self.assertTrue(self.packets[-1].get("dismiss_conversation"))
+
+    async def test_interaction_navigation_uses_the_displayed_report_checkout(
+        self,
+    ) -> None:
+        from unittest.mock import patch
+
+        from pet_daemon.navigation import Navigator, OpenResult, Target
+
+        self.model.exchange_choices = ("worktree",)
+        self.now += 1
+        self.report("The parser preserves escaped delimiters.")
+        self.complete_turn()
+        self.model.response = self.interaction_model_response
+        await self.app.comment(SpeechReason.CLICK)
+        snapshot = self.interaction_snapshot()
+        item = self.interaction_item(snapshot)
+        self.provider.publish(
+            HookEvent(
+                source=SessionSource.CODEX,
+                session="parser",
+                event=HookEventKind.INTENT,
+                goal="Inspect another checkout",
+                repo="/fixture/other-checkout",
+            )
+        )
+        opened: list[Target] = []
+        finished = asyncio.Event()
+
+        async def open_target(navigator: Navigator, target: Target) -> OpenResult:
+            opened.append(target)
+            finished.set()
+            return OpenResult(True)
+
+        with patch.object(Navigator, "open", open_target):
+            self.interaction_action(
+                snapshot, self.interaction_choice(item, "navigate", "Show worktree")
+            )
+            await asyncio.wait_for(finished.wait(), 1)
+        self.assertEqual([target.value for target in opened], ["/fixture/parser"])
+
+    async def test_interaction_dismissal_discards_a_pending_rounds_response(
+        self,
+    ) -> None:
+        from unittest.mock import patch
+
+        self.now += 1
+        self.report("The parser preserves escaped delimiters.")
+        self.model.response = self.interaction_model_response
+        started, release = asyncio.Event(), asyncio.Event()
+        complete = self.model.complete
+
+        async def held_response(
+            request: ModelRequest,
+            reason: SpeechReason | ModelPurpose,
+            *,
+            response_type: type[BaseModel],
+        ) -> dict[str, object]:
+            if reason == ModelPurpose.STORY:
+                started.set()
+                await release.wait()
+            return await complete(request, reason, response_type=response_type)
+
+        with patch.object(self.model, "complete", held_response):
+            self.app.receive_renderer({"kind": "renderer", "event": "rounds"})
+            await asyncio.wait_for(started.wait(), 1)
+            loading = self.interaction_snapshot()
+            self.assertEqual(loading["mode"], "loading")
+            self.app.receive_renderer(
+                {
+                    "kind": "renderer",
+                    "event": "interaction_dismissed",
+                    "interaction_id": loading["id"],
+                    "revision": loading["revision"],
+                }
+            )
+            count = len(self.packets)
+            release.set()
+            await asyncio.gather(require(self.app.task), return_exceptions=True)
+        self.assertEqual(len(self.packets), count)
+        self.assertTrue(self.packets[-1].get("dismiss_conversation"))
+        self.assertEqual(self.memory.speech(), [])
+        self.assertEqual(self.memory.load_source_attention(), {})
+
+    async def test_interaction_another_thread_reports_exhaustion(self) -> None:
+        self.model.exchange_choices = ("more",)
+        self.now += 1
+        self.report("The parser preserves escaped delimiters.")
+        self.complete_turn()
+        self.model.response = self.interaction_model_response
+        await self.app.comment(SpeechReason.CLICK)
+        snapshot = self.interaction_snapshot()
+        requests = len(self.model.requests)
+        self.interaction_action(snapshot, self.interaction_choice(snapshot, "more"))
+        self.app.tick()
+        exhausted = self.interaction_snapshot()
+        self.assertEqual(exhausted["mode"], "empty")
+        self.assertEqual(exhausted["items"], [])
+        self.assertEqual(len(self.model.requests), requests)
+        self.assertEqual(self.memory.load_source_attention(), {})
+
+    async def test_interaction_dismissal_cancels_one_pending_navigation(self) -> None:
+        from unittest.mock import patch
+
+        from pet_daemon.navigation import Navigator, OpenResult, Target
+
+        self.model.exchange_choices = ("worktree",)
+        self.now += 1
+        self.report("The parser preserves escaped delimiters.")
+        self.complete_turn()
+        self.model.response = self.interaction_model_response
+        await self.app.comment(SpeechReason.CLICK)
+        snapshot = self.interaction_snapshot()
+        item = self.interaction_item(snapshot)
+        started, cancelled, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        targets: list[Target] = []
+
+        async def open_target(navigator: Navigator, target: Target) -> OpenResult:
+            targets.append(target)
+            started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            return OpenResult(True)
+
+        with patch.object(Navigator, "open", open_target):
+            action = self.interaction_choice(item, "navigate")
+            self.interaction_action(snapshot, action)
+            self.interaction_action(snapshot, action)
+            await asyncio.wait_for(started.wait(), 1)
+            current = self.interaction_snapshot()
+            self.app.receive_renderer(
+                {
+                    "kind": "renderer",
+                    "event": "interaction_dismissed",
+                    "interaction_id": current["id"],
+                    "revision": current["revision"],
+                }
+            )
+            await asyncio.wait_for(cancelled.wait(), 1)
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(self.memory.load_source_attention(), {})
+        self.assertTrue(self.packets[-1].get("dismiss_conversation"))

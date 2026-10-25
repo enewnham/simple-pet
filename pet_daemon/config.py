@@ -1,5 +1,7 @@
 from pathlib import Path
+from string import Formatter
 from typing import Annotated, Self
+from urllib.parse import urlsplit
 
 from pydantic import (
     AfterValidator,
@@ -58,6 +60,49 @@ class BehaviorConfig(BaseModel):
     gaze_deadzone: Positive = 24
 
 
+class NavigationHandler(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    uri_template: str | None = None
+    argv: tuple[str, ...] | None = None
+
+    @model_validator(mode="after")
+    def configured_operation(self) -> Self:
+        if (self.uri_template is None) == (self.argv is None):
+            raise ValueError("Specify exactly one of uri_template and argv")
+        templates = (self.uri_template,) if self.uri_template is not None else self.argv
+        assert templates is not None
+        if not templates or any(not item or "\0" in item for item in templates):
+            raise ValueError("Navigation handlers require nonempty values without NUL")
+        for template in templates:
+            for _, name, spec, conversion in Formatter().parse(template):
+                if name is not None and (
+                    name not in {"target", "path", "session_id", "source"}
+                    or spec
+                    or conversion
+                ):
+                    raise ValueError("Unsupported navigation placeholder")
+        if self.uri_template is not None and not urlsplit(self.uri_template).scheme:
+            raise ValueError("Navigation URI templates require a scheme")
+        return self
+
+
+class NavigationHandlers(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    worktree: NavigationHandler | None = Field(
+        default_factory=lambda: NavigationHandler(argv=("/usr/bin/open", "{target}"))
+    )
+    pull_request: NavigationHandler | None = Field(
+        default_factory=lambda: NavigationHandler(argv=("/usr/bin/open", "{target}"))
+    )
+    session: NavigationHandler | None = None
+    timeout_seconds: Positive = 10
+
+
+class NavigationConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    handlers: NavigationHandlers = Field(default_factory=NavigationHandlers)
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
     pet_dir: Path
@@ -84,6 +129,7 @@ class Config(BaseModel):
     completed_retention_seconds: Positive = 7200
     max_tokens: PositiveInt = 512
     behavior: BehaviorConfig = Field(default_factory=BehaviorConfig)
+    navigation: NavigationConfig = Field(default_factory=NavigationConfig)
 
     @classmethod
     def load(cls, path: str | Path) -> Config:

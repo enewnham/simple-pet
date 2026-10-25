@@ -11,6 +11,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TypedDict
 
+from pydantic import BaseModel
+
 from pet_daemon.attention import AttentionSelection
 from pet_daemon.cli.hook import EVENTS, update
 from pet_daemon.commentary.cognition import Cognition
@@ -46,7 +48,11 @@ WRAPPER = ROOT / "examples" / "pet-run"
 
 class NoModel:
     async def complete(
-        self, request: ModelRequest, reason: SpeechReason | ModelPurpose
+        self,
+        request: ModelRequest,
+        reason: SpeechReason | ModelPurpose,
+        *,
+        response_type: type[BaseModel],
     ) -> dict[str, object]:
         raise AssertionError("Preparing a request must not call the model")
 

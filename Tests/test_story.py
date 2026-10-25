@@ -3,6 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from pydantic import BaseModel
+
 from pet_daemon.attention import AttentionSelection
 from pet_daemon.commentary.cognition import Cognition
 from pet_daemon.commentary.contracts import ModelRequest
@@ -43,7 +45,13 @@ from Tests.fixtures import (
 
 
 class NoModel:
-    async def complete(self, request: ModelRequest, reason: str) -> dict[str, object]:
+    async def complete(
+        self,
+        request: ModelRequest,
+        reason: str,
+        *,
+        response_type: type[BaseModel],
+    ) -> dict[str, object]:
         raise AssertionError("Preparing a story must not call the model")
 
 

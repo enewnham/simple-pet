@@ -71,5 +71,23 @@
   "process_probe_seconds": 10,
   "activity_fresh_seconds": 300,
   "repository_refresh_seconds": 30,
-  "github_refresh_seconds": 180
+  "github_refresh_seconds": 180,
+  "navigation": {
+    "handlers": {
+      "worktree": {
+        "argv": [
+          "/usr/bin/open",
+          "{target}"
+        ]
+      },
+      "pull_request": {
+        "argv": [
+          "/usr/bin/open",
+          "{target}"
+        ]
+      },
+      "session": null,
+      "timeout_seconds": 10
+    }
+  }
 }
