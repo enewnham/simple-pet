@@ -1,17 +1,18 @@
 import json
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import cast
 
 from anthropic import transform_schema
 from pydantic import BaseModel, ConfigDict
 
 from ..attention import AttentionSelection
-from ..identity import SessionIdentity, session_data
+from ..domain import ExecutionOutcome
+from ..identity import SessionIdentity
 from ..prose import work_prose
 from ..runtime import PetContext
 from ..storage.memory import Memory
-from ..types import JSONObject, JSONValue
+from ..types import JSONObject
 from ..work.evidence import (
     CommentaryEvidence,
     ExecutionStatus,
@@ -27,9 +28,11 @@ from ..work.models import (
 )
 from ..work.narrative import NarrativeStatement, WorkNarrative, semantic_revision
 from ..work.stories import revision_key
+from .citations import Citations
 from .contracts import ModelRequest, RequestFactory
-from .observations import describe_observation
+from .observations import EVENTS, OUTCOMES
 from .request import duration
+from .sources import NarrativeSource, SourceKind
 
 INSTRUCTIONS = """
 Maintain a short factual memory of your work with the developer. Observations describe
@@ -62,6 +65,7 @@ class WorkNarrativeRequest(BaseModel):
     sources: dict[str, JSONObject]
     request: ModelRequest
     latest_request_source: str
+    citations: Citations
 
 
 class StoryResponse(BaseModel):
@@ -71,48 +75,130 @@ class StoryResponse(BaseModel):
     progress: tuple[NarrativeStatement, ...]
 
 
+@dataclass(frozen=True)
+class StoryEvidence:
+    identifier: str
+    kind: SourceKind
+    text: str
+    scope: str
+    outcome: ExecutionOutcome | None
+    observed_at: float | None
+    supporting: tuple[str, ...] = ()
+
+    @classmethod
+    def from_source(
+        cls, source: NarrativeSource, supporting: tuple[str, ...] = ()
+    ) -> StoryEvidence:
+        return cls(
+            source.identifier,
+            source.kind,
+            source.text,
+            source.scope,
+            source.outcome,
+            source.observed_at,
+            supporting,
+        )
+
+    @property
+    def identifiers(self) -> tuple[str, ...]:
+        return self.supporting or (self.identifier,)
+
+    def payload(self, citations: Citations, timestamp: float) -> JSONObject:
+        item: JSONObject = {
+            "id": citations.label(self.identifier),
+            "event": EVENTS[self.kind.value],
+            "scope": self.scope,
+        }
+        if self.text:
+            item["text"] = self.text
+        if self.outcome is not None:
+            item["execution"] = OUTCOMES[self.outcome]
+        if self.observed_at is not None:
+            age = duration(timestamp - self.observed_at)
+            if age:
+                item["age"] = age + " ago"
+        if self.supporting:
+            item["supporting_ids"] = tuple(citations.labels(self.supporting))
+        return item
+
+
+@dataclass(frozen=True)
+class StoryMemory:
+    category: str
+    text: str
+    sources: tuple[str, ...]
+
+    def payload(self, citations: Citations) -> JSONObject:
+        return {
+            "category": self.category,
+            "text": self.text,
+            "sources": tuple(citations.labels(self.sources)),
+        }
+
+
+@dataclass(frozen=True)
+class StoryContext:
+    latest_request_source: str
+    evidence: tuple[StoryEvidence, ...]
+    earlier: tuple[StoryMemory, ...] = ()
+    explicit_context: str | None = None
+
+    def payload(self, citations: Citations, timestamp: float) -> JSONObject:
+        result: JSONObject = {
+            "current_work": {
+                "latest_request_source": citations.label(self.latest_request_source)
+            },
+            "current_moment": {
+                "evidence": [
+                    item.payload(citations, timestamp) for item in self.evidence
+                ]
+            },
+        }
+        if self.earlier:
+            result["earlier_context"] = [
+                item.payload(citations) for item in self.earlier
+            ]
+        if self.explicit_context is not None:
+            result["explicit_context"] = self.explicit_context
+        return result
+
+
 @dataclass
 class _NarrativeSources:
     root: SessionIdentity
     excluded: tuple[str, ...]
-    sources: dict[str, JSONObject] = field(default_factory=dict)
-    latest_sources: dict[tuple[SessionIdentity | None, str], str] = field(
+    sources: dict[str, NarrativeSource] = field(default_factory=dict)
+    latest_sources: dict[tuple[SessionIdentity | None, SourceKind], str] = field(
         default_factory=dict
     )
     latest_request_source: str = ""
-    full_text: dict[str, str] = field(default_factory=dict)
 
     def add(
         self,
-        kind: str,
+        kind: SourceKind,
         text: str,
         scope: str,
-        outcome: str | None = None,
+        outcome: ExecutionOutcome | None = None,
         origin: SessionIdentity | None = None,
         observed_at: float | None = None,
         source_key: str | None = None,
     ) -> None:
         prose = work_prose(text, limit=1200, excluded=self.excluded)
-        source: JSONObject = {"kind": kind, "scope": scope}
-        if prose:
-            source["text"] = prose
-        if outcome:
-            source["outcome"] = outcome
-        if not prose and not outcome:
+        if not prose and outcome is None:
             return
-        identifier = source_key or revision_key((source, origin, observed_at, text))
-        if observed_at is not None:
-            source["observed_at"] = observed_at
-        if origin is not None:
-            source["origin"] = {
-                "source": origin.source.value,
-                "native_id": origin.native_id,
-            }
+        facts: JSONObject = {"kind": kind.value, "scope": scope}
+        if prose:
+            facts["text"] = prose
+        if outcome is not None:
+            facts["outcome"] = outcome.value
+        identifier = source_key or revision_key((facts, origin, observed_at, text))
+        source = NarrativeSource(
+            identifier, kind, prose, scope, outcome, origin, observed_at, text
+        )
         self.sources.pop(identifier, None)
         self.sources[identifier] = source
-        self.full_text[identifier] = text
         self.latest_sources[origin, kind] = identifier
-        if kind == "request" and (origin is None or origin == self.root):
+        if kind == SourceKind.REQUEST and (origin is None or origin == self.root):
             self.latest_request_source = identifier
 
 
@@ -138,7 +224,7 @@ def _collect_reports(
         match item:
             case IntentEvidence(session=_, text=text):
                 collector.add(
-                    "request",
+                    SourceKind.REQUEST,
                     text,
                     scope,
                     origin=identity,
@@ -147,7 +233,7 @@ def _collect_reports(
                 )
             case ProgressEvidence(session=_, text=text):
                 collector.add(
-                    "reported_progress",
+                    SourceKind.PROGRESS,
                     text,
                     scope,
                     origin=identity,
@@ -163,7 +249,7 @@ def _collect_reports(
                 "interrupt",
             }:
                 collector.add(
-                    "turn_ended",
+                    SourceKind.TURN_ENDED,
                     progress or "",
                     scope,
                     outcome,
@@ -188,7 +274,7 @@ def _collect_records(
                         or scope
                     )
                 collector.add(
-                    "request",
+                    SourceKind.REQUEST,
                     text,
                     scope,
                     origin=origin,
@@ -196,7 +282,7 @@ def _collect_records(
                 )
             case ReportedProgress(reported_progress=text):
                 collector.add(
-                    "reported_progress",
+                    SourceKind.PROGRESS,
                     text,
                     scope,
                     origin=origin,
@@ -208,7 +294,7 @@ def _collect_records(
                 reported_execution_outcome=outcome,
             ):
                 collector.add(
-                    "turn_ended",
+                    SourceKind.TURN_ENDED,
                     progress or "",
                     scope,
                     outcome,
@@ -222,23 +308,22 @@ def _retain_sources(
     previous: WorkNarrative | None,
     target_bytes: int,
     clock: Callable[[], float],
-) -> dict[str, JSONObject]:
+) -> dict[str, NarrativeSource]:
     sources = collector.sources
     root_requests = [
         key
         for key, source in sources.items()
-        if source["kind"] == "request"
-        and source.get("origin") in (None, session_data(collector.root))
+        if source.kind == SourceKind.REQUEST and source.origin in (None, collector.root)
     ]
     root_sources = [
         key
         for key, source in sources.items()
-        if source.get("origin") in (None, session_data(collector.root))
+        if source.origin in (None, collector.root)
     ]
     current_index = root_sources.index(collector.latest_request_source)
     preceding = root_sources[:current_index]
     preceding_report = next(
-        (key for key in reversed(preceding) if sources[key]["kind"] != "request"),
+        (key for key in reversed(preceding) if sources[key].kind != SourceKind.REQUEST),
         None,
     )
     protected = tuple(
@@ -270,133 +355,104 @@ def _retain_sources(
         identifier for identifier in reversed(sources) if identifier in latest_ids
     ]
     priority = tuple(dict.fromkeys((*protected, *latest, *cited, *reversed(sources))))
-    group_ids: dict[str, tuple[str, ...]] = {}
-    for identifier, source in _group_sources(collector, sources):
-        identifiers = tuple(cast(list[str], source.get("supporting_ids", [identifier])))
-        for member in identifiers:
-            group_ids[member] = identifiers
-    retained_sources: dict[str, JSONObject] = {}
+    group_ids = {
+        member: group.identifiers
+        for group in _group_sources(sources)
+        for member in group.identifiers
+    }
+    retained: dict[str, NarrativeSource] = {}
     budget = max(target_bytes - 1200, 1200)
+    timestamp = clock()
     for identifier in priority:
-        if identifier in retained_sources:
+        if identifier in retained:
             continue
         candidate = {
-            **retained_sources,
+            **retained,
             **{key: sources[key] for key in group_ids[identifier]},
         }
+        citations = Citations.from_sources(candidate)
+        context = StoryContext(
+            collector.latest_request_source, _group_sources(candidate)
+        )
         if (
             identifier in protected
-            or len(
-                json.dumps(
-                    _story_payload(collector, candidate, None, clock, target_bytes),
-                    ensure_ascii=False,
-                ).encode()
-            )
-            <= budget
+            or _context_size(context, citations, timestamp) <= budget
         ):
-            retained_sources = candidate
-    return {key: value for key, value in sources.items() if key in retained_sources}
+            retained = candidate
+    return {key: value for key, value in sources.items() if key in retained}
 
 
-def _group_sources(
-    collector: _NarrativeSources, sources: dict[str, JSONObject]
-) -> list[tuple[str, JSONObject]]:
-    groups: dict[str, list[tuple[str, JSONObject]]] = {}
-    for identifier, source in sources.items():
-        key = identifier
+def _group_sources(sources: dict[str, NarrativeSource]) -> tuple[StoryEvidence, ...]:
+    groups: dict[str, list[NarrativeSource]] = {}
+    for source in sources.values():
+        key = source.identifier
         if (
-            source["kind"] in {"turn_ended", "reported_progress"}
-            and source.get("observed_at") is not None
-            and collector.full_text[identifier]
+            source.kind in {SourceKind.TURN_ENDED, SourceKind.PROGRESS}
+            and source.observed_at is not None
+            and source.full_text
         ):
             key = revision_key(
-                (
-                    source.get("origin"),
-                    source["scope"],
-                    source["observed_at"],
-                    collector.full_text[identifier],
-                )
+                (source.origin, source.scope, source.observed_at, source.full_text)
             )
-        groups.setdefault(key, []).append((identifier, source))
-    result: list[tuple[str, JSONObject]] = []
+        groups.setdefault(key, []).append(source)
+    result: list[StoryEvidence] = []
     for members in groups.values():
-        if len(members) == 2 and {source["kind"] for _, source in members} == {
-            "turn_ended",
-            "reported_progress",
+        if len(members) == 2 and {source.kind for source in members} == {
+            SourceKind.TURN_ENDED,
+            SourceKind.PROGRESS,
         }:
-            identifier, terminal = next(
-                (key, source)
-                for key, source in members
-                if source["kind"] == "turn_ended"
+            terminal = next(
+                source for source in members if source.kind == SourceKind.TURN_ENDED
             )
             result.append(
-                (
-                    identifier,
-                    {**terminal, "supporting_ids": [key for key, _ in members]},
+                StoryEvidence.from_source(
+                    terminal, tuple(source.identifier for source in members)
                 )
             )
         else:
-            result.extend(members)
-    return result
+            result.extend(StoryEvidence.from_source(source) for source in members)
+    return tuple(result)
 
 
-def _evidence(
-    identifier: str, source: JSONObject, clock: Callable[[], float]
-) -> JSONObject:
-    item = {"id": identifier, **source}
-    item.pop("scope_revision", None)
-    observed_at = item.pop("observed_at", None)
-    origin = item.pop("origin", None)
-    if origin is not None:
-        item["reporter"] = origin
-    if isinstance(observed_at, (int, float)):
-        age = duration(clock() - observed_at)
-        if age:
-            item["age"] = age + " ago"
-    return describe_observation(item)
+def _context_size(context: StoryContext, citations: Citations, timestamp: float) -> int:
+    return len(
+        json.dumps(context.payload(citations, timestamp), ensure_ascii=False).encode()
+    )
 
 
-def _story_payload(
+def _story_context(
     collector: _NarrativeSources,
-    sources: dict[str, JSONObject],
+    sources: dict[str, NarrativeSource],
     previous: WorkNarrative | None,
-    clock: Callable[[], float],
+    citations: Citations,
+    timestamp: float,
     target_bytes: int,
-) -> JSONObject:
-    payload: JSONObject = {
-        "current_work": {"latest_request_source": collector.latest_request_source},
-        "current_moment": {
-            "evidence": [
-                _evidence(key, value, clock)
-                for key, value in _group_sources(collector, sources)
-            ]
-        },
-    }
-    if previous:
-        statements = [
-            ("intent", previous.intent),
-            *(("decision", value) for value in previous.decisions),
-            *(("progress", value) for value in previous.progress),
-        ]
-        retained: list[JSONValue] = [
-            {"category": category, "text": text, "sources": list(value.sources)}
-            for category, value in statements
-            if set(value.sources) <= sources.keys()
-            and (text := work_prose(value.text, limit=400, excluded=collector.excluded))
-        ]
-        while (
-            retained
-            and len(
-                json.dumps(
-                    {**payload, "earlier_context": retained}, ensure_ascii=False
-                ).encode()
-            )
-            > target_bytes
-        ):
-            retained.pop()
-        if retained:
-            payload["earlier_context"] = retained
-    return payload
+    explicit_context: str | None,
+) -> StoryContext:
+    context = StoryContext(
+        collector.latest_request_source,
+        _group_sources(sources),
+        explicit_context=explicit_context,
+    )
+    if previous is None:
+        return context
+    statements = (
+        ("intent", previous.intent),
+        *(("decision", value) for value in previous.decisions),
+        *(("progress", value) for value in previous.progress),
+    )
+    earlier = tuple(
+        StoryMemory(category, text, value.sources)
+        for category, value in statements
+        if set(value.sources) <= sources.keys()
+        and (text := work_prose(value.text, limit=400, excluded=collector.excluded))
+    )
+    context = replace(context, earlier=earlier)
+    while (
+        context.earlier and _context_size(context, citations, timestamp) > target_bytes
+    ):
+        context = replace(context, earlier=context.earlier[:-1])
+    return context
 
 
 def context_revision(selection: AttentionSelection, memory: Memory) -> str:
@@ -437,10 +493,7 @@ def prepare(
         )
     for related in subject.story.sessions if subject else ():
         identity = aliases.get(related.session, related.session)
-        if any(
-            source.get("origin") == session_data(identity)
-            for source in collector.sources.values()
-        ):
+        if any(source.origin == identity for source in collector.sources.values()):
             continue
         assignment = work_prose(related.scope, limit=300, excluded=excluded)
         _collect_records(
@@ -450,17 +503,27 @@ def prepare(
             related.session,
         )
     if not collector.latest_request_source and subject is not None:
-        collector.add("request", subject.story.intent, "current task")
+        collector.add(SourceKind.REQUEST, subject.story.intent, "current task")
     if not collector.latest_request_source:
         return None
     previous = memory.load_narrative(subject.id) if subject else None
     sources = _retain_sources(collector, previous, target_bytes, memory.clock)
     for key, revision in memory.source_scope_revisions(tuple(sources)).items():
-        sources[key]["scope_revision"] = revision
-    payload = _story_payload(collector, sources, previous, memory.clock, target_bytes)
-    if selection.context:
-        payload["explicit_context"] = work_prose(selection.context, 2000, excluded)
-    request = make_request(payload, [{"type": "text", "text": INSTRUCTIONS}])
+        sources[key] = replace(sources[key], scope_revision=revision)
+    citations = Citations.from_sources(sources)
+    context = _story_context(
+        collector,
+        sources,
+        previous,
+        citations,
+        memory.clock(),
+        target_bytes,
+        work_prose(selection.context, 2000, excluded) if selection.context else None,
+    )
+    request = make_request(
+        context.payload(citations, memory.clock()),
+        [{"type": "text", "text": INSTRUCTIONS}],
+    )
     request["output_config"]["format"]["schema"] = cast(
         JSONObject, transform_schema(StoryResponse)
     )
@@ -471,17 +534,28 @@ def prepare(
         context_revision=revision_key(
             (selection.context, tuple(report_source_key(report) for report in reports))
         ),
-        sources=sources,
+        sources={key: source.record() for key, source in sources.items()},
         request=request,
+        citations=citations,
         latest_request_source=collector.latest_request_source,
     )
 
 
 def validate(raw: dict[str, object], request: WorkNarrativeRequest) -> WorkNarrative:
     response = StoryResponse.model_validate(raw)
-    for statement in (response.intent, *response.decisions, *response.progress):
-        if any(ref not in request.sources for ref in statement.sources):
-            raise ValueError("Story statement references unavailable evidence")
+
+    def resolve(statement: NarrativeStatement) -> NarrativeStatement:
+        return statement.model_copy(
+            update={"sources": request.citations.resolve_many(statement.sources)}
+        )
+
+    response = response.model_copy(
+        update={
+            "intent": resolve(response.intent),
+            "decisions": tuple(resolve(statement) for statement in response.decisions),
+            "progress": tuple(resolve(statement) for statement in response.progress),
+        }
+    )
     if request.latest_request_source not in response.intent.sources:
         raise ValueError("Story intent must reference the current request")
     return WorkNarrative(

@@ -225,29 +225,35 @@ class Cognition:
         )
         raw_result = await self.complete(commentary_request.request, reason)
         response = self.validate_speech(raw_result, explicit)
+        try:
+            mentions = commentary_request.citations.resolve_many(response.mentions)
+            memory_source = (
+                commentary_request.citations.resolve(response.memory)
+                if response.memory is not None
+                else None
+            )
+        except ValueError as error:
+            raise StoryUnavailable("Speech cited unavailable evidence") from error
         speech = response.speak
-        mentions = tuple(dict.fromkeys(response.mentions))
         if speech is None and mentions:
             raise StoryUnavailable("Silent commentary cited work")
         if response.memory is None and response.ongoing:
             raise StoryUnavailable("Ongoing work needs a cited memory")
-        if any(ref not in commentary_request.source_ids for ref in mentions):
-            raise StoryUnavailable("Speech cited unavailable evidence")
-        if response.memory is not None:
-            options = commentary_request.memory_options.get(response.memory)
-            source = narrative.sources.get(response.memory) if narrative else None
+        if memory_source is not None:
+            options = commentary_request.memory_options.get(memory_source)
+            source = narrative.sources.get(memory_source) if narrative else None
             observed_at = source.get("observed_at") if source else None
             if (
                 selection.situation != SpeechSituation.IDLE_REFLECTION
                 or options is None
                 or speech is not None
-                and response.memory not in mentions
+                and memory_source not in mentions
                 or not isinstance(observed_at, (int, float))
                 or not options[int(response.ongoing)]
             ):
                 raise StoryUnavailable("Idle memory was not supported by the prompt")
             memory = SelectedMemory(
-                key=response.memory,
+                key=memory_source,
                 observed_at=observed_at,
                 is_ongoing=response.ongoing,
             )

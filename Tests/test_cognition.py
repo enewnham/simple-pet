@@ -524,9 +524,10 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                     snapshot,
                     self.attention.select(snapshot, reason),
                 )
-                assert selected["current_work"] is not None
+                assert selected.work is not None
+                assert selected.work.request is not None
                 self.assertEqual(
-                    selected["current_work"]["request"],
+                    selected.work.request.text,
                     "Refactor batch inserts",
                 )
 
@@ -1029,8 +1030,11 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         assert refreshed is not None
         self.assertEqual(refreshed.revision, original.revision)
         payload = json.loads(self.story_requests[-1][1]["messages"][0]["content"])
-        self.assertIn(
-            payload["current_work"]["latest_request_source"], refreshed.intent.sources
+        self.assertEqual(len(refreshed.intent.sources), 1)
+        self.assertNotIn(refreshed.intent.sources[0], json.dumps(payload))
+        self.assertEqual(
+            refreshed.sources[refreshed.intent.sources[0]]["text"],
+            "Refactor batch inserts",
         )
         spoken_context = json.loads(self.requests[-1][1]["messages"][0]["content"])
         self.assertEqual(
@@ -1138,6 +1142,11 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 {item.get("text") for item in evidence},
             )
             self.assertNotIn("Review formatter colors", json.dumps(payload))
+            completion_label = next(
+                item["id"]
+                for item in evidence
+                if item.get("text") == "Parser recovery checks passed; task complete."
+            )
             return {
                 "intent": {
                     "text": "Implement parser recovery.",
@@ -1147,7 +1156,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 "progress": [
                     {
                         "text": "Parser recovery checks passed; task complete.",
-                        "sources": [completion_id],
+                        "sources": [completion_label],
                     }
                 ],
             }
@@ -1162,12 +1171,13 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 if item.get("reported_progress")
                 == "Parser recovery checks passed; task complete."
             )
-            self.assertEqual(completion_item["source_ids"], [completion_id])
+            self.assertEqual(len(completion_item["source_ids"]), 1)
+            self.assertNotIn(completion_id, json.dumps(payload))
             self.assertEqual(completion_item["age"], "1 day ago")
             return (
                 {
                     "speak": "The parser recovery checks passed, and the task is complete.",
-                    "mentions": [completion_id],
+                    "mentions": completion_item["source_ids"],
                 },
                 "end_turn",
             )
@@ -1376,6 +1386,23 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(StoryUnavailable):
             await self.generate_commentary()
 
+    async def test_speech_rejects_an_internal_source_id(self) -> None:
+        def answer() -> tuple[dict[str, object], str]:
+            subject = SessionIdentity(source=SessionSource.CLAUDE, native_id="worker")
+            narrative = self.memory.load_narrative(subject)
+            assert narrative is not None
+            return (
+                {
+                    "speak": "I see the request.",
+                    "mentions": [narrative.intent.sources[0]],
+                },
+                "end_turn",
+            )
+
+        self.responses.append(answer)
+        with self.assertRaises(StoryUnavailable):
+            await self.generate_commentary()
+
     async def test_long_current_report_keeps_a_usable_source_id(self) -> None:
         report = "Checked parser compatibility. " * 30 + "Desktop check failed."
         self.handle(
@@ -1392,6 +1419,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             moment = payload["current_moment"]
             self.assertLess(len(moment["reported_progress"]), len(report))
             self.assertTrue(moment["source_ids"])
+            self.assertRegex(moment["source_ids"][0], r"^s[1-9][0-9]*$")
             return (
                 {
                     "speak": "The desktop check failed.",

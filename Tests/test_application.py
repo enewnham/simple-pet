@@ -13,6 +13,7 @@ from pet_daemon.attention import Attention, AttentionSelection
 from pet_daemon.behavior.controller import Behavior
 from pet_daemon.behavior.sprites import Pack
 from pet_daemon.commentary import Cognition
+from pet_daemon.commentary.context import CommentaryContext
 from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.commentary.request import SpeechConditions
 from pet_daemon.config import Config
@@ -1299,7 +1300,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             revision=require(selection.subject).revision,
             history_epoch=self.app.history_epoch,
             conditions=DeliveryConditions(
-                commentary=SpeechConditions(selection=selection, payload={}),
+                commentary=SpeechConditions(
+                    selection=selection, context=CommentaryContext()
+                ),
                 trigger=None,
                 request_epoch=self.app.revision,
             ),
@@ -1618,20 +1621,14 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.report("The quoted field parser handles escaped delimiters.")
-        cited: list[str] = []
 
         def cite_peer(request: ModelRequest) -> dict[str, object]:
             payload = json.loads(request["messages"][0]["content"])
             evidence = payload["current_moment"]["evidence"]
             latest = payload["current_work"]["latest_request_source"]
             intent = next(item for item in evidence if item["id"] == latest)
-            source = next(
-                item
-                for item in evidence
-                if item.get("text") == reported
-                and item.get("reporter", {}).get("native_id") == peer.native_id
-            )
-            cited.append(source["id"])
+            source = next(item for item in evidence if item.get("text") == reported)
+            self.assertNotIn("native_id", json.dumps(payload))
             return {
                 "intent": {"text": intent["text"], "sources": [latest]},
                 "decisions": [],
@@ -1641,9 +1638,15 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         def mention_peer(
             request: ModelRequest, reason: SpeechReason
         ) -> dict[str, object]:
+            payload = json.loads(request["messages"][0]["content"])
+            source = next(
+                item
+                for item in payload["earlier_context"]
+                if item.get("reported_progress") == reported
+            )
             return {
                 "speak": "The multiline escape check is still open.",
-                "mentions": [cited[0]],
+                "mentions": source["source_ids"],
             }
 
         self.model.narrative_response = cite_peer
@@ -1656,7 +1659,11 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         emitted = next(item for item in reversed(self.packets) if "delivery_id" in item)
         message = self.app.delivery.deliveries[emitted["delivery_id"]].message
-        self.assertEqual(message.mentioned_sources, (cited[0],))
+        self.assertEqual(len(message.mentioned_sources), 1)
+        narrative = require(self.memory.load_narrative(parser))
+        self.assertEqual(
+            narrative.sources[message.mentioned_sources[0]]["text"], reported
+        )
         self.assertTrue(self.app.is_delivery_valid(message))
 
         self.now += 1
@@ -1725,9 +1732,12 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             "delivery_id": emitted["delivery_id"],
         }
         self.assertEqual(packet["text"], "The multiline escape check is still open.")
-        self.assertIsNone(self.memory.load_source_attention().get(selected[0]))
+        message = self.app.delivery.deliveries[emitted["delivery_id"]].message
+        source = message.mentioned_sources[0]
+        self.assertNotEqual(source, selected[0])
+        self.assertIsNone(self.memory.load_source_attention().get(source))
         self.accept(packet)
-        recorded = require(self.memory.load_source_attention().get(selected[0]))
+        recorded = require(self.memory.load_source_attention().get(source))
         self.assertEqual(recorded.considered_at, self.now)
         self.assertEqual(recorded.mentioned_at, self.now)
 
@@ -1737,16 +1747,16 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.now += 1
         self.app.tick()
         await require(self.app.task)
-        self.assertEqual(selected, [selected[0], selected[0]])
+        self.assertEqual(len(selected), 2)
         self.assertEqual(len(self.memory.speech()), 1)
-        recorded = require(self.memory.load_source_attention().get(selected[0]))
+        recorded = require(self.memory.load_source_attention().get(source))
         self.assertEqual(recorded.considered_at, self.now)
         self.assertEqual(recorded.mentioned_at, self.now - 900)
-        self.assertEqual(set(self.memory.load_source_attention()), {selected[0]})
+        self.assertEqual(set(self.memory.load_source_attention()), {source})
 
         self.restart_attention_and_sessions()
         self.attention.restore_sources(self.memory.load_source_attention())
-        self.assertEqual(self.attention.sources[selected[0]], recorded)
+        self.assertEqual(self.attention.sources[source], recorded)
 
     async def test_idle_reflection_uses_older_work_when_preferred_has_no_memory(
         self,
@@ -1795,7 +1805,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 for item in payload.get("earlier_context", ())
                 if "memory_candidate" in item
             ]
-            older_candidates.append([item["id"] for item in candidates])
+            older_candidates.append([item["text"] for item in candidates])
             selected_report = next(
                 (item for item in candidates if item["text"] == remaining), None
             )
@@ -1828,18 +1838,21 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             "delivery_id": emitted["delivery_id"],
         }
         self.assertEqual(self.memory.load_source_attention(), {})
+        message = self.app.delivery.deliveries[emitted["delivery_id"]].message
+        source = message.mentioned_sources[0]
+        self.assertNotEqual(source, selected[0])
         self.accept(packet)
-        considered = require(self.memory.load_source_attention().get(selected[0]))
+        considered = require(self.memory.load_source_attention().get(source))
         self.assertEqual(considered.considered_at, self.now)
-        self.assertEqual(set(self.memory.load_source_attention()), {selected[0]})
+        self.assertEqual(set(self.memory.load_source_attention()), {source})
 
         self.now += 900
         self.app.tick()
         await require(self.app.task)
         self.assertEqual(len(self.model.requests), 4)
-        self.assertNotIn(selected[0], older_candidates[-1])
+        self.assertNotIn(remaining, older_candidates[-1])
         self.assertEqual(len(self.memory.speech()), 1)
-        self.assertEqual(self.memory.load_source_attention()[selected[0]], considered)
+        self.assertEqual(self.memory.load_source_attention()[source], considered)
 
     async def test_new_activity_during_idle_generation_discards_the_reflection(
         self,
@@ -1879,9 +1892,8 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         def corrected_story(request: ModelRequest) -> dict[str, object]:
             payload = json.loads(request["messages"][0]["content"])
             evidence = payload["current_moment"]["evidence"]
-            old = next(item for item in evidence if item.get("text") == remaining)
+            self.assertTrue(any(item.get("text") == remaining for item in evidence))
             later = next(item for item in evidence if item.get("text") == completed)
-            older_source.append(old["id"])
             latest = payload["current_work"]["latest_request_source"]
             intent = next(item for item in evidence if item["id"] == latest)
             return {
@@ -1899,7 +1911,16 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 if "memory_candidate" in item
             ]
             self.assertTrue(any(item["text"] == completed for item in candidates))
-            self.assertFalse(any(item["id"] == older_source[0] for item in candidates))
+            self.assertFalse(any(item["text"] == remaining for item in candidates))
+            parser = SessionIdentity(source=SessionSource.CODEX, native_id="parser")
+            narrative = require(self.memory.load_narrative(parser))
+            older_source.append(
+                next(
+                    identifier
+                    for identifier, source in narrative.sources.items()
+                    if source.get("text") == remaining
+                )
+            )
             return {
                 "speak": "The multiline escape check still needs work.",
                 "mentions": [older_source[0]],
@@ -1968,17 +1989,19 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             "ttl": emitted["ttl"],
             "delivery_id": emitted["delivery_id"],
         }
+        message = self.app.delivery.deliveries[emitted["delivery_id"]].message
+        source = message.mentioned_sources[0]
         self.accept(packet)
-        mentioned = require(self.memory.load_source_attention().get(selected[0]))
+        mentioned = require(self.memory.load_source_attention().get(source))
         self.assertEqual(mentioned.mentioned_at, self.now)
 
         self.now += 900
         self.app.tick()
         await require(self.app.task)
         self.assertEqual(len(automatic_candidates), 1)
-        self.assertNotIn(selected[0], [item["id"] for item in automatic_candidates[0]])
+        self.assertNotIn(report, [item["text"] for item in automatic_candidates[0]])
         self.assertEqual(len(self.memory.speech()), 1)
-        self.assertEqual(self.memory.load_source_attention()[selected[0]], mentioned)
+        self.assertEqual(self.memory.load_source_attention()[source], mentioned)
 
     async def test_silent_reflection_keeps_its_interval_after_restart(self) -> None:
         self.config.behavior.naps = False
@@ -2046,6 +2069,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         first = next(
             packet for packet in reversed(self.packets) if "delivery_id" in packet
         )
+        first_message = self.app.delivery.deliveries[first["delivery_id"]].message
         for _ in range(2):
             self.now += 2
             self.app.delivery.tick()
@@ -2062,8 +2086,11 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             packet for packet in reversed(self.packets) if "delivery_id" in packet
         )
         self.assertNotEqual(second["delivery_id"], first["delivery_id"])
-        self.assertEqual(selected, [selected[0], selected[0]])
+        self.assertEqual(len(selected), 2)
         self.assertEqual(self.memory.load_source_attention(), {})
+        message = self.app.delivery.deliveries[second["delivery_id"]].message
+        source = message.mentioned_sources[0]
+        self.assertEqual(message.mentioned_sources, first_message.mentioned_sources)
         self.accept(
             {
                 "text": second["text"],
@@ -2071,6 +2098,6 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 "delivery_id": second["delivery_id"],
             }
         )
-        attention = require(self.memory.load_source_attention().get(selected[0]))
+        attention = require(self.memory.load_source_attention().get(source))
         self.assertEqual(attention.considered_at, self.now)
         self.assertEqual(attention.mentioned_at, self.now)

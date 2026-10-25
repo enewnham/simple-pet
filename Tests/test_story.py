@@ -117,11 +117,50 @@ class StoryTests(unittest.TestCase):
         self.assertEqual(payload["explicit_context"], question)
         selected = payload["current_work"]["latest_request_source"]
         self.assertEqual(
-            recalled.sources[selected]["text"], "Investigate billing totals"
+            recalled.sources[recalled.citations.resolve(selected)]["text"],
+            "Investigate billing totals",
         )
         self.assertEqual(recalled.sources, other_query.sources)
         self.assertNotEqual(recalled.context_revision, other_query.context_revision)
         self.assertEqual(self.memory.load_source_attention(), {})
+
+    def test_model_context_uses_local_citations_and_keeps_provenance_internal(
+        self,
+    ) -> None:
+        root = SessionIdentity(source=SessionSource.CODEX, native_id="root")
+        self.add(
+            IntentEvidence(session=root, text="Check parser compatibility"),
+            ProgressEvidence(session=root, text="Parser compatibility checks passed"),
+        )
+        prepared = self.prepared()
+        content = prepared.request["messages"][0]["content"]
+        payload = json.loads(content)
+        for field in ("origin", "reporter", "native_id", "scope_revision"):
+            self.assertNotIn(f'"{field}"', content)
+        for identifier in prepared.sources:
+            self.assertNotIn(identifier, content)
+        evidence = payload["current_moment"]["evidence"]
+        self.assertEqual([item["id"] for item in evidence], ["s1", "s2"])
+        narrative = validate(
+            {
+                "intent": {
+                    "text": "Check parser compatibility",
+                    "sources": [payload["current_work"]["latest_request_source"]],
+                },
+                "decisions": [],
+                "progress": [
+                    {
+                        "text": "Parser compatibility checks passed",
+                        "sources": [evidence[1]["id"]],
+                    }
+                ],
+            },
+            prepared,
+        )
+        self.assertEqual(narrative.intent.sources, (prepared.latest_request_source,))
+        source = narrative.sources[narrative.progress[0].sources[0]]
+        self.assertEqual(source["origin"], session_data(root))
+        self.assertEqual(source["observed_at"], 1000)
 
     def test_story_sources_preserve_observation_time_across_later_requests(
         self,
@@ -442,14 +481,30 @@ class StoryTests(unittest.TestCase):
             item for item in evidence if item.get("text") == unfinished
         )
         self.assertEqual(decision_item["scope"], decision)
-        self.assertEqual(decision_item["reporter"], session_data(storage))
+        self.assertNotIn("reporter", decision_item)
+        self.assertEqual(
+            first.sources[first.citations.resolve(decision_item["id"])]["origin"],
+            session_data(storage),
+        )
         self.assertEqual(decision_item["age"], "2 days ago")
         self.assertEqual(unfinished_item["scope"], assignment)
-        self.assertEqual(unfinished_item["reporter"], session_data(restoration))
+        self.assertNotIn("reporter", unfinished_item)
+        self.assertEqual(
+            first.sources[first.citations.resolve(unfinished_item["id"])]["origin"],
+            session_data(restoration),
+        )
         self.assertEqual(unfinished_item["age"], "2 days ago")
         self.assertNotIn("Formatter work remains blocked.", json.dumps(payload))
-        self.assertEqual(first.sources[decision_item["id"]]["observed_at"], 27000)
-        self.assertEqual(first.sources[unfinished_item["id"]]["observed_at"], 27020)
+        self.assertEqual(
+            first.sources[first.citations.resolve(decision_item["id"])]["observed_at"],
+            27000,
+        )
+        self.assertEqual(
+            first.sources[first.citations.resolve(unfinished_item["id"])][
+                "observed_at"
+            ],
+            27020,
+        )
         self.memory.clock = lambda: 286400
         later = self.prepared()
         later_payload = json.loads(later.request["messages"][0]["content"])
@@ -787,7 +842,7 @@ class StoryTests(unittest.TestCase):
         statements = [
             {
                 "text": f"{text}{index}",
-                "sources": [prepared.latest_request_source],
+                "sources": [prepared.citations.label(prepared.latest_request_source)],
             }
             for index in range(5)
         ]
@@ -822,7 +877,11 @@ class StoryTests(unittest.TestCase):
             for source in prepared.sources
             if source != prepared.latest_request_source
         )
-        for refs in (["unknown"], [old]):
+        for refs in (
+            ["unknown"],
+            [prepared.citations.label(old)],
+            [prepared.latest_request_source],
+        ):
             with self.subTest(refs=refs), self.assertRaises(ValueError):
                 validate(
                     {
@@ -836,7 +895,9 @@ class StoryTests(unittest.TestCase):
             {
                 "intent": {
                     "text": "Improve parser",
-                    "sources": [prepared.latest_request_source],
+                    "sources": [
+                        prepared.citations.label(prepared.latest_request_source)
+                    ],
                 },
                 "decisions": [],
                 "progress": [],
@@ -914,17 +975,25 @@ class StoryTests(unittest.TestCase):
             for key, source in prepared.sources.items()
             if source.get("text") == "Parser checks passed"
         }
-        self.assertEqual(set(reports[0]["supporting_ids"]), report_ids)
+        self.assertEqual(
+            set(prepared.citations.resolve_many(reports[0]["supporting_ids"])),
+            report_ids,
+        )
         self.assertIn("execution", reports[0])
         narrative = validate(
             {
                 "intent": {
                     "text": "Check parser",
-                    "sources": [prepared.latest_request_source],
+                    "sources": [
+                        prepared.citations.label(prepared.latest_request_source)
+                    ],
                 },
                 "decisions": [],
                 "progress": [
-                    {"text": "Parser checks passed", "sources": list(report_ids)}
+                    {
+                        "text": "Parser checks passed",
+                        "sources": prepared.citations.labels(tuple(report_ids)),
+                    }
                 ],
             },
             prepared,
@@ -980,7 +1049,10 @@ class StoryTests(unittest.TestCase):
             for item in first_payload["current_moment"]["evidence"]
             if item.get("text") == "Parser checks passed"
         ]
-        self.assertEqual([item["id"] for item in first_evidence], list(reports))
+        self.assertEqual(
+            [first.citations.resolve(item["id"]) for item in first_evidence],
+            list(reports),
+        )
         self.assertEqual(
             [item["age"] for item in first_evidence], ["3 minutes ago", "1 minute ago"]
         )
@@ -993,7 +1065,10 @@ class StoryTests(unittest.TestCase):
             if item.get("text") == "Parser checks passed"
         ]
         self.assertEqual(later.sources, first.sources)
-        self.assertEqual([item["id"] for item in later_evidence], list(reports))
+        self.assertEqual(
+            [later.citations.resolve(item["id"]) for item in later_evidence],
+            list(reports),
+        )
         self.assertEqual(
             [item["age"] for item in later_evidence], ["2 hours ago", "2 hours ago"]
         )
@@ -1075,7 +1150,9 @@ class StoryTests(unittest.TestCase):
             for item in payload["current_moment"]["evidence"]
             if str(item.get("text", "")).startswith("Checked a shared parser case.")
         ]
-        self.assertEqual([item["id"] for item in evidence], list(reports))
+        self.assertEqual(
+            [first.citations.resolve(item["id"]) for item in evidence], list(reports)
+        )
         self.assertTrue(all("supporting_ids" not in item for item in evidence))
         self.memory.clock = lambda: 8200
         later = self.prepared()
@@ -1171,6 +1248,9 @@ class StoryTests(unittest.TestCase):
         payload = json.loads(prepared.request["messages"][0]["content"])
         evidence = payload["current_moment"]["evidence"]
         self.assertEqual(sum(item.get("text") == "ok" for item in evidence), 2)
-        self.assertEqual(evidence[-1]["id"], prepared.latest_request_source)
+        self.assertEqual(
+            prepared.citations.resolve(evidence[-1]["id"]),
+            prepared.latest_request_source,
+        )
         self.assertEqual(evidence[-2]["text"], "I recommend removing the extra branch.")
         self.assertEqual(evidence[-3]["text"], "Can we simplify the next case?")

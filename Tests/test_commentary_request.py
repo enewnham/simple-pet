@@ -8,12 +8,19 @@ from typing import Unpack
 
 from pet_daemon.attention import Attention, AttentionSelection
 from pet_daemon.commentary import Cognition
+from pet_daemon.commentary.context import (
+    CommentaryPayload,
+    ContextFact,
+    Event,
+    FactKind,
+    Moment,
+)
 from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.commentary.request import (
-    CommentaryPayload,
     CommentaryRequest,
     _record_source_ids,
 )
+from pet_daemon.commentary.sources import NarrativeSource, SourceKind
 from pet_daemon.commentary.story import prepare as prepare_story
 from pet_daemon.config import Config
 from pet_daemon.domain import (
@@ -168,9 +175,9 @@ class ContextTests(unittest.TestCase):
                         "does not establish task completion", str(moment["execution"])
                     )
                 self.assertNotIn("outcome", moment)
-                self.assertEqual(
-                    prepared.conditions.payload["current_moment"]["outcome"], outcome
-                )
+                conditions_moment = prepared.conditions.context.moment
+                assert conditions_moment is not None
+                self.assertEqual(conditions_moment.outcome, outcome)
                 self.assertTrue(prepared.conditions.is_valid(self.current_snapshot()))
                 self.update_session(outcome=None, turn_active=True)
                 self.assertFalse(prepared.conditions.is_valid(self.current_snapshot()))
@@ -330,7 +337,14 @@ class ContextTests(unittest.TestCase):
         self.assertNotIn("Desktop check failed.", excerpt)
         moment_ids = payload["current_moment"]["source_ids"]
         assert isinstance(moment_ids, list)
-        self.assertEqual(set(moment_ids), set(report_ids))
+        labels = []
+        for value in moment_ids:
+            assert isinstance(value, str)
+            labels.append(value)
+        self.assertEqual(set(prepared.citations.resolve_many(labels)), set(report_ids))
+        self.assertNotIn("native_id", json.dumps(payload))
+        for identifier in prepared.source_ids:
+            self.assertNotIn(identifier, json.dumps(payload))
         self.assertEqual(set(report_ids) & set(prepared.source_ids), set(report_ids))
         self.assertTrue(
             any(
@@ -367,7 +381,17 @@ class ContextTests(unittest.TestCase):
             },
         )
         self.assertEqual(
-            _record_source_ids(record, root, ("reported_progress",), narrative, ()),
+            _record_source_ids(
+                record,
+                root,
+                ("reported_progress",),
+                narrative.subject_id,
+                tuple(
+                    NarrativeSource.from_record(identifier, value)
+                    for identifier, value in narrative.sources.items()
+                ),
+                (),
+            ),
             ["root"],
         )
 
@@ -441,8 +465,29 @@ class ContextTests(unittest.TestCase):
                 NarrativeStatement(text="Parser checks passed.", sources=("report",)),
             ),
             sources={
-                "request": {"observed_at": 700, "scope": "root"},
-                "report": {"observed_at": 880, "scope": "root"},
+                item.identifier: item.record()
+                for item in (
+                    NarrativeSource(
+                        "request",
+                        SourceKind.REQUEST,
+                        "Preserve parser compatibility.",
+                        "root",
+                        None,
+                        None,
+                        700,
+                        "Preserve parser compatibility.",
+                    ),
+                    NarrativeSource(
+                        "report",
+                        SourceKind.PROGRESS,
+                        "Parser checks passed.",
+                        "root",
+                        None,
+                        None,
+                        880,
+                        "Parser checks passed.",
+                    ),
+                )
             },
         )
         self.memory.save_narrative(narrative)
@@ -624,6 +669,36 @@ class ContextTests(unittest.TestCase):
         )
         self.assertNotIn("earlier_context", payload)
         self.assertEqual(self.snapshot, before)
+
+    def test_budgeted_context_resolves_only_the_included_citations(self) -> None:
+        self.config.prompt_target_bytes = 1
+        snapshot = self.current_snapshot()
+        selection = self.attention.select(snapshot, SpeechReason.ROUTINE)
+        narrative = WorkNarrative(
+            subject_id=SessionIdentity(
+                source=SessionSource.COMMAND, native_id="parser"
+            ),
+            revision="revision",
+            intent=NarrativeStatement(
+                text="Preserve parser compatibility.", sources=("intent-source",)
+            ),
+            decisions=(
+                NarrativeStatement(
+                    text="Keep the public API stable.", sources=("decision-source",)
+                ),
+            ),
+        )
+        prepared = self.cognition.prompts.prepare(
+            snapshot, selection, self.cognition.request, narrative=narrative
+        )
+        payload = self.payload(prepared)
+        self.assertEqual(payload["current_work"]["story_source_ids"], ["s1"])
+        self.assertNotIn("earlier_context", payload)
+        self.assertEqual(prepared.citations.resolve("s1"), "intent-source")
+        with self.assertRaises(ValueError):
+            prepared.citations.resolve("s2")
+        with self.assertRaises(ValueError):
+            prepared.citations.resolve("intent-source")
 
     def test_available_budget_keeps_requests_in_chronological_order(self) -> None:
         payload = self.payload(self.prepare())
@@ -1004,12 +1079,10 @@ class ContextTests(unittest.TestCase):
             [
                 {
                     "reported_progress": "Finished simplifying log labels",
-                    "reporter": {"source": "cli", "native_id": "parser"},
                     "age": "3 minutes ago",
                 },
                 {
                     "reported_progress": "Found two redundant assertions",
-                    "reporter": {"source": "cli", "native_id": "audit"},
                     "age": "2 minutes ago",
                     "scope": "Audit tests",
                 },
@@ -1109,8 +1182,8 @@ class ContextTests(unittest.TestCase):
                 ended_at=1000,
             ),
         )
-        moment = self.cognition.prompts.prompt(snapshot, selection)["current_moment"]
-        self.assertEqual(moment, {"kind": "failed_call"})
+        moment = self.cognition.prompts.prompt(snapshot, selection).moment
+        self.assertEqual(moment, Moment(Event.FAILED_CALL))
 
     def test_selected_completion_preserves_outcome_without_runtime_after_restart(
         self,
@@ -1149,10 +1222,11 @@ class ContextTests(unittest.TestCase):
                 ended_at=1000,
             ),
         )
-        moment = self.cognition.prompts.prompt(snapshot, selection)["current_moment"]
-        self.assertEqual(moment["kind"], "turn_ended")
-        self.assertEqual(moment["outcome"], "success")
-        self.assertEqual(moment["reported_progress"], "Parser checks passed")
+        moment = self.cognition.prompts.prompt(snapshot, selection).moment
+        assert moment is not None and moment.progress is not None
+        self.assertEqual(moment.event, Event.TURN_ENDED)
+        self.assertEqual(moment.outcome, ExecutionOutcome.SUCCESS)
+        self.assertEqual(moment.progress.text, "Parser checks passed")
 
     def test_selected_child_update_keeps_parent_result_in_historical_context(
         self,
@@ -1208,18 +1282,22 @@ class ContextTests(unittest.TestCase):
                 ),
             }
         )
-        payload = self.cognition.prompts.prompt(snapshot, selection)
-        self.assertEqual(payload["current_work"]["request"], "Inspect the parser")
+        context = self.cognition.prompts.prompt(snapshot, selection)
+        assert context.work is not None and context.work.request is not None
+        assert context.moment is not None and context.moment.progress is not None
+        self.assertEqual(context.work.request.text, "Inspect the parser")
         self.assertEqual(
-            payload["current_moment"]["reported_progress"],
+            context.moment.progress.text,
             "Child is inspecting escape handling",
         )
-        self.assertEqual(payload["current_moment"]["age"], "1 minute ago")
+        self.assertEqual(context.moment.age, "1 minute ago")
         self.assertTrue(
             any(
-                item.get("reported_progress") == "Parent checks passed"
-                and item["age"] == "5 minutes ago"
-                for item in payload["earlier_context"]
+                isinstance(item, ContextFact)
+                and item.kind == FactKind.PROGRESS
+                and item.statement.text == "Parent checks passed"
+                and item.age == "5 minutes ago"
+                for item in context.earlier
             )
         )
 
@@ -1280,28 +1358,42 @@ class ContextTests(unittest.TestCase):
                 NarrativeStatement(text="I checked escapes", sources=("coverage",)),
             ),
             sources={
-                "request": {
-                    "scope": "current task",
-                    "origin": {"source": "cli", "native_id": "parser"},
-                },
-                "parser": {
-                    "scope": "current task",
-                    "origin": {"source": "cli", "native_id": "parser"},
-                },
-                "coverage": {
-                    "scope": "current task",
-                    "origin": {"source": "cli", "native_id": "coverage"},
-                },
+                identifier: NarrativeSource(
+                    identifier=identifier,
+                    kind=kind,
+                    text=text,
+                    full_text=text,
+                    scope="current task",
+                    outcome=None,
+                    origin=origin,
+                    observed_at=None,
+                ).record()
+                for identifier, kind, text, origin in (
+                    (
+                        "request",
+                        SourceKind.REQUEST,
+                        "I am building the parser",
+                        subject.id,
+                    ),
+                    (
+                        "parser",
+                        SourceKind.PROGRESS,
+                        "I checked parser compatibility",
+                        subject.id,
+                    ),
+                    ("coverage", SourceKind.PROGRESS, "I checked escapes", related),
+                )
             },
         )
-        payload = self.cognition.prompts.prompt(snapshot, selection, narrative)
-        self.assertEqual(payload["current_work"]["request"], "current task")
-        self.assertEqual(
-            payload["current_moment"]["reported_progress"], "Escape checks passed"
-        )
+        context = self.cognition.prompts.prompt(snapshot, selection, narrative)
+        assert context.work is not None and context.work.request is not None
+        assert context.moment is not None and context.moment.progress is not None
+        self.assertEqual(context.work.request.text, "current task")
+        self.assertEqual(context.moment.progress.text, "Escape checks passed")
         history = {
-            item.get("request", item.get("reported_progress")): item.get("scope")
-            for item in payload["earlier_context"]
+            item.statement.text: item.scope
+            for item in context.earlier
+            if isinstance(item, ContextFact)
         }
         self.assertEqual(history["Parser compatibility checks passed"], "Build parser")
         self.assertEqual(history["I am building the parser"], "Build parser")

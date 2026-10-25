@@ -1,5 +1,4 @@
 from ..domain import Activity, ExecutionOutcome
-from ..types import JSONObject
 
 EVENTS = {
     "work_update": "An observation of the selected work is available.",
@@ -33,16 +32,3 @@ STATES = {
     "working": "Execution is active for this work.",
     "quiet": "No current execution is confirmed for this work.",
 }
-
-
-def describe_observation(observation: JSONObject) -> JSONObject:
-    result = dict(observation)
-    if "kind" in result:
-        result["event"] = EVENTS[str(result.pop("kind"))]
-    if "outcome" in result:
-        result["execution"] = OUTCOMES[ExecutionOutcome(str(result.pop("outcome")))]
-    if "state" in result:
-        result["activity"] = STATES[str(result.pop("state"))]
-    if "operation" in result:
-        result["operation"] = ACTIVITIES[Activity(str(result["operation"]))]
-    return result

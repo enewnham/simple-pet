@@ -17,8 +17,9 @@ from anthropic import AsyncAnthropic
 from pet_daemon.behavior.sprites import Pack
 from pet_daemon.cli.hook import update
 from pet_daemon.cli.notify import encode
+from pet_daemon.commentary.context import CommentaryPayload
 from pet_daemon.commentary.contracts import ModelRequest
-from pet_daemon.commentary.request import SITUATIONS, CommentaryPayload
+from pet_daemon.commentary.request import SITUATIONS
 from pet_daemon.config import Config
 from pet_daemon.daemon import Daemon, bind_socket
 from pet_daemon.domain import CareKind, SessionSource, SpeechReason, SpeechSituation
@@ -354,8 +355,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             snapshot, SpeechReason.PROMPT
         )
         payload = self.daemon.application.cognition.prompts.prompt(snapshot, selection)
+        assert payload.work is not None
+        assert payload.work.request is not None
         self.assertEqual(
-            payload["current_work"]["request"],
+            payload.work.request.text,
             "This is terrible. Stop making this worse.",
         )
 

@@ -1,8 +1,8 @@
 import json
-from collections.abc import Callable, Sequence
-from copy import deepcopy
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
-from typing import TypedDict, cast
+from typing import Literal, cast
 
 from anthropic.types import CacheControlEphemeralParam, TextBlockParam
 from pydantic import BaseModel, Field
@@ -14,11 +14,10 @@ from ..domain import (
     SpeechReason,
     SpeechSituation,
 )
-from ..identity import SessionIdentity, session_data
+from ..identity import SessionIdentity
 from ..prompts import bounded, request_excerpt
 from ..prose import prose_text, work_prose
 from ..runtime import PetContext, WaitingKind
-from ..types import JSONObject, JSONValue
 from ..work.evidence import (
     CommentaryEvidence,
     ExecutionStatus,
@@ -32,8 +31,22 @@ from ..work.narrative import (
     semantic_revision,
 )
 from ..work.stories import SessionContribution, WorkStory
+from .citations import Citations
+from .context import (
+    CommentaryContext,
+    ContextFact,
+    ContextItem,
+    Event,
+    FactKind,
+    Interpretation,
+    MemoryCandidate,
+    Moment,
+    SupportedText,
+    WorkContext,
+    WorkState,
+)
 from .contracts import ModelRequest, RequestFactory
-from .observations import describe_observation
+from .sources import NarrativeSource, SourceKind
 
 INSTRUCTIONS = """
 <role>
@@ -124,12 +137,6 @@ CARE_SITUATIONS = frozenset(
 CACHE_CONTROL: CacheControlEphemeralParam = {"type": "ephemeral", "ttl": "1h"}
 
 
-class CommentaryPayload(TypedDict, total=False):
-    current_work: JSONObject
-    current_moment: JSONObject
-    earlier_context: list[JSONObject]
-
-
 def encoded_size(value: object) -> int:
     return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
 
@@ -150,11 +157,15 @@ def duration(seconds: float | None) -> str | None:
     return f"{days} day{'s' if days != 1 else ''}"
 
 
-def context_priority(earlier: list[JSONObject]) -> list[int]:
+def context_priority(earlier: Sequence[ContextItem]) -> list[int]:
     latest_first = range(len(earlier) - 1, -1, -1)
-    return [index for index in latest_first if "request" in earlier[index]] + [
-        index for index in latest_first if "request" not in earlier[index]
+    requests = [
+        index
+        for index in latest_first
+        if isinstance(earlier[index], ContextFact)
+        and earlier[index].kind == FactKind.REQUEST
     ]
+    return requests + [index for index in latest_first if index not in requests]
 
 
 def _request_text(record: CommentaryEvidence) -> str:
@@ -184,49 +195,42 @@ def _record_source_ids(
     record: CommentaryEvidence,
     origin: SessionIdentity,
     kinds: tuple[str, ...],
-    narrative: WorkNarrative | None,
+    root: SessionIdentity | None,
+    sources: Sequence[NarrativeSource],
     excluded: Sequence[str],
 ) -> list[str]:
-    if narrative is None or record.observed_at is None:
+    if not sources or record.observed_at is None:
         return []
     original = _request_text(record) or _reported_progress(record)
     text = work_prose(original, 1200, excluded)
     if not text:
         return []
     candidates = [
-        (identifier, source)
-        for identifier, source in narrative.sources.items()
-        if source.get("kind") in kinds
-        and source.get("observed_at") == record.observed_at
-        and isinstance(source_text := source.get("text"), str)
-        and (source_text.startswith(text) or text.startswith(source_text))
+        source
+        for source in sources
+        if source.kind in kinds
+        and source.observed_at == record.observed_at
+        and source.text
+        and (source.text.startswith(text) or text.startswith(source.text))
     ]
-    expected = session_data(origin)
-    accepted_origins = (
-        (None, expected) if origin == narrative.subject_id else (expected,)
-    )
-    matching_origin = [
-        item for item in candidates if item[1].get("origin") in accepted_origins
-    ]
-    candidates = matching_origin
+    accepted_origins = (None, origin) if origin == root else (origin,)
+    candidates = [item for item in candidates if item.origin in accepted_origins]
     if any(
-        len([item for item in candidates if item[1].get("kind") == kind]) > 1
-        for kind in kinds
+        len([item for item in candidates if item.kind == kind]) > 1 for kind in kinds
     ):
         return []
-    return [identifier for identifier, _ in candidates]
+    return [source.identifier for source in candidates]
 
 
 def _add_earlier(
-    earlier: list[JSONObject],
+    earlier: list[ContextItem],
     timestamp: float,
     excluded: Sequence[str],
     text: str,
-    field: str,
+    kind: FactKind,
     observed_at: float | None = None,
     scope: str = "",
     outcome: ExecutionOutcome | None = None,
-    origin: SessionIdentity | None = None,
     source_ids: Sequence[str] = (),
 ) -> None:
     if not text:
@@ -234,24 +238,17 @@ def _add_earlier(
     text = work_prose(text, 600, excluded)
     if not text:
         return
-    item: JSONObject = {field: text}
-    if source_ids:
-        item["source_ids"] = list(source_ids)
-    if origin is not None:
-        item["reporter"] = {
-            "source": origin.source.value,
-            "native_id": origin.native_id,
-        }
-    if observed_at is not None:
-        age = duration(timestamp - observed_at)
-        if age:
-            item["age"] = age + " ago"
+    age = duration(timestamp - observed_at) if observed_at is not None else None
     scope_text = work_prose(scope, 200, excluded)
-    if scope_text:
-        item["scope"] = scope_text
-    if outcome is not None:
-        item["outcome"] = outcome
-    earlier.append(item)
+    earlier.append(
+        ContextFact(
+            kind=kind,
+            statement=SupportedText(text, tuple(source_ids)),
+            age=age + " ago" if age else None,
+            scope=scope_text or None,
+            outcome=outcome,
+        )
+    )
 
 
 def _current_work(
@@ -260,8 +257,9 @@ def _current_work(
     selected_child: SessionContribution | None,
     requests: tuple[CommentaryEvidence, ...],
     excluded: Sequence[str],
-    narrative: WorkNarrative | None = None,
-) -> JSONObject:
+    root: SessionIdentity | None,
+    sources: Sequence[NarrativeSource],
+) -> WorkContext | None:
     focus = selection.focus_session
     latest = requests[-1] if requests else None
     request = _request_text(latest) if latest else ""
@@ -271,123 +269,127 @@ def _current_work(
         request = focus.recent_requests[-1] if focus.recent_requests else focus.goal
     if not request and story:
         request = story.intent
-    current_work: JSONObject = {}
+    statement = None
     if request:
         prose = request_excerpt(prose_text(request, excluded))
         if prose:
-            current_work["request"] = prose
+            ids: list[str] = []
             if latest is not None and story is not None:
                 origin = selected_child.session if selected_child else story.id
                 ids = _record_source_ids(
-                    latest, origin, ("request",), narrative, excluded
+                    latest, origin, ("request",), root, sources, excluded
                 )
-                if ids:
-                    current_work["source_ids"] = cast(JSONValue, ids)
-    if focus and focus.repo:
-        current_work["project"] = bounded(Path(focus.repo).name, 120)
-    return current_work
+            statement = SupportedText(prose, tuple(ids))
+    project = bounded(Path(focus.repo).name, 120) if focus and focus.repo else None
+    return (
+        WorkContext(request=statement, project=project)
+        if statement or project
+        else None
+    )
 
 
-def _current_moment(
-    selection: AttentionSelection, excluded: Sequence[str]
-) -> JSONObject:
+def _current_moment(selection: AttentionSelection, excluded: Sequence[str]) -> Moment:
     if selection.context:
-        return {
-            "kind": "explicit_context",
-            "text": work_prose(selection.context, 2000, excluded),
-        }
+        return Moment(
+            Event.EXPLICIT_CONTEXT,
+            text=work_prose(selection.context, 2000, excluded),
+        )
     if selection.situation == SpeechSituation.IDLE_REFLECTION:
-        return {"kind": "quiet_time"}
+        return Moment(Event.QUIET_TIME)
     focus = selection.focus_session
     situation = selection.situation
-    moment: JSONObject = {"kind": "work_update"}
-    if focus:
-        if focus.waiting_for_input:
-            moment = {
-                "kind": "permission_request"
-                if focus.waiting_kind == WaitingKind.PERMISSION
-                else "input_requested"
-                if focus.waiting_kind == WaitingKind.QUESTION
-                else "waiting"
-            }
-            command = work_prose(focus.waiting_tool, 160, excluded)
-            if command:
-                moment["tool"] = command
-            elapsed = duration(focus.waiting_seconds)
-            if elapsed:
-                moment["elapsed"] = elapsed
-        elif situation == SpeechSituation.FAILURE:
-            moment = {"kind": "failed_call"}
-            if (
-                focus.failure
-                and focus.failure.current_turn
-                and not focus.failure.resolved
-            ):
-                moment["operation"] = focus.failure.activity
-        elif situation == SpeechSituation.COMPLETION and focus.outcome:
-            moment = {"kind": "turn_ended", "outcome": focus.outcome}
-        else:
-            moment["state"] = (
-                "working"
-                if any(
-                    session.turn_active and not session.activity_uncertain
-                    for session in (focus, *selection.context_sessions)
-                )
-                else "quiet"
+    moment = Moment(Event.WORK_UPDATE)
+    if focus is None:
+        return moment
+    if focus.waiting_for_input:
+        event = (
+            Event.PERMISSION_REQUEST
+            if focus.waiting_kind == WaitingKind.PERMISSION
+            else Event.INPUT_REQUESTED
+            if focus.waiting_kind == WaitingKind.QUESTION
+            else Event.WAITING
+        )
+        moment = Moment(
+            event,
+            tool=work_prose(focus.waiting_tool, 160, excluded) or None,
+            elapsed=duration(focus.waiting_seconds),
+        )
+    elif situation == SpeechSituation.FAILURE:
+        failure = focus.failure
+        moment = Moment(
+            Event.FAILED_CALL,
+            operation=failure.activity
+            if failure and failure.current_turn and not failure.resolved
+            else None,
+        )
+    elif situation == SpeechSituation.COMPLETION and focus.outcome:
+        moment = Moment(Event.TURN_ENDED, outcome=focus.outcome)
+    else:
+        state = (
+            WorkState.WORKING
+            if any(
+                session.turn_active and not session.activity_uncertain
+                for session in (focus, *selection.context_sessions)
             )
-            if moment["state"] == "quiet" and not focus.turn_active and focus.outcome:
-                moment["outcome"] = focus.outcome
-        if situation == SpeechSituation.PROMPT:
-            moment = {"kind": "request_received"}
-        if situation == SpeechSituation.CHECK_IN_RUNNING and focus.active_tools:
-            tool = max(focus.active_tools, key=lambda tool: tool.duration_seconds)
-            command = work_prose(tool.tool, 160, excluded)
-            if command:
-                moment["tool"] = command
-            elapsed = duration(tool.duration_seconds)
-            if elapsed:
-                moment["elapsed"] = elapsed
-        if situation == SpeechSituation.CHECK_IN_QUIET:
-            elapsed = duration(focus.quiet_seconds)
-            if elapsed:
-                moment["elapsed"] = elapsed
+            else WorkState.QUIET
+        )
+        moment = replace(
+            moment,
+            state=state,
+            outcome=focus.outcome
+            if state == WorkState.QUIET and not focus.turn_active
+            else None,
+        )
+    if situation == SpeechSituation.PROMPT:
+        moment = Moment(Event.REQUEST_RECEIVED)
+    if situation == SpeechSituation.CHECK_IN_RUNNING and focus.active_tools:
+        tool = max(focus.active_tools, key=lambda tool: tool.duration_seconds)
+        moment = replace(
+            moment,
+            tool=work_prose(tool.tool, 160, excluded) or None,
+            elapsed=duration(tool.duration_seconds),
+        )
+    if situation == SpeechSituation.CHECK_IN_QUIET:
+        moment = replace(moment, elapsed=duration(focus.quiet_seconds))
     return moment
 
 
-def _apply_terminal_moment(
+def _terminal_moment(
     selection: AttentionSelection,
     origin: SessionIdentity,
     activity: tuple[CommentaryEvidence, ...],
     timestamp: float,
-    moment: JSONObject,
-) -> None:
-    selected_origin = selection.update.session if selection.update else None
-    situation = selection.situation
+    moment: Moment,
+) -> Moment:
+    update = selection.update
     focus = selection.focus_session
     if (
-        origin == selected_origin
-        and selection.update
-        and selection.update.ended_at is not None
-        and situation in (SpeechSituation.ROUTINE, SpeechSituation.COMPLETION)
+        update is None
+        or origin != update.session
+        or update.ended_at is None
+        or selection.situation
+        not in (SpeechSituation.ROUTINE, SpeechSituation.COMPLETION)
+        or focus
+        and focus.waiting_for_input
     ):
-        terminal = next(
-            (
-                record
-                for record in reversed(activity)
-                if isinstance(record.details, ExecutionStatus)
-                and record.details.execution == "turn ended"
-            ),
-            None,
-        )
-        if terminal and not (focus and focus.waiting_for_input):
-            moment.clear()
-            moment["kind"] = "turn_ended"
-            outcome = _reported_outcome(terminal)
-            if outcome is not None:
-                moment["outcome"] = outcome
-            age = duration(timestamp - selection.update.ended_at)
-            if age:
-                moment["age"] = age + " ago"
+        return moment
+    terminal = next(
+        (
+            record
+            for record in reversed(activity)
+            if isinstance(record.details, ExecutionStatus)
+            and record.details.execution == "turn ended"
+        ),
+        None,
+    )
+    if terminal is None:
+        return moment
+    age = duration(timestamp - update.ended_at)
+    return Moment(
+        Event.TURN_ENDED,
+        outcome=_reported_outcome(terminal),
+        age=age + " ago" if age else None,
+    )
 
 
 def _report_scope(
@@ -429,10 +431,11 @@ def _story_reports(
     cutoff: float | None,
     timestamp: float,
     excluded: Sequence[str],
-    earlier: list[JSONObject],
-    moment: JSONObject,
-    narrative: WorkNarrative | None = None,
-) -> tuple[str, float | None, list[str]]:
+    earlier: list[ContextItem],
+    moment: Moment,
+    root: SessionIdentity | None,
+    sources: Sequence[NarrativeSource],
+) -> tuple[str, float | None, list[str], Moment]:
     current_report = ""
     current_observed_at: float | None = None
     current_ids: list[str] = []
@@ -442,7 +445,7 @@ def _story_reports(
         (child.session, child.activity, child.requests) for child in story.sessions
     )
     for origin, activity, assignments in groups:
-        _apply_terminal_moment(selection, origin, activity, timestamp, moment)
+        moment = _terminal_moment(selection, origin, activity, timestamp, moment)
         origin_cutoff = (
             cutoff
             if origin == story.id
@@ -472,7 +475,8 @@ def _story_reports(
                     record,
                     origin,
                     ("reported_progress", "turn_ended"),
-                    narrative,
+                    root,
+                    sources,
                     excluded,
                 )
             else:
@@ -481,20 +485,20 @@ def _story_reports(
                     timestamp,
                     excluded,
                     text,
-                    "reported_progress",
+                    FactKind.PROGRESS,
                     observed_at,
                     scope,
                     _reported_outcome(record),
-                    origin,
                     _record_source_ids(
                         record,
                         origin,
                         ("reported_progress", "turn_ended"),
-                        narrative,
+                        root,
+                        sources,
                         excluded,
                     ),
                 )
-    return current_report, current_observed_at, current_ids
+    return current_report, current_observed_at, current_ids, moment
 
 
 def _distinct_reports(
@@ -534,17 +538,16 @@ def commentary_facts(
     selection: AttentionSelection,
     timestamp: float,
     excluded: Sequence[str] = (),
-    narrative: WorkNarrative | None = None,
-) -> CommentaryPayload:
-    payload: CommentaryPayload = {}
+    root: SessionIdentity | None = None,
+    sources: Sequence[NarrativeSource] = (),
+) -> CommentaryContext:
     situation = selection.situation
     if situation in CARE_SITUATIONS or situation == SpeechSituation.CLICK_IDLE:
-        payload["current_moment"] = {"kind": "quiet_time"}
-        if snapshot.sleeping:
-            payload["current_moment"]["sleeping"] = True
-        return payload
+        return CommentaryContext(
+            moment=Moment(Event.QUIET_TIME, sleeping=snapshot.sleeping)
+        )
     if selection.reason == SpeechReason.EXPLICIT and not selection.context:
-        return payload
+        return CommentaryContext()
     focus = selection.focus_session
     story = (
         selection.subject.story
@@ -569,11 +572,9 @@ def commentary_facts(
         selected_child.requests if selected_child else story.requests if story else ()
     )
     current_work = _current_work(
-        selection, story, selected_child, requests, excluded, narrative
+        selection, story, selected_child, requests, excluded, root, sources
     )
-    if current_work:
-        payload["current_work"] = current_work
-    earlier: list[JSONObject] = []
+    earlier: list[ContextItem] = []
     if selected_child and story:
         for previous in story.requests[-4:]:
             _add_earlier(
@@ -581,10 +582,10 @@ def commentary_facts(
                 timestamp,
                 excluded,
                 _request_text(previous),
-                "request",
+                FactKind.REQUEST,
                 previous.observed_at,
                 source_ids=_record_source_ids(
-                    previous, story.id, ("request",), narrative, excluded
+                    previous, story.id, ("request",), root, sources, excluded
                 ),
             )
     if requests:
@@ -597,10 +598,10 @@ def commentary_facts(
                 timestamp,
                 excluded,
                 _request_text(previous),
-                "request",
+                FactKind.REQUEST,
                 previous.observed_at,
                 source_ids=_record_source_ids(
-                    previous, request_origin, ("request",), narrative, excluded
+                    previous, request_origin, ("request",), root, sources, excluded
                 )
                 if request_origin
                 else (),
@@ -612,16 +613,16 @@ def commentary_facts(
                 timestamp,
                 excluded,
                 request_excerpt(prose_text(previous, excluded)),
-                "request",
+                FactKind.REQUEST,
             )
-    moment: JSONObject = _current_moment(selection, excluded)
+    moment = _current_moment(selection, excluded)
     latest = requests[-1] if requests else None
     cutoff = latest.observed_at if latest else None
     current_report = ""
     current_observed_at: float | None = None
     current_ids: list[str] = []
     if story and situation != SpeechSituation.IDLE_REFLECTION:
-        current_report, current_observed_at, current_ids = _story_reports(
+        current_report, current_observed_at, current_ids, moment = _story_reports(
             selection,
             story,
             selected_child,
@@ -630,7 +631,8 @@ def commentary_facts(
             excluded,
             earlier,
             moment,
-            narrative,
+            root,
+            sources,
         )
     elif focus and situation not in (SpeechSituation.PROMPT, SpeechSituation.FAILURE):
         current_report = focus.progress
@@ -644,55 +646,32 @@ def commentary_facts(
     ):
         prose = work_prose(current_report, 600, excluded)
         if prose:
-            moment["reported_progress"] = prose
-            if current_ids:
-                moment["source_ids"] = cast(JSONValue, current_ids)
+            moment = replace(moment, progress=SupportedText(prose, tuple(current_ids)))
             age = (
                 duration(timestamp - current_observed_at)
                 if current_observed_at is not None
                 else None
             )
             if age:
-                moment["age"] = age + " ago"
-    payload["current_moment"] = moment
-    if earlier:
-        payload["earlier_context"] = [
+                moment = replace(moment, age=age + " ago")
+    return CommentaryContext(
+        work=current_work,
+        moment=moment,
+        earlier=tuple(
             earlier[index] for index in sorted(context_priority(earlier)[:6])
-        ]
-    return payload
-
-
-def stable_payload(payload: CommentaryPayload) -> CommentaryPayload:
-    result = deepcopy(payload)
-    moment = result.get("current_moment")
-    if moment:
-        moment.pop("elapsed", None)
-        moment.pop("age", None)
-    for item in result.get("earlier_context", ()):
-        item.pop("age", None)
-    return result
-
-
-def model_payload(payload: CommentaryPayload) -> CommentaryPayload:
-    result = deepcopy(payload)
-    if "current_moment" in result:
-        result["current_moment"] = describe_observation(result["current_moment"])
-    if "earlier_context" in result:
-        result["earlier_context"] = [
-            describe_observation(item) for item in result["earlier_context"]
-        ]
-    return result
+        ),
+    )
 
 
 class SpeechConditions(BaseModel):
     selection: AttentionSelection
-    payload: CommentaryPayload
+    context: CommentaryContext
     narrative_revision: str | None = None
     source_scope_revisions: dict[str, str] = Field(default_factory=dict)
 
     def is_valid(self, snapshot: PetContext) -> bool:
         if self.selection.situation in CARE_SITUATIONS:
-            sleeping = self.payload.get("current_moment", {}).get("sleeping", False)
+            sleeping = self.context.moment.sleeping if self.context.moment else False
             return snapshot.sleeping == sleeping and not any(
                 session.turn_active for session in snapshot.sessions
             )
@@ -751,63 +730,51 @@ class SpeechConditions(BaseModel):
             ongoing = max(after.active_tools, key=lambda tool: tool.duration_seconds)
             if original.call != ongoing.call:
                 return False
-        current = stable_payload(commentary_facts(snapshot, refreshed, 0))
-        expected = stable_payload(self.payload)
-        expected.pop("earlier_context", None)
-        current.pop("earlier_context", None)
-        return expected == current
+        current = commentary_facts(snapshot, refreshed, 0)
+        return self.context.stable() == current.stable()
 
 
 class CommentaryRequest(BaseModel):
     selection: AttentionSelection
     request: ModelRequest
     conditions: SpeechConditions
-    source_ids: tuple[str, ...] = ()
+    citations: Citations
     memory_options: dict[str, tuple[bool, bool]] = Field(default_factory=dict)
+
+    @property
+    def source_ids(self) -> tuple[str, ...]:
+        return self.citations.sources
 
 
 def _narrative_item(
-    field: str,
+    kind: FactKind,
     statement: NarrativeStatement,
-    narrative: WorkNarrative,
+    source_records: Mapping[str, NarrativeSource],
     selection: AttentionSelection,
     child_update: bool,
     clock: Callable[[], float],
     excluded: Sequence[str],
-) -> JSONObject | None:
+) -> ContextFact | None:
     text = work_prose(statement.text, 400, excluded)
     if not text:
         return None
-    item: JSONObject = {field: text, "source_ids": list(statement.sources)}
     sources = [
-        narrative.sources[ref] for ref in statement.sources if ref in narrative.sources
+        source_records[ref] for ref in statement.sources if ref in source_records
     ]
-    reporters: list[JSONValue] = []
-    for source in sources:
-        origin = source.get("origin")
-        if isinstance(origin, dict) and origin not in reporters:
-            reporters.append(origin)
-    if reporters:
-        item["reporters"] = reporters
     observed = [
-        value
-        for source in sources
-        if isinstance(value := source.get("observed_at"), (int, float))
+        source.observed_at for source in sources if source.observed_at is not None
     ]
-    if observed:
-        age = duration(clock() - max(observed))
-        if age:
-            item["age"] = age + " ago"
+    age = duration(clock() - max(observed)) if observed else None
     scopes: list[str] = []
     for source in sources:
-        if not source.get("scope"):
+        if not source.scope:
             continue
-        scope = str(source["scope"])
+        scope = source.scope
         if (
             child_update
             and selection.subject is not None
             and scope == "current task"
-            and source.get("origin") in (None, session_data(selection.subject.story.id))
+            and source.origin in (None, selection.subject.story.id)
         ):
             scope = (
                 work_prose(selection.subject.story.intent, 200, excluded)
@@ -815,18 +782,22 @@ def _narrative_item(
             )
         if scope not in scopes:
             scopes.append(scope)
-    if scopes:
-        item["scope"] = "; ".join(scopes)
-    return item
+    return ContextFact(
+        kind=kind,
+        statement=SupportedText(text, statement.sources),
+        age=age + " ago" if age else None,
+        scope="; ".join(scopes) if scopes else None,
+    )
 
 
 def _current_report_sources(
     selection: AttentionSelection,
-    narrative: WorkNarrative,
-    moment: JSONObject,
+    root: SessionIdentity,
+    sources: Sequence[NarrativeSource],
+    moment: Moment | None,
     excluded: Sequence[str],
 ) -> set[str]:
-    if selection.subject is None or not moment.get("reported_progress"):
+    if selection.subject is None or moment is None or moment.progress is None:
         return set()
     story = selection.subject.story
     origin = selection.update.session if selection.update else story.id
@@ -842,14 +813,15 @@ def _current_report_sources(
     if current is None or current.observed_at is None:
         return set()
     text = _reported_progress(current)
-    if work_prose(text, len(text), excluded) != moment["reported_progress"]:
+    if work_prose(text, len(text), excluded) != moment.progress.text:
         return set()
     return set(
         _record_source_ids(
             current,
             origin,
             ("reported_progress", "turn_ended"),
-            narrative,
+            root,
+            sources,
             excluded,
         )
     )
@@ -857,12 +829,15 @@ def _current_report_sources(
 
 def _memory_candidates(
     narrative: WorkNarrative,
+    sources: Mapping[str, NarrativeSource],
     clock: Callable[[], float],
     excluded: Sequence[str],
     eligible: Callable[[SelectedMemory], bool] | None,
-) -> list[JSONObject]:
-    candidates: dict[str, JSONObject] = {}
-    statements = (
+) -> list[MemoryCandidate]:
+    candidates: dict[str, MemoryCandidate] = {}
+    statements: tuple[
+        tuple[Literal["intent", "decision", "progress"], NarrativeStatement], ...
+    ] = (
         ("intent", narrative.intent),
         *(("decision", item) for item in narrative.decisions),
         *(("progress", item) for item in narrative.progress),
@@ -872,21 +847,18 @@ def _memory_candidates(
         if not interpretation:
             continue
         for identifier in statement.sources:
-            source = narrative.sources.get(identifier)
+            source = sources.get(identifier)
             if source is None:
                 continue
-            observed_at = source.get("observed_at")
-            original = source.get("text")
-            if not isinstance(observed_at, (int, float)) or not isinstance(
-                original, str
-            ):
+            observed_at = source.observed_at
+            if observed_at is None:
                 continue
-            text = work_prose(original, 600, excluded)
+            text = work_prose(source.text, 600, excluded)
             if not text:
                 continue
-            progress_report = category == "progress" and source.get("kind") in (
-                "reported_progress",
-                "turn_ended",
+            progress_report = category == "progress" and source.kind in (
+                SourceKind.PROGRESS,
+                SourceKind.TURN_ENDED,
             )
             candidate = candidates.get(identifier)
             if candidate is None:
@@ -898,30 +870,31 @@ def _memory_candidates(
                 )
                 if not allowed_recent and not allowed_ongoing:
                     continue
-                candidate = {
-                    "id": identifier,
-                    "kind": source["kind"],
-                    "text": text,
-                    "scope": source["scope"],
-                    "eligible_recent": allowed_recent,
-                    "eligible_ongoing": allowed_ongoing,
-                    "interpretations": [],
-                }
-                if origin := source.get("origin"):
-                    candidate["reporter"] = origin
-                if age := duration(clock() - observed_at):
-                    candidate["age"] = age + " ago"
-                if outcome := source.get("outcome"):
-                    candidate["outcome"] = outcome
-                candidates[identifier] = candidate
-            elif progress_report and not candidate["eligible_ongoing"]:
+                age = duration(clock() - observed_at)
+                candidate = MemoryCandidate(
+                    source_id=identifier,
+                    kind=source.kind,
+                    text=text,
+                    scope=source.scope,
+                    eligible_recent=allowed_recent,
+                    eligible_ongoing=allowed_ongoing,
+                    age=age + " ago" if age else None,
+                    outcome=source.outcome,
+                )
+            elif progress_report and not candidate.eligible_ongoing:
                 ongoing = SelectedMemory(
                     key=identifier, observed_at=observed_at, is_ongoing=True
                 )
-                candidate["eligible_ongoing"] = eligible(ongoing) if eligible else True
-            interpretations = candidate["interpretations"]
-            if isinstance(interpretations, list):
-                interpretations.append({"category": category, "text": interpretation})
+                candidate = replace(
+                    candidate, eligible_ongoing=eligible(ongoing) if eligible else True
+                )
+            candidates[identifier] = replace(
+                candidate,
+                interpretations=(
+                    *candidate.interpretations,
+                    Interpretation(category, interpretation),
+                ),
+            )
     return list(candidates.values())
 
 
@@ -969,68 +942,80 @@ class PromptBuilder:
         basic: bool = False,
         excluded: Sequence[str] = (),
         memory_eligible: Callable[[SelectedMemory], bool] | None = None,
-    ) -> CommentaryPayload:
-        payload = commentary_facts(
-            snapshot, selection, self.clock(), excluded, narrative
+    ) -> CommentaryContext:
+        sources = (
+            {
+                identifier: NarrativeSource.from_record(identifier, record)
+                for identifier, record in narrative.sources.items()
+            }
+            if narrative is not None
+            else {}
         )
-        if narrative is not None:
-            work = payload.setdefault("current_work", {})
-            intent = work_prose(narrative.intent.text, 400, excluded)
-            child_update = (
-                selection.update is not None
-                and selection.subject is not None
-                and selection.update.session != selection.subject.story.id
-            )
-            if intent and not child_update:
-                work["story"] = intent
-                work["story_source_ids"] = list(narrative.intent.sources)
-            earlier = payload.setdefault("earlier_context", [])
-            current_sources = _current_report_sources(
-                selection, narrative, payload.get("current_moment", {}), excluded
-            )
-            for field, statements in (
-                ("request", (narrative.intent,) if child_update else ()),
-                ("decision", narrative.decisions),
-                ("reported_progress", narrative.progress),
+        context = commentary_facts(
+            snapshot,
+            selection,
+            self.clock(),
+            excluded,
+            narrative.subject_id if narrative else None,
+            tuple(sources.values()),
+        )
+        if narrative is None:
+            if not basic:
+                return context
+            moment = context.moment
+            if moment is not None and moment.event not in (
+                Event.PERMISSION_REQUEST,
+                Event.INPUT_REQUESTED,
+                Event.WAITING,
             ):
-                for statement in statements:
-                    if (
-                        field == "reported_progress"
-                        and set(statement.sources) <= current_sources
-                    ):
-                        continue
-                    item = _narrative_item(
-                        field,
-                        statement,
-                        narrative,
-                        selection,
-                        child_update,
-                        self.clock,
-                        excluded,
-                    )
-                    if item is not None:
-                        earlier.append(item)
-            if not earlier:
-                payload.pop("earlier_context", None)
-            if selection.situation == SpeechSituation.IDLE_REFLECTION:
-                candidates = _memory_candidates(
-                    narrative, self.clock, excluded, memory_eligible
+                moment = replace(moment, progress=None)
+            return replace(context, earlier=(), moment=moment)
+        work = context.work or WorkContext()
+        intent = work_prose(narrative.intent.text, 400, excluded)
+        child_update = (
+            selection.update is not None
+            and selection.subject is not None
+            and selection.update.session != selection.subject.story.id
+        )
+        if intent and not child_update:
+            work = replace(work, story=SupportedText(intent, narrative.intent.sources))
+        earlier = list(context.earlier)
+        current_sources = _current_report_sources(
+            selection,
+            narrative.subject_id,
+            tuple(sources.values()),
+            context.moment,
+            excluded,
+        )
+        for kind, statements in (
+            (FactKind.REQUEST, (narrative.intent,) if child_update else ()),
+            (FactKind.DECISION, narrative.decisions),
+            (FactKind.PROGRESS, narrative.progress),
+        ):
+            for statement in statements:
+                if (
+                    kind == FactKind.PROGRESS
+                    and set(statement.sources) <= current_sources
+                ):
+                    continue
+                item = _narrative_item(
+                    kind,
+                    statement,
+                    sources,
+                    selection,
+                    child_update,
+                    self.clock,
+                    excluded,
                 )
-                if candidates:
-                    payload.setdefault("earlier_context", []).extend(
-                        {"memory_candidate": candidate, "source_ids": [candidate["id"]]}
-                        for candidate in candidates
-                    )
-        elif basic:
-            payload.pop("earlier_context", None)
-            moment = payload.get("current_moment", {})
-            if moment.get("kind") not in (
-                "permission_request",
-                "input_requested",
-                "waiting",
-            ):
-                moment.pop("reported_progress", None)
-        return payload
+                if item is not None:
+                    earlier.append(item)
+        if selection.situation == SpeechSituation.IDLE_REFLECTION:
+            earlier.extend(
+                _memory_candidates(
+                    narrative, sources, self.clock, excluded, memory_eligible
+                )
+            )
+        return replace(context, work=work, earlier=tuple(earlier))
 
     def prepare(
         self,
@@ -1044,7 +1029,7 @@ class PromptBuilder:
         excluded: Sequence[str] = (),
         memory_eligible: Callable[[SelectedMemory], bool] | None = None,
     ) -> CommentaryRequest:
-        payload = self.prompt(
+        context = self.prompt(
             snapshot,
             selection,
             narrative,
@@ -1053,54 +1038,43 @@ class PromptBuilder:
             memory_eligible=memory_eligible,
         )
         system = self.system(selection)
-        selected = deepcopy(payload)
-        earlier = selected.pop("earlier_context", [])
+        selected = replace(context, earlier=())
         included: list[int] = []
-        for index in context_priority(earlier):
-            candidate = deepcopy(selected)
-            candidate["earlier_context"] = [
-                earlier[item] for item in sorted((*included, index))
-            ]
+        for index in context_priority(context.earlier):
+            candidate = replace(
+                context,
+                earlier=tuple(
+                    context.earlier[item] for item in sorted((*included, index))
+                ),
+            )
             request = make_request(
-                model_payload(candidate), system, speech_required=speech_required
+                candidate.payload(candidate.citations),
+                system,
+                speech_required=speech_required,
             )
             if encoded_size(request) >= self.config.prompt_target_bytes:
                 break
             selected = candidate
             included.append(index)
+        citations = selected.citations
         request = make_request(
-            model_payload(selected), system, speech_required=speech_required
+            selected.payload(citations), system, speech_required=speech_required
         )
-        ids: list[str] = []
-        for item in (
-            selected.get("current_work", {}),
-            selected.get("current_moment", {}),
-            *selected.get("earlier_context", ()),
-        ):
-            for field in ("source_ids", "story_source_ids"):
-                refs = item.get(field)
-                if isinstance(refs, list | tuple):
-                    ids.extend(ref for ref in refs if isinstance(ref, str))
-        options: dict[str, tuple[bool, bool]] = {}
-        for item in selected.get("earlier_context", ()):
-            candidate = item.get("memory_candidate")
-            if isinstance(candidate, dict) and isinstance(
-                identifier := candidate.get("id"), str
-            ):
-                options[identifier] = (
-                    candidate.get("eligible_recent") is True,
-                    candidate.get("eligible_ongoing") is True,
-                )
+        options = {
+            item.source_id: (item.eligible_recent, item.eligible_ongoing)
+            for item in selected.earlier
+            if isinstance(item, MemoryCandidate)
+        }
         return CommentaryRequest(
             selection=selection,
             request=request,
-            source_ids=tuple(dict.fromkeys(ids)),
+            citations=citations,
             memory_options=options,
             conditions=SpeechConditions(
                 selection=selection,
-                payload=commentary_facts(snapshot, selection, self.clock())
+                context=commentary_facts(snapshot, selection, self.clock())
                 if narrative is not None or basic
-                else deepcopy(selected),
+                else selected,
                 narrative_revision=semantic_revision(
                     selection.subject.story, related=False
                 )
