@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import cast
 
 from anthropic import transform_schema
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from ..attention import AttentionSelection
 from ..identity import SessionIdentity, session_data
@@ -67,8 +67,8 @@ class WorkNarrativeRequest(BaseModel):
 class StoryResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     intent: NarrativeStatement
-    decisions: tuple[NarrativeStatement, ...] = Field(max_length=4)
-    progress: tuple[NarrativeStatement, ...] = Field(max_length=4)
+    decisions: tuple[NarrativeStatement, ...]
+    progress: tuple[NarrativeStatement, ...]
 
 
 @dataclass

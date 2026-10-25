@@ -775,6 +775,36 @@ class StoryTests(unittest.TestCase):
             )
         )
 
+    def test_story_preserves_statements_exceeding_brevity_targets(self) -> None:
+        self.add(
+            IntentEvidence(
+                session=SessionIdentity(source=SessionSource.CODEX, native_id="root"),
+                text="Improve parser",
+            )
+        )
+        prepared = self.prepared()
+        text = "I will improve parser handling of escaped characters. " * 10
+        statements = [
+            {
+                "text": f"{text}{index}",
+                "sources": [prepared.latest_request_source],
+            }
+            for index in range(5)
+        ]
+        narrative = validate(
+            {"intent": statements[0], "decisions": statements, "progress": statements},
+            prepared,
+        )
+        self.memory.save_narrative(narrative)
+        stored = require(self.memory.load_narrative(prepared.subject_id))
+        self.assertEqual(stored, narrative)
+        self.assertEqual(stored.intent.text, f"{text}0")
+        self.assertEqual(
+            [statement.text for statement in stored.decisions],
+            [f"{text}{index}" for index in range(5)],
+        )
+        self.assertEqual(stored.progress, stored.decisions)
+
     def test_validation_rejects_unknown_sources_and_stale_intent(self) -> None:
         self.add(
             IntentEvidence(

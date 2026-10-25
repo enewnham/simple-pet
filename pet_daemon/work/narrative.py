@@ -8,14 +8,14 @@ from .stories import WorkStory, revision_key
 
 class NarrativeStatement(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    text: str = Field(min_length=1, max_length=400)
+    text: str = Field(min_length=1)
     sources: tuple[str, ...] = Field(min_length=1)
 
     @field_validator("text")
     @classmethod
-    def bounded_text(cls, value: str) -> str:
+    def nonblank_text(cls, value: str) -> str:
         if not value.strip():
-            raise ValueError("Story statement requires bounded text")
+            raise ValueError("Story statement requires nonblank text")
         return value.strip()
 
     @field_validator("sources")
