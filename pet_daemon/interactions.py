@@ -663,6 +663,9 @@ class Interactions:
     def _choose(self, choice: Choice) -> None:
         kind, point = choice.kind, choice.point
         self.delivery.cancel_pending()
+        if point is not None and not self._is_current(point):
+            self._remove(point)
+            return
         if kind == ActionKind.DISMISS:
             self.clear()
         elif kind == ActionKind.MORE:

@@ -2528,6 +2528,52 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.interaction_item(refreshed)["id"], item["id"])
         self.assertIn("choose again", str(refreshed["error"]))
 
+    async def test_interaction_rejects_point_actions_after_session_intent_changes(
+        self,
+    ) -> None:
+        from unittest.mock import patch
+
+        from pet_daemon.navigation import Navigator, OpenResult, Target
+
+        self.model.response = self.interaction_model_response
+        opened: list[Target] = []
+
+        async def open_target(navigator: Navigator, target: Target) -> OpenResult:
+            opened.append(target)
+            return OpenResult(True)
+
+        with patch.object(Navigator, "open", open_target):
+            for response, kind in (
+                ("handled", "handled"),
+                ("tomorrow", "tomorrow"),
+                ("worktree", "navigate"),
+                ("context", "context"),
+            ):
+                with self.subTest(action=response):
+                    self.model.exchange_choices = (response,)
+                    self.now += 1
+                    self.report("The multiline escape check remains unverified.")
+                    self.complete_turn()
+                    await self.app.comment(SpeechReason.CLICK)
+                    snapshot = self.interaction_snapshot()
+                    item = self.interaction_item(snapshot)
+                    self.now += 1
+                    self.provider.publish(
+                        HookEvent(
+                            source=SessionSource.CODEX,
+                            session="parser",
+                            event=HookEventKind.INTENT,
+                            goal=f"Investigate parser {response} behavior",
+                        )
+                    )
+                    self.interaction_action(
+                        snapshot, self.interaction_choice(item, kind)
+                    )
+                    await asyncio.sleep(0)
+                    self.assertEqual(opened, [])
+                    self.assertEqual(self.memory.load_source_attention(), {})
+                    self.assertTrue(self.packets[-1].get("dismiss_conversation"))
+
     async def test_interaction_rounds_include_informative_and_remaining_reports(
         self,
     ) -> None:
@@ -2619,9 +2665,6 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.report("The parser preserves escaped delimiters.")
         self.complete_turn()
         self.model.response = self.interaction_model_response
-        await self.app.comment(SpeechReason.CLICK)
-        snapshot = self.interaction_snapshot()
-        item = self.interaction_item(snapshot)
         self.provider.publish(
             HookEvent(
                 source=SessionSource.CODEX,
@@ -2631,6 +2674,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 repo="/fixture/other-checkout",
             )
         )
+        await self.app.comment(SpeechReason.CLICK)
+        snapshot = self.interaction_snapshot()
+        item = self.interaction_item(snapshot)
         opened: list[Target] = []
         finished = asyncio.Event()
 
