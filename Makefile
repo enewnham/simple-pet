@@ -1,7 +1,7 @@
 .PHONY: setup build importer run demo test test-python test-swift check lint lint-python lint-swift complexity complexity-python complexity-swift format assets clean
 
 SWIFT_FLAGS ?= --disable-sandbox
-PYTHON_TEST_WORKERS ?= auto
+PYTHON_TEST_WORKERS ?= 4
 SWIFT_TESTING_PLUGIN = $(wildcard $(dir $(shell xcrun --find swiftc))../lib/swift/host/plugins/testing/libTestingMacros.dylib)
 SWIFT_TEST_FLAGS = $(SWIFT_FLAGS) $(if $(SWIFT_TESTING_PLUGIN),-Xswiftc -load-plugin-library -Xswiftc $(SWIFT_TESTING_PLUGIN))
 UV_CACHE_DIR ?= $(CURDIR)/.cache/uv
