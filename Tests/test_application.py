@@ -2299,7 +2299,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item["text"], self.model.text)
         self.assertIsInstance(item["id"], str)
 
-    async def test_interaction_context_expands_the_attributed_narrative(self) -> None:
+    async def test_interaction_context_preserves_generated_text_and_source_identity(
+        self,
+    ) -> None:
         self.now += 1
         self.report("The agent verified escaped delimiters inside quoted fields.")
         self.complete_turn()
@@ -2315,8 +2317,8 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         assert isinstance(before_revision, int) and isinstance(after_revision, int)
         self.assertGreater(after_revision, before_revision)
         context = self.interaction_item(expanded)["context"]
-        self.assertIn(self.model.exchange_context, str(context))
-        self.assertIn("Agent report", str(context))
+        self.assertEqual(context, self.model.exchange_context)
+        self.assertEqual(self.interaction_item(expanded)["id"], item["id"])
         self.assertEqual(expanded["headline"], self.model.headline)
         actions = item["actions"]
         assert isinstance(actions, list)
@@ -2455,7 +2457,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             self.interaction_item(self.interaction_snapshot())["id"], source
         )
 
-    async def test_interaction_navigation_failure_preserves_the_thread(self) -> None:
+    async def test_interaction_navigation_failure_preserves_the_thread_and_retry(
+        self,
+    ) -> None:
         from unittest.mock import patch
 
         from pet_daemon.navigation import Navigator, OpenResult, Target
@@ -2474,20 +2478,33 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         async def open_target(navigator: Navigator, target: Target) -> OpenResult:
             targets.append(target)
             opened.set()
-            return OpenResult(False, "Checkout is unavailable")
+            return OpenResult(len(targets) > 1, "Checkout is unavailable")
 
         with patch.object(Navigator, "open", open_target):
             self.interaction_action(
                 snapshot, self.interaction_choice(item, "navigate", "Show worktree")
             )
             await asyncio.wait_for(opened.wait(), 1)
-        failed = self.interaction_snapshot()
-        self.assertEqual([target.value for target in targets], [self.checkout.worktree])
-        self.assertEqual(failed["id"], snapshot["id"])
-        self.assertEqual(failed["mode"], "thread")
-        self.assertEqual(self.interaction_item(failed)["id"], item["id"])
-        self.assertIn("isn't available", str(failed["error"]))
-        self.assertEqual(self.memory.load_source_attention(), {})
+            failed = self.interaction_snapshot()
+            self.assertEqual(failed["id"], snapshot["id"])
+            self.assertEqual(failed["mode"], "thread")
+            failed_item = self.interaction_item(failed)
+            self.assertEqual(failed_item["id"], item["id"])
+            self.assertIn("couldn't open", str(failed["error"]))
+            self.assertNotIn("unavailable", str(failed["error"]))
+            self.assertEqual(self.memory.load_source_attention(), {})
+            self.interaction_action(
+                failed,
+                self.interaction_choice(failed_item, "navigate", "Show worktree"),
+            )
+            await require(self.app.interactions.task)
+        self.assertEqual(
+            [target.value for target in targets], [self.checkout.worktree] * 2
+        )
+        self.assertTrue(self.packets[-1].get("dismiss_conversation"))
+        self.assertEqual(
+            self.memory.load_source_attention()[str(item["id"])].engaged_at, self.now
+        )
 
     async def test_interaction_stale_and_unknown_actions_have_no_effect(self) -> None:
         from unittest.mock import patch
@@ -2598,12 +2615,24 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         items = snapshot["items"]
         assert isinstance(items, list)
         self.assertEqual(len(items), 2)
-        texts = [item["text"] for item in items if isinstance(item, dict)]
-        self.assertIn(
-            "Last report: Escaped delimiters are preserved inside quoted fields.",
-            texts,
+        texts = [
+            text
+            for item in items
+            if isinstance(item, dict) and isinstance(text := item.get("text"), str)
+        ]
+        self.assertEqual(len(texts), 2)
+        self.assertTrue(
+            any(
+                "Escaped delimiters are preserved inside quoted fields." in text
+                for text in texts
+            )
         )
-        self.assertIn("Last report: Desktop compatibility remains unverified.", texts)
+        self.assertTrue(
+            any("Desktop compatibility remains unverified." in text for text in texts)
+        )
+        self.assertFalse(
+            any("Last report" in text or "Last request" in text for text in texts)
+        )
         source_ids = [item["id"] for item in items if isinstance(item, dict)]
         self.assertEqual(len(set(source_ids)), 2)
         self.assertEqual(self.memory.load_source_attention(), {})

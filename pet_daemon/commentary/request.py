@@ -8,7 +8,7 @@ from anthropic.types import CacheControlEphemeralParam, TextBlockParam
 from pydantic import BaseModel, Field
 
 from ..attention import AttentionSelection
-from ..config import Config
+from ..config import DEFAULT_PERSONA, DEFAULT_PERSONA_EXAMPLES, Config
 from ..domain import (
     ExecutionOutcome,
     SpeechReason,
@@ -47,7 +47,7 @@ from .context import (
     WorkState,
 )
 from .contracts import ActionOffer, ModelRequest, RequestFactory
-from .prompt import Prompt, select_prompt
+from .prompt import COMMON_INSTRUCTIONS, Prompt, select_prompt
 from .sources import NarrativeSource, SourceKind
 
 CARE_SITUATIONS = frozenset(
@@ -827,13 +827,31 @@ class PromptBuilder:
         self.clock = clock
 
     def system(self, prompt: Prompt) -> list[TextBlockParam]:
+        sections = [
+            "<persona>\n" + self.config.persona + "\n</persona>",
+            "<rules>\n" + COMMON_INSTRUCTIONS + "\n</rules>",
+            "<instructions>\n" + prompt.instructions + "\n</instructions>",
+        ]
+        examples = self.config.persona_examples
+        if examples is None and self.config.persona == DEFAULT_PERSONA:
+            examples = DEFAULT_PERSONA_EXAMPLES
+        if examples is not None:
+            text = (
+                examples.conversation if prompt.is_conversation else examples.activity
+            )
+            if text.strip():
+                sections.append(
+                    "<examples>\n"
+                    "These illustrate voice and factual scope, not facts about the current work. "
+                    "Follow the configured persona, current observations, available action IDs, "
+                    "and response schema. Vary the wording and rhythm. Silence is still valid.\n\n"
+                    + text
+                    + "\n</examples>"
+                )
         return [
             {
                 "type": "text",
-                "text": "<persona>\n"
-                + self.config.persona
-                + "\n</persona>\n\n"
-                + prompt.instructions,
+                "text": "\n\n".join(sections),
                 "cache_control": CACHE_CONTROL,
             },
             {"type": "text", "text": "<request>\n" + prompt.direction + "\n</request>"},

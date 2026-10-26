@@ -3,7 +3,6 @@ import sqlite3
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
 from enum import StrEnum
 
 from .attention import Attention, AttentionSelection, SelectedWorkState
@@ -377,7 +376,7 @@ class Interactions:
             source, self._observed_at(source, selection.subject)
         )
 
-    def finish_empty(self, text: str = "That's the tour for now.") -> None:
+    def finish_empty(self, text: str = "Nothing else to share just yet.") -> None:
         self.mode = "empty"
         self.points = ()
         self.selected = None
@@ -418,11 +417,6 @@ class Interactions:
             ):
                 continue
             source = max(sources, key=lambda key: self._observed_at(key, subject))
-            attribution = (
-                "Last request"
-                if narrative.sources[source].get("kind") == "request"
-                else "Last report"
-            )
             conditions = SpeechConditions(
                 selection=selection,
                 context=commentary_facts(snapshot, selection, self.memory.clock()),
@@ -439,7 +433,7 @@ class Interactions:
                 source,
                 subject,
                 narrative.intent.text,
-                f"{attribution}: {statement.text}",
+                f"Where we left things: {statement.text}",
                 self._context_text(subject),
                 sources,
                 self._observed_at(source, subject),
@@ -486,7 +480,7 @@ class Interactions:
         text = (
             "Here's a quick tour of where we left things."
             if points
-            else "No recent threads to tour."
+            else "Nothing else to share just yet."
         )
         if failed and not points:
             text = "I couldn't refresh our notes. Try again in a moment."
@@ -548,18 +542,11 @@ class Interactions:
                         else None,
                     )
                 )
-        stamp = datetime.fromtimestamp(point.observed_at).strftime("%b %d, %H:%M")
-        narrative = self.memory.load_narrative(point.subject.id)
-        source = narrative.sources.get(point.source, {}) if narrative else {}
-        attribution = (
-            "User request" if source.get("kind") == "request" else "Agent report"
-        )
-        context = point.context + f"\n\n{attribution} · {stamp}."
         return {
             "id": point.source,
             "title": point.title,
             "text": point.text,
-            "context": context,
+            "context": point.context,
             "actions": tuple(actions),
         }
 
@@ -729,7 +716,7 @@ class Interactions:
             log.info(
                 "interaction.navigation_failed", target=target.value, error=result.error
             )
-            self._publish(error="That place isn't available. Try another choice.")
+            self._publish(error="I couldn't open that. You can try again.")
             return
         try:
             self.memory.record_source_feedback(

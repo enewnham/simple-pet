@@ -68,10 +68,10 @@ final class ConversationContent: NSVisualEffectView {
 
     private func appendState(_ conversation: Conversation) {
         if conversation.mode == .loading && conversation.text.isEmpty {
-            appendText("Gathering the threads…", to: body, size: 14)
+            appendText("Let me see where we left things.", to: body, size: 14)
         }
         if conversation.mode == .empty && conversation.text.isEmpty {
-            appendText("No recent work to show.", to: body, size: 14)
+            appendText("Nothing else to share just yet.", to: body, size: 14)
         }
     }
 
@@ -231,7 +231,7 @@ final class ConversationContent: NSVisualEffectView {
 
     private func title(for conversation: Conversation) -> String {
         switch conversation.mode {
-        case .rounds: return "Make the rounds"
+        case .rounds: return "Recent work"
         case .empty: return "No fresh notes"
         case .loading: return conversation.headline ?? "One moment"
         case .thread, .context:

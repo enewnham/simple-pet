@@ -24,8 +24,8 @@ struct ConversationOverlayTests {
         }
     }
 
-    @Test func updatedFailureRestoresActionsAndPreservesThePetAnchor() throws {
-        try withFixture { controller, _ in
+    @Test func updatedFailureRestoresActionsForRetryAndPreservesThePetAnchor() throws {
+        try withFixture { controller, packets in
             let anchor = Self.anchor
             try controller.receive(event(mode: "thread"))
             controller.performAction("open")
@@ -34,6 +34,15 @@ struct ConversationOverlayTests {
             let labels = descendants(controller.content).compactMap { ($0 as? NSTextField)?.stringValue }
             #expect(labels.contains("Could not open this work. Try again."))
             #expect(controller.panel.frame.intersects(anchor) == false)
+            let button = try #require(descendants(controller.content).compactMap { $0 as? NSButton }
+                .first { $0.identifier?.rawValue == "open" })
+            #expect(button.isEnabled)
+            controller.performAction("open")
+            let sent = packets.values.filter { $0["event"] as? String == "interaction_action" }
+            #expect(sent.count == 2)
+            #expect(sent.last?["interaction_id"] as? String == Self.identifier)
+            #expect(sent.last?["revision"] as? Int == 2)
+            #expect(sent.last?["action_id"] as? String == "open")
         }
     }
 

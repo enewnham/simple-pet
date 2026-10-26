@@ -126,6 +126,12 @@ Customize `persona` to change the pet's voice. Use `memory_retention_days` and
 PR links, stack membership, and basic PR state. Repository observations provide context
 for the agents' reports.
 
+Set `persona_examples.activity` and `persona_examples.conversation` to text containing
+example observations and replies for that voice. The pet sends only the section for
+the current interaction. An omitted `persona_examples` uses bundled examples for the
+default persona and no examples for a custom persona. In an explicit examples object,
+an empty or omitted section disables examples for that interaction.
+
 The pet maintains a short work story from user requests and scoped agent reports before
 generating commentary. Quoted text, code blocks, and tables are excluded from reports.
 Recent pet remarks stay local for repetition checks and are excluded from model prompts.

@@ -2819,6 +2819,38 @@ class ConfigurationTests(unittest.TestCase):
             with self.subTest(persona=persona), self.assertRaises(ValueError):
                 Config.model_validate({"pet_dir": Path("fixture"), "persona": persona})
 
+    def test_loads_independent_persona_examples_without_changing_the_persona(
+        self,
+    ) -> None:
+        config = Config.model_validate(
+            {
+                "pet_dir": Path("fixture"),
+                "persona": "A calm garden companion.",
+                "persona_examples": {
+                    "conversation": "Observation: Quiet. Remark: Hello."
+                },
+            }
+        )
+        self.assertEqual(config.persona, "A calm garden companion.")
+        assert config.persona_examples is not None
+        self.assertEqual(config.persona_examples.activity, "")
+        self.assertEqual(
+            config.persona_examples.conversation, "Observation: Quiet. Remark: Hello."
+        )
+
+    def test_rejects_malformed_or_unknown_persona_example_sections(self) -> None:
+        for examples in (
+            "Some examples",
+            {"activity": None},
+            {"activity": ["A remark"]},
+            {"conversation": 3},
+            {"unknown": "A remark"},
+        ):
+            with self.subTest(examples=examples), self.assertRaises(ValueError):
+                Config.model_validate(
+                    {"pet_dir": Path("fixture"), "persona_examples": examples}
+                )
+
     def test_rejects_invalid_memory_limits(self) -> None:
         for field in (
             "prompt_target_bytes",
