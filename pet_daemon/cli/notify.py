@@ -5,67 +5,34 @@ import json
 import math
 import os
 import socket
+import sys
+import time
 from collections.abc import Mapping
 
 from ..domain import SessionSource
-from ..prompts import request_excerpt
-from ..prose import prose_text, work_prose
 from ..sessions.processes import discover_owner
-
-MAX_DATAGRAM_BYTES = 1999
-EXCERPT_FIELDS = ("progress", "goal", "tool", "context", "sentiment_text")
+from ..transport import MAX_DATAGRAM_BYTES, SOCKET_BUFFER_BYTES
 
 
 def encode(payload: Mapping[str, object]) -> bytes | None:
-    payload = dict(payload)
-    original_goal = payload.get("goal")
-    if isinstance(original_goal, str):
-        original_goal = prose_text(original_goal)
-        payload["goal"] = request_excerpt(original_goal)
-
-    def serialized() -> bytes:
-        return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
-            "utf-8"
-        )
-
-    data = serialized()
-    for field in EXCERPT_FIELDS:
-        if len(data) <= MAX_DATAGRAM_BYTES:
-            break
-        value = payload.get(field)
-        if not isinstance(value, str):
-            continue
-        if field == "goal":
-            payload[field] = ""
-            available = MAX_DATAGRAM_BYTES - len(serialized()) + 2
-            payload[field] = request_excerpt(original_goal, max_bytes=available)
-            data = serialized()
-            continue
-        low, high = 0, len(value)
-        while low < high:
-            middle = (low + high + 1) // 2
-            payload[field] = (
-                work_prose(value, limit=middle)
-                if field == "progress"
-                else value[:middle]
-            )
-            if len(serialized()) <= MAX_DATAGRAM_BYTES:
-                low = middle
-            else:
-                high = middle - 1
-        payload[field] = (
-            work_prose(value, limit=low) if field == "progress" else value[:low]
-        )
-        data = serialized()
+    data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8"
+    )
     return data if len(data) <= MAX_DATAGRAM_BYTES else None
 
 
 def send(payload: Mapping[str, object]) -> bool:
+    if payload.get("kind") == "event" and "capture_at" not in payload:
+        payload = dict(payload, capture_at=time.time())
     data = encode(payload)
     if data is None:
+        print(
+            f"pet-notify: message exceeds {MAX_DATAGRAM_BYTES} bytes", file=sys.stderr
+        )
         return False
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as client:
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCKET_BUFFER_BYTES)
             client.setblocking(False)
             client.sendto(
                 data, os.environ.get("PET_DAEMON_SOCKET", "/tmp/pet-daemon.sock")

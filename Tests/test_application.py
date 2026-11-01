@@ -14,6 +14,7 @@ from pet_daemon.application import Application
 from pet_daemon.attention import Attention, AttentionSelection
 from pet_daemon.behavior.controller import Behavior
 from pet_daemon.behavior.sprites import Pack
+from pet_daemon.cli.hook import update
 from pet_daemon.commentary import Cognition
 from pet_daemon.commentary.context import CommentaryContext
 from pet_daemon.commentary.contracts import ModelRequest
@@ -55,7 +56,7 @@ from pet_daemon.storage import Memory
 from pet_daemon.types import JSONObject
 from pet_daemon.work import WorkStory
 from pet_daemon.work.evidence import ReportedProgress, WorkAssociation
-from pet_daemon.work.models import RelatedLink
+from pet_daemon.work.models import IntentEvidence, ProgressEvidence, RelatedLink
 from pet_daemon.work.observations import (
     BranchObservation,
     CheckoutObservation,
@@ -239,6 +240,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 "session": "parser",
                 "event": "intent",
                 "goal": "Improve quoted-field parsing",
+                "capture_at": self.now,
                 "repo": "/fixture/parser",
             }
         )
@@ -288,6 +290,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
     def report(self, text: str, *, session: str = "parser") -> None:
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session=session,
                 event=HookEventKind.PROGRESS,
@@ -295,11 +298,230 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    def test_notifications_retain_evidence_without_replacing_or_counting_requests(
+        self,
+    ) -> None:
+        notification = (
+            Path(__file__).parent / "fixtures/harness_text/claude-notification.txt"
+        ).read_text()
+        request = "Fix parser compatibility"
+        for timestamp, text in (
+            (100, notification),
+            (200, request),
+            (300, notification),
+        ):
+            hook = require(
+                update(
+                    "claude",
+                    "UserPromptSubmit",
+                    {
+                        "session_id": "notifications",
+                        "prompt": text,
+                    },
+                )
+            )
+            hook.capture_at = timestamp
+            self.app.ingest(hook)
+        identity = hook.subject
+        context = require(self.memory.context(identity))
+        self.assertEqual(context.initial_request, request)
+        self.assertEqual(context.initial_request_at, 200)
+        self.assertEqual(context.recent_requests, [request])
+        self.assertEqual(context.request_count, 1)
+        subject = next(item for item in self.app.context().work if item.id == identity)
+        self.assertEqual(subject.story.intent, request)
+        self.assertEqual(len(subject.story.requests), 1)
+        retained = self.memory.narrative_reports((identity,))
+        texts = [
+            item.payload.text
+            for item in retained
+            if isinstance(item.payload, IntentEvidence)
+        ]
+        self.assertEqual(texts, [notification, request, notification])
+
+    def test_captured_text_and_age_survive_ingestion_activity_and_reopen(self) -> None:
+        text = (
+            Path(__file__).parent / "fixtures/harness_text/claude-handback.txt"
+        ).read_text()
+        hook = require(
+            update(
+                "claude",
+                "UserPromptSubmit",
+                {
+                    "session_id": "capture",
+                    "prompt": text,
+                },
+            )
+        )
+        hook.capture_at = 100.0
+        self.app.ingest(hook)
+        self.now = 2000.0
+        self.app.ingest(
+            HookEvent(
+                source=SessionSource.CLAUDE,
+                session="capture",
+                event=HookEventKind.TOOL_START,
+                call="read",
+                tool="Read",
+                capture_at=self.now,
+            )
+        )
+        identity = hook.subject
+        report = next(
+            report
+            for report in self.memory.narrative_reports((identity,))
+            if isinstance(report.payload, IntentEvidence)
+        )
+        assert isinstance(report.payload, IntentEvidence)
+        self.assertEqual(report.payload.text, text)
+        self.assertEqual(report.evidence_at, 100.0)
+        self.assertEqual(report.ingested_at, 1000.0)
+        self.assertEqual(report.origin, identity)
+        self.assertEqual(report.record().observed_at, 100.0)
+        reopened = Memory(
+            Path(self.temporary.name) / "memory.sqlite3",
+            "fixture-pet",
+            clock=self.clock,
+        )
+        try:
+            retained = next(
+                report
+                for report in reopened.narrative_reports((identity,))
+                if isinstance(report.payload, IntentEvidence)
+            )
+            self.assertEqual(retained, report)
+            context = require(reopened.context(identity))
+            self.assertIn("ignore actor authorization", context.initial_request)
+            self.assertNotIn("Subagent hand-back", context.initial_request)
+        finally:
+            reopened.close()
+
+    def test_inherited_request_keeps_parent_capture_age_after_new_work_and_reopen(
+        self,
+    ) -> None:
+        child = SessionIdentity(source=SessionSource.CODEX, native_id="inherited")
+        self.app.ingest(
+            HookEvent(
+                source=SessionSource.CODEX,
+                session=child.native_id,
+                parent="parser",
+                event=HookEventKind.SUBAGENT_START,
+                capture_at=1100,
+            )
+        )
+        self.now = 8200.0
+        self.app.ingest(
+            HookEvent(
+                source=SessionSource.CODEX,
+                session="parser",
+                event=HookEventKind.INTENT,
+                goal="Review a different task",
+                capture_at=self.now,
+            )
+        )
+        self.app.ingest(
+            HookEvent(
+                source=SessionSource.CODEX,
+                session=child.native_id,
+                event=HookEventKind.TOOL_START,
+                call="read",
+                tool="Read",
+                capture_at=self.now,
+            )
+        )
+        trigger = SessionTrigger(session_id=child)
+        snapshot = self.app.context(trigger)
+        selection = self.attention.select(snapshot, SpeechReason.CHECK_IN)
+        self.assertEqual(require(selection.focus_session).id, child)
+        prepared = self.app.cognition.prompts.prepare(
+            snapshot, selection, self.app.cognition.request
+        )
+        payload = json.loads(prepared.request["messages"][0]["content"])
+        self.assertEqual(
+            payload["current_work"]["request"], "Improve quoted-field parsing"
+        )
+        self.assertEqual(payload["current_work"]["request_age"], "2 hours ago")
+        reopened = Memory(
+            Path(self.temporary.name) / "memory.sqlite3",
+            "fixture-pet",
+            clock=self.clock,
+        )
+        try:
+            context = require(reopened.context(child))
+            self.assertEqual(context.initial_request_at, 1000)
+            self.assertEqual(context.initial_request, "Improve quoted-field parsing")
+        finally:
+            reopened.close()
+
+    def test_tool_report_retains_original_text_without_becoming_work_progress(
+        self,
+    ) -> None:
+        text = "Message Type: MESSAGE\nTask name: /root\nSender: /root/reader\nPayload:\nReading fixtures.\n```python\noriginal_code()\n```"
+        self.app.ingest(
+            HookEvent(
+                source=SessionSource.CODEX,
+                session="parser",
+                event=HookEventKind.TOOL_START,
+                call="read",
+                tool="Read",
+                capture_at=self.now,
+            )
+        )
+        self.app.ingest(
+            HookEvent(
+                source=SessionSource.CODEX,
+                session="parser",
+                event=HookEventKind.TOOL_DONE,
+                call="read",
+                progress=text,
+                capture_at=self.now,
+            )
+        )
+        identity = SessionIdentity(source=SessionSource.CODEX, native_id="parser")
+        reports = self.memory.narrative_reports((identity,))
+        report = next(
+            report for report in reports if isinstance(report.payload, ProgressEvidence)
+        )
+        assert isinstance(report.payload, ProgressEvidence)
+        self.assertEqual(report.payload.text, text)
+        self.assertEqual(report.hook_kind, "tool_done")
+        story = next(
+            subject.story
+            for subject in self.app.context().work
+            if subject.id == identity
+        )
+        self.assertFalse(
+            any(
+                isinstance(record.details, ReportedProgress)
+                for record in story.activity
+            )
+        )
+
+    def test_missing_capture_time_keeps_observation_age_unknown(self) -> None:
+        self.app.ingest(
+            HookEvent(
+                source=SessionSource.CODEX,
+                session="undated",
+                event=HookEventKind.INTENT,
+                goal="Keep provenance unknown",
+            )
+        )
+        identity = SessionIdentity(source=SessionSource.CODEX, native_id="undated")
+        report = next(
+            report
+            for report in self.memory.narrative_reports((identity,))
+            if isinstance(report.payload, IntentEvidence)
+        )
+        self.assertIsNone(report.evidence_at)
+        self.assertIsNone(report.record().observed_at)
+        self.assertEqual(report.ingested_at, self.now)
+
     def test_context_enrichment_preserves_earlier_snapshots(self) -> None:
         earlier = self.app.context()
         captured = earlier.model_dump()
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="parser",
                 event=HookEventKind.INTENT,
@@ -349,6 +571,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         selection = self.attention.select(snapshot)
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="parser",
                 event=HookEventKind.SESSION_END,
@@ -368,6 +591,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.config.behavior.automatic_speech_cooldown_seconds = 0
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="parser",
                 event=HookEventKind.WAITING,
@@ -403,6 +627,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.packets.clear()
         for event in (
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="examples",
                 event=HookEventKind.SUBAGENT_START,
@@ -410,6 +635,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 goal="Document quoted-field examples",
             ),
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="examples",
                 event=HookEventKind.TOOL_START,
@@ -417,12 +643,14 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 tool="pytest",
             ),
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="examples",
                 event=HookEventKind.TOOL_ERROR,
                 call="check",
             ),
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="examples",
                 event=HookEventKind.TOOL_START,
@@ -430,12 +658,14 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 tool="pytest",
             ),
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="examples",
                 event=HookEventKind.TOOL_DONE,
                 call="retry",
             ),
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="examples",
                 event=HookEventKind.SUBAGENT_DONE,
@@ -474,6 +704,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="examples",
                 event=HookEventKind.SUBAGENT_START,
@@ -482,6 +713,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="examples",
                 event=HookEventKind.WAITING,
@@ -512,6 +744,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         for child in ("examples", "escapes"):
             self.provider.publish(
                 HookEvent(
+                    capture_at=self.now,
                     source=SessionSource.CODEX,
                     session=child,
                     event=HookEventKind.SUBAGENT_START,
@@ -550,6 +783,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs("pet-daemon", level="WARNING"):
             self.provider.publish(
                 HookEvent(
+                    capture_at=self.now,
                     source=SessionSource.CODEX,
                     session="parser",
                     event=HookEventKind.INTENT,
@@ -576,6 +810,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="parser",
                 event=HookEventKind.TURN_DONE,
@@ -756,6 +991,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.report(parent_report)
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="examples",
                 event=HookEventKind.SUBAGENT_START,
@@ -847,6 +1083,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="parser",
                 event=HookEventKind.PROGRESS,
@@ -855,6 +1092,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="examples",
                 event=HookEventKind.SUBAGENT_START,
@@ -876,6 +1114,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parent.native_id, "parser")
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="examples",
                 event=HookEventKind.PROGRESS,
@@ -895,6 +1134,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
     def complete_turn(self, session: str = "parser") -> None:
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session=session,
                 event=HookEventKind.TURN_DONE,
@@ -932,6 +1172,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.now += 10
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="parser",
                 event=HookEventKind.SESSION_END,
@@ -961,6 +1202,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.attention.is_selection_eligible(selection, snapshot))
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="parser",
                 event=HookEventKind.SESSION_END,
@@ -977,6 +1219,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         owner = ProcessIdentity(pid=42, started="fixture-owner")
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="parser",
                 event=HookEventKind.PROGRESS,
@@ -1073,6 +1316,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.accept(packet)
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="child",
                 event=HookEventKind.SUBAGENT_START,
@@ -1109,6 +1353,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_live_parent_cannot_revive_consumed_child_completion(self) -> None:
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="child",
                 event=HookEventKind.SUBAGENT_START,
@@ -1147,6 +1392,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         await self.submit_commentary()
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="other",
                 event=HookEventKind.INTENT,
@@ -1251,6 +1497,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             self.now += 1
             self.provider.publish(
                 HookEvent(
+                    capture_at=self.now,
                     source=session.source,
                     session=session.native_id,
                     event=HookEventKind.INTENT,
@@ -1260,6 +1507,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             )
             self.provider.publish(
                 HookEvent(
+                    capture_at=self.now,
                     source=session.source,
                     session=session.native_id,
                     event=HookEventKind.TURN_DONE,
@@ -1316,6 +1564,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_acceptance_keeps_uncaptured_related_reports_eligible(self) -> None:
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="child",
                 event=HookEventKind.INTENT,
@@ -1497,6 +1746,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.now += 3600
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="verification",
                 event=HookEventKind.INTENT,
@@ -1531,6 +1781,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.now += 1
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="billing",
                 event=HookEventKind.INTENT,
@@ -1569,6 +1820,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         repository = "https://example.test/team/parser"
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=peer.source,
                 session=peer.native_id,
                 event=HookEventKind.INTENT,
@@ -1579,6 +1831,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=peer.source,
                 session=peer.native_id,
                 event=HookEventKind.PROGRESS,
@@ -1612,6 +1865,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.now += 1
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=peer.source,
                 session=peer.native_id,
                 event=HookEventKind.PROGRESS,
@@ -1637,6 +1891,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         reported = "The quoted field parser still needs a multiline escape check."
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=peer.source,
                 session=peer.native_id,
                 event=HookEventKind.INTENT,
@@ -1647,6 +1902,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=peer.source,
                 session=peer.native_id,
                 event=HookEventKind.PROGRESS,
@@ -1704,6 +1960,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.now += 1
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=peer.source,
                 session=peer.native_id,
                 event=HookEventKind.PROGRESS,
@@ -1802,6 +2059,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.now += 1
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="docs",
                 event=HookEventKind.INTENT,
@@ -1813,6 +2071,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.now += 1
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="parser",
                 event=HookEventKind.INTENT,
@@ -2577,6 +2836,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                     self.now += 1
                     self.provider.publish(
                         HookEvent(
+                            capture_at=self.now,
                             source=SessionSource.CODEX,
                             session="parser",
                             event=HookEventKind.INTENT,
@@ -2598,6 +2858,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.report("Escaped delimiters are preserved inside quoted fields.")
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="renderer",
                 event=HookEventKind.INTENT,
@@ -2696,6 +2957,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.model.response = self.interaction_model_response
         self.provider.publish(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="parser",
                 event=HookEventKind.INTENT,

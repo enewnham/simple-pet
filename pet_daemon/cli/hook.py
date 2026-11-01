@@ -4,15 +4,13 @@ import argparse
 import json
 import os
 import sys
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 from ..domain import ExecutionOutcome, SessionSource
-from ..harness_text import clean_text
-from ..prose import work_prose
 from ..runtime import HookEvent, HookEventKind, WaitingKind
 from ..sessions.processes import discover_owner
-from ..user_text import sentiment_excerpt
 from .notify import send
 
 COMMON_EVENTS = {
@@ -205,16 +203,12 @@ def update(source: str, event: str, payload: Mapping[str, object]) -> HookEvent 
     )
     tool = excerpt(command, tool_name, limit=160)
     goal = None
-    sentiment_text = None
     progress = None
     waiting_kind = None
     if normalized == HookEventKind.INTENT:
-        raw_goal = string(payload.get("prompt"))
-        goal = clean_text(source_kind, raw_goal)
-        if not parent:
-            sentiment_text = sentiment_excerpt(raw_goal)
+        goal = string(payload.get("prompt"))
     elif normalized == HookEventKind.SUBAGENT_START and payload.get("task"):
-        goal = clean_text(source_kind, string(payload.get("task")))
+        goal = string(payload.get("task"))
     normalized_event, outcome = execution_result(source, normalized, payload)
     if normalized == HookEventKind.TOOL_START and tool_name in INPUT_TOOLS:
         normalized_event = HookEventKind.WAITING
@@ -240,15 +234,15 @@ def update(source: str, event: str, payload: Mapping[str, object]) -> HookEvent 
         waiting_kind = WaitingKind.PERMISSION
     elif normalized == HookEventKind.WAITING:
         waiting_kind = WaitingKind.QUESTION
-    if outcome != ExecutionOutcome.ERROR and normalized in (
+    if normalized in (
         HookEventKind.TOOL_DONE,
+        HookEventKind.TOOL_ERROR,
         HookEventKind.TURN_DONE,
+        HookEventKind.TURN_ERROR,
         HookEventKind.SUBAGENT_DONE,
         HookEventKind.PROGRESS,
     ):
-        reported = work_prose(
-            clean_text(source_kind, string(payload.get("last_assistant_message")))
-        )
+        reported = string(payload.get("last_assistant_message"))
         if normalized != HookEventKind.TOOL_DONE:
             reported = string(
                 reported,
@@ -257,9 +251,10 @@ def update(source: str, event: str, payload: Mapping[str, object]) -> HookEvent 
                 payload.get("thought"),
                 payload.get("summary"),
             )
-        progress = work_prose(clean_text(source_kind, reported)) or None
+        progress = reported or None
     return HookEvent(
         source=source_kind,
+        capture_at=time.time(),
         session=session,
         event=normalized_event,
         repo=repo,
@@ -274,7 +269,6 @@ def update(source: str, event: str, payload: Mapping[str, object]) -> HookEvent 
         tool_name=tool_name or None,
         tool=tool or None,
         goal=goal,
-        sentiment_text=sentiment_text,
         progress=progress,
         waiting_kind=waiting_kind,
         outcome=outcome,

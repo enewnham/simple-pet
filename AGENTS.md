@@ -64,6 +64,9 @@ that require judgment beyond formatting, linting, and type checks.
   [pet_daemon/commentary/model.py](pet_daemon/commentary/model.py) adapts Anthropic responses.
   [pet_daemon/storage/](pet_daemon/storage/) owns SQLite persistence, transactions, and migrations.
   Session metadata, report context, and request history commit together.
+  Reports retain captured text and provenance. [pet_daemon/work/history.py](pet_daemon/work/history.py)
+  supplies report prose and derived references using the provider cleaners in
+  [pet_daemon/harness_text.py](pet_daemon/harness_text.py).
   Reports retain their observed references; current checkout state remains separate. Accepted speech,
   message outcomes, and captured-subject consideration commit together.
   Schema changes always drop and recreate local storage. Never add data-preserving

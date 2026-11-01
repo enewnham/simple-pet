@@ -1,12 +1,16 @@
+import random
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
+from pet_daemon.attention import Attention
+from pet_daemon.config import Config
 from pet_daemon.domain import (
     ArtifactKind,
     CollectionKind,
     EvidenceSource,
+    ExecutionOutcome,
     LinkRelationship,
     PullRequestState,
     SessionSource,
@@ -26,7 +30,7 @@ from pet_daemon.work.evidence import (
     ReportedProgress,
 )
 from pet_daemon.work.history import build_session_entry
-from pet_daemon.work.models import RelatedLink
+from pet_daemon.work.models import IntentEvidence, RelatedLink
 from pet_daemon.work.narrative import semantic_revision
 from pet_daemon.work.observations import (
     BranchObservation,
@@ -36,7 +40,7 @@ from pet_daemon.work.observations import (
     PullRequestObservation,
 )
 from pet_daemon.work.stories import WorkStory
-from Tests.fixtures import require, sessions_snapshot
+from Tests.fixtures import capture_snapshot, require, sessions_snapshot
 
 REPOSITORY = RemoteRepository(value="github.com/team/project")
 SESSION = SessionIdentity(source=SessionSource.CODEX, native_id="one")
@@ -67,6 +71,7 @@ class WorkTests(unittest.TestCase):
         hook = require(
             normalize_hook(
                 {
+                    "capture_at": self.now,
                     "source": source,
                     "session": name,
                     "event": event,
@@ -80,6 +85,60 @@ class WorkTests(unittest.TestCase):
             with self.memory.transaction():
                 self.store.record_session(result.observation)
                 self.memory.record_event(build_session_entry(hook))
+
+    def test_unknown_completion_time_does_not_start_a_fresh_grace_period(self) -> None:
+        self.event("intent", goal="Check parser compatibility")
+        self.event(
+            "turn_done",
+            capture_at=None,
+            progress="Parser checks passed at an unknown time.",
+            outcome=ExecutionOutcome.SUCCESS,
+        )
+        config = Config(pet_dir=Path(self.temporary.name))
+        attention = Attention(
+            config, lambda: self.now, random.Random(0), wall_clock=lambda: self.now
+        )
+        for restart in (False, True):
+            with self.subTest(restart=restart):
+                if restart:
+                    self.memory.close()
+                    self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
+                    self.store = self.memory.work
+                subjects = self.memory.connected_work(sessions_snapshot())
+                subject = subjects[0]
+                update = subject.updates[0]
+                self.assertIsNone(subject.story.activity[-1].observed_at)
+                self.assertIsNone(update.ended_at)
+                snapshot = capture_snapshot(sessions_snapshot(), work=subjects)
+                self.assertFalse(attention.is_update_eligible(update, snapshot))
+
+    def test_delayed_request_keeps_current_intent_in_capture_order(self) -> None:
+        self.event("intent", capture_at=900, goal="Review the current implementation")
+        self.event("intent", capture_at=800, goal="Investigate the earlier proposal")
+        for restart in (False, True):
+            with self.subTest(restart=restart):
+                if restart:
+                    self.memory.close()
+                    self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
+                    self.store = self.memory.work
+                story = self.story()
+                reports = self.memory.narrative_reports((SESSION,))
+                intents = [
+                    report.payload.text
+                    for report in reports
+                    if isinstance(report.payload, IntentEvidence)
+                ]
+                self.assertEqual(
+                    intents,
+                    [
+                        "Investigate the earlier proposal",
+                        "Review the current implementation",
+                    ],
+                )
+                self.assertEqual(story.intent, intents[-1])
+                self.assertEqual(
+                    [request.observed_at for request in story.requests], [800, 900]
+                )
 
     def test_closure_and_replayed_completion_preserve_the_original_result(self) -> None:
         self.event("intent", goal="Accept spaced JSON", repo="/work/parser")
@@ -264,6 +323,7 @@ class WorkTests(unittest.TestCase):
 
         ingest(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="a",
                 event=HookEventKind.SESSION_START,
@@ -273,6 +333,7 @@ class WorkTests(unittest.TestCase):
         )
         ingest(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="b",
                 event=HookEventKind.SESSION_START,
@@ -282,6 +343,7 @@ class WorkTests(unittest.TestCase):
         )
         ingest(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="b",
                 event=HookEventKind.INTENT,
@@ -291,6 +353,7 @@ class WorkTests(unittest.TestCase):
         self.now += 1
         ingest(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="a",
                 event=HookEventKind.INTENT,
@@ -299,6 +362,7 @@ class WorkTests(unittest.TestCase):
         )
         ingest(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="a",
                 event=HookEventKind.PROGRESS,
@@ -311,6 +375,7 @@ class WorkTests(unittest.TestCase):
         self.now += 1
         ingest(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="b",
                 event=HookEventKind.PROGRESS,
@@ -323,11 +388,15 @@ class WorkTests(unittest.TestCase):
         )
         ingest(
             HookEvent(
-                source=SessionSource.CODEX, session="b", event=HookEventKind.WAITING
+                capture_at=self.now,
+                source=SessionSource.CODEX,
+                session="b",
+                event=HookEventKind.WAITING,
             )
         )
         ingest(
             HookEvent(
+                capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="child",
                 event=HookEventKind.SUBAGENT_START,
@@ -338,6 +407,7 @@ class WorkTests(unittest.TestCase):
         self.assertEqual(
             ingest(
                 HookEvent(
+                    capture_at=self.now,
                     source=SessionSource.CODEX,
                     session="b",
                     event=HookEventKind.SESSION_START,
@@ -467,7 +537,7 @@ class WorkTests(unittest.TestCase):
         )
         self.event(
             "progress",
-            progress="Validated the alternate branch",
+            progress=f"Validated the alternate branch alongside {self.pr(8).url}",
             repository=REPOSITORY.value,
             branch="alternate",
             pull_request=self.pr(9).url,

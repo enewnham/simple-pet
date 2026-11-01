@@ -46,7 +46,6 @@ class WorkIngestion:
     def _context(
         self,
         location: str,
-        prose: str = "",
         *,
         repository: RepositoryIdentity | None = None,
         branch: str | None = None,
@@ -67,19 +66,12 @@ class WorkIngestion:
             if repo and branch_name
             else None
         )
-        context = report_context(location, checkout, observed, prose)
-        explicit = next(
-            (
-                item.ref
-                for item in context.references
-                if item.kind == ArtifactKind.PULL_REQUEST
-            ),
-            "",
-        )
-        resolved_pr = pull_request or explicit or context.pull_request
+        context = report_context(location, checkout, observed)
+        resolved_pr = pull_request or context.pull_request
         context.repository = repo
         context.branch = branch_name
         context.pull_request = resolved_pr
+        context.explicit_pull_request = bool(pull_request)
         context.branch_resolution = (
             len(observed.resolutions) if observed and not resolved_pr else 0
         )
@@ -97,9 +89,6 @@ class WorkIngestion:
             contexts = tuple(
                 self._context(
                     location,
-                    (payload.progress or "")
-                    if isinstance(payload, ExecutionEvidence)
-                    else payload.text,
                     repository=observation.repository,
                     branch=observation.branch,
                     pull_request=observation.pull_request,
@@ -108,7 +97,19 @@ class WorkIngestion:
             )
             for payload, context in zip(observation.reports, contexts, strict=True):
                 appended = self.repository.append_report(
-                    SessionReport(payload=payload, context=context, observed_at=now)
+                    SessionReport(
+                        payload=payload,
+                        context=context,
+                        observed_at=observation.capture_at
+                        if observation.capture_at is not None
+                        else now,
+                        capture_at=observation.capture_at,
+                        ingested_at=now,
+                        origin=observation.origin,
+                        parent=observation.parent,
+                        aliases=observation.aliases,
+                        hook_kind=observation.hook_kind,
+                    )
                 )
                 if (
                     not appended

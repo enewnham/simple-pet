@@ -10,6 +10,7 @@ from ..identity import SessionIdentity
 from ..runtime import AgentSessionStatus, SwarmActivity
 from .association import TERMINAL_EVENTS
 from .evidence import ExecutionStatus, ReportedProgress
+from .history import report_prose
 from .models import (
     ExecutionEvidence,
     IntentEvidence,
@@ -66,7 +67,7 @@ def work_update(agent: SessionRecord, story: WorkStory) -> WorkUpdate:
 
     execution = agent.execution
     ended_at = (
-        execution.observed_at
+        execution.evidence_at
         if execution
         and isinstance(execution.payload, ExecutionEvidence)
         and execution.payload.event in TERMINAL_EVENTS
@@ -110,6 +111,12 @@ def related_reports(
     reports: tuple[SessionReport, ...],
     observed_at: float,
 ) -> tuple[SessionReport, ...]:
+    reports = tuple(
+        report
+        for report in reports
+        if not isinstance(report.payload, IntentEvidence)
+        or report_prose(report).strip()
+    )
     own = tuple(
         report
         for report in reports

@@ -1,7 +1,9 @@
+import re
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from pet_daemon.domain import SessionSource, SpeechReason
 from pet_daemon.identity import SessionIdentity
@@ -20,6 +22,66 @@ class StoryStorageTests(unittest.TestCase):
         self.path = Path(directory.name) / "memory.sqlite3"
         self.memory = Memory(self.path, "pet", clock=lambda: 1000)
         self.addCleanup(lambda: self.memory.close())
+
+    def test_retained_text_supports_new_cleaners_and_inherited_context(self) -> None:
+        root = SessionIdentity(source=SessionSource.CODEX, native_id="root")
+        child = SessionIdentity(source=SessionSource.CODEX, native_id="child")
+        original = "Unrecognized report:\nFix parser.\n    keep_code()"
+        observation = SessionObservation(
+            session=root,
+            capture_at=700,
+            reports=(IntentEvidence(session=root, text=original),),
+        )
+        self.memory.work.record_session(observation)
+        self.memory.observe_session_context(observation)
+        inherited = SessionObservation(session=child, parent=root, capture_at=800)
+        self.memory.work.record_session(inherited)
+        self.memory.observe_session_context(inherited)
+        self.memory.close()
+        self.memory = Memory(self.path, "pet", clock=lambda: 2000)
+        report = self.memory.narrative_reports((root,))[0]
+        assert isinstance(report.payload, IntentEvidence)
+        self.assertEqual(report.payload.text, original)
+        self.assertEqual(report.evidence_at, 700)
+        before = self.memory.context(child)
+        assert before is not None
+        self.assertIn("Unrecognized report:", before.initial_request)
+        cleaner = re.compile(r"Unrecognized report:\n(?P<body>.*)", re.DOTALL)
+        with patch("pet_daemon.harness_text._CODEX_MESSAGE", cleaner):
+            after = self.memory.context(child)
+            assert after is not None
+            self.assertTrue(after.initial_request.startswith("Fix parser."))
+            self.assertEqual(after.initial_report, before.initial_report)
+            retained = self.memory.narrative_reports((root,))[0].payload
+            assert isinstance(retained, IntentEvidence)
+            self.assertEqual(retained.text, original)
+
+    def test_alias_merge_preserves_inherited_report_identity_and_capture_time(
+        self,
+    ) -> None:
+        alias = SessionIdentity(source=SessionSource.CODEX, native_id="alias")
+        canonical = SessionIdentity(source=SessionSource.CODEX, native_id="canonical")
+        child = SessionIdentity(source=SessionSource.CODEX, native_id="child")
+        observation = SessionObservation(
+            session=alias,
+            capture_at=500,
+            reports=(IntentEvidence(session=alias, text="Inspect parser"),),
+        )
+        self.memory.work.record_session(observation)
+        self.memory.observe_session_context(observation)
+        original = self.memory.context(alias)
+        assert original is not None
+        merged = SessionObservation(session=canonical, aliases=(alias,), capture_at=800)
+        self.memory.work.record_session(merged)
+        self.memory.observe_session_context(merged)
+        inherited = SessionObservation(session=child, parent=canonical, capture_at=900)
+        self.memory.work.record_session(inherited)
+        self.memory.observe_session_context(inherited)
+        context = self.memory.context(child)
+        assert context is not None
+        self.assertEqual(context.initial_report, original.initial_report)
+        self.assertEqual(context.initial_request_at, 500)
+        self.assertEqual(context.initial_request, "Inspect parser")
 
     def narrative(self) -> WorkNarrative:
         return WorkNarrative(

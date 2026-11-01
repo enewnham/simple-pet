@@ -169,6 +169,7 @@ class HookEvent(BaseModel):
     progress: str | None = None
     repo: str | None = None
     tool_name: str | None = None
+    capture_at: float | None = Field(default=None, allow_inf_nan=False)
     sentiment_text: str | None = None
     outcome: ExecutionOutcome | None = None
     manual: bool | None = None
@@ -239,6 +240,7 @@ class AgentSessionStatus(BaseModel):
     progress: str
     failure: FailureSnapshot | None
     outcome: ExecutionOutcome | None
+    initial_request_at: float | None = None
     last_hook_at: float = 0
     retired: bool = False
     user_sentiment: UserSentiment | None = None

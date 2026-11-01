@@ -7,13 +7,15 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
-from ..domain import Activity, ExecutionOutcome
+from ..domain import Activity, ArtifactKind, ExecutionOutcome
+from ..harness_text import clean_text
 from ..identity import SessionIdentity
 from ..prompts import bounded
-from ..prose import work_prose
+from ..prose import prose_text, work_prose
 from ..repository_identity import RepositoryIdentity, parse_remote_repository
 from ..runtime import WaitingKind
 from ..sessions.activity import activity
+from .association import references
 from .models import ExecutionEvidence, IntentEvidence, ProgressEvidence, SessionReport
 
 if TYPE_CHECKING:
@@ -65,14 +67,14 @@ def build_session_entry(
         or event.waiting_kind == WaitingKind.PERMISSION_CHECK
     ):
         return None
-    progress = work_prose(event.progress)
+    progress = work_prose(clean_text(event.source, event.progress or ""))
     if kind == "progress" and not progress:
         return None
     working_directory = bounded(
         event.repo or (context.working_directory if context else None), 1024
     )
     session_id = context.session_id if context else event.subject
-    explicit_goal = bounded(event.goal)
+    explicit_goal = bounded(clean_text(event.source, event.goal or ""))
     goal = explicit_goal or bounded(context.goal if context else None)
     terminal = kind in {
         "turn_done",
@@ -110,7 +112,7 @@ def build_session_entry(
     )
 
 
-def report_prose(report: SessionReport) -> str:
+def report_text(report: SessionReport) -> str:
     payload = report.payload
     if isinstance(payload, IntentEvidence | ProgressEvidence):
         return payload.text
@@ -129,6 +131,24 @@ def report_prose(report: SessionReport) -> str:
             if part
         )
     return ""
+
+
+def report_prose(report: SessionReport) -> str:
+    if (report.hook_kind or "").startswith("tool_"):
+        return ""
+    return clean_text(report.payload.session.source, report_text(report))
+
+
+def associated_report(report: SessionReport) -> SessionReport:
+    context = report.context.model_copy()
+    found = references(prose_text(report_prose(report)))
+    context.references = found or context.references
+    explicit = next(
+        (item.ref for item in found if item.kind == ArtifactKind.PULL_REQUEST), ""
+    )
+    if explicit and not context.explicit_pull_request:
+        context.pull_request = explicit
+    return report.model_copy(update={"context": context})
 
 
 def report_search_terms(text: str) -> tuple[str, ...]:

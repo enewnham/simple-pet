@@ -2,7 +2,7 @@ import sqlite3
 
 from .transactions import transaction
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 
 
 MEMORY_SCHEMA = """
@@ -28,7 +28,7 @@ MEMORY_SCHEMA = """
             CREATE TABLE IF NOT EXISTS contexts (
                 pet TEXT NOT NULL, source TEXT NOT NULL, session TEXT NOT NULL, first_prompt TEXT NOT NULL,
                 session_context TEXT NOT NULL, recent_requests TEXT NOT NULL, timestamp REAL NOT NULL,
-                request_count INTEGER NOT NULL DEFAULT 0, first_summary_attempted INTEGER NOT NULL DEFAULT 0,
+                request_count INTEGER NOT NULL DEFAULT 0, first_summary_attempted INTEGER NOT NULL DEFAULT 0, initial_report INTEGER,
                 PRIMARY KEY(pet, source, session)
             );
 

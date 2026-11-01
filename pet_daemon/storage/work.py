@@ -4,7 +4,7 @@ from contextlib import AbstractContextManager
 from ..identity import SessionIdentity
 from ..repository_identity import RepositoryIdentity, repository_columns
 from ..work.association import TERMINAL_EVENTS
-from ..work.history import report_prose
+from ..work.history import associated_report, report_prose, report_text
 from ..work.models import (
     ExecutionEvidence,
     IntentEvidence,
@@ -160,7 +160,7 @@ class SQLiteWorkRepository:
                 report.observed_at,
             ),
         )
-        prose = report_prose(report)
+        prose = report_text(report)
         if prose:
             self.db.execute(
                 "INSERT INTO work_reports_fts(rowid,prose) VALUES (?,?)",
@@ -247,16 +247,22 @@ class SQLiteWorkRepository:
         )
         placeholders, values = session_parameters(identities)
         records = self.db.execute(
-            f"SELECT data FROM work_reports WHERE pet=? AND (source,session) IN ({placeholders}) ORDER BY id",
+            f"SELECT data FROM work_reports WHERE pet=? AND (source,session) IN ({placeholders}) ORDER BY observed_at,id",
             (self.pet, *values),
         )
         reports = tuple(
-            SessionReport.model_validate_json(record["data"]) for record in records
+            associated_report(SessionReport.model_validate_json(record["data"]))
+            for record in records
         )
         authored = tuple(
             report
             for report in reports
             if isinstance(report.payload, IntentEvidence | ProgressEvidence)
+            and not (report.hook_kind or "").startswith("tool_")
+            and (
+                not isinstance(report.payload, IntentEvidence)
+                or report_prose(report).strip()
+            )
         )
         execution = next(
             (
@@ -269,7 +275,7 @@ class SQLiteWorkRepository:
         )
         intent = next(
             (
-                report.payload.text
+                report_prose(report)
                 for report in reversed(authored)
                 if isinstance(report.payload, IntentEvidence)
             ),

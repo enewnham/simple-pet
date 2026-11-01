@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from pet_daemon.attention import AttentionSelection
 from pet_daemon.cli.hook import EVENTS, update
+from pet_daemon.cli.notify import encode
 from pet_daemon.commentary.cognition import Cognition
 from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.commentary.story import prepare
@@ -37,6 +38,8 @@ from pet_daemon.runtime import (
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources.hooks import normalize_hook
 from pet_daemon.storage import Memory
+from pet_daemon.transport import MAX_DATAGRAM_BYTES, SOCKET_BUFFER_BYTES
+from pet_daemon.user_text import sentiment_excerpt
 from pet_daemon.work.models import ExecutionEvidence
 from Tests.fixtures import capture_snapshot, require
 
@@ -58,6 +61,7 @@ class NoModel:
 
 
 class ReceivedPacket(TypedDict, total=False):
+    capture_at: float
     kind: str
     source: str
     session: str
@@ -89,6 +93,9 @@ class NotifyTests(unittest.TestCase):
         self.path = Path(self.directory.name)
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         self.socket_path = str(self.path / "daemon.sock")
+        self.listener.setsockopt(
+            socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKET_BUFFER_BYTES
+        )
         self.listener.bind(self.socket_path)
         self.listener.settimeout(10)
         self.environment = os.environ.copy()
@@ -126,8 +133,8 @@ class NotifyTests(unittest.TestCase):
         )
 
     def receive(self) -> ReceivedPacket:
-        data = self.listener.recv(8192)
-        self.assertLessEqual(len(data), 2000)
+        data = self.listener.recv(MAX_DATAGRAM_BYTES + 1)
+        self.assertLessEqual(len(data), MAX_DATAGRAM_BYTES)
         return json.loads(data)
 
     def assert_quiet(self) -> None:
@@ -236,8 +243,10 @@ class NotifyTests(unittest.TestCase):
 
     def test_manual_single_call_and_intent_share_session(self) -> None:
         self.run_client("intent", "--session", "worker", "--text", 'Fix "quotes" 🐈')
+        packet = self.receive()
+        self.assertIsInstance(packet.pop("capture_at"), float)
         self.assertEqual(
-            self.receive(),
+            packet,
             {
                 "kind": "event",
                 "source": "cli",
@@ -250,7 +259,7 @@ class NotifyTests(unittest.TestCase):
         self.run_client("--session", "worker", "--status", "start")
         self.assertEqual(self.receive()["call"], "single")
 
-    def test_hook_preserves_user_sentiment_prose_before_prompt_compression(
+    def test_hook_retains_source_for_sentiment_reads(
         self,
     ) -> None:
         for source, event, identity in (
@@ -268,7 +277,7 @@ class NotifyTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 packet = self.receive()
                 self.assertEqual(
-                    packet["sentiment_text"],
+                    sentiment_excerpt(packet["goal"]),
                     "This is terrible.\nPlease fix the parser.",
                 )
                 self.assertIn("Please fix the parser.", packet["goal"])
@@ -303,7 +312,9 @@ class NotifyTests(unittest.TestCase):
         self.run_client("speak", "--context", "Use configured expiry")
         self.assertNotIn("ttl", self.receive())
 
-    def test_unicode_and_escape_excerpts_fit_without_trimming_identifiers(self) -> None:
+    def test_unicode_and_escape_text_survives_without_trimming_identifiers(
+        self,
+    ) -> None:
         for text in ("🐈" * 3000, "\x01" * 3000):
             self.run_client(
                 "--session",
@@ -318,12 +329,21 @@ class NotifyTests(unittest.TestCase):
             packet = self.receive()
             self.assertEqual(packet["session"], "session-" + "s" * 100)
             self.assertEqual(packet["call"], "call-" + "c" * 100)
-            self.assertTrue(text.startswith(packet["tool"]))
+            self.assertEqual(packet["tool"], text)
             self.assertEqual(packet["event"], "tool_error")
 
-    def test_oversize_identifiers_are_dropped_whole(self) -> None:
-        self.run_client("--session", "s" * 3000, "--status", "start")
+    def test_oversized_messages_are_rejected_whole(self) -> None:
+        result = self.run_client("speak", "--context", "s" * MAX_DATAGRAM_BYTES)
+        self.assertIn("message exceeds", result.stderr)
         self.assert_quiet()
+
+    def test_packet_size_boundary_preserves_the_complete_message(self) -> None:
+        overhead = len(require(encode({"goal": ""})))
+        payload = {"goal": "x" * (MAX_DATAGRAM_BYTES - overhead)}
+        encoded = require(encode(payload))
+        self.assertEqual(len(encoded), MAX_DATAGRAM_BYTES)
+        self.assertEqual(json.loads(encoded), payload)
+        self.assertIsNone(encode({"goal": payload["goal"] + "x"}))
 
     def test_absent_listener_does_not_fail_the_caller(self) -> None:
         self.environment["PET_DAEMON_SOCKET"] = str(self.path / "missing.sock")
@@ -377,7 +397,7 @@ class NotifyTests(unittest.TestCase):
         self.assertEqual((packet["event"], packet["outcome"]), ("tool_error", "error"))
         self.assertNotIn("compiler panic", json.dumps(packet))
 
-    def test_native_prompt_and_progress_excerpts_are_bounded(self) -> None:
+    def test_native_prompt_and_progress_text_survives(self) -> None:
         self.run_hook(
             "claude", "UserPromptSubmit", {"session_id": "worker", "prompt": "x" * 1000}
         )
@@ -393,8 +413,7 @@ class NotifyTests(unittest.TestCase):
             },
         )
         packet = self.receive()
-        self.assertLessEqual(len(packet["progress"]), 800)
-        self.assertTrue(packet["progress"].endswith("[omitted]"))
+        self.assertEqual(packet["progress"], "y" * 1000)
         self.assertEqual(packet["turn"], "turn-one")
         self.assertNotIn("transcript_path", packet)
 
@@ -404,9 +423,7 @@ class NotifyTests(unittest.TestCase):
             "claude", "UserPromptSubmit", {"session_id": "worker", "prompt": prompt}
         )
         goal = self.receive()["goal"]
-        self.assertLessEqual(len(goal), 1000)
-        self.assertIn("Fix the parser for UTF-8 input.", goal)
-        self.assertIn("[omitted]", goal)
+        self.assertEqual(goal, prompt)
 
     def test_cli_and_native_goals_filter_markdown_before_story_selection(self) -> None:
         prompt = (
@@ -484,8 +501,7 @@ class NotifyTests(unittest.TestCase):
         goal = packet["goal"]
         self.assertEqual(packet["session"], session)
         self.assertIn("Fix parser/猫.py for 🐈 input.", goal)
-        self.assertNotIn("haunted mail", goal)
-        self.assertLessEqual(len(goal), 1000)
+        self.assertEqual(goal, prompt)
 
     def test_claude_stop_failure_closes_the_turn_as_error(self) -> None:
         self.run_hook(
@@ -834,10 +850,7 @@ class NotifyTests(unittest.TestCase):
                 },
             )
             packet = self.receive()
-            if code == 0:
-                self.assertEqual(packet["progress"], "Checking authentication")
-            else:
-                self.assertNotIn("progress", packet)
+            self.assertEqual(packet["progress"], "Checking authentication")
             self.assertNotIn("private output", json.dumps(packet))
 
     def test_failed_content_blocks_are_absent_from_events(self) -> None:
@@ -960,7 +973,7 @@ class NotifyTests(unittest.TestCase):
         self.assertEqual(
             (packet["event"], packet["outcome"]), ("subagent_done", "error")
         )
-        self.assertNotIn("progress", packet)
+        self.assertEqual(packet["progress"], "Authentication tests failed")
 
     def test_interrupted_tools_finish_without_an_error_alert(self) -> None:
         for source, event, key in (

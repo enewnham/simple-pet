@@ -385,10 +385,19 @@ class ReplayHarness:
         self, observation: HookEvent | RepositoryObservation | Mapping[str, object]
     ) -> None:
         if isinstance(observation, Mapping):
+            observation = dict(observation)
+            observation.setdefault("capture_at", self.clock.wall())
             hook = normalize_hook(observation)
             if hook is None:
                 raise ValueError("Invalid replay hook")
             observation = hook
+        elif (
+            isinstance(observation, HookEvent)
+            and "capture_at" not in observation.model_fields_set
+        ):
+            observation = observation.model_copy(
+                update={"capture_at": self.clock.wall()}
+            )
         self.app.ingest(observation)
 
     def receive(self, packet: Mapping[str, object]) -> None:

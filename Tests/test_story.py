@@ -79,7 +79,12 @@ class StoryTests(unittest.TestCase):
             else SessionIdentity(source=SessionSource.CODEX, native_id="root")
         )
         self.memory.work.record_session(
-            SessionObservation(session=identity, parent=parent, reports=reports)
+            SessionObservation(
+                session=identity,
+                parent=parent,
+                reports=reports,
+                capture_at=self.memory.work.clock(),
+            )
         )
 
     def prepared(
@@ -639,6 +644,7 @@ class StoryTests(unittest.TestCase):
         self.memory.work.clock = lambda: 850
         self.memory.work.record_session(
             SessionObservation(
+                capture_at=self.memory.work.clock(),
                 session=SessionIdentity(source=SessionSource.CODEX, native_id="native"),
                 aliases=(SessionIdentity(source=SessionSource.CODEX, native_id="old"),),
                 reports=(

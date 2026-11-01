@@ -9,6 +9,7 @@ from uuid import UUID
 from pydantic import BaseModel
 
 from ..domain import Activity, ExecutionOutcome, PetState, ProcessStatus, SessionSource
+from ..harness_text import clean_text
 from ..identity import SessionIdentity
 from ..logging import get_logger
 from ..prompts import request_excerpt
@@ -569,7 +570,7 @@ class Sessions:
         ):
             self._open(key, session, event, now)
         if event.goal:
-            request = request_excerpt(prose_text(event.goal))
+            request = request_excerpt(prose_text(clean_text(event.source, event.goal)))
             if not session.intent_received:
                 session.goal = request
             session.intent_received = True
@@ -909,11 +910,7 @@ class Sessions:
     ) -> SessionObservation:
         reports: list[IntentEvidence | ProgressEvidence | ExecutionEvidence] = []
         if event.goal and event.event in ("intent", "subagent_start"):
-            reports.append(
-                IntentEvidence(
-                    session=key, text=request_excerpt(prose_text(event.goal))
-                )
-            )
+            reports.append(IntentEvidence(session=key, text=event.goal))
         if session.finished and event.event != "session_start":
             kind = "turn_done" if event.event.startswith("tool_") else event.event
             reports.append(
@@ -956,13 +953,12 @@ class Sessions:
                     progress=None,
                 )
             )
-        if (
-            event.progress
-            and not event.event.startswith("tool_")
-            and event.waiting_kind != WaitingKind.PERMISSION_CHECK
-        ):
+        if event.progress and event.waiting_kind != WaitingKind.PERMISSION_CHECK:
             reports.append(ProgressEvidence(session=key, text=event.progress))
         return SessionObservation(
+            capture_at=event.capture_at,
+            origin=event.subject,
+            hook_kind=event.event,
             session=key,
             aliases=tuple(
                 sorted(

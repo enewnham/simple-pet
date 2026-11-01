@@ -217,6 +217,7 @@ class Application:
             if context:
                 session.goal = context.initial_request or session.goal
                 session.initial_request = context.initial_request
+                session.initial_request_at = context.initial_request_at
                 session.summary = context.summary
                 session.recent_requests = tuple(context.recent_requests)
                 session.request_count = context.request_count

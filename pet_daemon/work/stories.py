@@ -17,6 +17,7 @@ from ..repository_identity import (
 )
 from .association import TERMINAL_EVENTS, enclosing_checkout, references, report_context
 from .evidence import CommentaryEvidence, commentary_evidence
+from .history import associated_report
 from .models import (
     ArtifactReference,
     AvailabilityEvidence,
@@ -96,7 +97,8 @@ def resolve_report_pull_request(
 
 def report_record(state: WorkFacts, report: SessionReport) -> EvidenceRecord:
     record = report.record()
-    record.context = resolve_report_pull_request(state, report.context)
+    context = associated_report(report).context
+    record.context = resolve_report_pull_request(state, context)
     return record
 
 
@@ -349,9 +351,18 @@ def session_work(state: WorkFacts, agent: SessionRecord) -> WorkStory:
     )
     if not ended and not closed:
         contexts.append((current_context(state, agent), True))
-    contexts.extend((report.context, False) for report in agent.reports)
+    contexts.extend(
+        (report_record(state, report).context or report.context, False)
+        for report in agent.reports
+    )
     if agent.execution:
-        contexts.append((agent.execution.context, False))
+        contexts.append(
+            (
+                report_record(state, agent.execution).context
+                or agent.execution.context,
+                False,
+            )
+        )
     artifacts = _StoryArtifacts(state)
     for context, current in contexts:
         artifacts.add_context(context, current)

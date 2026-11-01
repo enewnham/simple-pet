@@ -9,9 +9,11 @@ from typing import Literal
 from pydantic import BaseModel
 
 from ..domain import DeliveryStatus, SpeechReason
+from ..harness_text import clean_text
 from ..identity import SessionIdentity
 from ..logging import get_logger
 from ..prompts import request_excerpt
+from ..prose import prose_text
 from ..repository_identity import (
     RepositoryIdentity,
     repository_columns,
@@ -22,6 +24,7 @@ from ..work import WorkIngestion
 from ..work.history import (
     HistoryDetails,
     SessionEntry,
+    associated_report,
     report_prose,
     report_search_terms,
     report_source_key,
@@ -88,6 +91,8 @@ class ContextRecord(BaseModel):
     recent_requests: list[str]
     request_count: int
     first_summary_attempted: bool
+    initial_report: int | None = None
+    initial_request_at: float | None = None
 
 
 class MessageOutcome(BaseModel):
@@ -260,7 +265,10 @@ class Memory:
             f"SELECT data FROM work_reports WHERE pet=? AND (source,session) IN ({placeholders}) ORDER BY observed_at,id",
             (self.pet, *values),
         )
-        return tuple(SessionReport.model_validate_json(row["data"]) for row in rows)
+        return tuple(
+            associated_report(SessionReport.model_validate_json(row["data"]))
+            for row in rows
+        )
 
     def context_reports(
         self, subject: WorkSubject | None, query: str | None = None
@@ -313,7 +321,9 @@ class Memory:
         repository = latest.context.repository
         payload = latest.payload
         assert isinstance(payload, IntentEvidence | ProgressEvidence)
-        terms = report_search_terms(query if query is not None else payload.text)[:3]
+        terms = report_search_terms(
+            query if query is not None else report_prose(latest)
+        )[:3]
         if repository and terms and subject is not None:
             expression = " OR ".join(f'"{term}"' for term in terms)
             rows = self.db.execute(
@@ -680,18 +690,42 @@ class Memory:
 
     def context(self, session: SessionIdentity) -> ContextRecord | None:
         row = self.db.execute(
-            "SELECT first_prompt AS initial_request,session_context AS summary,recent_requests,request_count,first_summary_attempted FROM contexts WHERE pet=? AND source=? AND session=?",
+            "SELECT first_prompt AS initial_request,session_context AS summary,recent_requests,request_count,first_summary_attempted,initial_report FROM contexts WHERE pet=? AND source=? AND session=?",
             (self.pet, *session_values(session)),
         ).fetchone()
         if row is None:
             return None
         data = dict(row)
         data["recent_requests"] = json.loads(row["recent_requests"])
+        reports = self.narrative_reports((session,))
+        requests = [
+            report
+            for report in reports
+            if isinstance(report.payload, IntentEvidence)
+            and report_prose(report).strip()
+        ]
+        if data["initial_report"] is not None:
+            original = self.db.execute(
+                "SELECT data FROM work_reports WHERE pet=? AND id=?",
+                (self.pet, data["initial_report"]),
+            ).fetchone()
+            if original:
+                report = SessionReport.model_validate_json(original["data"])
+                data["initial_request"] = request_excerpt(
+                    prose_text(report_prose(report))
+                )
+                data["initial_request_at"] = report.evidence_at
+        if reports:
+            data["recent_requests"] = [
+                request_excerpt(prose_text(report_prose(report)))
+                for report in requests[-4:]
+            ]
         return ContextRecord.model_validate(data)
 
     def observe_session_context(self, observation: SessionObservation) -> None:
         stored = self.context(observation.session)
         first = stored.initial_request if stored else ""
+        initial_report = stored.initial_report if stored else None
         summary = stored.summary if stored else ""
         requests = list(stored.recent_requests) if stored else []
         count = stored.request_count if stored else 0
@@ -700,6 +734,8 @@ class Memory:
             other = self.context(alias)
             if other is None:
                 continue
+            if not count:
+                initial_report = other.initial_report or initial_report
             first = first if count else other.initial_request or first
             summary = summary or other.summary
             requests = [*requests, *other.recent_requests][-4:]
@@ -711,18 +747,43 @@ class Memory:
             )
         for report in observation.reports:
             if isinstance(report, IntentEvidence):
-                request = request_excerpt(report.text)
+                text = clean_text(report.session.source, report.text)
+                if not text.strip():
+                    continue
+                request = request_excerpt(prose_text(text))
+                if not count:
+                    rows = self.db.execute(
+                        "SELECT id,data FROM work_reports WHERE pet=? AND source=? AND session=? AND kind='intent' ORDER BY observed_at,id",
+                        (self.pet, *session_values(observation.session)),
+                    )
+                    initial_report = next(
+                        (
+                            row["id"]
+                            for row in rows
+                            if report_prose(
+                                SessionReport.model_validate_json(row["data"])
+                            ).strip()
+                        ),
+                        None,
+                    )
                 first = first if count else request
                 requests = [*requests, request][-4:]
                 count += 1
         if not first and observation.parent:
             parent = self.context(observation.parent)
             if parent:
+                initial_report = parent.initial_report
                 first = parent.initial_request
                 summary = parent.summary
         if first:
             self.save_context(
-                observation.session, first, summary, requests, count, attempted
+                observation.session,
+                first,
+                summary,
+                requests,
+                count,
+                attempted,
+                initial_report,
             )
 
     def save_context(
@@ -733,15 +794,17 @@ class Memory:
         recent_requests: Sequence[str],
         request_count: int | None = None,
         first_summary_attempted: bool = False,
+        initial_report: int | None = None,
     ) -> None:
         requests = [request_excerpt(request) for request in recent_requests[-4:]]
         count = len(requests) if request_count is None else request_count
         with self.transaction():
             self.db.execute(
-                """INSERT INTO contexts VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(pet,source,session) DO UPDATE SET
+                """INSERT INTO contexts(pet,source,session,first_prompt,session_context,recent_requests,timestamp,request_count,first_summary_attempted,initial_report) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(pet,source,session) DO UPDATE SET
                 first_prompt=excluded.first_prompt, session_context=excluded.session_context,
                 recent_requests=excluded.recent_requests, timestamp=excluded.timestamp,
-                request_count=excluded.request_count, first_summary_attempted=excluded.first_summary_attempted""",
+                request_count=excluded.request_count, first_summary_attempted=excluded.first_summary_attempted,
+                initial_report=COALESCE(excluded.initial_report,contexts.initial_report)""",
                 (
                     self.pet,
                     *session_values(session),
@@ -751,6 +814,7 @@ class Memory:
                     self.clock(),
                     count,
                     first_summary_attempted,
+                    initial_report,
                 ),
             )
         self.prune()

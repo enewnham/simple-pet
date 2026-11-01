@@ -153,6 +153,7 @@ type EvidencePayload = Annotated[
 
 
 class EvidenceRecord(BaseModel):
+    source_key: str | None = None
     payload: EvidencePayload
     observed_at: float | None = None
     context: ReportContext | None = None
@@ -171,6 +172,7 @@ class ReportContext(BaseModel):
     repository: RepositoryIdentity | None = None
     branch: str = ""
     pull_request: str = ""
+    explicit_pull_request: bool = False
     references: tuple[ArtifactReference, ...] = ()
     # Capture the next branch resolution when the report has no PR.
     branch_resolution: int = 0
@@ -180,10 +182,25 @@ class SessionReport(BaseModel):
     payload: ReportPayload
     context: ReportContext
     observed_at: float
+    capture_at: float | None = None
+    ingested_at: float | None = None
+    origin: SessionIdentity | None = None
+    parent: SessionIdentity | None = None
+    aliases: tuple[SessionIdentity, ...] = ()
+    hook_kind: str | None = None
+
+    @property
+    def evidence_at(self) -> float | None:
+        return self.observed_at if self.ingested_at is None else self.capture_at
 
     def record(self) -> EvidenceRecord:
+        from .history import report_source_key
+
         return EvidenceRecord(
-            payload=self.payload, observed_at=self.observed_at, context=self.context
+            source_key=report_source_key(self),
+            payload=self.payload,
+            observed_at=self.evidence_at,
+            context=self.context,
         )
 
 

@@ -14,6 +14,7 @@ from ..sentiment import (
     analyzer,
     sentiment_score,
 )
+from ..user_text import sentiment_excerpt
 from .reactions import ReactionKind, SessionReaction, SessionReactions
 from .tracking import AgentSession, Sessions, SessionUpdate
 
@@ -116,7 +117,7 @@ class ActivityCoordinator:
         text = (
             packet.sentiment_text
             if packet.sentiment_text is not None
-            else packet.goal or ""
+            else sentiment_excerpt(packet.goal or "")
         )
         identity = (packet.turn, text)
         if session.sentiment_identity == identity and (

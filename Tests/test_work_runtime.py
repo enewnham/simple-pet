@@ -3,6 +3,7 @@ import json
 import random
 import socket
 import tempfile
+import time
 import unittest
 from collections.abc import Callable
 from pathlib import Path
@@ -193,6 +194,9 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.fail(f"Unexpected GitHub command: {args}")
 
     def send(self, packet: JSONObject) -> None:
+        packet = dict(packet)
+        if packet.get("kind", "event") == "event":
+            packet.setdefault("capture_at", time.time())
         self.hook.sendto(json.dumps(packet).encode(), self.config.daemon_socket)
 
     async def packet(self, predicate: Callable[[OverlayPacket], bool]) -> OverlayPacket:

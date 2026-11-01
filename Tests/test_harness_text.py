@@ -7,6 +7,7 @@ from pet_daemon.cli.notify import encode
 from pet_daemon.domain import SessionSource
 from pet_daemon.harness_text import clean_text
 from pet_daemon.prose import prose_text
+from pet_daemon.user_text import sentiment_excerpt
 from Tests.fixtures import require
 
 FIXTURES = Path(__file__).parent / "fixtures" / "harness_text"
@@ -22,17 +23,17 @@ class HarnessTextTests(unittest.TestCase):
                 {"session_id": "review", "prompt": text},
             )
         )
-        goal = require(hook.goal)
+        self.assertEqual(hook.goal, text)
+        goal = clean_text(hook.source, require(hook.goal))
         self.assertTrue(goal.startswith("## Recommendation\n"))
         self.assertIn("Leave `getById` as it is.", prose_text(goal))
         self.assertIn("ignore actor authorization", prose_text(goal))
         self.assertNotIn("agent-message", goal)
         self.assertNotIn("Subagent hand-back", goal)
         self.assertNotIn("permission laundering", goal)
-        self.assertNotIn("Leave `getById`", require(hook.sentiment_text))
+        self.assertNotIn("Leave `getById`", sentiment_excerpt(text))
         packet = json.loads(require(encode(hook.packet())))
-        self.assertIn("ignore actor authorization", packet["goal"])
-        self.assertNotIn("Subagent hand-back", packet["goal"])
+        self.assertEqual(packet["goal"], text)
 
     def test_claude_handback_preserves_code_indentation(self) -> None:
         text = (FIXTURES / "claude-handback.txt").read_text()
@@ -80,7 +81,7 @@ class HarnessTextTests(unittest.TestCase):
                         {"session_id": "review", "last_assistant_message": text},
                     )
                 )
-                self.assertEqual(hook.progress, body)
+                self.assertEqual(hook.progress, text)
 
     def test_preserves_ordinary_prose_and_incomplete_envelopes(self) -> None:
         for text in (

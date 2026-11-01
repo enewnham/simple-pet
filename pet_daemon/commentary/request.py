@@ -14,6 +14,7 @@ from ..domain import (
     SpeechReason,
     SpeechSituation,
 )
+from ..harness_text import clean_text
 from ..identity import SessionIdentity
 from ..prompts import bounded, request_excerpt
 from ..prose import prose_text, work_prose
@@ -128,13 +129,27 @@ def _record_source_ids(
     text = work_prose(original, 1200, excluded)
     if not text:
         return []
+    original_source = next(
+        (source for source in sources if source.identifier == record.source_key), None
+    )
     candidates = [
         source
         for source in sources
         if source.kind in kinds
         and source.observed_at == record.observed_at
         and source.text
-        and (source.text.startswith(text) or text.startswith(source.text))
+        and (
+            original_source is not None
+            and (
+                source.identifier == record.source_key
+                or source.kind != original_source.kind
+                and source.full_text == original_source.full_text
+                and source.scope == original_source.scope
+                and source.origin == original_source.origin
+            )
+            if record.source_key is not None
+            else source.text.startswith(text) or text.startswith(source.text)
+        )
     ]
     accepted_origins = (None, origin) if origin == root else (origin,)
     candidates = [item for item in candidates if item.origin in accepted_origins]
@@ -192,6 +207,8 @@ def _current_work(
         request = selected_child.scope
     if not request and focus:
         request = focus.recent_requests[-1] if focus.recent_requests else focus.goal
+        if not focus.recent_requests and request == focus.initial_request:
+            observed_at = focus.initial_request_at
     if not request and story:
         request = story.intent
     statement = None
@@ -565,11 +582,11 @@ def commentary_facts(
             sources,
         )
     elif focus and situation not in (SpeechSituation.PROMPT, SpeechSituation.FAILURE):
-        current_report = focus.progress
+        current_report = clean_text(focus.id.source, focus.progress)
     if focus and focus.waiting_for_input:
         if focus.waiting_prompt != current_report:
             current_ids = []
-        current_report = focus.waiting_prompt or ""
+        current_report = clean_text(focus.id.source, focus.waiting_prompt or "")
     if current_report and situation not in (
         SpeechSituation.PROMPT,
         SpeechSituation.FAILURE,

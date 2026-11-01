@@ -7,7 +7,8 @@ from pydantic import BaseModel, ConfigDict
 from ..attention import AttentionSelection
 from ..domain import ExecutionOutcome
 from ..identity import SessionIdentity
-from ..prose import work_prose
+from ..prompts import request_excerpt
+from ..prose import prose_text, work_prose
 from ..runtime import PetContext
 from ..storage.memory import Memory
 from ..types import JSONObject
@@ -17,7 +18,7 @@ from ..work.evidence import (
     ReportedProgress,
     UserIntent,
 )
-from ..work.history import report_source_key
+from ..work.history import report_prose, report_source_key
 from ..work.models import (
     ExecutionEvidence,
     IntentEvidence,
@@ -181,7 +182,11 @@ class _NarrativeSources:
         observed_at: float | None = None,
         source_key: str | None = None,
     ) -> None:
-        prose = work_prose(text, limit=1200, excluded=self.excluded)
+        prose = (
+            request_excerpt(prose_text(text, self.excluded), limit=1200)
+            if kind == SourceKind.REQUEST
+            else work_prose(text, limit=1200, excluded=self.excluded)
+        )
         if not prose and outcome is None:
             return
         facts: JSONObject = {"kind": kind.value, "scope": scope}
@@ -211,7 +216,7 @@ def _collect_reports(
         identity = aliases.get(item.session, item.session)
         if isinstance(item, IntentEvidence):
             assignments[identity] = work_prose(
-                item.text, limit=300, excluded=collector.excluded
+                report_prose(report), limit=300, excluded=collector.excluded
             )
         assignment = assignments.get(identity, "")
         scope = (
@@ -220,27 +225,25 @@ def _collect_reports(
             else assignment or "related task"
         )
         match item:
-            case IntentEvidence(session=_, text=text):
+            case IntentEvidence():
                 collector.add(
                     SourceKind.REQUEST,
-                    text,
+                    report_prose(report),
                     scope,
                     origin=identity,
-                    observed_at=report.observed_at,
+                    observed_at=report.evidence_at,
                     source_key=report_source_key(report),
                 )
-            case ProgressEvidence(session=_, text=text):
+            case ProgressEvidence():
                 collector.add(
                     SourceKind.PROGRESS,
-                    text,
+                    report_prose(report),
                     scope,
                     origin=identity,
-                    observed_at=report.observed_at,
+                    observed_at=report.evidence_at,
                     source_key=report_source_key(report),
                 )
-            case ExecutionEvidence(
-                session=_, event=event, outcome=outcome, tool_name=_, progress=progress
-            ) if event in {
+            case ExecutionEvidence(event=event, outcome=outcome) if event in {
                 "turn_done",
                 "turn_error",
                 "subagent_done",
@@ -248,11 +251,11 @@ def _collect_reports(
             }:
                 collector.add(
                     SourceKind.TURN_ENDED,
-                    progress or "",
+                    report_prose(report),
                     scope,
                     outcome,
                     origin=identity,
-                    observed_at=report.observed_at,
+                    observed_at=report.evidence_at,
                     source_key=report_source_key(report),
                 )
 
@@ -459,7 +462,12 @@ def context_revision(selection: AttentionSelection, memory: Memory) -> str:
         return ""
     reports = memory.context_reports(subject, selection.context)
     return revision_key(
-        (selection.context, tuple(report_source_key(report) for report in reports))
+        (
+            selection.context,
+            tuple(
+                (report_source_key(report), report_prose(report)) for report in reports
+            ),
+        )
     )
 
 
@@ -528,7 +536,13 @@ def prepare(
         subject_id=subject.id if subject else root,
         revision=semantic_revision(subject.story) if subject else "",
         context_revision=revision_key(
-            (selection.context, tuple(report_source_key(report) for report in reports))
+            (
+                selection.context,
+                tuple(
+                    (report_source_key(report), report_prose(report))
+                    for report in reports
+                ),
+            )
         ),
         sources={key: source.record() for key, source in sources.items()},
         request=request,

@@ -10,6 +10,9 @@ from ..domain import (
     ExecutionOutcome,
     PullRequestState,
 )
+from ..harness_text import clean_text
+from ..prompts import request_excerpt
+from ..prose import prose_text, work_prose
 from ..repository_identity import (
     RemoteRepository,
 )
@@ -95,6 +98,7 @@ type EvidenceDetails = Annotated[
 
 
 class CommentaryEvidence(BaseModel):
+    source_key: str | None = None
     source: EvidenceSource
     kind: EvidenceKind
     details: EvidenceDetails
@@ -146,7 +150,9 @@ def commentary_evidence(record: EvidenceRecord) -> CommentaryEvidence | None:
             )
             details = ExecutionStatus(
                 execution=execution,
-                reported_progress=" ".join(payload.progress.split())[:800]
+                reported_progress=work_prose(
+                    clean_text(payload.session.source, payload.progress)
+                )
                 if payload.progress
                 else None,
                 reported_execution_outcome=payload.outcome
@@ -170,10 +176,16 @@ def commentary_evidence(record: EvidenceRecord) -> CommentaryEvidence | None:
                 )
             )
         case IntentEvidence():
-            details = UserIntent(text=" ".join(payload.text.split())[:1000])
+            details = UserIntent(
+                text=request_excerpt(
+                    prose_text(clean_text(payload.session.source, payload.text))
+                )
+            )
         case ProgressEvidence():
             details = ReportedProgress(
-                reported_progress=" ".join(payload.text.split())[:800]
+                reported_progress=work_prose(
+                    clean_text(payload.session.source, payload.text)
+                )
             )
         case CheckoutAssociation():
             details = WorkAssociation(
@@ -194,6 +206,7 @@ def commentary_evidence(record: EvidenceRecord) -> CommentaryEvidence | None:
         case _:
             return None
     return CommentaryEvidence(
+        source_key=record.source_key,
         source=source,
         kind=kind,
         details=details,

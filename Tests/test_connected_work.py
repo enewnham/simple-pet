@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from pet_daemon.attention import Attention
+from pet_daemon.cli.hook import update
 from pet_daemon.config import Config
 from pet_daemon.domain import (
     ArtifactKind,
@@ -24,7 +25,7 @@ from pet_daemon.work.evidence import (
     ExecutionStatus,
     ReportedProgress,
 )
-from pet_daemon.work.models import RelatedLink
+from pet_daemon.work.models import IntentEvidence, RelatedLink
 from pet_daemon.work.observations import (
     BranchObservation,
     CheckoutObservation,
@@ -50,12 +51,54 @@ class ConnectedWorkTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def event(self, event: HookEvent) -> None:
+        event = event.model_copy(update={"capture_at": self.now})
         result = self.sessions.apply(event)
         if result is not None:
             self.memory.work.record_session(result.observation)
 
     def subjects(self) -> tuple[WorkSubject, ...]:
         return self.memory.connected_work(sessions_snapshot())
+
+    def test_provider_wrapper_preserves_related_history_retrieval(self) -> None:
+        task = "Optimize authentication persistence"
+        wrapped = (
+            'Another Claude session sent a message:\n<agent-message from="reviewer">\n'
+            f"{task}\n</agent-message>"
+        )
+        for name, prompt in (("older", task), ("plain", task), ("wrapped", wrapped)):
+            self.event(
+                require(
+                    update(
+                        "claude",
+                        "UserPromptSubmit",
+                        {
+                            "session_id": name,
+                            "prompt": prompt,
+                            "repository": "https://github.com/team/project",
+                        },
+                    )
+                )
+            )
+            self.now += 1
+        subjects = {subject.id.native_id: subject for subject in self.subjects()}
+        histories = {
+            name: self.memory.context_reports(subjects[name])
+            for name in ("plain", "wrapped")
+        }
+        for name, reports in histories.items():
+            with self.subTest(name=name):
+                self.assertEqual(
+                    {report.payload.session.native_id for report in reports},
+                    {"older", "plain", "wrapped"},
+                )
+        original = next(
+            report.payload
+            for report in histories["wrapped"]
+            if report.payload.session.native_id == "wrapped"
+            and isinstance(report.payload, IntentEvidence)
+        )
+        assert isinstance(original, IntentEvidence)
+        self.assertEqual(original.text, wrapped)
 
     def test_connected_sessions_preserve_same_named_branches_across_repository_kinds(
         self,

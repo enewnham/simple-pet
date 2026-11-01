@@ -35,6 +35,8 @@ from pet_daemon.runtime import (
 from pet_daemon.sessions.processes import process_identity
 from pet_daemon.sources import RepositoryTracker
 from pet_daemon.sources.git import CommandOptions
+from pet_daemon.transport import MAX_DATAGRAM_BYTES, SOCKET_BUFFER_BYTES
+from pet_daemon.work.models import IntentEvidence
 from pet_daemon.work.observations import BranchObservation, PullRequestObservation
 from Tests.fixtures import require, story_response
 
@@ -213,6 +215,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     def event(
         self, event: str, session: str = "one", source: str = "cli", **extra: object
     ) -> None:
+        extra.setdefault("capture_at", self.wall_clock())
         if self.live_owner is not None:
             extra.setdefault("owner", self.live_owner.packet())
         self.send(
@@ -2724,6 +2727,54 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(Path(self.config.overlay_socket).exists())
         assert daemon.child is not None
         self.assertEqual(daemon.child.returncode, 4)
+
+    async def test_large_source_text_crosses_the_socket_without_truncation(
+        self,
+    ) -> None:
+        text = "Preserve this report.\n" * 2000
+        packet = {
+            "kind": "event",
+            "source": "codex",
+            "session": "large-observation",
+            "event": "intent",
+            "goal": text,
+        }
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sender:
+            sender.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCKET_BUFFER_BYTES)
+            sender.sendto(require(encode(packet)), self.config.daemon_socket)
+        for _ in range(100):
+            if self.daemon.application.sessions.by_id:
+                break
+            await asyncio.sleep(0.01)
+        identity = SessionIdentity(
+            source=SessionSource.CODEX, native_id="large-observation"
+        )
+        reports = self.daemon.application.memory.narrative_reports((identity,))
+        payload = reports[0].payload
+        assert isinstance(payload, IntentEvidence)
+        self.assertEqual(payload.text, text)
+
+    async def test_socket_rejects_oversized_packets_without_partial_ingestion(
+        self,
+    ) -> None:
+        packet = json.dumps(
+            {
+                "kind": "event",
+                "source": "codex",
+                "session": "oversized",
+                "event": "intent",
+                "goal": "x" * MAX_DATAGRAM_BYTES,
+            }
+        ).encode()
+        self.assertIsNone(encode({"goal": "x" * MAX_DATAGRAM_BYTES}))
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sender:
+            sender.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCKET_BUFFER_BYTES)
+            sender.sendto(packet, self.config.daemon_socket)
+            sender.sendto(
+                packet + b" " * (2 * MAX_DATAGRAM_BYTES), self.config.daemon_socket
+            )
+        await asyncio.sleep(0.05)
+        self.assertFalse(self.daemon.application.sessions.by_id)
 
     async def test_malformed_packets_do_not_change_valid_session_state(self) -> None:
         self.event("tool_start", call="real", manual=True)

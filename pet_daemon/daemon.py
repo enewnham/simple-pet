@@ -26,9 +26,9 @@ from .sessions.tracking import Sessions
 from .sources import RepositoryTracker
 from .sources.hooks import normalize_hook
 from .storage import Memory
+from .transport import MAX_DATAGRAM_BYTES, SOCKET_BUFFER_BYTES
 
 log = get_logger("pet-daemon")
-MAX_INPUT_BYTES = 2000
 
 
 def reject_constant(value: str) -> Never:
@@ -56,6 +56,7 @@ def bind_socket(path: str) -> tuple[socket.socket, tuple[int, int]]:
         os.unlink(path)
     receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
     try:
+        receiver.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKET_BUFFER_BYTES)
         receiver.setblocking(False)
         receiver.bind(path)
         os.chmod(path, 0o600)
@@ -209,7 +210,10 @@ class Daemon:
             return False
 
     def receive(self, data: bytes) -> None:
-        if not data or len(data) > MAX_INPUT_BYTES:
+        if not data:
+            return
+        if len(data) > MAX_DATAGRAM_BYTES:
+            log.warning("input.rejected", reason="message_too_large", bytes=len(data))
             return
         try:
             packet = json.loads(data.decode("utf-8"), parse_constant=reject_constant)

@@ -16,6 +16,9 @@ from .models import RelatedLink, ReportPayload
 
 
 class SessionObservation(BaseModel):
+    capture_at: float | None = None
+    origin: SessionIdentity | None = None
+    hook_kind: str | None = None
     session: SessionIdentity
     aliases: tuple[SessionIdentity, ...] = ()
     parent: SessionIdentity | None = None

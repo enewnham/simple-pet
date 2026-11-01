@@ -216,11 +216,13 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def handle(self, packet: object) -> None:
+        if isinstance(packet, dict):
+            packet = dict(packet, capture_at=self.clock())
         result = self.sessions.handle(packet)
         if result:
             with self.memory.transaction():
-                self.memory.observe_session_context(result.observation)
                 self.memory.work.record_session(result.observation)
+                self.memory.observe_session_context(result.observation)
 
     def snapshot(self) -> PetContext:
         activity = self.sessions.activity()
@@ -918,6 +920,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             self.cognition.memory.record_event(
                 build_session_entry(
                     HookEvent(
+                        capture_at=self.clock(),
                         source=SessionSource.CODEX,
                         session=f"worker-{index}",
                         event=HookEventKind.PROGRESS,
@@ -951,6 +954,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             self.cognition.memory.record_event(
                 build_session_entry(
                     HookEvent(
+                        capture_at=self.clock(),
                         source=SessionSource.CLAUDE,
                         session="worker",
                         event=HookEventKind.PROGRESS,
@@ -965,6 +969,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.cognition.memory.record_event(
             build_session_entry(
                 HookEvent(
+                    capture_at=self.clock(),
                     source=SessionSource.CODEX,
                     session="unrelated",
                     event=HookEventKind.INTENT,
@@ -1066,6 +1071,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.cognition.memory.record_event(
             build_session_entry(
                 HookEvent(
+                    capture_at=self.clock(),
                     source=SessionSource.CLAUDE,
                     session="worker",
                     event=HookEventKind.INTENT,

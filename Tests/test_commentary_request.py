@@ -123,6 +123,7 @@ class ContextTests(unittest.TestCase):
         self.sessions = Sessions(lambda: 1000, wall_clock=lambda: 1000)
 
     def record_hook(self, hook: HookEvent) -> None:
+        hook = hook.model_copy(update={"capture_at": self.memory.clock()})
         result = self.sessions.apply(hook)
         assert result is not None
         with self.memory.transaction():
@@ -660,6 +661,22 @@ class ContextTests(unittest.TestCase):
         self.assertIn(
             "Review the commentary", prepared.request["messages"][0]["content"]
         )
+
+    def test_runtime_progress_and_waiting_text_use_the_source_cleaner(self) -> None:
+        text = "Message Type: MESSAGE\nTask name: /root\nSender: /root/reader\nPayload:\nChecking parser compatibility."
+        for waiting in (False, True):
+            with self.subTest(waiting=waiting):
+                self.update_session(
+                    id=SessionIdentity(source=SessionSource.CODEX, native_id="parser"),
+                    progress=text,
+                    waiting_for_input=waiting,
+                    waiting_seconds=10 if waiting else None,
+                    waiting_prompt=text if waiting else None,
+                )
+                content = self.prepare().request["messages"][0]["content"]
+                self.assertIn("Checking parser compatibility.", content)
+                self.assertNotIn("Message Type:", content)
+                self.assertNotIn("/root/reader", content)
 
     def test_running_and_waiting_commands_exclude_spoken_remarks(self) -> None:
         utterance = "Mail is in. Quiet time."

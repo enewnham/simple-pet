@@ -9,7 +9,7 @@ from ..runtime import HookEvent, ProcessIdentity
 def normalize_hook(packet: object) -> HookEvent | None:
     if not isinstance(packet, Mapping):
         return None
-    nullable = {"manual", "owner", "exit_code"}
+    nullable = {"manual", "owner", "exit_code", "capture_at"}
     if any(
         value is None and name in HookEvent.model_fields and name not in nullable
         for name, value in packet.items()
