@@ -1,0 +1,9 @@
+#!/bin/bash
+set -eo pipefail
+
+pet_root="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$pet_root"
+set -a
+source .env
+set +a
+exec "$pet_root/.venv/bin/python" -m pet_daemon

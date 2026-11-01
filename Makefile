@@ -1,4 +1,4 @@
-.PHONY: setup build importer run demo test test-python test-swift check lint lint-python lint-swift complexity complexity-python complexity-swift format assets clean
+.PHONY: setup build importer run demo install-agent uninstall-agent restart-agent status-agent test test-python test-swift check lint lint-python lint-swift complexity complexity-python complexity-swift format assets clean
 
 SWIFT_FLAGS ?= --disable-sandbox
 PYTHON_TEST_WORKERS ?= 4
@@ -27,6 +27,18 @@ run: setup build
 
 demo: setup build
 	bin/pet-demo $(ARGS)
+
+install-agent: setup build
+	.venv/bin/python scripts/pet-agent.py install
+
+uninstall-agent:
+	.venv/bin/python scripts/pet-agent.py uninstall
+
+restart-agent:
+	.venv/bin/python scripts/pet-agent.py restart
+
+status-agent:
+	.venv/bin/python scripts/pet-agent.py status
 
 ifneq ($(strip $(ARGS)),)
 test:
@@ -87,6 +99,7 @@ check: lint test
 	bash -n bin/pet-demo
 	bash -n bin/pet-notify
 	bash -n scripts/pet-hook
+	bash -n scripts/pet-agent-run
 
 assets:
 	scripts/fetch-assets.sh $(ARGS)

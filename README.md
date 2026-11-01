@@ -31,6 +31,32 @@ bin/pet-daemon
 
 The daemon runs in the foreground. Press Ctrl-C to stop it. Use `make run` for subsequent runs.
 
+### Start at login
+
+Store `ANTHROPIC_API_KEY` in `.env` at the repository root using shell assignment
+syntax, then install the per-user macOS LaunchAgent:
+
+```sh
+make install-agent
+make status-agent
+```
+
+Stop any foreground instance with Ctrl-C before installing. The agent starts at
+login, runs in your desktop session, and restarts after a failure. Installation
+also starts it immediately. It uses this checkout, sources `.env` on every start,
+and inherits the `PATH` from installation. Keep the checkout at the same path.
+Run `make install-agent` again after moving it or changing your tool paths.
+
+```sh
+make restart-agent
+make uninstall-agent
+```
+
+Restart after changing `.env` or `pet.config.json`. Uninstalling stops the agent
+and removes its login registration. The plist is stored at
+`~/Library/LaunchAgents/dev.simple-pet.plist`. Startup output is stored in
+`~/Library/Logs/Simple Pet/`. The daemon also writes its configured JSONL logs.
+
 Console logs go to stderr with local timestamps, colored levels, event names, and
 key-value fields. Colors are disabled when stderr is redirected or `NO_COLOR` is set.
 
