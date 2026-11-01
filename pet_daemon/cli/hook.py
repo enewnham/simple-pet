@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from ..domain import ExecutionOutcome, SessionSource
+from ..harness_text import clean_text
 from ..prose import work_prose
 from ..runtime import HookEvent, HookEventKind, WaitingKind
 from ..sessions.processes import discover_owner
@@ -172,6 +173,7 @@ def update(source: str, event: str, payload: Mapping[str, object]) -> HookEvent 
     ):
         return None
     normalized = EVENTS[source][event]
+    source_kind = SessionSource(source)
     identity = hook_session(source, normalized, payload)
     session, parent = identity.session, identity.parent
     if not session:
@@ -207,11 +209,12 @@ def update(source: str, event: str, payload: Mapping[str, object]) -> HookEvent 
     progress = None
     waiting_kind = None
     if normalized == HookEventKind.INTENT:
-        goal = string(payload.get("prompt"))
+        raw_goal = string(payload.get("prompt"))
+        goal = clean_text(source_kind, raw_goal)
         if not parent:
-            sentiment_text = sentiment_excerpt(goal)
+            sentiment_text = sentiment_excerpt(raw_goal)
     elif normalized == HookEventKind.SUBAGENT_START and payload.get("task"):
-        goal = string(payload.get("task"))
+        goal = clean_text(source_kind, string(payload.get("task")))
     normalized_event, outcome = execution_result(source, normalized, payload)
     if normalized == HookEventKind.TOOL_START and tool_name in INPUT_TOOLS:
         normalized_event = HookEventKind.WAITING
@@ -243,20 +246,20 @@ def update(source: str, event: str, payload: Mapping[str, object]) -> HookEvent 
         HookEventKind.SUBAGENT_DONE,
         HookEventKind.PROGRESS,
     ):
-        reported = work_prose(string(payload.get("last_assistant_message")))
+        reported = work_prose(
+            clean_text(source_kind, string(payload.get("last_assistant_message")))
+        )
         if normalized != HookEventKind.TOOL_DONE:
-            reported = work_prose(
-                string(
-                    reported,
-                    payload.get("text"),
-                    payload.get("response"),
-                    payload.get("thought"),
-                    payload.get("summary"),
-                )
+            reported = string(
+                reported,
+                payload.get("text"),
+                payload.get("response"),
+                payload.get("thought"),
+                payload.get("summary"),
             )
-        progress = reported or None
+        progress = work_prose(clean_text(source_kind, reported)) or None
     return HookEvent(
-        source=SessionSource(source),
+        source=source_kind,
         session=session,
         event=normalized_event,
         repo=repo,

@@ -41,6 +41,7 @@ class SupportedText:
 @dataclass(frozen=True)
 class WorkContext:
     request: SupportedText | None = None
+    request_age: str | None = None
     project: str | None = None
     story: SupportedText | None = None
 
@@ -55,6 +56,7 @@ class WorkContext:
         result: JSONObject = {}
         if self.request is not None:
             result["request"] = self.request.text
+            result["request_age"] = self.request_age or "unknown"
             if self.request.sources:
                 result["source_ids"] = tuple(citations.labels(self.request.sources))
         if self.project is not None:
@@ -203,6 +205,7 @@ class CommentaryContext:
     def stable(self) -> CommentaryContext:
         return replace(
             self,
+            work=replace(self.work, request_age=None) if self.work else None,
             moment=replace(self.moment, elapsed=None, age=None)
             if self.moment
             else None,

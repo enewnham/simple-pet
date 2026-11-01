@@ -182,10 +182,12 @@ def _current_work(
     excluded: Sequence[str],
     root: SessionIdentity | None,
     sources: Sequence[NarrativeSource],
+    timestamp: float,
 ) -> WorkContext | None:
     focus = selection.focus_session
     latest = requests[-1] if requests else None
     request = _request_text(latest) if latest else ""
+    observed_at = latest.observed_at if latest and request else None
     if not request and selected_child:
         request = selected_child.scope
     if not request and focus:
@@ -204,8 +206,13 @@ def _current_work(
                 )
             statement = SupportedText(prose, tuple(ids))
     project = bounded(Path(focus.repo).name, 120) if focus and focus.repo else None
+    age = duration(timestamp - observed_at) if observed_at is not None else None
     return (
-        WorkContext(request=statement, project=project)
+        WorkContext(
+            request=statement,
+            request_age=age + " ago" if age else None,
+            project=project,
+        )
         if statement or project
         else None
     )
@@ -495,7 +502,7 @@ def commentary_facts(
         selected_child.requests if selected_child else story.requests if story else ()
     )
     current_work = _current_work(
-        selection, story, selected_child, requests, excluded, root, sources
+        selection, story, selected_child, requests, excluded, root, sources, timestamp
     )
     earlier: list[ContextItem] = []
     if selected_child and story:

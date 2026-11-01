@@ -521,6 +521,46 @@ class ContextTests(unittest.TestCase):
             ),
         )
 
+    def test_request_age_follows_its_observation_despite_recent_activity(self) -> None:
+        self.output()
+        snapshot = self.current_snapshot()
+        selection = self.attention.select(snapshot, SpeechReason.ROUTINE)
+        prepared = self.cognition.prompts.prepare(
+            snapshot, selection, self.cognition.request
+        )
+        self.assertEqual(
+            self.payload(prepared)["current_work"]["request_age"],
+            "less than a minute ago",
+        )
+        self.cognition.clock = lambda: 15400
+        update = selection.update
+        assert update is not None
+        later_selection = selection.model_copy(
+            update={"update": update.model_copy(update={"observed_at": 15400})}
+        )
+        later = self.cognition.prompts.prepare(
+            snapshot, later_selection, self.cognition.request
+        )
+        self.assertEqual(
+            self.payload(later)["current_work"]["request_age"], "4 hours ago"
+        )
+        self.assertEqual(
+            prepared.conditions.context.stable(), later.conditions.context.stable()
+        )
+        self.assertTrue(later.conditions.is_valid(snapshot))
+
+    def test_undated_request_does_not_inherit_the_update_time(self) -> None:
+        self.output()
+        subject = self.work[0]
+        subject = subject.model_copy(
+            update={"story": subject.story.model_copy(update={"requests": ()})}
+        )
+        self.work = (subject,)
+        prepared = self.prepare()
+        self.assertEqual(
+            self.payload(prepared)["current_work"]["request_age"], "unknown"
+        )
+
     def test_changed_older_story_evidence_invalidates_speech_outside_raw_projection(
         self,
     ) -> None:
@@ -602,7 +642,10 @@ class ContextTests(unittest.TestCase):
             excluded=(utterance,),
         )
         work = self.payload(prepared)["current_work"]
-        self.assertEqual(work, {"request": "Keep the public API stable"})
+        self.assertEqual(
+            work,
+            {"request": "Keep the public API stable", "request_age": "unknown"},
+        )
         self.assertNotIn(utterance, prepared.request["messages"][0]["content"])
 
     def test_copied_speech_is_removed_from_the_current_request(self) -> None:
