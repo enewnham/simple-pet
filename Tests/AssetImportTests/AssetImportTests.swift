@@ -32,6 +32,8 @@ struct AssetImportTests {
             let fps = try #require(clip["fps"] as? Double)
             #expect(paths.count == count, "Frame count for \(id)")
             #expect(clip["role"] as? String == role, "Semantic role for \(id)")
+            #expect(clip["stride"] as? Double == (role.hasPrefix("walk-") ? 40 : nil))
+            #expect(clip["flip_x"] as? Bool == false)
             #expect(abs(fps * duration - Double(count)) < 0.0001, "Duration for \(id)")
             for (index, path) in paths.enumerated() {
                 let channels = try fixture.pixel(path)
@@ -99,6 +101,10 @@ struct AssetImportTests {
         let manifest = try fixture.manifest()
         let clips = try #require(manifest["clips"] as? [String: [String: Any]])
         #expect(clips["bounce"]?["max_repeats"] as? Int == 2)
+        #expect(clips["bounce"]?["stride"] as? Double == 32.5)
+        #expect(clips["bounce"]?["flip_x"] as? Bool == true)
+        #expect(clips["calm"]?["stride"] == nil)
+        #expect(clips["calm"]?["flip_x"] as? Bool == false)
         #expect(clips["snooze"]?["role"] as? String == "sleep")
         try fixture.invoke("custom", root: custom, origin: "/downloads/custom-pet.zip")
         #expect(try fixture.manifest()["source"] as? String == "/downloads/custom-pet.zip")
@@ -108,6 +114,22 @@ struct AssetImportTests {
         #expect(try fixture.invoke("custom", root: custom, expectedSuccess: false) != 0)
         #expect(try fixture.manifestData() == saved)
         #expect(try Data(contentsOf: fixture.output.appendingPathComponent("clips/bounce/000.png")) == savedFrame)
+    }
+
+    @Test func rejectsMalformedMovementMetadata() throws {
+        let invalid: [(String, Any)] = [
+            ("stride", 0), ("stride", -1), ("stride", true), ("stride", "40"),
+            ("stride", NSNull()), ("flip_x", 1), ("flip_x", "true"), ("flip_x", NSNull()),
+        ]
+        for (field, value) in invalid {
+            let fixture = try AssetFixture()
+            let custom = try fixture.customPack()
+            var clip: [String: Any] = ["frames": ["pose.png"], "fps": 1.0, "role": "rest"]
+            clip[field] = value
+            try fixture.writeObject(["rest": "calm", "clips": ["calm": clip]],
+                                    to: custom.appendingPathComponent("manifest.json"))
+            #expect(try fixture.invoke("custom", root: custom, expectedSuccess: false) != 0)
+        }
     }
 
     @Test func rejectsFrameReferencesOutsideCustomPack() throws {
@@ -209,7 +231,7 @@ private final class AssetFixture {
         try writeImage(width: 192, height: 208, to: custom.appendingPathComponent("pose.png"))
         try writeObject(["pet": "custom", "rest": "calm", "clips": [
             "calm": ["frames": ["pose.png"], "fps": 1.0, "role": "rest"],
-            "bounce": ["frames": ["pose.png"], "fps": 2.0, "role": "celebrate", "max_repeats": 2],
+            "bounce": ["frames": ["pose.png"], "fps": 2.0, "role": "celebrate", "max_repeats": 2, "stride": 32.5, "flip_x": true],
             "snooze": ["frames": ["pose.png"], "fps": 1.0, "role": "sleep"],
         ]], to: custom.appendingPathComponent("manifest.json"))
         return custom

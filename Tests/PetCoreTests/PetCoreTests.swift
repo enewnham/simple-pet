@@ -13,6 +13,8 @@ struct PetCoreTests {
         "{}", #"{"state":"busy"}"#, #"{"state":"idle","ttl":-1}"#,
         #"{"text":false}"#, #"{"animation":{"id":"jump","command_id":1,"repeats":0}}"#,
         #"{"motion":{"x":0,"y":0,"seconds":0,"command_id":2}}"#,
+        #"{"animation":{"id":"walk","rate":0,"command_id":1}}"#,
+        #"{"animation":{"id":"walk","rate":-1,"command_id":1}}"#,
         #"{"sleeping":"true"}"#, #"{"text":"Rejected","delivery_id":"invalid"}"#
     ])
     func rejectsMalformedEvents(json: String) {
@@ -184,6 +186,8 @@ struct PetCoreTests {
         validManifest.replacingOccurrences(of: "rest.png", with: "missing.png"),
         validManifest.replacingOccurrences(of: "rest.png", with: "../rest.png"),
         validManifest.replacingOccurrences(of: #""fps":1"#, with: #""fps":0"#),
+        validManifest.replacingOccurrences(of: #""fps":1"#, with: #""fps":1,"stride":0"#),
+        validManifest.replacingOccurrences(of: #""fps":1"#, with: #""fps":1,"stride":-2"#),
         validManifest.replacingOccurrences(of: #""rest":"rest""#, with: #""rest":"missing""#)
     ])
     func rejectsInvalidSpritePacks(manifest: String) throws {

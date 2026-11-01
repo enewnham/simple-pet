@@ -19,10 +19,14 @@ struct Clip {
     let fps: Double
     let role: String
     let maxRepeats: Int?
+    let stride: Double?
+    let flipX: Bool
 
     var metadata: [String: Any] {
         var result: [String: Any] = ["frames": frames, "fps": fps, "role": role]
         if let maxRepeats { result["max_repeats"] = maxRepeats }
+        if let stride { result["stride"] = stride }
+        result["flip_x"] = flipX
         return result
     }
 }
@@ -98,7 +102,7 @@ func resolveFrame(_ path: String, in source: URL) throws -> URL {
 }
 
 func saveClip(_ id: String, images: [CGImage], fps: Double, role: String, staging: URL,
-              maxRepeats: Int? = nil) throws -> Clip {
+              maxRepeats: Int? = nil, stride: Double? = nil, flipX: Bool = false) throws -> Clip {
     guard safeName(id), !images.isEmpty, fps.isFinite, fps > 0, roles.contains(role),
           maxRepeats == nil || maxRepeats! > 0 else {
         throw AssetError("Invalid clip: \(id)")
@@ -112,7 +116,7 @@ func saveClip(_ id: String, images: [CGImage], fps: Double, role: String, stagin
         try writePNG(image, to: directory.appendingPathComponent(name))
         paths.append("\(relative)/\(name)")
     }
-    return Clip(frames: paths, fps: fps, role: role, maxRepeats: maxRepeats)
+    return Clip(frames: paths, fps: fps, role: role, maxRepeats: maxRepeats, stride: stride, flipX: flipX)
 }
 
 func validateExtras(_ metadata: [String: Any], clips: [String: Clip]) throws {
@@ -147,8 +151,23 @@ func extractManifest(source: URL, staging: URL) throws -> ImportedAssets {
             }
             limit = number.intValue
         }
+        var stride: Double?
+        if let value = clip["stride"] {
+            guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  number.doubleValue.isFinite, number.doubleValue > 0 else {
+                throw AssetError("stride must be a positive finite number: \(id)")
+            }
+            stride = number.doubleValue
+        }
+        var flipX = false
+        if let value = clip["flip_x"] {
+            guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else {
+                throw AssetError("flip_x must be a boolean: \(id)")
+            }
+            flipX = number.boolValue
+        }
         let images = try paths.map { try decodeImage(resolveFrame($0, in: source)) }
-        clips[id] = try saveClip(id, images: images, fps: fps, role: role, staging: staging, maxRepeats: limit)
+        clips[id] = try saveClip(id, images: images, fps: fps, role: role, staging: staging, maxRepeats: limit, stride: stride, flipX: flipX)
     }
     guard clips[rest]?.role == "rest" else { throw AssetError("The rest clip must have the rest role.") }
     try validateExtras(manifest, clips: clips)
@@ -173,7 +192,8 @@ func extractSheet(_ sheetURL: URL, pet: [String: Any], staging: URL) throws -> I
             return frame
         }
         clips[animation.id] = try saveClip(animation.id, images: images, fps: Double(animation.count) / animation.duration,
-                                           role: animation.role, staging: staging)
+                                           role: animation.role, staging: staging,
+                                           stride: animation.role.hasPrefix("walk-") ? 40 : nil)
     }
     var gaze: [String] = []
     for index in 0..<16 {

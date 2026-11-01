@@ -2794,6 +2794,12 @@ class ConfigurationTests(unittest.TestCase):
             ("idle_pause", 30),
             ("work_burst_seconds", 12),
             ("walk_speed", [20, 40]),
+            ("walk_pace", 0),
+            ("walk_pace", True),
+            ("walk_pace", float("inf")),
+            ("roaming_size", [320]),
+            ("roaming_size", [320, 0]),
+            ("roaming_size", [True, 160]),
             ("pointer_radius", [50, 100]),
         ):
             with (

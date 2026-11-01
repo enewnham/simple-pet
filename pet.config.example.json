@@ -20,7 +20,7 @@
   "max_tokens": 512,
   "behavior": {
     "roaming": true,
-    "roaming_radius": 160,
+    "roaming_size": [320, 160],
     "automatic_speech_cooldown_seconds": 90,
     "naps": true,
     "nap_interval": [
@@ -38,6 +38,7 @@
       6
     ],
     "walk_speed": 40,
+    "walk_pace": 1,
     "idle_pause": [
       20,
       60

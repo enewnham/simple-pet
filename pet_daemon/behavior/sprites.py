@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Annotated, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 from ..config import Positive, PositiveInt
 from ..runtime import Point
@@ -12,6 +12,8 @@ class ManifestClip(BaseModel):
     fps: Positive
     role: str = Field(min_length=1)
     max_repeats: PositiveInt | None = None
+    stride: Positive | None = None
+    flip_x: StrictBool = False
 
 
 class Clip(ManifestClip):

@@ -76,7 +76,7 @@ class StackFixture(TypedDict):
 
 class BehaviorOptions(TypedDict, total=False):
     roaming: bool
-    roaming_radius: float
+    roaming_size: tuple[float, float]
     automatic_speech_cooldown_seconds: float
     naps: bool
     care: bool
@@ -89,6 +89,7 @@ class BehaviorOptions(TypedDict, total=False):
     error_seconds: float
     walk_seconds: tuple[float, float]
     walk_speed: float
+    walk_pace: float
     idle_pause: tuple[float, float]
     working_pause: tuple[float, float]
     work_burst_seconds: tuple[float, float]

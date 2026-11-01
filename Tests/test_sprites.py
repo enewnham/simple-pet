@@ -35,6 +35,12 @@ class SpriteTests(unittest.TestCase):
         self.assertEqual(pack.gaze_anchor, Point(x=0.5, y=0.5))
         self.assertEqual(pack.gaze, ())
 
+    def test_manifest_preserves_authored_stride_and_flip(self) -> None:
+        pack = self.load(stride=36, flip_x=True)
+        clip = pack.clips[pack.rest]
+        self.assertEqual(clip.stride, 36)
+        self.assertTrue(clip.flip_x)
+
     def test_invalid_clip_fields_are_rejected_at_load(self) -> None:
         for fields in (
             {"fps": True},
@@ -46,6 +52,10 @@ class SpriteTests(unittest.TestCase):
             {"max_repeats": True},
             {"max_repeats": 0},
             {"role": None},
+            {"stride": 0},
+            {"stride": True},
+            {"stride": float("inf")},
+            {"flip_x": 1},
         ):
             with (
                 self.subTest(fields=fields),

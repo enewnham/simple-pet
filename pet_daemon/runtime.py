@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from enum import StrEnum
-from typing import TYPE_CHECKING, Annotated, Literal, Protocol, TypedDict, cast
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Literal,
+    NotRequired,
+    Protocol,
+    TypedDict,
+    cast,
+)
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -45,6 +53,7 @@ type HookPacket = dict[str, object]
 
 
 class AnimationPacket(TypedDict):
+    rate: NotRequired[float]
     id: str
     repeats: int | None
     command_id: int

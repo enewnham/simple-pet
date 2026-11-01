@@ -147,6 +147,13 @@ examples/pet-run pytest
 
 Edit `pet.config.json` and restart the daemon to apply changes. Paths are relative to the configuration file. See [pet.config.example.json](pet.config.example.json) for all settings and defaults. Set `pet_dir` to your imported sprite pack.
 
+Set `behavior.roaming_size` to the roaming box width and height in screen points
+(default `[320, 160]`). Drag the pet to set its home. The box shifts inward at screen
+edges to preserve its size when space permits. Set `behavior.walk_pace` to scale
+walking speed and animation playback together (default `1`). `behavior.walk_speed`
+sets speed for sprite clips without an authored stride. `behavior.walk_seconds`
+sets the preferred duration range for each walk.
+
 Customize `persona` to change the pet's voice. Use `memory_retention_days` and
 `memory_max_events` to limit remembered work. Install and authenticate `gh` for
 PR links, stack membership, and basic PR state. Repository observations provide context

@@ -28,6 +28,7 @@ class Rectangle(Point):
 
 
 class RendererStatus(Rectangle):
+    home: Point | None = None
     pointer: Point
     screen: Rectangle
     dragging: StrictBool
@@ -65,6 +66,7 @@ class Behavior:
         self.pointer_moved = -math.inf
         self.last_pointer: tuple[float, float] | None = None
         self.preferred_position: tuple[float, float] | None = None
+        self.walk_direction = "walk-right"
         self.last_movement = clock()
         self.nap_until: float | None = None
         self.next_nap: float | None = None
@@ -210,7 +212,7 @@ class Behavior:
             status = RendererStatus.model_validate(packet)
         except ValidationError:
             return False
-        pointer, screen = status.pointer, status.screen
+        pointer = status.pointer
         position = (pointer.x, pointer.y)
         if position != self.last_pointer:
             self.pointer_moved = self.clock()
@@ -224,22 +226,14 @@ class Behavior:
             or self.status.speech != status.speech
         ):
             log.debug("renderer.status", detail="payload", packet=packet)
-        if self.preferred_position is None or (
-            self.status and self.status.dragging and not status.dragging
-        ):
+        if status.home is not None:
+            home = (status.home.x, status.home.y)
+            if home != self.preferred_position:
+                self.last_movement = self.clock()
+            self.preferred_position = home
+        elif self.preferred_position is None:
             self.preferred_position = (status.x, status.y)
             self.last_movement = self.clock()
-        home_x, home_y = self.preferred_position
-        self.preferred_position = (
-            max(
-                screen.x,
-                min(home_x, max(screen.x, screen.x + screen.width - status.width)),
-            ),
-            max(
-                screen.y,
-                min(home_y, max(screen.y, screen.y + screen.height - status.height)),
-            ),
-        )
         self.status = status
         return True
 
@@ -395,36 +389,46 @@ class Behavior:
         status = self.status
         assert status is not None
         assert self.preferred_position is not None
-        seconds = self.rng.uniform(*self.config.walk_seconds)
+        budget = self.rng.uniform(*self.config.walk_seconds)
         angle = self.rng.uniform(0, 2 * math.pi)
-        x = status.x + math.cos(angle) * self.config.walk_speed * seconds
-        y = status.y + math.sin(angle) * self.config.walk_speed * seconds
         home_x, home_y = self.preferred_position
-        distance = math.hypot(x - home_x, y - home_y)
-        if distance > self.config.roaming_radius:
-            scale = self.config.roaming_radius / distance
-            x, y = home_x + (x - home_x) * scale, home_y + (y - home_y) * scale
         screen = status.screen
-        x = max(
-            screen.x,
-            min(x, max(screen.x, screen.x + screen.width - status.width)),
+        available_width = max(0, screen.width - status.width)
+        available_height = max(0, screen.height - status.height)
+        width = min(self.config.roaming_size[0], available_width)
+        height = min(self.config.roaming_size[1], available_height)
+        left = max(
+            screen.x, min(home_x - width / 2, screen.x + available_width - width)
         )
-        y = max(
-            screen.y,
-            min(y, max(screen.y, screen.y + screen.height - status.height)),
+        bottom = max(
+            screen.y, min(home_y - height / 2, screen.y + available_height - height)
         )
-        distance = math.hypot(x - status.x, y - status.y)
+        dx, dy = math.cos(angle), math.sin(angle)
+        reach = math.hypot(available_width, available_height)
+        x = max(left, min(status.x + dx * reach, left + width))
+        y = max(bottom, min(status.y + dy * reach, bottom + height))
+        dx, dy = x - status.x, y - status.y
+        distance = math.hypot(dx, dy)
         if distance < 1:
             return False
-        seconds = min(seconds, distance / self.config.walk_speed)
-        clip = self.rng.choice(
-            self.pack.role("walk-left" if x < status.x else "walk-right")
-        )
-        if clip.max_repeats is not None and seconds > clip.seconds * clip.max_repeats:
-            scale = clip.seconds * clip.max_repeats / seconds
-            x = status.x + (x - status.x) * scale
-            y = status.y + (y - status.y) * scale
-            seconds = clip.seconds * clip.max_repeats
+        direction = self.walk_direction
+        if abs(dx) > 1e-9:
+            direction = "walk-left" if dx < 0 else "walk-right"
+        clip = self.rng.choice(self.pack.role(direction))
+        stride = clip.stride or self.config.walk_speed * clip.seconds
+        loop_seconds = clip.seconds / self.config.walk_pace
+        repeats = min(math.floor(distance / stride), math.floor(budget / loop_seconds))
+        if clip.max_repeats is not None:
+            repeats = min(repeats, clip.max_repeats)
+        if repeats < 1:
+            return False
+        scale = stride * repeats / distance
+        x = status.x + dx * scale
+        y = status.y + dy * scale
+        if not (left <= x <= left + width and bottom <= y <= bottom + height):
+            return False
+        seconds = loop_seconds * repeats
+        self.walk_direction = direction
         command = self._next_id()
         self.last_movement = self.clock()
         self.execution.start(
@@ -442,7 +446,8 @@ class Behavior:
             {
                 "animation": {
                     "id": clip.id,
-                    "repeats": clip.max_repeats,
+                    "repeats": repeats,
+                    "rate": self.config.walk_pace,
                     "command_id": command,
                 },
                 "motion": {"x": x, "y": y, "seconds": seconds, "command_id": command},

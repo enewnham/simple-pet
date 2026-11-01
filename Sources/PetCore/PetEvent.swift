@@ -8,8 +8,9 @@ public enum PetState: String, Codable, CaseIterable {
 public struct AnimationCommand: Decodable {
     public let id: String
     public let repeats: Int?
+    public let rate: Double?
     public let commandID: Int
-    enum CodingKeys: String, CodingKey { case id, repeats; case commandID = "command_id" }
+    enum CodingKeys: String, CodingKey { case id, repeats, rate; case commandID = "command_id" }
 }
 
 public struct MotionCommand: Decodable {
@@ -49,6 +50,7 @@ public struct PetEvent: Decodable {
         if let animation = event.animation {
             guard !animation.id.isEmpty, animation.commandID >= 0 else { throw EventError.invalid }
             if let repeats = animation.repeats, repeats <= 0 { throw EventError.invalid }
+            if let rate = animation.rate, !rate.isFinite || rate <= 0 { throw EventError.invalid }
         }
         if let motion = event.motion {
             guard motion.x.isFinite, motion.y.isFinite, motion.seconds.isFinite,
@@ -136,7 +138,13 @@ public struct SpriteClip: Decodable {
     public let fps: Double
     public let role: String
     public let maxRepeats: Int?
-    enum CodingKeys: String, CodingKey { case frames, fps, role; case maxRepeats = "max_repeats" }
+    public let stride: Double?
+    public let flipX: Bool?
+    enum CodingKeys: String, CodingKey {
+        case frames, fps, role, stride
+        case maxRepeats = "max_repeats"
+        case flipX = "flip_x"
+    }
 }
 
 public struct SpriteManifest: Decodable {
@@ -151,7 +159,8 @@ public struct SpriteManifest: Decodable {
         guard !manifest.pet.isEmpty, manifest.clips[manifest.rest] != nil else { throw PackError.invalid }
         for (id, clip) in manifest.clips {
             guard !id.isEmpty, !clip.frames.isEmpty, clip.fps.isFinite, clip.fps > 0,
-                  clip.maxRepeats == nil || clip.maxRepeats! > 0 else { throw PackError.invalid }
+                  clip.maxRepeats == nil || clip.maxRepeats! > 0,
+                  clip.stride == nil || (clip.stride!.isFinite && clip.stride! > 0) else { throw PackError.invalid }
             for frame in clip.frames {
                 let file = root.appendingPathComponent(frame).standardizedFileURL.resolvingSymlinksInPath()
                 guard !frame.hasPrefix("/"), file.path.hasPrefix(root.path + "/"),

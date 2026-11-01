@@ -5,7 +5,7 @@ final class PetView: NSView {
     private let model: PetModel
     let manifest: SpriteManifest
     private let frames: [String: [NSImage]]
-    private var playback: AnimationPlayback
+    private(set) var playback: AnimationPlayback
     private var frameIndex = 0
     private var timer: Timer?
     private var latestCommand = -1
@@ -13,6 +13,8 @@ final class PetView: NSView {
     private var speechRect: NSRect?
     private let speechScroll = NSScrollView()
     private let speechText = NSTextView()
+    var onTick: ((Double) -> Void)?
+    var onDrop: ((NSPoint) -> Void)?
     var onPlayback: ((Int, String) -> Void)?
     var onInteraction: ((Bool, Bool) -> Void)?
     var onClick: (() -> Void)?
@@ -83,7 +85,7 @@ final class PetView: NSView {
         layoutSpeech()
     }
 
-    func play(_ command: AnimationCommand) {
+    func play(_ command: AnimationCommand, start: Double = ProcessInfo.processInfo.systemUptime) {
         guard command.commandID > latestCommand else { return }
         latestCommand = command.commandID
         guard let clip = manifest.clips[command.id] else {
@@ -91,31 +93,53 @@ final class PetView: NSView {
             return
         }
         if playback.commandID >= 0 && !playback.finished {
-            onPlayback?(playback.commandID, "interrupted")
+            let commandID = playback.commandID
+            if isWalking { rest(at: start) }
+            onPlayback?(commandID, "interrupted")
         }
         let repeats = command.repeats.map { min($0, clip.maxRepeats ?? $0) }
         playback = AnimationPlayback(commandID: command.commandID, clipID: command.id,
-                                     count: clip.frames.count, fps: clip.fps, repeats: repeats,
-                                     start: ProcessInfo.processInfo.systemUptime)
+                                     count: clip.frames.count, fps: clip.fps * (command.rate ?? 1), repeats: repeats,
+                                     start: start)
         frameIndex = 0
-        scheduleAnimation(finite: repeats != nil)
         needsDisplay = true
     }
 
-    private func scheduleAnimation(finite: Bool = false) {
-        timer?.invalidate()
-        let clip = manifest.clips[playback.clipID]!
-        guard clip.frames.count > 1 || finite else { return }
-        let timer = Timer(timeInterval: 1 / min(clip.fps, 60), repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            let sample = self.playback.sample(at: ProcessInfo.processInfo.systemUptime)
-            if self.frameIndex != sample.frame { self.needsDisplay = true }
-            self.frameIndex = sample.frame
-            if sample.completed {
-                self.timer?.invalidate()
-                self.timer = nil
-                self.onPlayback?(self.playback.commandID, "finished")
-            }
+    private var isWalking: Bool {
+        ["walk-left", "walk-right"].contains(manifest.clips[playback.clipID]?.role ?? "")
+    }
+
+    func restAfterWalking(commandID: Int, at time: Double) {
+        guard playback.commandID == commandID, isWalking else { return }
+        let interrupted = playback.commandID >= 0 && !playback.finished
+        let commandID = playback.commandID
+        rest(at: time)
+        if interrupted { onPlayback?(commandID, "interrupted") }
+    }
+
+    private func rest(at time: Double) {
+        let clip = manifest.clips[manifest.rest]!
+        playback = AnimationPlayback(commandID: -1, clipID: manifest.rest, count: clip.frames.count,
+                                     fps: clip.fps, repeats: nil, start: time)
+        frameIndex = 0
+        needsDisplay = true
+    }
+
+    func advance(at time: Double) {
+        let sample = playback.sample(at: time)
+        if frameIndex != sample.frame { needsDisplay = true }
+        frameIndex = sample.frame
+        if sample.completed {
+            let commandID = playback.commandID
+            if isWalking { rest(at: time) }
+            onPlayback?(commandID, "finished")
+        }
+        onTick?(time)
+    }
+
+    private func scheduleAnimation() {
+        let timer = Timer(timeInterval: 1 / 60, repeats: true) { [weak self] _ in
+            self?.advance(at: ProcessInfo.processInfo.systemUptime)
         }
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
@@ -128,7 +152,14 @@ final class PetView: NSView {
         let size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
         let rect = NSRect(x: spriteRect.midX - size.width / 2, y: spriteRect.minY, width: size.width, height: size.height)
         NSGraphicsContext.current?.imageInterpolation = .none
+        NSGraphicsContext.saveGraphicsState()
+        if manifest.clips[playback.clipID]?.flipX == true {
+            var transform = AffineTransform(translationByX: rect.midX * 2, byY: 0)
+            transform.scale(x: -1, y: 1)
+            (transform as NSAffineTransform).concat()
+        }
         image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+        NSGraphicsContext.restoreGraphicsState()
         if model.sleeping {
             let sleep = NSAttributedString(string: "Zzz", attributes: [.font: NSFont.systemFont(ofSize: 15, weight: .medium),
                                                                        .foregroundColor: NSColor.secondaryLabelColor])
@@ -199,6 +230,7 @@ final class PetView: NSView {
         onInteraction?(true, false)
         defer {
             onInteraction?(false, false)
+            if dragged { onDrop?(petFrameInScreen.origin) }
             if clickedSprite && !dragged { onClick?() }
         }
         let initialPointer = window.convertPoint(toScreen: event.locationInWindow)
@@ -208,8 +240,12 @@ final class PetView: NSView {
             let pointer = window.convertPoint(toScreen: next.locationInWindow)
             if hypot(pointer.x - initialPointer.x, pointer.y - initialPointer.y) >= 4 { dragged = true }
             guard dragged else { continue }
-            layoutSpeech(spriteOrigin: NSPoint(x: initialOrigin.x + pointer.x - initialPointer.x,
-                                               y: initialOrigin.y + pointer.y - initialPointer.y))
+            let proposed = NSPoint(x: initialOrigin.x + pointer.x - initialPointer.x - 52,
+                                   y: initialOrigin.y + pointer.y - initialPointer.y - 4)
+            let screen = NSScreen.screens.first { $0.frame.contains(pointer) } ?? window.screen ?? NSScreen.main
+            let origin = WindowMotion.clamp(proposed, size: petFrameInScreen.size,
+                                            bounds: screen?.visibleFrame ?? .zero)
+            layoutSpeech(spriteOrigin: NSPoint(x: origin.x + 52, y: origin.y + 4))
         }
     }
 

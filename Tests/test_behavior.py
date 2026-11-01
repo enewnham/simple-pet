@@ -37,6 +37,7 @@ def make_clip(
     frame_count: int = 1,
     fps: float = 1,
     max_repeats: int | None = None,
+    stride: float | None = None,
 ) -> Clip:
     return Clip(
         id=identifier,
@@ -44,6 +45,7 @@ def make_clip(
         fps=fps,
         role=role,
         max_repeats=max_repeats,
+        stride=stride,
     )
 
 
@@ -101,6 +103,8 @@ class BehaviorTests(unittest.TestCase):
             }
             if clip.max_repeats is not None:
                 definition["max_repeats"] = clip.max_repeats
+            if clip.stride is not None:
+                definition["stride"] = clip.stride
             definitions[clip.id] = definition
         manifest = {
             "pet": "different-character",
@@ -676,22 +680,94 @@ class BehaviorTests(unittest.TestCase):
         self.assertIsNone(behavior.pending)
         self.assertEqual(self.animations()[-1]["id"], "quiet-pose")
 
-    def test_walk_targets_stay_near_home_and_inside_screen(self) -> None:
+    def test_walk_box_shifts_inward_at_screen_edges(self) -> None:
         behavior = self.make_behavior(
-            [make_clip("west", "walk-left"), make_clip("east", "walk-right")],
-            walk_speed=1000,
+            [
+                make_clip("west", "walk-left", stride=40),
+                make_clip("east", "walk-right", stride=40),
+            ],
+            walk_seconds=(20, 20),
+        )
+        behavior.update_renderer_status(
+            self.status(x=390, y=235, home={"x": 390, "y": 235})
+        )
+        self.rng.angle = math.pi
+        motion = self.wait_for_walk(behavior)
+        self.assertAlmostEqual(motion["x"], 110)
+        self.assertAlmostEqual(motion["y"], 235)
+        self.assertEqual(self.animations()[-1]["id"], "west")
+        self.assertEqual(self.animations()[-1]["repeats"], 7)
+
+    def test_renderer_home_survives_clicks_and_daemon_restart(self) -> None:
+        behavior = self.make_behavior(
+            [
+                make_clip("west", "walk-left", stride=40),
+                make_clip("east", "walk-right", stride=40),
+            ],
+            walk_seconds=(20, 20),
+        )
+        behavior.update_renderer_status(
+            self.status(x=220, home={"x": 100, "y": 100}, dragging=True)
+        )
+        behavior.update_renderer_status(self.status(x=220, home={"x": 100, "y": 100}))
+        motion = self.wait_for_walk(behavior)
+        self.assertEqual(motion["x"], 300)
+        self.assertEqual(self.animations()[-1]["repeats"], 2)
+
+    def test_walk_pace_changes_duration_without_changing_stride(self) -> None:
+        behavior = self.make_behavior(
+            [
+                make_clip("west", "walk-left", stride=30),
+                make_clip("east", "walk-right", stride=30),
+            ],
+            walk_seconds=(10, 10),
+            walk_pace=2,
         )
         motion = self.wait_for_walk(behavior)
-        self.assertLessEqual(math.hypot(motion["x"] - 100, motion["y"] - 100), 160)
-        self.assertEqual(motion["x"], 260)
-        self.assertEqual(self.animations()[-1]["id"], "east")
-        behavior.update_renderer_status(self.status(dragging=True, x=390, y=235))
-        behavior.tick(PetState.IDLE, self.sessions)
-        behavior.update_renderer_status(self.status(x=390, y=235))
-        motion = self.wait_for_walk(behavior)
-        self.assertEqual(motion["x"], 400)
-        self.assertLessEqual(math.hypot(motion["x"] - 390, motion["y"] - 235), 160)
-        self.assertLessEqual(motion["y"], 240)
+        self.assertEqual(motion["x"], 310)
+        self.assertEqual(motion["seconds"], 3.5)
+        self.assertEqual(self.animations()[-1]["rate"], 2)
+        self.assertEqual(self.animations()[-1]["repeats"], 7)
+
+    def test_walk_skips_paths_shorter_than_one_stride(self) -> None:
+        behavior = self.make_behavior(
+            [
+                make_clip("west", "walk-left", stride=400),
+                make_clip("east", "walk-right", stride=400),
+            ],
+        )
+        self.assertFalse(behavior._walk())
+        self.assertFalse(any("motion" in packet for packet in self.output))
+
+    def test_walk_rejects_full_stride_endpoint_outside_home_box(self) -> None:
+        behavior = self.make_behavior(
+            [
+                make_clip("west", "walk-left", stride=40),
+                make_clip("east", "walk-right", stride=40),
+            ],
+        )
+        behavior.update_renderer_status(self.status(x=390, home={"x": 100, "y": 100}))
+        self.assertFalse(behavior._walk())
+        self.assertFalse(any("motion" in packet for packet in self.output))
+
+    def test_vertical_walk_keeps_the_last_horizontal_direction(self) -> None:
+        behavior = self.make_behavior(
+            [
+                make_clip("west", "walk-left", stride=40),
+                make_clip("east", "walk-right", stride=40),
+            ],
+        )
+        self.rng.angle = math.pi
+        self.assertTrue(behavior._walk())
+        behavior.stop_movement()
+        self.rng.angle = math.pi / 2
+        self.assertTrue(behavior._walk())
+        self.assertEqual(self.animations()[-1]["id"], "west")
+        motion = next(
+            packet["motion"] for packet in reversed(self.output) if "motion" in packet
+        )
+        self.assertAlmostEqual(motion["x"], 100)
+        self.assertAlmostEqual(motion["y"], 180)
 
     def test_walk_duration_honors_authored_repeat_limit(self) -> None:
         behavior = self.make_behavior(

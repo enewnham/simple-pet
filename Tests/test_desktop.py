@@ -46,7 +46,7 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
             config.behavior.idle_pause = config.behavior.working_pause = (0.05, 0.05)
             config.behavior.resume_seconds = 0.05
             config.behavior.pointer_radius = 0.01
-            config.behavior.walk_seconds = (0.2, 0.2)
+            config.behavior.walk_seconds = (1.2, 1.2)
             config.behavior.baseline_dwell = 0.05
             config.behavior.error_seconds = 0.2
             entered, release = asyncio.Event(), asyncio.Event()

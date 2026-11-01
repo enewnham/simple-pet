@@ -46,9 +46,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var workspaceObservers: [NSObjectProtocol] = []
     private var systemSleeping = false
     private var statusTimer: Timer?
-    private var motionTimer: Timer?
     private var motion: WindowMotion?
     private var latestMotion = -1
+    private var home = NSPoint.zero
     private var dragging = false
     private var menu = false
     private var lastStatus: Data?
@@ -64,6 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             server = try SocketServer(path: options.socket) { [weak self] event in self?.receive(event) }
             let window = makePanel(view: view)
             panel = window
+            home = view.petFrameInScreen.origin
             conversation = ConversationController(anchor: { [weak view] in
                 let frame = view?.petFrameInScreen ?? .zero
                 return NSRect(x: frame.minX + 52, y: frame.minY + 4, width: 96, height: 96)
@@ -102,6 +103,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func connectCallbacks(view: PetView) {
+        view.onTick = { [weak self] time in self?.advanceMotion(at: time) }
+        view.onDrop = { [weak self] origin in
+            self?.home = origin
+            self?.status(force: true)
+        }
         view.onPlayback = { [weak self] id, result in self?.complete("animation", id: id, result: result) }
         view.onModelChange = { [weak self] in
             self?.stopIfPaused()
@@ -171,32 +177,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let deliveryID = model.apply(event, acceptsSpeech: acceptsSpeech) {
             sender?.send(["kind": "renderer", "event": "speech_accepted", "delivery_id": deliveryID])
         }
+        let started = ProcessInfo.processInfo.systemUptime
         if event.stopMotion == true { stopMotion() }
-        if let animation = event.animation { view?.play(animation) }
+        if let animation = event.animation { view?.play(animation, start: started) }
         if let command = event.motion, command.commandID > latestMotion {
             latestMotion = command.commandID
             stopMotion()
-            guard !isPaused, let panel = panel else {
+            guard !isPaused, let view = view else {
+                self.view?.restAfterWalking(commandID: command.commandID, at: started)
                 complete("motion", id: command.commandID, result: "interrupted")
                 return
             }
-            motion = WindowMotion(command: command, origin: panel.frame.origin, size: panel.frame.size,
-                                  bounds: screenBounds, started: ProcessInfo.processInfo.systemUptime)
-            let timer = Timer(timeInterval: 1 / 30, repeats: true) { [weak self] _ in self?.advanceMotion() }
-            RunLoop.main.add(timer, forMode: .common)
-            motionTimer = timer
+            let frame = view.petFrameInScreen
+            motion = WindowMotion(command: command, origin: frame.origin, size: frame.size,
+                                  bounds: screenBounds, started: started)
         }
     }
 
-    private func advanceMotion() {
+    private func advanceMotion(at time: Double) {
         guard !isPaused else { stopMotion(); return }
-        guard let motion = motion, let panel = panel else { return }
-        let sample = motion.sample(at: ProcessInfo.processInfo.systemUptime, size: panel.frame.size, bounds: screenBounds)
-        panel.setFrameOrigin(sample.origin)
+        guard let motion = motion, let panel = panel, let view = view else { return }
+        let frame = view.petFrameInScreen
+        let sample = motion.sample(at: time, size: frame.size, bounds: screenBounds)
+        let offset = NSPoint(x: panel.frame.minX - frame.minX, y: panel.frame.minY - frame.minY)
+        panel.setFrameOrigin(NSPoint(x: sample.origin.x + offset.x, y: sample.origin.y + offset.y))
         if sample.finished {
             self.motion = nil
-            motionTimer?.invalidate()
-            motionTimer = nil
+            view.restAfterWalking(commandID: motion.commandID, at: time)
             complete("motion", id: motion.commandID, result: "finished")
             status(force: true)
         }
@@ -207,8 +214,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func stopMotion() {
         guard let motion = motion else { return }
         self.motion = nil
-        motionTimer?.invalidate()
-        motionTimer = nil
+        view?.restAfterWalking(commandID: motion.commandID, at: ProcessInfo.processInfo.systemUptime)
         complete("motion", id: motion.commandID, result: "interrupted")
     }
 
@@ -236,6 +242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "width": petFrame.width, "height": petFrame.height,
             "screen": ["x": bounds.minX, "y": bounds.minY, "width": bounds.width, "height": bounds.height],
             "pointer": ["x": pointer.x, "y": pointer.y],
+            "home": ["x": home.x, "y": home.y],
             "dragging": dragging, "menu": menu, "speech": model.text != nil || conversation?.isVisible == true, "sleeping": model.sleeping,
             "system_sleeping": systemSleeping
         ]

@@ -92,6 +92,7 @@ struct PetOverlayTests {
         try withFixture { fixture in
             var events: [String] = []
             fixture.view.onClick = { events.append("click") }
+            fixture.view.onDrop = { _ in events.append("drop") }
             fixture.view.onInteraction = { dragging, _ in events.append(dragging ? "begin" : "end") }
             let point = NSPoint(x: 100, y: 52)
             let originalPet = fixture.view.petFrameInScreen
@@ -106,15 +107,88 @@ struct PetOverlayTests {
         try withFixture { fixture in
             var events: [String] = []
             fixture.view.onClick = { events.append("click") }
+            fixture.view.onDrop = { _ in events.append("drop") }
             fixture.view.onInteraction = { dragging, _ in events.append(dragging ? "begin" : "end") }
             let point = NSPoint(x: 100, y: 52)
-            let dragPoint = NSPoint(x: point.x - 30, y: point.y - 10)
+            let dragPoint = NSPoint(x: point.x + 30, y: point.y + 10)
             let originalPet = fixture.view.petFrameInScreen
             fixture.panel.events = [try fixture.mouseEvent(.leftMouseDragged, at: dragPoint),
                                     try fixture.mouseEvent(.leftMouseUp, at: dragPoint)]
             fixture.view.mouseDown(with: try fixture.mouseEvent(.leftMouseDown, at: point))
-            #expect(events == ["begin", "end"])
-            #expect(fixture.view.petFrameInScreen.origin == NSPoint(x: originalPet.minX - 30, y: originalPet.minY - 10))
+            #expect(events == ["begin", "end", "drop"])
+            #expect(fixture.view.petFrameInScreen.origin == NSPoint(x: originalPet.minX + 30, y: originalPet.minY + 10))
+        }
+    }
+
+    @Test func draggingClampsThePetFootprintWithSpeechVisible() throws {
+        try withFixture { fixture in
+            try fixture.apply(["text": Self.longSpeech, "ttl": 60])
+            let frame = fixture.view.petFrameInScreen
+            let point = NSPoint(x: frame.midX - fixture.panel.frame.minX,
+                                y: frame.minY + 52 - fixture.panel.frame.minY)
+            let dragPoint = NSPoint(x: point.x + fixture.screen.frame.width * 2,
+                                    y: point.y + fixture.screen.frame.height * 2)
+            var dropped: NSPoint?
+            fixture.view.onDrop = { dropped = $0 }
+            fixture.panel.events = [try fixture.mouseEvent(.leftMouseDragged, at: dragPoint),
+                                    try fixture.mouseEvent(.leftMouseUp, at: dragPoint)]
+            fixture.view.mouseDown(with: try fixture.mouseEvent(.leftMouseDown, at: point))
+            let visible = fixture.screen.visibleFrame
+            let expected = NSPoint(x: visible.maxX - 200, y: visible.maxY - 160)
+            #expect(fixture.view.petFrameInScreen.origin == expected)
+            #expect(dropped == expected)
+            try fixture.apply(["text": ""])
+            #expect(fixture.panel.frame.origin == expected)
+        }
+    }
+
+    @Test func walkingReturnsToRestBeforeCompletionAndKeepsTicking() throws {
+        try withFixture { fixture in
+            let command = try #require(PetEvent.decode(Data(#"{"animation":{"id":"walk","repeats":2,"rate":2,"command_id":1}}"#.utf8)).animation)
+            var completed: [String] = []
+            var ticks: [Double] = []
+            fixture.view.onPlayback = { _, result in
+                completed.append(result)
+                #expect(fixture.view.playback.clipID == "rest")
+            }
+            fixture.view.onTick = { ticks.append($0) }
+            fixture.view.play(command, start: 100)
+            fixture.view.advance(at: 100.5)
+            #expect(fixture.view.playback.clipID == "walk")
+            fixture.view.advance(at: 101)
+            #expect(completed == ["finished"])
+            fixture.view.advance(at: 101.01)
+            #expect(ticks == [100.5, 101, 101.01])
+            #expect(fixture.view.playback.clipID == "rest")
+        }
+    }
+
+    @Test func stoppingMovementPreservesANewerReaction() throws {
+        try withFixture { fixture in
+            let walk = try #require(PetEvent.decode(Data(#"{"animation":{"id":"walk","repeats":2,"command_id":1}}"#.utf8)).animation)
+            let reaction = try #require(PetEvent.decode(Data(#"{"animation":{"id":"reaction","repeats":1,"command_id":2}}"#.utf8)).animation)
+            fixture.view.play(walk, start: 100)
+            fixture.view.restAfterWalking(commandID: 1, at: 100.5)
+            #expect(fixture.view.playback.clipID == "rest")
+            fixture.view.play(reaction, start: 101)
+            fixture.view.restAfterWalking(commandID: 1, at: 101.1)
+            #expect(fixture.view.playback.clipID == "reaction")
+        }
+    }
+
+    @Test func replacingAWalkRestsBeforeReportingItsInterruption() throws {
+        try withFixture { fixture in
+            let walk = try #require(PetEvent.decode(Data(#"{"animation":{"id":"walk","repeats":2,"command_id":1}}"#.utf8)).animation)
+            let reaction = try #require(PetEvent.decode(Data(#"{"animation":{"id":"reaction","repeats":1,"command_id":2}}"#.utf8)).animation)
+            fixture.view.play(walk, start: 100)
+            var results: [String] = []
+            fixture.view.onPlayback = { _, result in
+                results.append(result)
+                #expect(fixture.view.playback.clipID == "rest")
+            }
+            fixture.view.play(reaction, start: 100.5)
+            #expect(results == ["interrupted"])
+            #expect(fixture.view.playback.clipID == "reaction")
         }
     }
 
@@ -145,7 +219,7 @@ struct PetOverlayTests {
         bitmap.setColor(.black, atX: 0, y: 0)
         let png = try #require(bitmap.representation(using: .png, properties: [:]))
         try png.write(to: assets.appendingPathComponent("rest.png"))
-        let manifest = "{\"pet\":\"quiet\",\"rest\":\"rest\",\"clips\":{\"rest\":{\"frames\":[\"rest.png\"],\"fps\":1,\"role\":\"rest\"}}}"
+        let manifest = #"{"pet":"quiet","rest":"rest","clips":{"rest":{"frames":["rest.png"],"fps":1,"role":"rest"},"walk":{"frames":["rest.png","rest.png"],"fps":2,"role":"walk-right"},"reaction":{"frames":["rest.png"],"fps":1,"role":"reaction"}}}"#
         try Data(manifest.utf8).write(to: assets.appendingPathComponent("manifest.json"))
         let model = PetModel()
         let view = try PetView(model: model, assets: assets)
@@ -154,7 +228,12 @@ struct PetOverlayTests {
                             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.isReleasedWhenClosed = false
         panel.contentView = view
-        defer { panel.close() }
+        defer {
+            view.onPlayback = nil
+            view.onTick = nil
+            view.onDrop = nil
+            panel.close()
+        }
         let scroll = try #require(view.subviews.compactMap { $0 as? NSScrollView }.first)
         let text = try #require(scroll.documentView as? NSTextView)
         try body(Fixture(screen: screen, model: model, view: view, panel: panel, scroll: scroll, text: text))

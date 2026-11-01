@@ -104,7 +104,7 @@ Another possible remark for the same observation: "Oh, hello. I'm enjoying the q
 class BehaviorConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     roaming: StrictBool = True
-    roaming_radius: Positive = 160
+    roaming_size: tuple[Positive, Positive] = (320, 160)
     automatic_speech_cooldown_seconds: Nonnegative = 90
     naps: StrictBool = True
     care: StrictBool = True
@@ -117,6 +117,7 @@ class BehaviorConfig(BaseModel):
     error_seconds: Positive = 2
     walk_seconds: Interval = (2, 6)
     walk_speed: Positive = 40
+    walk_pace: Positive = 1
     idle_pause: Interval = (20, 60)
     working_pause: Interval = (2, 5)
     work_burst_seconds: Interval = (12, 25)
