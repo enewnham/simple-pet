@@ -148,6 +148,80 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
             rows[20] = row(20, 10, "/usr/bin/codex exec task")
             self.assertEqual(discover_owner(SessionSource.CODEX, pid=30), rows[20][0])
 
+    def test_cursor_owner_crosses_hook_shells_and_uses_the_closest_cli(self) -> None:
+        package = "/opt/homebrew/Caskroom/cursor-cli/2026.10.22-27dcf5f/dist-package"
+        for command in (
+            "/opt/homebrew/bin/cursor-agent --use-system-ca " + package + "/index.js",
+            package + "/node --use-system-ca " + package + "/index.js",
+        ):
+            with self.subTest(command=command):
+                owner = ProcessIdentity(pid=20, started="cursor-start")
+                rows = {
+                    30: (
+                        ProcessIdentity(pid=30, started="hook-start"),
+                        25,
+                        "S",
+                        "python pet-hook",
+                    ),
+                    25: (
+                        ProcessIdentity(pid=25, started="shell-start"),
+                        20,
+                        "S",
+                        "sh -c pet-hook",
+                    ),
+                    20: (owner, 10, "S", command),
+                    10: (
+                        ProcessIdentity(pid=10, started="outer-start"),
+                        1,
+                        "S",
+                        "/opt/homebrew/bin/cursor-agent",
+                    ),
+                }
+                with (
+                    patch(
+                        "pet_daemon.sessions.processes._processes", return_value=rows
+                    ),
+                    patch.dict(os.environ, {}, clear=True),
+                ):
+                    self.assertEqual(
+                        discover_owner(SessionSource.CURSOR, pid=30), owner
+                    )
+                    self.assertIsNone(discover_owner(SessionSource.CODEX, pid=30))
+
+    def test_cursor_owner_rejects_shared_hosts_and_zombie_processes(self) -> None:
+        for command, state in (
+            ("node /work/index.js", "S"),
+            ("node /work/index.js --cursor-agent", "S"),
+            (
+                "/usr/local/bin/node /opt/homebrew/Caskroom/cursor-cli/version/dist-package/index.js",
+                "S",
+            ),
+            ('"/Applications/Cursor.app/Contents/MacOS/Cursor"', "S"),
+            ("/opt/homebrew/bin/cursor-agent", "Z"),
+        ):
+            with self.subTest(command=command, state=state):
+                rows = {
+                    30: (
+                        ProcessIdentity(pid=30, started="hook-start"),
+                        20,
+                        "S",
+                        "python pet-hook",
+                    ),
+                    20: (
+                        ProcessIdentity(pid=20, started="host-start"),
+                        1,
+                        state,
+                        command,
+                    ),
+                }
+                with (
+                    patch(
+                        "pet_daemon.sessions.processes._processes", return_value=rows
+                    ),
+                    patch.dict(os.environ, {}, clear=True),
+                ):
+                    self.assertIsNone(discover_owner(SessionSource.CURSOR, pid=30))
+
     def test_explicit_wrapper_must_match_a_live_ancestor_identity(self) -> None:
         owner = ProcessIdentity(pid=20, started="wrapper-start")
         rows = {

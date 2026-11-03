@@ -54,6 +54,26 @@ def _processes(pid: int | None = None) -> dict[int, ProcessRow]:
     return rows
 
 
+def _is_cursor_cli(argv: list[str]) -> bool:
+    executable = Path(argv[0])
+    if executable.name == "cursor-agent":
+        return True
+    if executable.name == "agent":
+        return executable.resolve().name == "cursor-agent"
+    if executable.name != "node":
+        return False
+    script = next(
+        (Path(value) for value in argv[1:] if not value.startswith("-")), None
+    )
+    return bool(
+        script
+        and script.name == "index.js"
+        and script.parent == executable.parent
+        and script.parent.name == "dist-package"
+        and "cursor-cli" in script.parts
+    )
+
+
 def discover_owner(
     source: SessionSource, pid: int | None = None
 ) -> ProcessIdentity | None:
@@ -86,7 +106,11 @@ def discover_owner(
             argv = shlex.split(command)
         except ValueError:
             continue
-        executable = Path(argv[0]).name if argv else ""
+        if not argv:
+            continue
+        executable = Path(argv[0]).name
+        if source == SessionSource.CURSOR and _is_cursor_cli(argv):
+            return identity
         if (
             source in (SessionSource.CLAUDE, SessionSource.CODEX)
             and executable == source

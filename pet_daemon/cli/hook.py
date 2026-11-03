@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from collections.abc import Mapping
@@ -92,12 +93,38 @@ class HookSession:
 
 
 def hook_session(
-    source: str, normalized: HookEventKind, payload: Mapping[str, object]
+    source: str,
+    normalized: HookEventKind,
+    payload: Mapping[str, object],
+    launch_session: str = "",
 ) -> HookSession:
     parent = ""
     aliases = []
     if source == "cursor":
-        session = string(payload.get("conversation_id"))
+        session = string(payload.get("conversation_id"), payload.get("session_id"))
+        # Separate launcher identities from saved conversations.
+        if normalized == HookEventKind.SESSION_START:
+            session = f"runtime:{session}" if session else ""
+        elif (
+            launch_session
+            and normalized != HookEventKind.INTENT
+            and session == launch_session.removeprefix("runtime:")
+        ):
+            session = launch_session
+        native_session = string(payload.get("session_id"))
+        if (
+            native_session
+            and native_session != session
+            and normalized != HookEventKind.SESSION_START
+            and not launch_session
+        ):
+            aliases.append(native_session)
+        if (
+            normalized == HookEventKind.INTENT
+            and launch_session
+            and launch_session != session
+        ):
+            aliases.append(launch_session)
         if normalized in (HookEventKind.SUBAGENT_START, HookEventKind.SUBAGENT_DONE):
             parent = string(payload.get("parent_conversation_id"), session)
             aliases = list(
@@ -118,7 +145,7 @@ def hook_session(
         agent = string(payload.get("agent_id"))
         if agent:
             parent, session = session, agent
-    return HookSession(session, parent, tuple(aliases))
+    return HookSession(session, parent, tuple(dict.fromkeys(aliases)))
 
 
 def execution_result(
@@ -162,7 +189,9 @@ def execution_result(
     return normalized_event, outcome
 
 
-def update(source: str, event: str, payload: Mapping[str, object]) -> HookEvent | None:
+def update(
+    source: str, event: str, payload: Mapping[str, object], *, launch_session: str = ""
+) -> HookEvent | None:
     if source == "claude" and payload.get("cursor_version"):
         return None
     if event == "Notification" and payload.get("notification_type") not in (
@@ -172,13 +201,24 @@ def update(source: str, event: str, payload: Mapping[str, object]) -> HookEvent 
         return None
     normalized = EVENTS[source][event]
     source_kind = SessionSource(source)
-    identity = hook_session(source, normalized, payload)
+    identity = hook_session(source, normalized, payload, launch_session)
     session, parent = identity.session, identity.parent
     if not session:
         return None
     cwd = string(payload.get("cwd"))
+    if source == "cursor" and not cwd:
+        roots = payload.get("workspace_roots")
+        if isinstance(roots, list) and len(roots) == 1:
+            cwd = string(roots[0])
     repo = os.path.normpath(cwd) if cwd else None
     turn = string(payload.get("generation_id"), payload.get("turn_id"))
+    if source == "cursor" and event == "afterAgentThought":
+        thought = re.fullmatch(
+            r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-[0-9]+-[0-9a-z]{4}",
+            turn,
+        )
+        if thought:
+            turn = thought[1]
     if normalized in (HookEventKind.SUBAGENT_START, HookEventKind.SUBAGENT_DONE):
         turn = ""
     call = string(payload.get("tool_use_id"), payload.get("tool_call_id"))
@@ -254,6 +294,9 @@ def update(source: str, event: str, payload: Mapping[str, object]) -> HookEvent 
         progress = reported or None
     return HookEvent(
         source=source_kind,
+        runtime_session=launch_session
+        if source == "cursor" and launch_session
+        else None,
         capture_at=time.time(),
         session=session,
         event=normalized_event,
@@ -288,16 +331,22 @@ def main() -> None:
         payload = {}
     if not isinstance(payload, dict):
         payload = {}
-    hook = update(args.source, args.event, payload)
+    hook = update(
+        args.source,
+        args.event,
+        payload,
+        launch_session=os.environ.get("PET_CURSOR_SESSION_ID", ""),
+    )
     if hook is not None:
         owner = discover_owner(hook.source)
         hook.owner = owner
         send(hook.packet())
-    response = (
-        {"continue": True}
-        if args.source == "cursor" and args.event == "beforeSubmitPrompt"
-        else {}
-    )
+    response: dict[str, object] = {}
+    if args.source == "cursor":
+        if args.event == "beforeSubmitPrompt":
+            response = {"continue": True}
+        elif args.event == "sessionStart" and hook is not None:
+            response = {"env": {"PET_CURSOR_SESSION_ID": hook.session}}
     print(json.dumps(response))
 
 

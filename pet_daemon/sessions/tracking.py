@@ -283,8 +283,10 @@ class Sessions:
             for name, target in self.aliases.items()
         }
         self.child_calls = {
-            name: key if target == old_key else target
-            for name, target in self.child_calls.items()
+            (key if parent == old_key else parent, call): key
+            if target == old_key
+            else target
+            for (parent, call), target in self.child_calls.items()
         }
         for child in self.by_id.values():
             if child.parent == old_key:
@@ -316,15 +318,24 @@ class Sessions:
             HookEventKind.TOOL_ERROR,
             HookEventKind.WAITING,
         ):
-            target = self.child_calls.get(
-                (SessionIdentity(source=source, native_id=identifier), parent_call)
-            )
+            target = self.child_calls.get((self._key(source, identifier), parent_call))
             if target and target != key:
                 key = target
                 routed = True
+        is_cursor_intent = source == SessionSource.CURSOR and (
+            event.event == HookEventKind.INTENT and bool(event.runtime_session)
+        )
+        if is_cursor_intent:
+            # Rebind the launcher without merging saved conversation histories.
+            key = event.subject
+            assert event.runtime_session is not None
+            runtime = SessionIdentity(source=source, native_id=event.runtime_session)
+            previous = self.aliases.get(runtime)
+            if previous is not None and previous != key:
+                del self.aliases[runtime]
         alternate = event.aliases
         matches = [self._key(source, alias) for alias in alternate]
-        if key not in self.by_id:
+        if key not in self.by_id and not is_cursor_intent:
             key = next((match for match in matches if match in self.by_id), key)
         parent = event.parent
         if parent and self._key(source, parent) in {key, *matches}:
@@ -344,9 +355,7 @@ class Sessions:
         if parent:
             session.parent = self._key(source, parent)
             if parent_call:
-                self.child_calls[
-                    (SessionIdentity(source=source, native_id=parent), parent_call)
-                ] = key
+                self.child_calls[(self._key(source, parent), parent_call)] = key
             parent_session = self.by_id.get(session.parent)
             if parent_session and not session.goal:
                 session.goal = parent_session.goal

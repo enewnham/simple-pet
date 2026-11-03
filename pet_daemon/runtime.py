@@ -171,6 +171,7 @@ class HookEvent(BaseModel):
     aliases: tuple[Annotated[str, Field(min_length=1)], ...] = ()
     parent: str | None = None
     parent_call: str | None = None
+    runtime_session: str | None = None
     call: str | None = None
     turn: str | None = None
     tool: str | None = None
