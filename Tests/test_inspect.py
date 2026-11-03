@@ -115,7 +115,7 @@ def test_viewer_selects_requests_and_refreshes_without_losing_selection(
                 console.print(app.query_one(f"#{pane}", Static).content)
             rendered = output.getvalue()
             assert "Parser fixed." in rendered
-            assert "Speak plainly." in rendered
+            assert "Speak **plainly**." in rendered
             assert '  "goal": "Fix parser"' in rendered
             with path.open("a") as stream:
                 stream.write(
@@ -135,5 +135,94 @@ def test_viewer_selects_requests_and_refreshes_without_losing_selection(
             assert timeline.highlighted == 2
             assert app.requests[timeline.highlighted].outcome == "displayed"
             await pilot.press("tab", "tab", "pagedown", "q")
+
+    asyncio.run(browse())
+
+
+def test_correction_retains_each_attempt_and_aggregates_usage(tmp_path: Path) -> None:
+    path = tmp_path / "pet.jsonl"
+    write_logs(path)
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    request = next(
+        record for record in records if record.get("request", {}).get("model")
+    )
+    request["request"]["messages"][0]["content"] = (
+        "<task>Fix parser</task>\n<evidence>Use &lt;tag&gt; safely</evidence>"
+    )
+    response_index = next(
+        index
+        for index, record in enumerate(records)
+        if record["event"] == "observation.response" and record["reason"] != "story"
+    )
+    base = {
+        key: request[key] for key in ("run_id", "observation_id", "reason", "timestamp")
+    }
+    records[response_index:response_index] = [
+        {
+            **base,
+            "event": "observation.response",
+            "response": {
+                "content": [{"type": "text", "text": '{"speak":"Repeated speech."}'}]
+            },
+        },
+        {
+            **base,
+            "event": "observation.usage",
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "duration_seconds": 0.25,
+        },
+        {
+            **base,
+            "event": "observation.request",
+            "request": {
+                "model": "claude-test",
+                "system": [],
+                "messages": [{"role": "user", "content": "Avoid repeated speech."}],
+            },
+        },
+    ]
+    records.insert(
+        response_index + 4,
+        {
+            **base,
+            "event": "observation.usage",
+            "input_tokens": 20,
+            "output_tokens": 3,
+            "duration_seconds": 0.5,
+        },
+    )
+    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+    items = commentary_requests(load_logs(path).entries)
+    spoken = next(item for item in items if item.key[1] == "spoken")
+    assert len(items) == 2
+    assert len(spoken.attempts) == 2
+    assert spoken.usage == {
+        "input_tokens": 30,
+        "output_tokens": 5,
+        "duration_seconds": 0.75,
+    }
+    assert spoken.outcome == "displayed"
+    assert spoken.speech == "Parser fixed."
+
+    async def browse() -> None:
+        app = RequestInspector(path)
+        async with app.run_test(size=(130, 40)) as pilot:
+            await pilot.pause()
+            app.show_request(spoken)
+            output = StringIO()
+            console = Console(file=output, width=120)
+            for pane in ("bubble", "system", "messages"):
+                console.print(app.query_one(f"#{pane}", Static).content)
+            rendered = output.getvalue()
+            assert "<task>Fix parser</task>" in rendered
+            assert "<evidence>Use &lt;tag&gt; safely</evidence>" in rendered
+            assert "Repeated speech." in rendered
+            assert "Parser fixed." in rendered
+            assert "Avoid repeated speech." in rendered
+            assert "2 attempts" in rendered
+            assert "30 in / 5 out · 0.75s" in rendered
+            assert '"input_tokens": 10' in rendered
+            assert '"input_tokens": 20' in rendered
 
     asyncio.run(browse())

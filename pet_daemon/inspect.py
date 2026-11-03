@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from rich.console import Group
-from rich.markdown import Markdown
 from rich.syntax import Syntax
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -23,12 +22,37 @@ from .triage import LogEntry, load_logs
 
 
 @dataclass
+class ModelAttempt:
+    request: dict[str, Any]
+    response: dict[str, Any] | None = None
+    usage: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class CommentaryRequest:
     entry: LogEntry
-    request: dict[str, Any]
+    attempts: list[ModelAttempt]
     speech: str | None = None
     outcome: str = "pending"
-    usage: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def request(self) -> dict[str, Any]:
+        return self.attempts[0].request
+
+    @property
+    def usage(self) -> dict[str, Any]:
+        fields = (
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "duration_seconds",
+        )
+        return {
+            name: sum(attempt.usage.get(name, 0) for attempt in self.attempts)
+            for name in fields
+            if any(name in attempt.usage for attempt in self.attempts)
+        }
 
     @property
     def key(self) -> tuple[str, str]:
@@ -51,8 +75,11 @@ def commentary_requests(entries: Sequence[LogEntry]) -> list[CommentaryRequest]:
         key = (data.get("run_id"), data.get("observation_id"))
         event = data.get("event")
         if event == "observation.request" and data.get("reason") != "story":
-            item = CommentaryRequest(entry, data["request"])
-            requests[item.key] = item
+            item = requests.get(key)
+            if item is None:
+                item = CommentaryRequest(entry, [])
+                requests[item.key] = item
+            item.attempts.append(ModelAttempt(data["request"]))
         item = requests.get(key)
         if event == "speech.delivery":
             delivery = deliveries.get((data.get("run_id"), data.get("message")))
@@ -64,6 +91,8 @@ def commentary_requests(entries: Sequence[LogEntry]) -> list[CommentaryRequest]:
         if item is None:
             continue
         if event == "observation.response" and data.get("reason") != "story":
+            item.attempts[-1].response = data["response"]
+            item.speech = None
             content = data["response"].get("content", [])
             text = "".join(
                 block["text"] for block in content if block["type"] == "text"
@@ -79,7 +108,7 @@ def commentary_requests(entries: Sequence[LogEntry]) -> list[CommentaryRequest]:
                 else:
                     item.outcome = "silent"
         elif event == "observation.usage" and data.get("reason") != "story":
-            item.usage = data
+            item.attempts[-1].usage = data
         elif event == "observation.finished":
             item.outcome = data.get("outcome", item.outcome)
         elif event == "renderer.command":
@@ -90,7 +119,7 @@ def commentary_requests(entries: Sequence[LogEntry]) -> list[CommentaryRequest]:
 
 
 def render_content(content: object) -> Group:
-    """Render text blocks as Markdown and JSON payloads with indentation."""
+    """Render text blocks literally and JSON payloads with indentation."""
     if isinstance(content, list):
         return Group(*(render_content(block) for block in content))
     if isinstance(content, dict) and content.get("type") == "text":
@@ -99,7 +128,7 @@ def render_content(content: object) -> Group:
         try:
             value = json.loads(content)
         except json.JSONDecodeError:
-            return Group(Markdown(content))
+            return Group(Text(content))
     else:
         value = content
     return Group(
@@ -195,6 +224,7 @@ class RequestInspector(App[None]):
         usage = item.usage
         metadata = (
             f"{item.outcome} · {data.get('reason')} · {item.request.get('model')}\n"
+            f"{len(item.attempts)} attempts · "
             f"{usage.get('input_tokens', '?')} in / {usage.get('output_tokens', '?')} out"
             f" · {usage.get('duration_seconds', '?')}s"
         )
@@ -205,16 +235,34 @@ class RequestInspector(App[None]):
             )
         )
         self.query_one("#system", Static).update(
-            render_content(item.request.get("system"))
+            Group(
+                *(
+                    Group(
+                        Text(f"ATTEMPT {index}", style="bold cyan"),
+                        render_content(attempt.request.get("system")),
+                    )
+                    for index, attempt in enumerate(item.attempts, 1)
+                )
+            )
         )
         self.query_one("#messages", Static).update(
             Group(
                 *(
                     Group(
-                        Text(message["role"].upper(), style="bold cyan"),
-                        render_content(message["content"]),
+                        Text(f"ATTEMPT {index}", style="bold cyan"),
+                        *(
+                            Group(
+                                Text(message["role"].upper(), style="bold cyan"),
+                                render_content(message["content"]),
+                            )
+                            for message in attempt.request.get("messages", [])
+                        ),
+                        Text("RESPONSE", style="bold cyan"),
+                        render_content(attempt.response),
+                        Text("USAGE", style="bold cyan"),
+                        render_content(attempt.usage),
                     )
-                    for message in item.request.get("messages", [])
+                    for index, attempt in enumerate(item.attempts, 1)
                 )
             )
         )
