@@ -3,6 +3,7 @@ import random
 import tempfile
 import unittest
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from typing import Unpack
 
@@ -11,16 +12,19 @@ from pydantic import BaseModel
 from pet_daemon.attention import Attention, AttentionSelection, SelectedWorkState
 from pet_daemon.commentary import Cognition
 from pet_daemon.commentary.context import (
-    CommentaryPayload,
     ContextFact,
     Event,
     FactKind,
     Moment,
+    SupportedText,
+    WorkState,
 )
 from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.commentary.request import (
     CommentaryRequest,
     _record_source_ids,
+    encoded_size,
+    select_prompt,
 )
 from pet_daemon.commentary.sources import NarrativeSource, SourceKind
 from pet_daemon.commentary.story import prepare as prepare_story
@@ -174,17 +178,22 @@ class ContextTests(unittest.TestCase):
             with self.subTest(outcome=outcome):
                 self.finished_work(outcome)
                 prepared = self.prepare(SpeechReason.COMPLETION)
-                moment = self.payload(prepared)["current_moment"]
+                moment = prepared.context.moment
+                assert moment is not None
                 self.assertEqual(
-                    moment["event"],
-                    "An execution of this work ended. The reported outcome describes that execution, not whether the whole task is complete.",
+                    moment.event,
+                    Event.TURN_ENDED,
                 )
-                self.assertIn(meaning, str(moment["execution"]))
+                self.assertEqual(moment.outcome, outcome)
+                self.assertIn(meaning, prepared.request["messages"][0]["content"])
                 if outcome == ExecutionOutcome.SUCCESS:
                     self.assertIn(
-                        "does not establish task completion", str(moment["execution"])
+                        "does not establish task completion",
+                        prepared.request["messages"][0]["content"],
                     )
-                self.assertNotIn("outcome", moment)
+                self.assertNotIn(
+                    '"outcome"', prepared.request["messages"][0]["content"]
+                )
                 conditions_moment = prepared.conditions.context.moment
                 assert conditions_moment is not None
                 self.assertEqual(conditions_moment.outcome, outcome)
@@ -210,12 +219,18 @@ class ContextTests(unittest.TestCase):
                         seconds_ago=0,
                     )
                 )
-                moment = self.payload(self.prepare(SpeechReason.FAILURE))[
-                    "current_moment"
-                ]
-                self.assertEqual(moment["event"], "An operation reported a failure.")
-                self.assertEqual(moment["operation"], meaning)
-                self.assertNotIn("cause", moment)
+                prepared = self.prepare(SpeechReason.FAILURE)
+                moment = prepared.context.moment
+                assert moment is not None
+                self.assertEqual(moment.event, Event.FAILED_CALL)
+                self.assertEqual(moment.operation, activity)
+                self.assertIn(meaning, prepared.request["messages"][0]["content"])
+                self.assertNotIn(
+                    "cause",
+                    prepared.request["messages"][0]["content"].split("</observations>")[
+                        0
+                    ],
+                )
 
     def test_current_report_and_its_cached_paraphrase_are_sent_once(self) -> None:
         self.finished_work()
@@ -249,15 +264,17 @@ class ContextTests(unittest.TestCase):
         prepared = self.cognition.prompts.prepare(
             snapshot, selection, self.cognition.request, narrative=narrative
         )
-        payload = self.payload(prepared)
+        context = prepared.context
+        assert context.moment is not None
+        assert context.moment.progress is not None
         self.assertEqual(
-            payload["current_moment"]["reported_progress"],
+            context.moment.progress.text,
             "Parser checks passed; desktop behavior remains unverified.",
         )
         self.assertFalse(
             any(
-                "reported_progress" in item
-                for item in payload.get("earlier_context", [])
+                isinstance(item, ContextFact) and item.kind == FactKind.PROGRESS
+                for item in context.earlier
             )
         )
         self.assertTrue(prepared.conditions.is_valid(snapshot))
@@ -289,9 +306,11 @@ class ContextTests(unittest.TestCase):
         prepared = self.cognition.prompts.prepare(
             snapshot, selection, self.cognition.request, narrative=narrative
         )
-        moment = self.payload(prepared)["current_moment"]
-        self.assertEqual(moment["input_needed"], question)
-        self.assertNotIn("source_ids", moment)
+        moment = prepared.context.moment
+        assert moment is not None
+        assert moment.progress is not None
+        self.assertEqual(moment.progress.text, question)
+        self.assertEqual(moment.sources, ())
 
     def test_truncated_report_keeps_a_summary_of_the_omitted_result(self) -> None:
         self.finished_work()
@@ -341,25 +360,22 @@ class ContextTests(unittest.TestCase):
         prepared = self.cognition.prompts.prepare(
             snapshot, selection, self.cognition.request, narrative=narrative
         )
-        payload = self.payload(prepared)
-        excerpt = payload["current_moment"]["reported_progress"]
+        context = prepared.context
+        assert context.moment is not None
+        assert context.moment.progress is not None
+        excerpt = context.moment.progress.text
         assert isinstance(excerpt, str)
         self.assertNotIn("Desktop check failed.", excerpt)
-        moment_ids = payload["current_moment"]["source_ids"]
-        assert isinstance(moment_ids, list)
-        labels = []
-        for value in moment_ids:
-            assert isinstance(value, str)
-            labels.append(value)
-        self.assertEqual(set(prepared.citations.resolve_many(labels)), set(report_ids))
-        self.assertNotIn("native_id", json.dumps(payload))
+        self.assertEqual(set(context.moment.sources), set(report_ids))
+        self.assertNotIn("native_id", prepared.request["messages"][0]["content"])
         for identifier in prepared.source_ids:
-            self.assertNotIn(identifier, json.dumps(payload))
+            self.assertNotIn(identifier, prepared.request["messages"][0]["content"])
         self.assertEqual(set(report_ids) & set(prepared.source_ids), set(report_ids))
         self.assertTrue(
             any(
-                item.get("reported_progress") == "Desktop check failed."
-                for item in payload["earlier_context"]
+                isinstance(item, ContextFact)
+                and item.statement.text == "Desktop check failed."
+                for item in context.earlier
             )
         )
         self.assertTrue(prepared.conditions.is_valid(snapshot))
@@ -386,14 +402,17 @@ class ContextTests(unittest.TestCase):
                 prepared = self.cognition.prompts.prepare(
                     snapshot, selection, self.cognition.request, narrative=summary
                 )
-                payload = self.payload(prepared)
+                context = prepared.context
+                assert context.work is not None
+                assert context.work.request is not None
                 self.assertEqual(
-                    payload["current_work"]["source_ids"],
-                    [prepared.citations.label(request_key)],
+                    context.work.request.sources,
+                    (request_key,),
                 )
+                assert context.moment is not None
                 self.assertEqual(
-                    payload["current_moment"]["source_ids"],
-                    [prepared.citations.label(report_key)],
+                    context.moment.sources,
+                    (report_key,),
                 )
                 self.assertEqual(
                     prepared.citations.resolve(prepared.citations.label(report_key)),
@@ -498,9 +517,6 @@ class ContextTests(unittest.TestCase):
             self.current_snapshot(), selection, self.cognition.request
         )
 
-    def payload(self, prepared: CommentaryRequest) -> CommentaryPayload:
-        return json.loads(json.dumps(prepared.context.payload(prepared.citations)))
-
     def test_validated_story_keeps_selected_progress_and_aged_support(
         self,
     ) -> None:
@@ -529,16 +545,19 @@ class ContextTests(unittest.TestCase):
         prepared = self.cognition.prompts.prepare(
             snapshot, selection, self.cognition.request, narrative=narrative
         )
-        payload = self.payload(prepared)
+        context = prepared.context
+        assert context.work is not None
+        assert context.work.story is not None
+        self.assertEqual(context.work.story.text, "Preserve parser compatibility.")
+        assert context.moment is not None
+        assert context.moment.progress is not None
         self.assertEqual(
-            payload["current_work"]["story"], "Preserve parser compatibility."
-        )
-        self.assertEqual(
-            payload["current_moment"]["reported_progress"],
+            context.moment.progress.text,
             "Checking parser compatibility",
         )
+        assert isinstance(context.earlier[-1], ContextFact)
         self.assertEqual(
-            payload["earlier_context"][-1]["reported_progress"],
+            context.earlier[-1].statement.text,
             "The agent reports compatibility checks are running.",
         )
         self.assertTrue(prepared.conditions.is_valid(snapshot))
@@ -593,37 +612,40 @@ class ContextTests(unittest.TestCase):
                     narrative=narrative,
                     spoken_content_revision=revision,
                 )
-                payload = self.payload(prepared)
+                context = prepared.context
+                assert context.moment is not None
+                self.assertEqual(context.moment.elapsed, "6 hours")
+                self.assertIsNone(context.moment.state)
                 self.assertEqual(
-                    payload["current_moment"]["time_since_last_activity"], "6 hours"
-                )
-                self.assertNotIn("activity", payload["current_moment"])
-                self.assertEqual(
-                    payload["current_moment"]["event"],
-                    "The work session remains open. No new activity has been observed.",
+                    context.moment.event,
+                    Event.QUIET_CHECK_IN,
                 )
                 self.assertTrue(prepared.conditions.is_valid(snapshot))
                 if covered:
-                    self.assertIsNone(prepared.context.work)
-                    self.assertNotIn("current_work", payload)
+                    self.assertIsNone(context.work)
                     self.assertEqual(prepared.citations.sources, ())
-                    self.assertNotIn("overlay", json.dumps(payload))
-                    self.assertNotIn("earlier_context", payload)
-                    self.assertNotIn("reported_progress", payload["current_moment"])
+                    self.assertNotIn(
+                        "overlay", prepared.request["messages"][0]["content"]
+                    )
+                    self.assertEqual(context.earlier, ())
+                    self.assertIsNone(context.moment.progress)
                     self.assertNotIn(
                         "Check parser compatibility",
                         prepared.request["messages"][0]["content"],
                     )
                 else:
+                    assert context.work is not None
+                    assert context.work.request is not None
                     self.assertEqual(
-                        payload["current_work"]["request"], "Check parser compatibility"
+                        context.work.request.text, "Check parser compatibility"
                     )
+                    assert context.work.story is not None
                     self.assertEqual(
-                        payload["current_work"]["story"],
+                        context.work.story.text,
                         "The stale overlays need a refresh.",
                     )
-                    self.assertIn("earlier_context", payload)
-                    self.assertIn("reported_progress", payload["current_moment"])
+                    self.assertTrue(context.earlier)
+                    self.assertIsNotNone(context.moment.progress)
 
     def test_cached_narrative_ages_follow_wall_time_without_changing_support(
         self,
@@ -674,14 +696,14 @@ class ContextTests(unittest.TestCase):
         prepared = self.cognition.prompts.prepare(
             snapshot, selection, self.cognition.request, narrative=cached
         )
-        report = self.payload(prepared)["earlier_context"][-1]
-        self.assertEqual(report["age"], "2 minutes ago")
+        report = prepared.context.earlier[-1]
+        self.assertEqual(report.age, "2 minutes ago")
         self.cognition.clock = lambda: 8200
         later = self.cognition.prompts.prepare(
             snapshot, selection, self.cognition.request, narrative=cached
         )
-        report = self.payload(later)["earlier_context"][-1]
-        self.assertEqual(report["age"], "2 hours ago")
+        report = later.context.earlier[-1]
+        self.assertEqual(report.age, "2 hours ago")
         self.assertEqual(prepared.conditions, later.conditions)
         self.assertEqual(
             cached,
@@ -742,8 +764,9 @@ class ContextTests(unittest.TestCase):
         prepared = self.cognition.prompts.prepare(
             snapshot, selection, self.cognition.request
         )
+        assert prepared.context.work is not None
         self.assertEqual(
-            self.payload(prepared)["current_work"]["request_age"],
+            prepared.context.work.request_age,
             "less than a minute ago",
         )
         self.cognition.clock = lambda: 15400
@@ -755,9 +778,8 @@ class ContextTests(unittest.TestCase):
         later = self.cognition.prompts.prepare(
             snapshot, later_selection, self.cognition.request
         )
-        self.assertEqual(
-            self.payload(later)["current_work"]["request_age"], "4 hours ago"
-        )
+        assert later.context.work is not None
+        self.assertEqual(later.context.work.request_age, "4 hours ago")
         self.assertEqual(
             prepared.conditions.context.stable(), later.conditions.context.stable()
         )
@@ -771,9 +793,8 @@ class ContextTests(unittest.TestCase):
         )
         self.work = (subject,)
         prepared = self.prepare()
-        self.assertEqual(
-            self.payload(prepared)["current_work"]["request_age"], "unknown"
-        )
+        assert prepared.context.work is not None
+        self.assertEqual(prepared.context.work.request_age, None)
 
     def test_changed_older_story_evidence_invalidates_speech_outside_raw_projection(
         self,
@@ -855,11 +876,12 @@ class ContextTests(unittest.TestCase):
             narrative=narrative,
             excluded=(utterance,),
         )
-        work = self.payload(prepared)["current_work"]
-        self.assertEqual(
-            work,
-            {"request": "Keep the public API stable", "request_age": "unknown"},
-        )
+        work = prepared.context.work
+        assert work is not None
+        assert work.request is not None
+        self.assertEqual(work.request.text, "Keep the public API stable")
+        self.assertIsNone(work.request_age)
+        self.assertIsNone(work.story)
         self.assertNotIn(utterance, prepared.request["messages"][0]["content"])
 
     def test_copied_speech_is_removed_from_the_current_request(self) -> None:
@@ -916,7 +938,8 @@ class ContextTests(unittest.TestCase):
                 )
                 content = prepared.request["messages"][0]["content"]
                 self.assertNotIn(utterance, content)
-                tool = self.payload(prepared)["current_moment"]["tool"]
+                assert prepared.context.moment is not None
+                tool = prepared.context.moment.tool
                 assert isinstance(tool, str)
                 self.assertIn("rg", tool)
 
@@ -927,8 +950,11 @@ class ContextTests(unittest.TestCase):
             + "Keep it grounded."
         )
         self.update_session(recent_requests=(request,))
-        payload = self.payload(self.prepare())
-        request = payload["current_work"]["request"]
+        prepared = self.prepare()
+        context = prepared.context
+        assert context.work is not None
+        assert context.work.request is not None
+        request = context.work.request.text
         assert isinstance(request, str)
         self.assertIn("Fix the commentary.", request)
         self.assertIn("Keep it grounded.", request)
@@ -938,15 +964,17 @@ class ContextTests(unittest.TestCase):
         self.config.prompt_target_bytes = 1
         before = deepcopy(self.snapshot)
         prepared = self.prepare()
-        payload = self.payload(prepared)
+        context = prepared.context
+        assert context.work is not None
+        assert context.work.request is not None
+        self.assertEqual(context.work.request.text, "Keep the public API stable")
+        assert context.moment is not None
+        assert context.moment.progress is not None
         self.assertEqual(
-            payload["current_work"]["request"], "Keep the public API stable"
-        )
-        self.assertEqual(
-            payload["current_moment"]["reported_progress"],
+            context.moment.progress.text,
             "Checking parser compatibility",
         )
-        self.assertNotIn("earlier_context", payload)
+        self.assertEqual(context.earlier, ())
         self.assertEqual(self.snapshot, before)
 
     def test_budgeted_context_resolves_only_the_included_citations(self) -> None:
@@ -970,9 +998,11 @@ class ContextTests(unittest.TestCase):
         prepared = self.cognition.prompts.prepare(
             snapshot, selection, self.cognition.request, narrative=narrative
         )
-        payload = self.payload(prepared)
-        self.assertEqual(payload["current_work"]["story_source_ids"], ["s1"])
-        self.assertNotIn("earlier_context", payload)
+        context = prepared.context
+        assert context.work is not None
+        assert context.work.story is not None
+        self.assertEqual(context.work.story.sources, ("intent-source",))
+        self.assertEqual(context.earlier, ())
         self.assertEqual(prepared.citations.resolve("s1"), "intent-source")
         with self.assertRaises(ValueError):
             prepared.citations.resolve("s2")
@@ -980,12 +1010,14 @@ class ContextTests(unittest.TestCase):
             prepared.citations.resolve("intent-source")
 
     def test_available_budget_keeps_requests_in_chronological_order(self) -> None:
-        payload = self.payload(self.prepare())
+        prepared = self.prepare()
+        context = prepared.context
+        assert context.work is not None
+        assert context.work.request is not None
+        self.assertEqual(context.work.request.text, "Keep the public API stable")
         self.assertEqual(
-            payload["current_work"]["request"], "Keep the public API stable"
-        )
-        self.assertEqual(
-            payload["earlier_context"], [{"request": "Explore parsing options"}]
+            context.earlier,
+            (ContextFact(FactKind.REQUEST, SupportedText("Explore parsing options")),),
         )
 
     def test_manifest_ignores_an_omitted_session_changing(self) -> None:
@@ -1059,10 +1091,10 @@ class ContextTests(unittest.TestCase):
         prepared = self.cognition.prompts.prepare(
             snapshot, selection, self.cognition.request
         )
-        payload = self.payload(prepared)
-        self.assertEqual(
-            payload["current_work"]["request"], "Preserve parser compatibility"
-        )
+        context = prepared.context
+        assert context.work is not None
+        assert context.work.request is not None
+        self.assertEqual(context.work.request.text, "Preserve parser compatibility")
 
     def test_manifest_rejects_a_superseded_runtime_transition(self) -> None:
         prepared = self.prepare()
@@ -1078,15 +1110,15 @@ class ContextTests(unittest.TestCase):
         self,
     ) -> None:
         prepared = self.prepare(context="Inspect the parser result")
-        payload = self.payload(prepared)
+        context = prepared.context
+        self.assertIsNone(context.work)
+        self.assertEqual(context.earlier, ())
         self.assertEqual(
-            payload,
-            {
-                "current_moment": {
-                    "event": "The developer supplied context for a reaction.",
-                    "text": "Inspect the parser result",
-                }
-            },
+            context.moment,
+            Moment(Event.EXPLICIT_CONTEXT, text="Inspect the parser result"),
+        )
+        self.assertIn(
+            "Inspect the parser result", prepared.request["messages"][0]["content"]
         )
         self.assertNotIn(
             "Inspect the parser result", json.dumps(prepared.request["system"])
@@ -1163,7 +1195,7 @@ class ContextTests(unittest.TestCase):
         self,
     ) -> None:
         self.output()
-        encoded = json.dumps(self.payload(self.prepare()))
+        encoded = self.prepare().request["messages"][0]["content"]
         self.assertNotIn('"checkout"', encoded)
         self.assertNotIn('"/parser"', encoded)
         self.assertNotIn("native_id", encoded)
@@ -1197,7 +1229,7 @@ class ContextTests(unittest.TestCase):
             PullRequestObservation(ref=pr.url, pr=pr, checked_at=1001)
         )
         self.work = self.memory.connected_work(self.snapshot)
-        encoded = json.dumps(self.payload(self.prepare()))
+        encoded = self.prepare().request["messages"][0]["content"]
         self.assertNotIn(PullRequestState.MERGED, encoded)
         self.assertNotIn("OPEN", encoded)
 
@@ -1235,12 +1267,19 @@ class ContextTests(unittest.TestCase):
     def test_selected_work_context_is_supplied_once(self) -> None:
         self.output()
         self.update_session(connected_work=self.work[0].story)
-        payload = self.payload(self.prepare())
+        prepared = self.prepare()
+        context = prepared.context
+        assert context.work is not None
+        assert context.work.request is not None
         self.assertEqual(
-            payload["current_work"]["request"], "Make session tracking survive restarts"
+            context.work.request.text, "Make session tracking survive restarts"
         )
-        self.assertNotIn("focus_work", payload)
-        self.assertNotIn("focus_session", payload)
+        self.assertEqual(
+            self.prepare()
+            .request["messages"][0]["content"]
+            .count("Make session tracking survive restarts"),
+            1,
+        )
 
     def test_resumed_work_invalidates_a_quiet_care_remark(self) -> None:
         self.snapshot = sessions_snapshot()
@@ -1277,9 +1316,12 @@ class ContextTests(unittest.TestCase):
             progress="",
             recent_requests=(),
         )
-        payload = self.payload(self.prepare())
-        self.assertEqual(set(payload), {"current_work", "current_moment"})
-        encoded = json.dumps(payload)
+        prepared = self.prepare()
+        context = prepared.context
+        self.assertIsNotNone(context.work)
+        self.assertIsNotNone(context.moment)
+        self.assertEqual(context.earlier, ())
+        encoded = prepared.request["messages"][0]["content"]
         for excluded in (
             "summary",
             "observed_at",
@@ -1350,24 +1392,30 @@ class ContextTests(unittest.TestCase):
             )
             for subject in self.work
         )
-        payload = self.payload(self.prepare())
-        self.assertEqual(payload["current_work"]["request"], "Build a log explorer")
-        self.assertNotIn("reported_progress", payload["current_moment"])
+        prepared = self.prepare()
+        context = prepared.context
+        assert context.work is not None
+        assert context.work.request is not None
+        self.assertEqual(context.work.request.text, "Build a log explorer")
+        assert context.moment is not None
+        self.assertIsNone(context.moment.progress)
         self.assertEqual(
-            payload["earlier_context"],
-            [
-                {
-                    "reported_progress": "Finished simplifying log labels",
-                    "age": "3 minutes ago",
-                },
-                {
-                    "reported_progress": "Found two redundant assertions",
-                    "age": "2 minutes ago",
-                    "scope": "Audit tests",
-                },
-            ],
+            context.earlier,
+            (
+                ContextFact(
+                    FactKind.PROGRESS,
+                    SupportedText("Finished simplifying log labels"),
+                    age="3 minutes ago",
+                ),
+                ContextFact(
+                    FactKind.PROGRESS,
+                    SupportedText("Found two redundant assertions"),
+                    age="2 minutes ago",
+                    scope="Audit tests",
+                ),
+            ),
         )
-        self.assertNotIn("observed_at", json.dumps(payload))
+        self.assertNotIn("observed_at", prepared.request["messages"][0]["content"])
 
     def test_waiting_reports_only_the_current_input_request(self) -> None:
         self.update_session(
@@ -1377,23 +1425,24 @@ class ContextTests(unittest.TestCase):
             waiting_prompt="Which examples should I use?",
             progress="Finished an older task",
         )
-        moment = self.payload(self.prepare())["current_moment"]
-        self.assertEqual(
-            moment["event"], "The work is waiting for an answer to a question."
-        )
-        self.assertEqual(moment["input_needed"], "Which examples should I use?")
+        moment = self.prepare().context.moment
+        assert moment is not None
+        self.assertEqual(moment.event, Event.INPUT_REQUESTED)
+        assert moment.progress is not None
+        self.assertEqual(moment.progress.text, "Which examples should I use?")
         self.update_session(
             waiting_kind=WaitingKind.PERMISSION,
             waiting_prompt=None,
             waiting_tool="Run the local browser check",
         )
-        moment = self.payload(self.prepare())["current_moment"]
+        moment = self.prepare().context.moment
+        assert moment is not None
         self.assertEqual(
-            moment["event"],
-            "The work is waiting for the developer to approve an operation.",
+            moment.event,
+            Event.PERMISSION_REQUEST,
         )
-        self.assertEqual(moment["tool"], "Run the local browser check")
-        self.assertNotIn("reported_progress", moment)
+        self.assertEqual(moment.tool, "Run the local browser check")
+        self.assertIsNone(moment.progress)
 
     def test_running_check_in_rejects_a_replacement_call_with_the_same_command(
         self,
@@ -1503,8 +1552,10 @@ class ContextTests(unittest.TestCase):
         )
         moment = self.cognition.prompts.prompt(snapshot, selection).moment
         assert moment is not None and moment.progress is not None
+        assert moment is not None
         self.assertEqual(moment.event, Event.TURN_ENDED)
         self.assertEqual(moment.outcome, ExecutionOutcome.SUCCESS)
+        assert moment.progress is not None
         self.assertEqual(moment.progress.text, "Parser checks passed")
 
     def test_selected_child_update_keeps_parent_result_in_historical_context(
@@ -1562,9 +1613,11 @@ class ContextTests(unittest.TestCase):
             }
         )
         context = self.cognition.prompts.prompt(snapshot, selection)
-        assert context.work is not None and context.work.request is not None
-        assert context.moment is not None and context.moment.progress is not None
+        assert context.work is not None
+        assert context.work.request is not None
         self.assertEqual(context.work.request.text, "Inspect the parser")
+        assert context.moment is not None
+        assert context.moment.progress is not None
         self.assertEqual(
             context.moment.progress.text,
             "Child is inspecting escape handling",
@@ -1665,9 +1718,11 @@ class ContextTests(unittest.TestCase):
             },
         )
         context = self.cognition.prompts.prompt(snapshot, selection, narrative)
-        assert context.work is not None and context.work.request is not None
-        assert context.moment is not None and context.moment.progress is not None
+        assert context.work is not None
+        assert context.work.request is not None
         self.assertEqual(context.work.request.text, "current task")
+        assert context.moment is not None
+        assert context.moment.progress is not None
         self.assertEqual(context.moment.progress.text, "Escape checks passed")
         history = {
             item.statement.text: item.scope
@@ -1715,8 +1770,9 @@ class ContextTests(unittest.TestCase):
             )
             for subject in self.work
         )
-        payload = self.payload(self.prepare())
-        self.assertEqual(payload["earlier_context"][-1]["scope"], "Audit tests")
+        prepared = self.prepare()
+        context = prepared.context
+        self.assertEqual(context.earlier[-1].scope, "Audit tests")
         child_without_earlier_assignment = child.model_copy(
             update={"requests": (current_assignment,)}
         )
@@ -1730,8 +1786,9 @@ class ContextTests(unittest.TestCase):
             )
             for subject in self.work
         )
-        payload = self.payload(self.prepare())
-        self.assertEqual(payload["earlier_context"][-1]["scope"], "related task")
+        prepared = self.prepare()
+        context = prepared.context
+        self.assertEqual(context.earlier[-1].scope, "related task")
 
     def test_cancelled_routine_work_preserves_the_terminal_outcome(self) -> None:
         self.update_session(
@@ -1750,16 +1807,13 @@ class ContextTests(unittest.TestCase):
         prepared = self.cognition.prompts.prepare(
             snapshot, selection, self.cognition.request
         )
-        moment = self.payload(prepared)["current_moment"]
+        moment = prepared.context.moment
+        assert moment is not None
+        self.assertEqual(moment.event, Event.WORK_UPDATE)
+        self.assertEqual(moment.state, WorkState.QUIET)
         self.assertEqual(
-            moment["event"], "The supplied activity and findings describe this work."
-        )
-        self.assertEqual(
-            moment["activity"], "No current execution is confirmed for this work."
-        )
-        self.assertEqual(
-            moment["execution"],
-            "The work segment was cancelled. The report may describe partial progress.",
+            moment.outcome,
+            ExecutionOutcome.CANCELLED,
         )
 
     def test_running_check_in_omits_an_unknown_tool_name(self) -> None:
@@ -1780,9 +1834,10 @@ class ContextTests(unittest.TestCase):
         prepared = self.cognition.prompts.prepare(
             snapshot, selection, self.cognition.request
         )
-        moment = self.payload(prepared)["current_moment"]
-        self.assertNotIn("tool", moment)
-        self.assertEqual(moment["tool_running_for"], "3 minutes")
+        moment = prepared.context.moment
+        assert moment is not None
+        self.assertIsNone(moment.tool)
+        self.assertEqual(moment.elapsed, "3 minutes")
 
     def test_historical_reports_preserve_terminal_outcomes_without_duplicates(
         self,
@@ -1832,14 +1887,14 @@ class ContextTests(unittest.TestCase):
             )
             for subject in self.work
         )
-        earlier = self.payload(self.prepare())["earlier_context"]
+        earlier = self.prepare().context.earlier
         self.assertEqual(len(earlier), 2)
         self.assertEqual(
-            earlier[0]["execution"],
-            "The work segment was cancelled. The report may describe partial progress.",
+            earlier[0].outcome,
+            ExecutionOutcome.CANCELLED,
         )
-        self.assertEqual(earlier[1]["execution"], earlier[0]["execution"])
-        self.assertEqual(earlier[1]["scope"], "related task")
+        self.assertEqual(earlier[1].outcome, earlier[0].outcome)
+        self.assertEqual(earlier[1].scope, "related task")
 
     def test_followup_keeps_its_prior_request_ahead_of_optional_child_reports(
         self,
@@ -1891,31 +1946,31 @@ class ContextTests(unittest.TestCase):
             for subject in self.work
         )
         prepared = self.prepare()
-        payload = self.payload(prepared)
-        self.assertEqual(payload["current_work"]["request"], "proceed")
-        self.assertEqual(len(payload["earlier_context"]), 6)
+        context = prepared.context
+        assert context.work is not None
+        assert context.work.request is not None
+        self.assertEqual(context.work.request.text, "proceed")
+        self.assertEqual(len(context.earlier), 6)
+        assert isinstance(context.earlier[0], ContextFact)
+        self.assertEqual(context.earlier[0].statement.text, "Build a log explorer")
+        assert isinstance(context.earlier[1], ContextFact)
         self.assertEqual(
-            payload["earlier_context"][0]["request"], "Build a log explorer"
-        )
-        self.assertEqual(
-            payload["earlier_context"][1]["reported_progress"],
+            context.earlier[1].statement.text,
             "Report 1: " + "Checked parser behavior. " * 7 + "Checked parser behavior.",
         )
+        assert isinstance(context.earlier[-1], ContextFact)
         self.assertEqual(
-            payload["earlier_context"][-1]["reported_progress"],
+            context.earlier[-1].statement.text,
             "Report 5: " + "Checked parser behavior. " * 7 + "Checked parser behavior.",
         )
-        one_request_payload = deepcopy(payload)
-        one_request_payload["earlier_context"] = payload["earlier_context"][:1]
         one_request = deepcopy(prepared.request)
-        one_request["messages"] = [
-            {
-                "role": "user",
-                "content": json.dumps(one_request_payload, ensure_ascii=False),
-            }
-        ]
-        self.config.prompt_target_bytes = (
-            len(json.dumps(one_request, ensure_ascii=False).encode("utf-8")) + 1
+        selection = self.attention.select(self.current_snapshot(), SpeechReason.ROUTINE)
+        one_request["messages"][0]["content"] = self.cognition.prompts.payload(
+            replace(context, earlier=context.earlier[:1]),
+            select_prompt(selection),
+            (),
+            None,
         )
-        limited = self.payload(self.prepare())
-        self.assertEqual(limited["earlier_context"], payload["earlier_context"][:1])
+        self.config.prompt_target_bytes = encoded_size(one_request) + 1
+        limited = self.prepare().context
+        self.assertEqual(limited.earlier, context.earlier[:1])

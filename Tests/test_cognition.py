@@ -17,6 +17,13 @@ from pet_daemon.commentary.cognition import (
     Cognition,
     CommentaryResult,
 )
+from pet_daemon.commentary.context import (
+    ContextFact,
+    Event,
+    Interpretation,
+    MemoryCandidate,
+    WorkState,
+)
 from pet_daemon.commentary.contracts import ActionOffer
 from pet_daemon.commentary.model import AnthropicModelClient
 from pet_daemon.commentary.story import StoryResponse
@@ -35,10 +42,9 @@ from pet_daemon.runtime import CareTrigger, HookEventKind, PetContext, SessionTr
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources.hooks import HookEvent
 from pet_daemon.storage import Memory
-from pet_daemon.types import JSONValue
 from pet_daemon.work.history import build_session_entry, report_source_key
 from pet_daemon.work.narrative import NarrativeStatement
-from Tests.fixtures import capture_snapshot, sessions_snapshot
+from Tests.fixtures import capture_snapshot, require, sessions_snapshot
 from Tests.prompt_fixtures import RecordingPromptBuilder
 
 
@@ -357,20 +363,26 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(schema["properties"]), {"speak", "mentions"})
         self.assertEqual(schema["required"], ["speak"])
         self.assertFalse(schema["additionalProperties"])
-        snapshot = self.prompts.inspect_payload(body)
-        self.assertEqual(snapshot["current_work"]["request"], "Refactor batch inserts")
-        self.assertNotIn("pet", snapshot)
+        prepared = self.prompts.prepared(body)
+        context = prepared.context
+        self.assertEqual(
+            require(require(context.work).request).text, "Refactor batch inserts"
+        )
+        self.assertNotIn("<pet>", self.prompts.text(body))
 
     async def test_working_click_requests_speech_with_source_citations(self) -> None:
         speech = "Clicking while I'm busy should still get you a reply."
 
         def answer() -> tuple[dict[str, object], str]:
             body = self.requests[-1][1]
-            payload = self.prompts.inspect_payload(body)
+            prepared = self.prompts.prepared(body)
+            context = prepared.context
             return (
                 {
                     "speak": speech,
-                    "mentions": payload["current_work"]["source_ids"],
+                    "mentions": prepared.citations.labels(
+                        require(require(context.work).request).sources
+                    ),
                 },
                 "end_turn",
             )
@@ -397,17 +409,16 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
 
         def answer() -> tuple[dict[str, object], str]:
             body = self.requests[-1][1]
-            payload = self.prompts.inspect_payload(body)
+            prepared = self.prompts.prepared(body)
+            context = prepared.context
             candidate = next(
-                item["memory_candidate"]
-                for item in payload["earlier_context"]
-                if "memory_candidate" in item
+                item for item in context.earlier if isinstance(item, MemoryCandidate)
             )
             return (
                 {
                     "speak": "We left off at the batch insert refactor.",
-                    "mentions": [candidate["id"]],
-                    "memory": candidate["id"],
+                    "mentions": [prepared.citations.label(candidate.source_id)],
+                    "memory": prepared.citations.label(candidate.source_id),
                     "ongoing": False,
                     "headline": "Batch inserts, remembered",
                     "context": "The last request concerned batch inserts.",
@@ -514,11 +525,13 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         await self.generate_commentary(SpeechReason.EXPLICIT, text)
         body = self.requests[-1][1]
         self.assertNotIn(text, json.dumps(body["system"]))
-        payload = self.prompts.inspect_payload(body)
-        self.assertEqual(payload["current_moment"]["text"], text)
-        self.assertIn("current_work", payload)
-        self.assertIn("source_ids", payload["current_work"])
-        self.assertNotIn("focus_opportunity", payload)
+        prepared = self.prompts.prepared(body)
+        context = prepared.context
+        content = self.prompts.text(body)
+        self.assertEqual(require(context.moment).text, text)
+        self.assertIsNotNone(context.work)
+        self.assertTrue(require(context.work).sources)
+        self.assertNotIn("<focus_opportunity>", content)
 
     async def test_click_greets_only_when_all_sessions_are_inactive(self) -> None:
         snapshot = self.snapshot()
@@ -563,17 +576,19 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(direction=direction, sessions=len(state.sessions)):
                 self.responses.append(({"speak": "Hello there."}, "end_turn"))
                 await self.generate_for_context(state, SpeechReason.CLICK)
-                payload = self.prompts.inspect_payload(self.requests[-1][1])
+                prepared = self.prompts.prepared(self.requests[-1][1])
+                context = prepared.context
                 self.assertIn(direction, self.requests[-1][1]["messages"][0]["content"])
                 if not state.sessions:
                     self.assertEqual(
-                        payload["current_moment"]["event"],
-                        "The developer clicked you. No work is confirmed to be executing.",
+                        require(context.moment).event,
+                        Event.PET_CLICKED_IDLE,
                     )
-        payload = self.prompts.inspect_payload(self.requests[-1][1])
+        prepared = self.prompts.prepared(self.requests[-1][1])
+        context = prepared.context
         self.assertEqual(
-            payload["current_moment"]["activity"],
-            "A work turn is open. This alone does not establish current progress.",
+            require(context.moment).state,
+            WorkState.WORKING,
         )
 
     async def test_click_keeps_active_work_instruction_when_sessions_are_omitted(
@@ -612,12 +627,14 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.responses.append(({"speak": "I am still on it."}, "end_turn"))
         await self.generate_for_context(snapshot, SpeechReason.CLICK)
         body = self.requests[-1][1]
-        payload = self.prompts.inspect_payload(body)
+        prepared = self.prompts.prepared(body)
+        context = prepared.context
+        content = self.prompts.text(body)
         self.assertEqual(
-            payload["current_moment"]["activity"],
-            "A work turn is open. This alone does not establish current progress.",
+            require(context.moment).state,
+            WorkState.WORKING,
         )
-        self.assertNotIn("other_sessions", payload)
+        self.assertNotIn("<other_sessions>", content)
         self.assertIn(
             "The developer clicked you for a conversation about this work.",
             self.requests[-1][1]["messages"][0]["content"],
@@ -666,17 +683,19 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.generate_for_context(snapshot, SpeechReason.CLICK)
         body = self.requests[-1][1]
-        payload = self.prompts.inspect_payload(body)
-        self.assertNotIn("id", payload["current_work"])
+        prepared = self.prompts.prepared(body)
+        context = prepared.context
+        content = self.prompts.text(body)
+        self.assertNotIn("native_id", content)
         self.assertEqual(
-            payload["current_moment"]["input_needed"],
+            require(require(context.moment).progress).text,
             "Choose eager or lazy parsing",
         )
         self.assertEqual(
-            payload["current_moment"]["event"],
-            "The work is waiting for an answer to a question.",
+            require(context.moment).event,
+            Event.INPUT_REQUESTED,
         )
-        self.assertNotIn("other_sessions", payload)
+        self.assertNotIn("<other_sessions>", content)
         direction = self.requests[-1][1]["messages"][0]["content"]
         self.assertIn("Explain the open question or approval request", direction)
         self.assertNotIn("while our work continues", direction)
@@ -707,11 +726,10 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.generate_commentary(SpeechReason.CLICK)
         body = self.requests[-1][1]
-        payload = self.prompts.inspect_payload(body)
-        self.assertEqual(
-            payload["current_moment"]["event"], "The work is waiting for input."
-        )
-        self.assertNotIn("reported_progress", payload["current_moment"])
+        prepared = self.prompts.prepared(body)
+        context = prepared.context
+        self.assertEqual(require(context.moment).event, Event.WAITING)
+        self.assertIsNone(require(context.moment).progress)
         self.assertIn(render("system/rules.jinja"), body["system"][0]["text"])
 
     async def test_care_conversation_matches_the_moment_and_can_choose_silence(
@@ -731,8 +749,8 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 self.responses.append(({"speak": "A little stretch."}, "end_turn"))
                 await self.generate_for_context(snapshot, SpeechReason.CARE)
                 body = self.requests[-1][1]
-                payload = self.prompts.inspect_payload(body)
-                self.assertNotIn("trigger", payload)
+                content = self.prompts.text(body)
+                self.assertNotIn("<trigger>", content)
                 self.assertIn(direction, self.requests[-1][1]["messages"][0]["content"])
                 self.assertNotIn(
                     "Supply a nonempty line of speech",
@@ -804,10 +822,9 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("description", schema["properties"]["speak"])
         self.assertEqual(result.speak, speech)
         self.assertEqual(self.cognition.memory.speech(), [])
-        snapshot = self.prompts.inspect_payload(self.requests[-1][1])
-        self.assertEqual(
-            snapshot["current_moment"]["text"], "The compiler complained again"
-        )
+        prepared = self.prompts.prepared(self.requests[-1][1])
+        context = prepared.context
+        self.assertEqual(require(context.moment).text, "The compiler complained again")
 
     async def test_each_request_contains_one_current_observation_and_no_generated_history(
         self,
@@ -832,13 +849,13 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.responses.append(({"speak": "The parser is progressing."}, "end_turn"))
         await self.generate_commentary(SpeechReason.ROUTINE, "🐈" * 100000)
         content = self.requests[-1][1]["messages"][0]["content"]
-        excerpt = self.prompts.inspect_payload(self.requests[-1][1])["current_moment"][
-            "text"
-        ]
+        excerpt = require(
+            require(self.prompts.prepared(self.requests[-1][1]).context.moment).text
+        )
         self.assertLessEqual(len(excerpt), 2000)
         self.assertTrue(excerpt.endswith("[omitted]"))
         self.assertIn(excerpt, content)
-        self.assertNotIn("reason", self.prompts.inspect_payload(self.requests[-1][1]))
+        self.assertNotIn("<reason>", content)
 
     async def test_concurrent_work_keeps_triggering_session_and_active_tool_durations(
         self,
@@ -876,12 +893,14 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.responses.append(({"speak": "The checks are still running."}, "end_turn"))
         await self.generate_for_context(snapshot, SpeechReason.CHECK_IN)
-        payload = self.prompts.inspect_payload(self.requests[-1][1])
-        self.assertEqual(payload["current_work"]["request"], "Goal 7")
-        self.assertNotIn("other_sessions", payload)
-        self.assertNotIn("trigger", payload)
-        self.assertEqual(payload["current_moment"]["tool"], "pytest")
-        self.assertEqual(payload["current_moment"]["tool_running_for"], "2 minutes")
+        prepared = self.prompts.prepared(self.requests[-1][1])
+        context = prepared.context
+        content = self.prompts.text(self.requests[-1][1])
+        self.assertEqual(require(require(context.work).request).text, "Goal 7")
+        self.assertNotIn("<other_sessions>", content)
+        self.assertNotIn("<trigger>", content)
+        self.assertEqual(require(context.moment).tool, "pytest")
+        self.assertEqual(require(context.moment).elapsed, "2 minutes")
 
     async def test_unrelated_completed_work_stays_out_of_commentary(
         self,
@@ -903,9 +922,13 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         await self.generate_commentary()
-        payload = self.prompts.inspect_payload(self.requests[-1][1])
-        self.assertNotIn("Renderer docs verified", json.dumps(payload))
-        self.assertEqual(payload["current_work"]["request"], "Refactor batch inserts")
+        prepared = self.prompts.prepared(self.requests[-1][1])
+        context = prepared.context
+        content = self.prompts.text(self.requests[-1][1])
+        self.assertNotIn("Renderer docs verified", content)
+        self.assertEqual(
+            require(require(context.work).request).text, "Refactor batch inserts"
+        )
 
     async def test_small_target_keeps_triggering_request_without_unrelated_memory(
         self,
@@ -945,10 +968,12 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.generate_for_context(snapshot, SpeechReason.FAILURE)
         body = self.requests[-1][1]
-        payload = self.prompts.inspect_payload(body)
-        self.assertIn("猫", payload["current_work"]["request"])
-        self.assertNotIn("trigger", payload)
-        self.assertNotIn("memory", payload)
+        prepared = self.prompts.prepared(body)
+        context = prepared.context
+        content = self.prompts.text(body)
+        self.assertIn("猫", require(require(context.work).request).text)
+        self.assertNotIn("<trigger>", content)
+        self.assertNotIn("<memory>", content)
 
     async def test_session_commentary_omits_historical_facts_and_separates_recent_speech(
         self,
@@ -992,11 +1017,11 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         await self.generate_for_context(snapshot, SpeechReason.FAILURE)
-        payload = self.prompts.inspect_payload(self.requests[-1][1])
-        self.assertNotIn("memory", payload)
-        self.assertNotIn("repetition", payload)
-        self.assertNotIn("Unrelated billing project", json.dumps(payload))
-        self.assertNotIn("Visible remark", json.dumps(payload))
+        content = self.prompts.text(self.requests[-1][1])
+        self.assertNotIn("<memory>", content)
+        self.assertNotIn("<repetition>", content)
+        self.assertNotIn("Unrelated billing project", content)
+        self.assertNotIn("Visible remark", content)
         self.assertEqual(
             [row.text for row in self.cognition.memory.speech()],
             ["Visible remark 5", "Visible remark 6", "Visible remark 7"],
@@ -1018,8 +1043,8 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.responses.append(({"speak": "The checks are still running."}, "end_turn"))
         await self.generate_commentary(SpeechReason.CHECK_IN)
         body = self.requests[-1][1]
-        payload = self.prompts.inspect_payload(body)
-        forbidden = {
+        content = self.prompts.text(body)
+        for field in (
             "id",
             "session",
             "source",
@@ -1035,20 +1060,10 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             "seconds_ago",
             "initial_request",
             "project_context",
-        }
-
-        def check(value: JSONValue) -> None:
-            if isinstance(value, dict):
-                self.assertFalse(forbidden.intersection(value))
-                for child in value.values():
-                    check(child)
-            elif isinstance(value, list):
-                for child in value:
-                    check(child)
-
-        check(payload)
-        self.assertNotIn("native_id", json.dumps(payload))
-        self.assertNotIn("private-call", json.dumps(payload))
+        ):
+            self.assertNotIn(f"<{field}>", content)
+        self.assertNotIn("native_id", content)
+        self.assertNotIn("private-call", content)
         system = json.dumps(body["system"])
         for phrase in (
             "Return JSON",
@@ -1094,28 +1109,23 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.responses.append(({"speak": "A little stretch."}, "end_turn"))
                 await self.generate_for_context(snapshot, reason)
-                payload = self.prompts.inspect_payload(self.requests[-1][1])
+                prepared = self.prompts.prepared(self.requests[-1][1])
+                context = prepared.context
+                content = self.prompts.text(self.requests[-1][1])
                 if reason == SpeechReason.CLICK:
-                    self.assertIn("current_work", payload)
-                    self.assertIn("earlier_context", payload)
+                    self.assertIsNotNone(context.work)
+                    self.assertTrue(context.earlier)
                     self.assertEqual(
-                        payload["current_moment"]["event"],
-                        "This is a quiet moment to recall earlier work. The supplied memories describe earlier observations.",
+                        require(context.moment).event,
+                        Event.RECOLLECTION,
                     )
                 else:
-                    self.assertEqual(
-                        payload,
-                        {
-                            "current_moment": {
-                                "event": "No work is confirmed to be executing. Earlier tasks may still be unfinished.",
-                            },
-                            "available_actions": [],
-                            "recent_mentions": [],
-                        },
-                    )
-                self.assertNotIn("Old checklist", json.dumps(payload))
-                self.assertNotIn("Old task report", json.dumps(payload))
-                self.assertNotIn("A recent spoken line", json.dumps(payload))
+                    self.assertIsNone(context.work)
+                    self.assertEqual(require(context.moment).event, Event.QUIET_TIME)
+                    self.assertEqual(context.earlier, ())
+                self.assertNotIn("Old checklist", content)
+                self.assertNotIn("Old task report", content)
+                self.assertNotIn("A recent spoken line", content)
 
     async def test_completion_without_a_captured_request_keeps_its_report(self) -> None:
         self.handle(
@@ -1145,9 +1155,10 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         await self.generate_for_context(snapshot, SpeechReason.COMPLETION)
-        payload = self.prompts.inspect_payload(self.requests[-1][1])
+        prepared = self.prompts.prepared(self.requests[-1][1])
+        context = prepared.context
         self.assertEqual(
-            payload["current_moment"]["reported_progress"], "Checks passed."
+            require(require(context.moment).progress).text, "Checks passed."
         )
 
     async def test_story_schema_preserves_definitions_and_references_through_sdk(
@@ -1172,9 +1183,10 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             SessionIdentity(source=SessionSource.CLAUDE, native_id="worker")
         )
         self.assertIsNotNone(narrative)
-        payload = self.prompts.inspect_payload(self.requests[-1][1])
+        prepared = self.prompts.prepared(self.requests[-1][1])
+        context = prepared.context
         self.assertEqual(
-            payload["current_work"]["story"], "Follow the current request."
+            require(require(context.work).story).text, "Follow the current request."
         )
         self.assertIn(
             "Refactor batch inserts", self.requests[-1][1]["messages"][0]["content"]
@@ -1183,7 +1195,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             "Follow the current request.",
             self.requests[-1][1]["messages"][0]["content"],
         )
-        self.assertNotIn("earlier_context", payload)
+        self.assertEqual(context.earlier, ())
         await self.generate_commentary()
         self.assertEqual(self.call_kinds, ["story", "commentary", "commentary"])
 
@@ -1216,14 +1228,16 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             refreshed.sources[refreshed.intent.sources[0]]["text"],
             "Refactor batch inserts",
         )
-        spoken_context = self.prompts.inspect_payload(self.requests[-1][1])
+        prepared = self.prompts.prepared(self.requests[-1][1])
+        context = prepared.context
+        content = self.prompts.text(self.requests[-1][1])
         self.assertEqual(
-            spoken_context["current_work"]["story"], "Follow the current request."
+            require(require(context.work).story).text, "Follow the current request."
         )
         self.assertIn(
             "Refactor batch inserts", self.requests[-1][1]["messages"][0]["content"]
         )
-        self.assertNotIn("A child confirmed", json.dumps(spoken_context))
+        self.assertNotIn("A child confirmed", content)
 
     async def test_cached_story_refreshes_when_retrieved_reports_change(self) -> None:
         snapshot = self.snapshot()
@@ -1345,22 +1359,25 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             }
 
         def speech_answer() -> tuple[dict[str, object], str]:
-            payload = self.prompts.inspect_payload(self.requests[-1][1])
-            self.assertEqual(payload["current_moment"]["text"], question)
-            self.assertNotIn("Review formatter colors", json.dumps(payload))
+            prepared = self.prompts.prepared(self.requests[-1][1])
+            context = prepared.context
+            content = self.prompts.text(self.requests[-1][1])
+            self.assertEqual(require(context.moment).text, question)
+            self.assertNotIn("Review formatter colors", content)
             completion_item = next(
                 item
-                for item in payload["earlier_context"]
-                if item.get("reported_progress")
+                for item in context.earlier
+                if isinstance(item, ContextFact)
+                and item.statement.text
                 == "Parser recovery checks passed; task complete."
             )
-            self.assertEqual(len(completion_item["source_ids"]), 1)
-            self.assertNotIn(completion_id, json.dumps(payload))
-            self.assertEqual(completion_item["age"], "1 day ago")
+            self.assertEqual(len(completion_item.sources), 1)
+            self.assertNotIn(completion_id, content)
+            self.assertEqual(completion_item.age, "1 day ago")
             return (
                 {
                     "speak": "The parser recovery checks passed, and the task is complete.",
-                    "mentions": completion_item["source_ids"],
+                    "mentions": prepared.citations.labels(completion_item.sources),
                 },
                 "end_turn",
             )
@@ -1440,29 +1457,29 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         )
 
         def answer() -> tuple[dict[str, object], str]:
-            payload = self.prompts.inspect_payload(self.requests[-1][1])
+            prepared = self.prompts.prepared(self.requests[-1][1])
+            context = prepared.context
             candidate = next(
-                item["memory_candidate"]
-                for item in payload["earlier_context"]
-                if item.get("memory_candidate", {}).get("text")
-                == "I am implementing the next parser pass."
+                item
+                for item in context.earlier
+                if isinstance(item, MemoryCandidate)
+                and item.text == "I am implementing the next parser pass."
             )
-            self.assertFalse(candidate["eligible_recent"])
-            self.assertTrue(candidate["eligible_ongoing"])
+            self.assertFalse(candidate.eligible_recent)
+            self.assertTrue(candidate.eligible_ongoing)
             self.assertEqual(
-                candidate["interpretations"],
-                [
-                    {
-                        "category": "progress",
-                        "text": "I am implementing the next parser pass.",
-                    }
-                ],
+                candidate.interpretations,
+                (
+                    Interpretation(
+                        "progress", "I am implementing the next parser pass."
+                    ),
+                ),
             )
             return (
                 {
                     "speak": "I am working through the next parser pass.",
-                    "mentions": [candidate["id"]],
-                    "memory": candidate["id"],
+                    "mentions": [prepared.citations.label(candidate.source_id)],
+                    "memory": prepared.citations.label(candidate.source_id),
                     "ongoing": True,
                 },
                 "end_turn",
@@ -1535,18 +1552,19 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         )
 
         def answer() -> tuple[dict[str, object], str]:
-            payload = self.prompts.inspect_payload(self.requests[-1][1])
+            prepared = self.prompts.prepared(self.requests[-1][1])
+            context = prepared.context
             candidate = next(
-                item["memory_candidate"]
-                for item in payload["earlier_context"]
-                if item.get("memory_candidate", {}).get("text")
-                == "Desktop compatibility remains unverified."
+                item
+                for item in context.earlier
+                if isinstance(item, MemoryCandidate)
+                and item.text == "Desktop compatibility remains unverified."
             )
             return (
                 {
                     "speak": None,
                     "mentions": [],
-                    "memory": candidate["id"],
+                    "memory": prepared.citations.label(candidate.source_id),
                     "ongoing": True,
                 },
                 "end_turn",
@@ -1599,8 +1617,11 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             feedback = repaired["messages"][-1]["content"]
             self.assertIn("unknown_citation", feedback)
             self.assertIn("s999", feedback)
-            payload = self.prompts.inspect_payload(original)
-            source = payload["current_work"]["source_ids"][0]
+            prepared = self.prompts.prepared(original)
+            context = prepared.context
+            source = prepared.citations.labels(
+                require(require(context.work).request).sources
+            )[0]
             self.assertIn(f"- {source}", feedback)
             return (
                 {
@@ -1691,17 +1712,16 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.handle({"source": "claude", "session": "worker", "event": "turn_done"})
 
         def answer() -> tuple[dict[str, object], str]:
-            payload = self.prompts.inspect_payload(self.requests[-1][1])
+            prepared = self.prompts.prepared(self.requests[-1][1])
+            context = prepared.context
             candidate = next(
-                item["memory_candidate"]
-                for item in payload["earlier_context"]
-                if "memory_candidate" in item
+                item for item in context.earlier if isinstance(item, MemoryCandidate)
             )
             return (
                 {
                     "speak": "We left off at the batch insert refactor.",
-                    "mentions": [candidate["id"]],
-                    "memory": candidate["id"],
+                    "mentions": [prepared.citations.label(candidate.source_id)],
+                    "memory": prepared.citations.label(candidate.source_id),
                     "ongoing": False,
                 },
                 "end_turn",
@@ -1733,8 +1753,11 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_silent_commentary_corrects_its_claimed_citation(self) -> None:
         def silent_draft() -> tuple[dict[str, object], str]:
-            payload = self.prompts.inspect_payload(self.requests[-1][1])
-            source = payload["current_work"]["source_ids"][0]
+            prepared = self.prompts.prepared(self.requests[-1][1])
+            context = prepared.context
+            source = prepared.citations.labels(
+                require(require(context.work).request).sources
+            )[0]
             return ({"speak": None, "mentions": [source]}, "end_turn")
 
         self.responses.extend([silent_draft, ({"speak": None}, "end_turn")])
@@ -1776,15 +1799,17 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         )
 
         def answer() -> tuple[dict[str, object], str]:
-            payload = self.prompts.inspect_payload(self.requests[-1][1])
-            moment = payload["current_moment"]
-            self.assertLess(len(moment["reported_progress"]), len(report))
-            self.assertTrue(moment["source_ids"])
-            self.assertRegex(moment["source_ids"][0], r"^s[1-9][0-9]*$")
+            prepared = self.prompts.prepared(self.requests[-1][1])
+            context = prepared.context
+            progress = require(require(context.moment).progress)
+            self.assertLess(len(progress.text), len(report))
+            labels = prepared.citations.labels(progress.sources)
+            self.assertTrue(labels)
+            self.assertRegex(labels[0], r"^s[1-9][0-9]*$")
             return (
                 {
                     "speak": "The desktop check failed.",
-                    "mentions": [moment["source_ids"][0]],
+                    "mentions": [labels[0]],
                 },
                 "end_turn",
             )
@@ -2016,10 +2041,13 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.responses.append(({"speak": "I am here."}, "end_turn"))
         with self.assertLogs("pet-daemon", level="ERROR"):
             await self.generate_commentary(SpeechReason.CLICK)
-        payload = self.prompts.inspect_payload(self.requests[-1][1])
-        self.assertEqual(payload["current_work"]["request"], "Refactor batch inserts")
-        self.assertNotIn("story", payload["current_work"])
-        self.assertNotIn("earlier_context", payload)
+        prepared = self.prompts.prepared(self.requests[-1][1])
+        context = prepared.context
+        self.assertEqual(
+            require(require(context.work).request).text, "Refactor batch inserts"
+        )
+        self.assertIsNone(require(context.work).story)
+        self.assertEqual(context.earlier, ())
 
     async def test_previous_speech_stays_out_of_both_model_stages(self) -> None:
         history = "Mail's in. Quiet now."
@@ -2139,14 +2167,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(render("system/conversation.jinja"), system)
         self.assertIn(render("examples/conversation.jinja"), system)
         self.assertNotIn(render("examples/speech.jinja"), system)
-        payload = self.prompts.inspect_payload(body)
-        self.assertEqual(
-            payload["available_actions"],
-            [
-                {"id": offer.id, "label": offer.label, "description": offer.description}
-                for offer in offers
-            ],
-        )
+        self.assertEqual(self.prompts.offers(body), offers)
         self.assertNotIn(
             "memory", body["output_config"]["format"]["schema"]["properties"]
         )
@@ -2175,9 +2196,9 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             set(body["output_config"]["format"]["schema"]["properties"]),
             {"speak", "mentions"},
         )
-        payload = self.prompts.inspect_payload(body)
-        self.assertNotIn("available_actions", payload)
-        self.assertNotIn("recent_mentions", payload)
+        content = self.prompts.text(body)
+        self.assertNotIn("<available_actions>", content)
+        self.assertNotIn("<recent_mentions>", content)
         self.assertIsNone(result.exchange)
         self.responses.append(
             (
@@ -2319,20 +2340,21 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.story_response = remember_result
 
         def acknowledge() -> tuple[dict[str, object], str]:
-            payload = self.prompts.inspect_payload(self.requests[-1][1])
+            prepared = self.prompts.prepared(self.requests[-1][1])
+            context = prepared.context
             candidate = next(
-                item["memory_candidate"]
-                for item in payload["earlier_context"]
-                if "memory_candidate" in item
-                and item["memory_candidate"]["text"] == "The parser checks passed."
+                item
+                for item in context.earlier
+                if isinstance(item, MemoryCandidate)
+                and item.text == "The parser checks passed."
             )
             return {
                 "speak": "The agent reports that the parser checks passed.",
                 "headline": "Parser checks passed",
                 "context": "",
                 "choices": [],
-                "mentions": [candidate["id"]],
-                "memory": candidate["id"],
+                "mentions": [prepared.citations.label(candidate.source_id)],
+                "memory": prepared.citations.label(candidate.source_id),
                 "ongoing": False,
             }, "end_turn"
 
@@ -2342,17 +2364,10 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.clock.advance(60)
         self.responses.append(({"speak": None}, "end_turn"))
         second = await self.generate_commentary(SpeechReason.CLICK)
-        payload = self.prompts.inspect_payload(self.requests[-1][1])
-        self.assertEqual(
-            payload["recent_mentions"],
-            [
-                {
-                    "source_id": second.request.citations.label(first.mentions[0]),
-                    "age": "1 minute ago",
-                }
-            ],
-        )
-        self.assertNotIn(first.speak, json.dumps(payload))
+        content = self.prompts.text(self.requests[-1][1])
+        label = second.request.citations.label(first.mentions[0])
+        self.assertIn(f"[{label}] was mentioned 1 minute ago.", content)
+        self.assertNotIn(first.speak, content)
         instructions = self.requests[-1][1]["system"][0]["text"]
         self.assertIn(render("system/conversation.jinja"), instructions)
         self.assertIsNone(second.exchange)

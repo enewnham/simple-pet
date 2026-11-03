@@ -176,8 +176,8 @@ the conversation moves on.
 Automatic activity reactions stay brief. Clicking the pet opens a conversation,
 including while agents are working. A separate prompt composes its headline,
 remark, context, and up to two relevant responses from available actions.
-**Recent work** offers another thread or a brief tour of recent work and explicitly
-remaining threads. The right-click menu also offers rounds.
+**Recent work** offers another thread or a brief tour of recent work.
+The right-click menu also offers rounds.
 
 Work commentary offers actions for its recorded worktree, PR, or session when a
 handler is configured. When offered, **Already handled** stops recalling that source,

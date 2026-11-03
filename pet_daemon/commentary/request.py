@@ -1,7 +1,6 @@
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
-from pathlib import Path
 from typing import Literal, cast
 
 from anthropic.types import CacheControlEphemeralParam, TextBlockParam
@@ -16,7 +15,7 @@ from ..domain import (
 )
 from ..harness_text import clean_text
 from ..identity import SessionIdentity
-from ..prompts import bounded, request_excerpt
+from ..prompts import request_excerpt
 from ..prose import prose_text, work_prose
 from ..runtime import PetContext, WaitingKind
 from ..work.evidence import (
@@ -223,15 +222,13 @@ def _current_work(
                     latest, origin, ("request",), root, sources, excluded
                 )
             statement = SupportedText(prose, tuple(ids))
-    project = bounded(Path(focus.repo).name, 120) if focus and focus.repo else None
     age = duration(timestamp - observed_at) if observed_at is not None else None
     return (
         WorkContext(
             request=statement,
             request_age=age + " ago" if age else None,
-            project=project,
         )
-        if statement or project
+        if statement
         else None
     )
 

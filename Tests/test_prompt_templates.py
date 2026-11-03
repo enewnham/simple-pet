@@ -13,13 +13,12 @@ from pet_daemon.commentary.context import (
     Moment,
     SupportedText,
     WorkContext,
+    WorkState,
 )
 from pet_daemon.commentary.contracts import ActionOffer
 from pet_daemon.commentary.observations import (
-    activity_text,
     event_text,
     outcome_text,
-    state_text,
 )
 from pet_daemon.commentary.prompt import select_prompt
 from pet_daemon.commentary.request import PromptBuilder
@@ -60,22 +59,45 @@ class PromptTemplateTests(unittest.TestCase):
                 self.assertTrue(outcome_text(outcome))
         for activity in Activity:
             with self.subTest(activity=activity):
-                self.assertTrue(activity_text(activity))
+                self.assertTrue(
+                    render("observation.jinja", kind="activity", value=activity)
+                )
         self.assertEqual(
             event_text("reported_progress"), "A report describes progress on this work."
         )
-        self.assertEqual(activity_text(Activity.TESTING), "test execution")
+        self.assertEqual(
+            render("observation.jinja", kind="activity", value=Activity.TESTING),
+            "test execution",
+        )
         self.assertEqual(
             outcome_text(ExecutionOutcome.CANCELLED),
             "The work segment was cancelled. The report may describe partial progress.",
         )
         self.assertEqual(
-            state_text("working"),
+            render("observation.jinja", kind="state", value="working"),
             "A work turn is open. This alone does not establish current progress.",
         )
         self.assertEqual(
-            state_text("quiet"), "No current execution is confirmed for this work."
+            render("observation.jinja", kind="state", value="quiet"),
+            "No current execution is confirmed for this work.",
         )
+
+    def test_request_preserves_uncertainty_about_open_and_quiet_work(self) -> None:
+        for state, expected in (
+            (
+                WorkState.WORKING,
+                "A work turn is open. This alone does not establish current progress.",
+            ),
+            (WorkState.QUIET, "No current execution is confirmed for this work."),
+        ):
+            with self.subTest(state=state):
+                text = self.builder.payload(
+                    CommentaryContext(moment=Moment(Event.WORK_UPDATE, state=state)),
+                    select_prompt(self.selection(SpeechSituation.ROUTINE)),
+                    (),
+                    None,
+                )
+                self.assertIn(expected, text)
 
     def test_routine_request_keeps_report_time_beside_the_requested_reaction(
         self,

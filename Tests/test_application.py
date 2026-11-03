@@ -16,8 +16,13 @@ from pet_daemon.behavior.controller import Behavior
 from pet_daemon.behavior.sprites import Pack
 from pet_daemon.cli.hook import update
 from pet_daemon.commentary import Cognition
-from pet_daemon.commentary.context import CommentaryContext
+from pet_daemon.commentary.context import (
+    CommentaryContext,
+    ContextFact,
+    MemoryCandidate,
+)
 from pet_daemon.commentary.contracts import ModelRequest
+from pet_daemon.commentary.observations import event_text
 from pet_daemon.commentary.request import SpeechConditions
 from pet_daemon.config import Config
 from pet_daemon.delivery import (
@@ -139,10 +144,7 @@ class FixtureModel:
         properties = schema.get("properties", {})
         if isinstance(properties, dict) and "headline" in properties:
             assert self.prompts is not None
-            payload = self.prompts.inspect_payload(request)
-            available = {
-                action["id"]: action for action in payload.get("available_actions", [])
-            }
+            available = {action.id: action for action in self.prompts.offers(request)}
             speaking = result.get("speak") is not None
             result.setdefault("headline", self.headline if speaking else "")
             result.setdefault("context", self.exchange_context if speaking else "")
@@ -152,7 +154,7 @@ class FixtureModel:
                     {
                         "id": identifier,
                         "label": self.choice_labels.get(
-                            identifier, available[identifier]["label"]
+                            identifier, available[identifier].label
                         ),
                     }
                     for identifier in self.exchange_choices
@@ -442,11 +444,11 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         prepared = self.app.cognition.prompts.prepare(
             snapshot, selection, self.app.cognition.request
         )
-        payload = self.prompts.inspect_payload(prepared.request)
+        payload = self.prompts.prepared(prepared.request).context
         self.assertEqual(
-            payload["current_work"]["request"], "Improve quoted-field parsing"
+            require(require(payload.work).request).text, "Improve quoted-field parsing"
         )
-        self.assertEqual(payload["current_work"]["request_age"], "2 hours ago")
+        self.assertEqual(require(payload.work).request_age, "2 hours ago")
         reopened = Memory(
             Path(self.temporary.name) / "memory.sqlite3",
             "fixture-pet",
@@ -705,8 +707,8 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             require(selection.focus_session).id,
             SessionIdentity(source=SessionSource.CODEX, native_id="parser"),
         )
-        payload = self.prompts.inspect_payload(self.model.requests[-1][0])
-        self.assertIn("Documented escaped delimiter examples.", json.dumps(payload))
+        text = self.prompts.text(self.model.requests[-1][0])
+        self.assertIn("Documented escaped delimiter examples.", text)
 
     async def test_child_input_request_receives_attention_within_the_root_work(
         self,
@@ -733,16 +735,16 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.app.tick()
         await require(self.app.task)
         self.assertEqual(self.model.requests[-1][1], SpeechReason.CHECK_IN)
-        payload = self.prompts.inspect_payload(self.model.requests[-1][0])
+        payload = self.prompts.prepared(self.model.requests[-1][0]).context
         self.assertEqual(
-            payload["current_moment"]["event"], "The work is waiting for input."
+            event_text(require(payload.moment).event), "The work is waiting for input."
         )
         self.assertEqual(
-            payload["current_moment"]["input_needed"],
+            require(require(payload.moment).progress).text,
             "Which quoted-field examples should I document?",
         )
         self.assertEqual(
-            payload["current_work"]["request"], "Improve quoted-field parsing"
+            require(require(payload.work).request).text, "Improve quoted-field parsing"
         )
 
     async def test_quiet_children_do_not_create_independent_timed_check_ins(
@@ -803,12 +805,13 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.memory.db.execute("DROP TRIGGER reject_session_write")
         self.report("Quoted fields preserve escaped delimiters.")
         await self.submit_commentary()
-        payload = self.prompts.inspect_payload(self.model.requests[-1][0])
+        payload = self.prompts.prepared(self.model.requests[-1][0]).context
+        text = self.prompts.text(self.model.requests[-1][0])
         self.assertEqual(
-            payload["current_work"]["request"], "Improve quoted-field parsing"
+            require(require(payload.work).request).text, "Improve quoted-field parsing"
         )
-        self.assertIn("Quoted fields preserve escaped delimiters.", json.dumps(payload))
-        self.assertNotIn(failed_intent, json.dumps(payload))
+        self.assertIn("Quoted fields preserve escaped delimiters.", text)
+        self.assertNotIn(failed_intent, text)
 
     async def test_late_pr_resolution_keeps_a_report_on_its_work_after_branch_reuse(
         self,
@@ -861,7 +864,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         _, selection = await self.submit_commentary()
-        payload = self.prompts.inspect_payload(self.model.requests[-1][0])
+        text = self.prompts.text(self.model.requests[-1][0])
         work = require(selection.subject).story
         report = next(
             report
@@ -870,8 +873,8 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             and report.details.reported_progress == "The parser changes are ready."
         )
         self.assertEqual(require(report.context).pull_request, reported_pr.url)
-        self.assertNotIn(reported_pr.url, json.dumps(payload))
-        self.assertNotIn(unrelated_pr.url, json.dumps(payload))
+        self.assertNotIn(reported_pr.url, text)
+        self.assertNotIn(unrelated_pr.url, text)
         artifacts = {artifact.ref for artifact in work.artifacts}
         self.assertIn(reported_pr.url, artifacts)
         self.assertNotIn(unrelated_pr.url, artifacts)
@@ -970,8 +973,8 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             "The notes are cleared from disk, and the editor needs a redraw."
         )
         packet, _ = await self.submit_commentary()
-        first = self.prompts.inspect_payload(self.model.requests[-1][0])
-        self.assertIn(report, json.dumps(first))
+        text = self.prompts.text(self.model.requests[-1][0])
+        self.assertIn(report, text)
         self.accept(packet)
 
         self.now += self.config.speech_history_seconds + 1
@@ -989,13 +992,14 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         await self.app.comment(SpeechReason.CHECK_IN)
         request, reason = self.model.requests[-1]
         self.assertEqual(reason, SpeechReason.CHECK_IN)
-        quiet = self.prompts.inspect_payload(request)
-        self.assertNotIn("current_work", quiet)
-        self.assertIn("time_since_last_activity", quiet["current_moment"])
-        self.assertNotIn("activity", quiet["current_moment"])
-        self.assertNotIn("reported_progress", quiet["current_moment"])
-        self.assertNotIn("earlier_context", quiet)
-        self.assertNotIn("overlays", json.dumps(quiet))
+        quiet = self.prompts.prepared(request).context
+        text = self.prompts.text(request)
+        self.assertIsNone(quiet.work)
+        self.assertIsNotNone(require(quiet.moment).elapsed)
+        self.assertIsNone(require(quiet.moment).state)
+        self.assertIsNone(require(quiet.moment).progress)
+        self.assertEqual(quiet.earlier, ())
+        self.assertNotIn("overlays", text)
         content = request["messages"][0]["content"]
         self.assertNotIn("Improve quoted-field parsing", content)
         self.assertNotIn("overlays", content)
@@ -1006,12 +1010,13 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         updated = "The editor refresh clears the annotations."
         self.report(updated)
         await self.app.comment(SpeechReason.CHECK_IN)
-        fresh = self.prompts.inspect_payload(self.model.requests[-1][0])
+        fresh = self.prompts.prepared(self.model.requests[-1][0]).context
+        text = self.prompts.text(self.model.requests[-1][0])
         self.assertEqual(
-            fresh["current_work"]["request"], "Improve quoted-field parsing"
+            require(require(fresh.work).request).text, "Improve quoted-field parsing"
         )
-        self.assertEqual(fresh["current_moment"]["reported_progress"], updated)
-        self.assertNotIn("story", fresh["current_work"])
+        self.assertEqual(require(require(fresh.moment).progress).text, updated)
+        self.assertIsNone(require(fresh.work).story)
         self.assertIn(updated, self.model.requests[-1][0]["messages"][0]["content"])
 
     async def test_silent_check_ins_keep_findings_available(self) -> None:
@@ -1022,8 +1027,8 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.now += 1
         await self.app.comment(SpeechReason.CHECK_IN)
         self.assertEqual(len(self.model.requests), 2)
-        payload = self.prompts.inspect_payload(self.model.requests[-1][0])
-        self.assertIn(report, json.dumps(payload))
+        text = self.prompts.text(self.model.requests[-1][0])
+        self.assertIn(report, text)
         self.assertEqual(self.memory.speech(), [])
 
     async def test_failed_speech_keeps_findings_available_to_quiet_check_ins(
@@ -1041,8 +1046,8 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.model.text = None
         await self.app.comment(SpeechReason.CHECK_IN)
-        payload = self.prompts.inspect_payload(self.model.requests[-1][0])
-        self.assertIn(report, json.dumps(payload))
+        text = self.prompts.text(self.model.requests[-1][0])
+        self.assertIn(report, text)
 
     async def test_running_check_ins_keep_findings_after_accepted_speech(
         self,
@@ -1064,9 +1069,10 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.model.text = None
         await self.app.comment(SpeechReason.CHECK_IN)
-        payload = self.prompts.inspect_payload(self.model.requests[-1][0])
-        self.assertEqual(payload["current_moment"]["tool"], "Run parser checks")
-        self.assertIn(report, json.dumps(payload))
+        payload = self.prompts.prepared(self.model.requests[-1][0]).context
+        text = self.prompts.text(self.model.requests[-1][0])
+        self.assertEqual(require(payload.moment).tool, "Run parser checks")
+        self.assertIn(report, text)
 
     async def test_parent_and_child_reports_share_stack_context_and_one_accepted_speech(
         self,
@@ -1170,9 +1176,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         packet, selection = await self.submit_commentary()
-        payload = self.prompts.inspect_payload(self.model.requests[0][0])
-        self.assertIn(parent_report, json.dumps(payload["earlier_context"]))
-        self.assertIn(child_report, json.dumps(payload["current_moment"]))
+        text = self.prompts.text(self.model.requests[0][0])
+        self.assertIn(parent_report, text)
+        self.assertIn(child_report, text)
         story_payload = json.loads(
             self.model.story_requests[0]["messages"][0]["content"]
         )
@@ -1183,8 +1189,8 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertIn(child_report, json.dumps(child_sources))
         self.assertNotIn(parent_report, json.dumps(child_sources))
-        self.assertNotIn("artifacts", json.dumps(payload))
-        self.assertNotIn(child_pr.url, json.dumps(payload))
+        self.assertNotIn("artifacts", text)
+        self.assertNotIn(child_pr.url, text)
         self.assertEqual(self.memory.speech(), [])
         self.assertTrue(
             self.attention.has_unconsidered_changes(require(selection.subject))
@@ -1656,11 +1662,12 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         await self.app.comment(
             SpeechReason.ROUTINE, snapshot=snapshot, selection=selection
         )
-        payload = self.prompts.inspect_payload(self.model.requests[-1][0])
+        payload = self.prompts.prepared(self.model.requests[-1][0]).context
+        text = self.prompts.text(self.model.requests[-1][0])
         self.assertEqual(
-            payload["current_moment"]["reported_progress"], selected_report
+            require(require(payload.moment).progress).text, selected_report
         )
-        self.assertIn(peer_report, json.dumps(payload["earlier_context"]))
+        self.assertIn(peer_report, text)
         emitted = next(
             packet for packet in reversed(self.packets) if "delivery_id" in packet
         )
@@ -1891,8 +1898,8 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         evidence = story_payload["current_moment"]["evidence"]
         self.assertTrue(any(item.get("text") == earlier for item in evidence))
-        speech_payload = self.prompts.inspect_payload(self.model.requests[-1][0])
-        self.assertIn(earlier, json.dumps(speech_payload))
+        text = self.prompts.text(self.model.requests[-1][0])
+        self.assertIn(earlier, text)
 
     async def test_new_request_in_another_conversation_preserves_queued_completion(
         self,
@@ -2054,15 +2061,17 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         def mention_peer(
             request: ModelRequest, reason: SpeechReason
         ) -> dict[str, object]:
-            payload = self.prompts.inspect_payload(request)
+            payload = self.prompts.prepared(request).context
             source = next(
                 item
-                for item in payload["earlier_context"]
-                if item.get("reported_progress") == reported
+                for item in payload.earlier
+                if isinstance(item, ContextFact) and item.statement.text == reported
             )
             return {
                 "speak": "The multiline escape check is still open.",
-                "mentions": source["source_ids"],
+                "mentions": self.prompts.prepared(request).citations.labels(
+                    source.sources
+                ),
             }
 
         self.model.narrative_response = cite_peer
@@ -2115,14 +2124,14 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
 
         def recall(request: ModelRequest, reason: SpeechReason) -> dict[str, object]:
             self.assertEqual(reason, SpeechReason.CHECK_IN)
-            payload = self.prompts.inspect_payload(request)
+            payload = self.prompts.prepared(request).context
             candidates = [
-                item["memory_candidate"]
-                for item in payload.get("earlier_context", ())
-                if "memory_candidate" in item
+                item for item in payload.earlier if isinstance(item, MemoryCandidate)
             ]
-            candidate = next(item for item in candidates if item["text"] == report)
-            identifier = candidate["id"]
+            candidate = next(item for item in candidates if item.text == report)
+            identifier = self.prompts.prepared(request).citations.label(
+                candidate.source_id
+            )
             selected.append(identifier)
             if len(selected) == 1:
                 return {
@@ -2212,29 +2221,30 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
 
         def respond(request: ModelRequest, reason: SpeechReason) -> dict[str, object]:
             self.assertEqual(reason, SpeechReason.CHECK_IN)
-            payload = self.prompts.inspect_payload(request)
-            work = payload["current_work"]["request"]
+            payload = self.prompts.prepared(request).context
+            work = require(require(payload.work).request).text
             if work == "Review quoted-field parser behavior":
                 return {"speak": None, "memory": None}
             self.assertEqual(work, "Document accessibility examples")
             if not older_candidates:
                 self.assertEqual(self.memory.load_source_attention(), {})
             candidates = [
-                item["memory_candidate"]
-                for item in payload.get("earlier_context", ())
-                if "memory_candidate" in item
+                item for item in payload.earlier if isinstance(item, MemoryCandidate)
             ]
-            older_candidates.append([item["text"] for item in candidates])
+            older_candidates.append([item.text for item in candidates])
             selected_report = next(
-                (item for item in candidates if item["text"] == remaining), None
+                (item for item in candidates if item.text == remaining), None
             )
             if selected_report is None:
                 return {"speak": None, "memory": None}
-            selected.append(selected_report["id"])
+            identifier = self.prompts.prepared(request).citations.label(
+                selected_report.source_id
+            )
+            selected.append(identifier)
             return {
                 "speak": "The accessibility example is still on the docs list.",
-                "mentions": [selected_report["id"]],
-                "memory": selected_report["id"],
+                "mentions": [identifier],
+                "memory": identifier,
                 "ongoing": True,
             }
 
@@ -2242,10 +2252,10 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.app.tick()
         await require(self.app.task)
         requests = [
-            self.prompts.inspect_payload(request) for request, _ in self.model.requests
+            self.prompts.prepared(request).context for request, _ in self.model.requests
         ]
         self.assertEqual(
-            [item["current_work"]["request"] for item in requests],
+            [require(require(item.work).request).text for item in requests],
             ["Review quoted-field parser behavior", "Document accessibility examples"],
         )
         self.assertEqual(len(selected), 1)
@@ -2322,14 +2332,12 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
 
         def cite_old(request: ModelRequest, reason: SpeechReason) -> dict[str, object]:
             self.assertEqual(reason, SpeechReason.CHECK_IN)
-            payload = self.prompts.inspect_payload(request)
+            payload = self.prompts.prepared(request).context
             candidates = [
-                item["memory_candidate"]
-                for item in payload.get("earlier_context", ())
-                if "memory_candidate" in item
+                item for item in payload.earlier if isinstance(item, MemoryCandidate)
             ]
-            self.assertTrue(any(item["text"] == completed for item in candidates))
-            self.assertFalse(any(item["text"] == remaining for item in candidates))
+            self.assertTrue(any(item.text == completed for item in candidates))
+            self.assertFalse(any(item.text == remaining for item in candidates))
             parser = SessionIdentity(source=SessionSource.CODEX, native_id="parser")
             narrative = require(self.memory.load_narrative(parser))
             older_source.append(
@@ -2373,18 +2381,18 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.attention.next_observation = self.now + 200_000
         self.now += 86_400
         selected: list[str] = []
-        automatic_candidates: list[list[dict[str, object]]] = []
+        automatic_candidates: list[list[MemoryCandidate]] = []
 
         def respond(request: ModelRequest, reason: SpeechReason) -> dict[str, object]:
-            payload = self.prompts.inspect_payload(request)
+            payload = self.prompts.prepared(request).context
             candidates = [
-                item["memory_candidate"]
-                for item in payload.get("earlier_context", ())
-                if "memory_candidate" in item
+                item for item in payload.earlier if isinstance(item, MemoryCandidate)
             ]
             if reason == SpeechReason.CLICK:
-                candidate = next(item for item in candidates if item["text"] == report)
-                identifier = candidate["id"]
+                candidate = next(item for item in candidates if item.text == report)
+                identifier = self.prompts.prepared(request).citations.label(
+                    candidate.source_id
+                )
                 selected.append(identifier)
                 return {
                     "speak": "The multiline escape check is still on the list.",
@@ -2427,7 +2435,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.app.tick()
         await require(self.app.task)
         self.assertEqual(len(automatic_candidates), 1)
-        self.assertNotIn(report, [item["text"] for item in automatic_candidates[0]])
+        self.assertNotIn(report, [item.text for item in automatic_candidates[0]])
         self.assertEqual(len(self.memory.speech()), 1)
         self.assertEqual(self.memory.load_source_attention()[source], mentioned)
 
@@ -2475,18 +2483,20 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         selected: list[str] = []
 
         def recall(request: ModelRequest, reason: SpeechReason) -> dict[str, object]:
-            payload = self.prompts.inspect_payload(request)
+            payload = self.prompts.prepared(request).context
             candidate = next(
-                item["memory_candidate"]
-                for item in payload.get("earlier_context", ())
-                if "memory_candidate" in item
-                and item["memory_candidate"]["text"] == report
+                item
+                for item in payload.earlier
+                if isinstance(item, MemoryCandidate) and item.text == report
             )
-            selected.append(candidate["id"])
+            identifier = self.prompts.prepared(request).citations.label(
+                candidate.source_id
+            )
+            selected.append(identifier)
             return {
                 "speak": "The multiline escape check remains open.",
-                "mentions": [candidate["id"]],
-                "memory": candidate["id"],
+                "mentions": [identifier],
+                "memory": identifier,
                 "ongoing": True,
             }
 
@@ -2577,32 +2587,36 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
     def interaction_model_response(
         self, request: ModelRequest, reason: SpeechReason
     ) -> dict[str, object]:
-        payload = self.prompts.inspect_payload(request)
+        payload = self.prompts.prepared(request).context
         candidates = [
-            item["memory_candidate"]
-            for item in payload.get("earlier_context", [])
-            if "memory_candidate" in item
+            item for item in payload.earlier if isinstance(item, MemoryCandidate)
         ]
         if candidates:
             candidate = next(
                 (
                     item
                     for item in reversed(candidates)
-                    if item["kind"] == "reported_progress"
+                    if item.kind == "reported_progress"
                 ),
                 candidates[-1],
             )
+            identifier = self.prompts.prepared(request).citations.label(
+                candidate.source_id
+            )
             return {
                 "speak": self.model.text,
-                "mentions": [candidate["id"]],
-                "memory": candidate["id"],
-                "ongoing": candidate["eligible_ongoing"],
+                "mentions": [identifier],
+                "memory": identifier,
+                "ongoing": candidate.eligible_ongoing,
             }
-        sources = payload.get("current_moment", {}).get("source_ids", [])
+        citations = self.prompts.prepared(request).citations
+        sources = citations.labels(payload.moment.sources) if payload.moment else []
         reports = [
-            item["source_ids"]
-            for item in payload.get("earlier_context", [])
-            if "reported_progress" in item and item.get("source_ids")
+            citations.labels(item.sources)
+            for item in payload.earlier
+            if isinstance(item, ContextFact)
+            and item.kind == "reported_progress"
+            and item.sources
         ]
         return {
             "speak": self.model.text,
@@ -2624,8 +2638,8 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         properties = schema["properties"]
         assert isinstance(properties, dict)
         self.assertEqual(set(properties), {"speak", "mentions"})
-        payload = self.prompts.inspect_payload(request)
-        self.assertNotIn("available_actions", payload)
+        text = self.prompts.text(request)
+        self.assertNotIn("<button_choices>", text)
 
     async def test_click_during_active_work_opens_a_conversation(self) -> None:
         self.report("The parser preserves escaped delimiters.")
@@ -2664,9 +2678,8 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 ("context", "How did we get here?"),
             ],
         )
-        payload = self.prompts.inspect_payload(self.model.requests[-1][0])
         self.assertEqual(
-            {action["id"] for action in payload["available_actions"]},
+            {action.id for action in self.prompts.offers(self.model.requests[-1][0])},
             {
                 "worktree",
                 "pull_request",

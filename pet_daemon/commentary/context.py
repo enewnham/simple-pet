@@ -1,11 +1,11 @@
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import Literal, TypedDict
+from typing import Literal
 
 from ..domain import Activity, ExecutionOutcome
 from ..types import JSONObject
 from .citations import Citations
-from .observations import activity_text, event_text, outcome_text, state_text
+from .observations import outcome_text
 from .sources import SourceKind
 
 
@@ -47,7 +47,6 @@ class SupportedText:
 class WorkContext:
     request: SupportedText | None = None
     request_age: str | None = None
-    project: str | None = None
     story: SupportedText | None = None
 
     @property
@@ -56,21 +55,6 @@ class WorkContext:
             *(self.request.sources if self.request else ()),
             *(self.story.sources if self.story else ()),
         )
-
-    def payload(self, citations: Citations) -> JSONObject:
-        result: JSONObject = {}
-        if self.request is not None:
-            result["request"] = self.request.text
-            result["request_age"] = self.request_age or "unknown"
-            if self.request.sources:
-                result["source_ids"] = tuple(citations.labels(self.request.sources))
-        if self.project is not None:
-            result["project"] = self.project
-        if self.story is not None:
-            result["story"] = self.story.text
-            if self.story.sources:
-                result["story_source_ids"] = tuple(citations.labels(self.story.sources))
-        return result
 
 
 @dataclass(frozen=True)
@@ -89,46 +73,6 @@ class Moment:
     @property
     def sources(self) -> tuple[str, ...]:
         return self.progress.sources if self.progress else ()
-
-    def payload(self, citations: Citations) -> JSONObject:
-        result: JSONObject = {"event": event_text(self.event)}
-        if self.text is not None:
-            result["text"] = self.text
-        if self.progress is not None:
-            progress_key = (
-                "input_needed"
-                if self.event
-                in (Event.PERMISSION_REQUEST, Event.INPUT_REQUESTED, Event.WAITING)
-                else "reported_progress"
-            )
-            result[progress_key] = self.progress.text
-            if self.progress.sources:
-                result["source_ids"] = tuple(citations.labels(self.progress.sources))
-        if self.state is not None:
-            result["activity"] = state_text(self.state)
-        if self.outcome is not None:
-            result["execution"] = outcome_text(self.outcome)
-        if self.operation is not None:
-            result["operation"] = activity_text(self.operation)
-        if self.tool is not None:
-            result["tool"] = self.tool
-        if self.elapsed is not None:
-            elapsed_key = (
-                "time_since_last_activity"
-                if self.event == Event.QUIET_CHECK_IN
-                else "tool_running_for"
-                if self.event == Event.TOOL_RUNNING
-                else "waiting_for_input_for"
-            )
-            result[elapsed_key] = self.elapsed
-        if self.age is not None:
-            age_key = (
-                "reported_progress_age" if self.progress else "execution_ended_age"
-            )
-            result[age_key] = self.age
-        if self.sleeping:
-            result["sleeping"] = True
-        return result
 
 
 @dataclass(frozen=True)
@@ -201,12 +145,6 @@ class MemoryCandidate:
 type ContextItem = ContextFact | MemoryCandidate
 
 
-class CommentaryPayload(TypedDict, total=False):
-    current_work: JSONObject
-    current_moment: JSONObject
-    earlier_context: list[JSONObject]
-
-
 @dataclass(frozen=True)
 class CommentaryContext:
     work: WorkContext | None = None
@@ -232,15 +170,3 @@ class CommentaryContext:
             else None,
             earlier=(),
         )
-
-    def payload(self, citations: Citations) -> CommentaryPayload:
-        result: CommentaryPayload = {}
-        if self.work is not None:
-            result["current_work"] = self.work.payload(citations)
-        if self.moment is not None:
-            result["current_moment"] = self.moment.payload(citations)
-        if self.earlier:
-            result["earlier_context"] = [
-                item.payload(citations) for item in self.earlier
-            ]
-        return result

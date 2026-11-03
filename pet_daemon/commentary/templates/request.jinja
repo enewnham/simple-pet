@@ -34,6 +34,10 @@ Report{% if moment.age %} recorded {{ moment.age|xmltext }}{% endif %} {{ eviden
 {{ moment.progress.text|xmltext }}
 
 {% endif %}
+{% if moment.state %}
+{{ observations.state(moment.state) }}
+
+{% endif %}
 {% if moment.outcome %}
 Execution outcome: {{ observations.outcome(moment.outcome) }}
 {% if moment.age and not moment.progress %}

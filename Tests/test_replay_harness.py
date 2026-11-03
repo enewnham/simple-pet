@@ -8,6 +8,8 @@ from unittest.mock import patch
 import pytest
 
 from pet_daemon.cli.hook import update as hook_update
+from pet_daemon.commentary.context import CommentaryContext, Moment
+from pet_daemon.commentary.observations import event_text
 from pet_daemon.domain import (
     DeliveryStatus,
     ExecutionOutcome,
@@ -31,10 +33,15 @@ class ReplayHarness(ApplicationReplayHarness):
             self.config, self.clock.wall
         )
 
-    def speech_context(self, request: Mapping[str, Any]) -> dict[str, Any]:
+    def speech_context(self, request: Mapping[str, Any]) -> CommentaryContext:
         prompts = self.app.cognition.prompts
         assert isinstance(prompts, RecordingPromptBuilder)
-        return prompts.inspect_payload(request)
+        return prompts.prepared(request).context
+
+
+def require_moment(context: CommentaryContext) -> Moment:
+    assert context.moment is not None
+    return context.moment
 
 
 def test_scheduler_persists_only_renderer_accepted_speech() -> None:
@@ -63,7 +70,7 @@ def test_scheduler_persists_only_renderer_accepted_speech() -> None:
             ]
             payload = replay.speech_context(replay.model.calls[-1]["request"])
             assert (
-                payload["current_moment"]["event"]
+                event_text(require_moment(payload).event)
                 == "The developer sent a message about this work."
             )
             assert any(
@@ -342,7 +349,7 @@ def test_wait_kind_controls_scheduled_and_clicked_commentary(
             else:
                 assert replay.model.calls[-1]["purpose"] == "check_in"
                 payload = replay.speech_context(replay.model.calls[-1]["request"])
-                assert payload["current_moment"]["event"] == moment_event
+                assert event_text(require_moment(payload).event) == moment_event
             replay.receive({"kind": "renderer", "event": "click"})
             await replay.advance(0)
             assert replay.model.calls[-1]["purpose"] == "click"
@@ -352,7 +359,7 @@ def test_wait_kind_controls_scheduled_and_clicked_commentary(
                 if waiting_kind == WaitingKind.PERMISSION_CHECK
                 else moment_event
             )
-            assert payload["current_moment"]["event"] == clicked_event
+            assert event_text(require_moment(payload).event) == clicked_event
             conversation = next(
                 packet["conversation"]
                 for packet in reversed(replay.packets)
@@ -370,12 +377,11 @@ def test_wait_kind_controls_scheduled_and_clicked_commentary(
             await replay.advance(10, tick_seconds=1)
             assert replay.model.calls[-1]["purpose"] == "check_in"
             payload = replay.speech_context(replay.model.calls[-1]["request"])
-            assert payload["current_moment"]["event"] == moment_event
+            assert event_text(require_moment(payload).event) == moment_event
             if waiting_kind == WaitingKind.QUESTION:
-                assert (
-                    payload["current_moment"]["input_needed"]
-                    == "Which parser should I check?"
-                )
+                progress = require_moment(payload).progress
+                assert progress is not None
+                assert progress.text == "Which parser should I check?"
             activity = replay.app.context().work[0].story.activity
             assert any(
                 isinstance(item.details, ExecutionStatus)
@@ -421,12 +427,12 @@ def test_wait_kind_controls_scheduled_and_clicked_commentary(
             assert replay.model.calls[-1]["purpose"] == "completion"
             payload = replay.speech_context(replay.model.calls[-1]["request"])
             assert (
-                payload["current_moment"]["event"]
+                event_text(require_moment(payload).event)
                 == "An execution of this work ended. The reported outcome describes that execution, not whether the whole task is complete."
             )
             assert (
-                payload["current_moment"]["execution"]
-                == "The work segment ended without a reported execution error. This alone does not establish task completion."
+                "The work segment ended without a reported execution error. This alone does not establish task completion."
+                in replay.model.calls[-1]["request"]["messages"][0]["content"]
             )
             reports = replay.memory.narrative_reports(
                 (SessionIdentity(source=SessionSource.CLAUDE, native_id="parser"),)
@@ -509,10 +515,12 @@ def test_child_check_ins_follow_requests_for_input(
                 assert child.last_check_in == replay.clock()
                 payload = replay.speech_context(replay.model.calls[-1]["request"])
                 assert (
-                    payload["current_moment"]["event"]
+                    event_text(require_moment(payload).event)
                     == "The work is waiting for the developer to approve an operation."
                 )
-                assert payload["current_work"]["request"] == "Check escaped delimiters"
+                assert payload.work is not None
+                assert payload.work.request is not None
+                assert payload.work.request.text == "Check escaped delimiters"
 
     asyncio.run(scenario())
 
