@@ -11,10 +11,9 @@ from pathlib import Path
 import httpx2 as httpx
 from anthropic import AsyncAnthropic
 
-from pet_daemon.commentary import reaction
 from pet_daemon.config import Config
 from pet_daemon.daemon import Daemon
-from pet_daemon.domain import SessionSource, SpeechSituation
+from pet_daemon.domain import SessionSource
 from pet_daemon.identity import SessionIdentity
 from pet_daemon.types import JSONObject
 from Tests.fixtures import require, story_response
@@ -63,8 +62,8 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                 ]
                 explicit = (
                     not summary
-                    and reaction.DIRECTIONS[SpeechSituation.EXPLICIT]
-                    in body["system"][-1]["text"]
+                    and "Give a brief reaction to the supplied context above."
+                    in body["messages"][0]["content"]
                 )
                 if explicit:
                     entered.set()
@@ -269,10 +268,8 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(daemon.application.sessions.is_working)
                     self.assertTrue(
                         any(
-                            json.loads(request["messages"][-1]["content"])
-                            .get("current_moment", {})
-                            .get("text")
-                            == "Observe these parallel parser tasks"
+                            "Observe these parallel parser tasks"
+                            in request["messages"][-1]["content"]
                             for request in requests
                         )
                     )

@@ -1293,6 +1293,22 @@ class MemoryTests(unittest.TestCase):
         finally:
             other.close()
 
+    def test_spoken_content_survives_speech_expiration_and_restart(self) -> None:
+        identifier = SessionIdentity(source=SessionSource.CODEX, native_id="parser")
+        history = AttentionHistory(
+            considered_subject_revision="considered-work",
+            spoken_content_revision="spoken-findings",
+        )
+        self.memory.save_attention_history(identifier, history)
+        self.memory.record_speech("I found the parser issue.", SpeechReason.ROUTINE)
+        self.now += 3600
+        self.memory.prune()
+        self.memory.close()
+        self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
+
+        self.assertEqual(self.memory.speech(), [])
+        self.assertEqual(self.memory.load_attention_history(), {identifier: history})
+
     def test_subject_and_session_consideration_share_a_canonical_identity(self) -> None:
         identifier = SessionIdentity(source=SessionSource.CODEX, native_id="parser")
         original = AttentionHistory(

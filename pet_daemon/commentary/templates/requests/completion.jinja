@@ -1,0 +1,9 @@
+React briefly to the reported execution outcome above.
+{% if moment and moment.outcome == 'cancelled' %}
+Acknowledge the cancelled execution. If its report describes a change, you may react to that reported change in the past tense. Keep the subject to this execution and its recorded changes.
+{% elif moment and moment.outcome == 'error' %}
+Acknowledge the unsuccessful execution and any failure detail explicitly supplied in its report.
+{% else %}
+Choose one reported execution result and give a small reaction to that recorded result.
+{% endif %}
+Silence is welcome.

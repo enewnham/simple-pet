@@ -1,0 +1,120 @@
+{% import '_evidence.jinja' as evidence with context %}
+{% import 'observations.jinja' as observations %}
+{% set work = context.work %}
+{% set moment = context.moment %}
+<observations>
+{% if work %}
+{% if work.request %}
+The developer asked{% if work.request_age %} {{ work.request_age|xmltext }}{% endif %} {{ evidence.cite(work.request.sources) }}:
+{{ work.request.text|xmltext }}
+
+{% endif %}
+{% if work.story %}
+Supported work intent {{ evidence.cite(work.story.sources) }}:
+{{ work.story.text|xmltext }}
+
+{% endif %}
+{% endif %}
+{% if moment %}
+{% if moment.text %}
+Supplied context:
+{{ moment.text|xmltext }}
+
+{% endif %}
+{% if moment.progress %}
+{% if moment.event.value == 'permission_request' %}
+Approval requested {{ evidence.cite(moment.progress.sources) }}:
+{% elif moment.event.value == 'input_requested' %}
+Open question {{ evidence.cite(moment.progress.sources) }}:
+{% elif moment.event.value == 'waiting' %}
+Open input request {{ evidence.cite(moment.progress.sources) }}:
+{% else %}
+Report{% if moment.age %} recorded {{ moment.age|xmltext }}{% endif %} {{ evidence.cite(moment.progress.sources) }}:
+{% endif %}
+{{ moment.progress.text|xmltext }}
+
+{% endif %}
+{% if moment.outcome %}
+Execution outcome: {{ observations.outcome(moment.outcome) }}
+{% if moment.age and not moment.progress %}
+This execution ending was observed {{ moment.age|xmltext }}.
+{% endif %}
+
+{% endif %}
+{% if moment.operation %}
+The failed operation was {{ observations.activity(moment.operation) }}.
+
+{% endif %}
+{% if moment.tool %}
+Tool: {{ moment.tool|xmltext }}
+{% endif %}
+{% if moment.elapsed %}
+{% if moment.event.value == 'tool_running' %}
+The tool call has been running for {{ moment.elapsed|xmltext }}.
+{% elif moment.event.value == 'quiet_check_in' %}
+No new activity has been observed for {{ moment.elapsed|xmltext }}.
+{% elif moment.event.value == 'permission_request' %}
+This approval request has been open for {{ moment.elapsed|xmltext }}.
+{% elif moment.event.value == 'input_requested' %}
+This question has been open for {{ moment.elapsed|xmltext }}.
+{% else %}
+This input request has been open for {{ moment.elapsed|xmltext }}.
+{% endif %}
+
+{% endif %}
+{% if moment.sleeping %}
+The pet is resting.
+
+{% endif %}
+{% endif %}
+{% for item in context.earlier %}
+{% if item.source_id is defined %}
+Memory [{{ citations.label(item.source_id) }}]{% if item.age %} (recorded {{ item.age|xmltext }}){% endif %}:
+{{ item.text|xmltext }}
+Scope: {{ item.scope|xmltext }}
+May recall as: {% if item.eligible_recent %}earlier observation{% endif %}{% if item.eligible_recent and item.eligible_ongoing %}, {% endif %}{% if item.eligible_ongoing %}ongoing work{% endif %}.
+{% if item.outcome %}
+Execution outcome: {{ observations.outcome(item.outcome) }}
+{% endif %}
+{% for interpretation in item.interpretations %}
+{% if interpretation.text != item.text %}
+Recorded {{ interpretation.category }} interpretation: {{ interpretation.text|xmltext }}
+{% endif %}
+{% endfor %}
+
+{% else %}
+Earlier {{ item.kind.value }}{% if item.age %} recorded {{ item.age|xmltext }}{% endif %} {{ evidence.cite(item.sources) }}:
+{{ item.statement.text|xmltext }}
+{% if item.scope %}
+Scope: {{ item.scope|xmltext }}
+{% endif %}
+{% if item.outcome %}
+Execution outcome: {{ observations.outcome(item.outcome) }}
+{% endif %}
+
+{% endif %}
+{% endfor %}
+</observations>
+{% if actions %}
+
+<button_choices>
+Buttons you may offer:
+{% for action in actions %}
+- {{ action.id|xmltext }} — {{ action.label|xmltext }}: {{ action.description|xmltext }}
+{% endfor %}
+</button_choices>
+{% endif %}
+{% if recent_mentions %}
+
+<previous_mentions>
+Sources already mentioned:
+{% for label, age in recent_mentions.items() %}
+- [{{ label }}] was mentioned {{ age|xmltext }}.
+{% endfor %}
+</previous_mentions>
+{% endif %}
+
+<task>
+{% include prompt.template %}
+
+</task>

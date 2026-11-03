@@ -3,10 +3,12 @@
 import argparse
 import asyncio
 import base64
+import html
 import json
 import logging
 import math
 import random
+import re
 import sys
 import tempfile
 import time
@@ -25,6 +27,7 @@ from .behavior.sprites import Pack
 from .commentary.cognition import Cognition
 from .commentary.contracts import ModelRequest
 from .commentary.model import AnthropicModelClient, ModelClient
+from .commentary.observations import event_text
 from .commentary.usage import UsageTokens, collect_usage, request_usage
 from .config import Config
 from .domain import DeliveryStatus, ModelPurpose, ProcessStatus, SpeechReason
@@ -68,24 +71,27 @@ class FixtureModel:
     ) -> dict[str, object]:
         if reason != ModelPurpose.STORY:
             if self.memory_contains is not None:
-                payload = json.loads(request["messages"][0]["content"])
+                content = html.unescape(request["messages"][0]["content"])
                 memory = next(
                     (
-                        candidate
-                        for item in payload.get("earlier_context", [])
-                        if (candidate := item.get("memory_candidate"))
-                        and self.memory_contains in candidate.get("text", "")
-                        and candidate.get(
-                            "eligible_ongoing" if self.ongoing else "eligible_recent"
+                        match.group(1)
+                        for match in re.finditer(
+                            r"^Memory \[(s\d+)\] \(recorded [^\n]+\):\n(.*?)(?=\n\nMemory |\n</observations>|\Z)",
+                            content,
+                            re.MULTILINE | re.DOTALL,
                         )
+                        if self.memory_contains
+                        in match.group(2).split("\nScope: ", 1)[0]
+                        and ("ongoing work" if self.ongoing else "earlier observation")
+                        in match.group(2).split("May recall as: ", 1)[-1].split("\n")[0]
                     ),
                     None,
                 )
                 return {
                     "speak": self.speech if memory else None,
-                    "memory": memory["id"] if memory else None,
+                    "memory": memory,
                     "ongoing": self.ongoing if memory else False,
-                    "mentions": [memory["id"]] if memory and self.speech else [],
+                    "mentions": [memory] if memory and self.speech else [],
                 }
             return {"speak": self.speech}
         payload = json.loads(request["messages"][0]["content"])
@@ -100,8 +106,8 @@ class FixtureModel:
                 for source in sources
                 if source.get("event")
                 in (
-                    "A report describes progress on this work.",
-                    "The current work segment ended.",
+                    event_text("reported_progress"),
+                    event_text("turn_ended"),
                 )
                 and source.get("text")
                 and (

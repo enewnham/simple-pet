@@ -261,40 +261,6 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    def assert_human_context(self, value: object) -> None:
-        if isinstance(value, dict):
-            forbidden = {
-                "id",
-                "revision",
-                "head",
-                "number",
-                "repository",
-                "session",
-                "work_id",
-                "worktree",
-                "checkout",
-                "staged",
-                "unstaged",
-                "untracked",
-                "ahead",
-                "behind",
-                "count",
-                "timestamp",
-                "changed_at",
-                "observed_at",
-                "artifacts",
-                "activity",
-                "summary",
-                "version",
-                "delivery_id",
-            }
-            self.assertFalse(forbidden.intersection(value))
-            for item in value.values():
-                self.assert_human_context(item)
-        elif isinstance(value, list):
-            for item in value:
-                self.assert_human_context(item)
-
     async def native_work(self) -> SessionIdentity:
         self.send(
             {
@@ -365,15 +331,14 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         work_id = await self.native_work()
         self.schedule_routine()
         speech = await self.packet(lambda packet: "delivery_id" in packet)
-        payload = json.loads(self.requests[-1]["messages"][-1]["content"])
-        self.assertIn("next I will document restart behavior", json.dumps(payload))
-        self.assertEqual(
-            payload["current_work"]["request"],
-            "Preserve coding session context across daemon restarts",
-        )
-        self.assertNotIn("Persist coding session context", json.dumps(payload))
-        self.assertNotIn("draft", json.dumps(payload).lower())
-        self.assert_human_context(payload)
+        payload = self.requests[-1]["messages"][-1]["content"]
+        self.assertIn("next I will document restart behavior", payload)
+        self.assertIn("Preserve coding session context across daemon restarts", payload)
+        self.assertNotIn("Persist coding session context", payload)
+        self.assertNotIn("draft", payload.lower())
+        self.assertNotIn(str(self.repository_path), payload)
+        self.assertNotIn('"native_id"', payload)
+        self.assertNotIn('"revision"', payload)
         self.assertEqual(self.daemon.application.memory.speech(), [])
         await self.accept(speech)
         outcome = require(

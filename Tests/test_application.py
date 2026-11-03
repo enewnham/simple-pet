@@ -65,6 +65,7 @@ from pet_daemon.work.observations import (
     RepositoryObservation,
 )
 from Tests.fixtures import require, story_response
+from Tests.prompt_fixtures import RecordingPromptBuilder
 
 
 class FixtureProvider:
@@ -106,6 +107,7 @@ class FixtureModel:
         self.text: str | None = (
             "The parser preserves escaped delimiters inside quoted fields."
         )
+        self.prompts: RecordingPromptBuilder | None = None
         self.response: (
             Callable[[ModelRequest, SpeechReason], dict[str, object]] | None
         ) = None
@@ -136,7 +138,8 @@ class FixtureModel:
         schema = request["output_config"]["format"]["schema"]
         properties = schema.get("properties", {})
         if isinstance(properties, dict) and "headline" in properties:
-            payload = json.loads(request["messages"][0]["content"])
+            assert self.prompts is not None
+            payload = self.prompts.inspect_payload(request)
             available = {
                 action["id"]: action for action in payload.get("available_actions", [])
             }
@@ -232,6 +235,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             clock=self.clock,
             rng=random.Random(0),
         )
+        self.prompts = RecordingPromptBuilder(self.config, self.clock)
+        self.app.cognition.prompts = self.prompts
+        self.model.prompts = self.prompts
         self.provider.emit = self.app.ingest
         hook = normalize_hook(
             {
@@ -436,7 +442,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         prepared = self.app.cognition.prompts.prepare(
             snapshot, selection, self.app.cognition.request
         )
-        payload = json.loads(prepared.request["messages"][0]["content"])
+        payload = self.prompts.inspect_payload(prepared.request)
         self.assertEqual(
             payload["current_work"]["request"], "Improve quoted-field parsing"
         )
@@ -497,13 +503,13 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    def test_missing_capture_time_keeps_observation_age_unknown(self) -> None:
+    def test_uncaptured_requests_retain_their_recorded_observation_time(self) -> None:
         self.app.ingest(
             HookEvent(
                 source=SessionSource.CODEX,
                 session="undated",
                 event=HookEventKind.INTENT,
-                goal="Keep provenance unknown",
+                goal="Keep source capture separate from observation time",
             )
         )
         identity = SessionIdentity(source=SessionSource.CODEX, native_id="undated")
@@ -513,8 +519,11 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             if isinstance(report.payload, IntentEvidence)
         )
         self.assertIsNone(report.evidence_at)
-        self.assertIsNone(report.record().observed_at)
+        self.assertIsNone(report.capture_at)
+        self.assertEqual(report.record().observed_at, self.now)
         self.assertEqual(report.ingested_at, self.now)
+        context = require(self.memory.context(identity))
+        self.assertEqual(context.initial_request_at, self.now)
 
     def test_context_enrichment_preserves_earlier_snapshots(self) -> None:
         earlier = self.app.context()
@@ -696,7 +705,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             require(selection.focus_session).id,
             SessionIdentity(source=SessionSource.CODEX, native_id="parser"),
         )
-        payload = json.loads(self.model.requests[-1][0]["messages"][0]["content"])
+        payload = self.prompts.inspect_payload(self.model.requests[-1][0])
         self.assertIn("Documented escaped delimiter examples.", json.dumps(payload))
 
     async def test_child_input_request_receives_attention_within_the_root_work(
@@ -724,12 +733,12 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.app.tick()
         await require(self.app.task)
         self.assertEqual(self.model.requests[-1][1], SpeechReason.CHECK_IN)
-        payload = json.loads(self.model.requests[-1][0]["messages"][0]["content"])
+        payload = self.prompts.inspect_payload(self.model.requests[-1][0])
         self.assertEqual(
             payload["current_moment"]["event"], "The work is waiting for input."
         )
         self.assertEqual(
-            payload["current_moment"]["reported_progress"],
+            payload["current_moment"]["input_needed"],
             "Which quoted-field examples should I document?",
         )
         self.assertEqual(
@@ -794,7 +803,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.memory.db.execute("DROP TRIGGER reject_session_write")
         self.report("Quoted fields preserve escaped delimiters.")
         await self.submit_commentary()
-        payload = json.loads(self.model.requests[-1][0]["messages"][0]["content"])
+        payload = self.prompts.inspect_payload(self.model.requests[-1][0])
         self.assertEqual(
             payload["current_work"]["request"], "Improve quoted-field parsing"
         )
@@ -852,7 +861,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         _, selection = await self.submit_commentary()
-        payload = json.loads(self.model.requests[-1][0]["messages"][0]["content"])
+        payload = self.prompts.inspect_payload(self.model.requests[-1][0])
         work = require(selection.subject).story
         report = next(
             report
@@ -940,6 +949,124 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.report("Tests pass")
         self.attention.next_observation = self.now
         self.assertIsNone(self.attention.request(self.app.context()))
+
+    async def test_accepted_work_keeps_only_quiet_context_until_new_progress(
+        self,
+    ) -> None:
+        report = "The feedback file is gone; leftover editor overlays need a redraw."
+        owner = ProcessIdentity(pid=42, started="fixture-owner")
+        self.provider.publish(
+            HookEvent(
+                capture_at=self.now,
+                source=SessionSource.CODEX,
+                session="parser",
+                event=HookEventKind.PROGRESS,
+                progress=report,
+                owner=owner,
+            )
+        )
+        self.app.sessions.apply_process_status({owner: ProcessStatus.ALIVE})
+        self.model.text = (
+            "The notes are cleared from disk, and the editor needs a redraw."
+        )
+        packet, _ = await self.submit_commentary()
+        first = self.prompts.inspect_payload(self.model.requests[-1][0])
+        self.assertIn(report, json.dumps(first))
+        self.accept(packet)
+
+        self.now += self.config.speech_history_seconds + 1
+        reopened = Memory(
+            Path(self.temporary.name) / "memory.sqlite3",
+            "fixture-pet",
+            clock=self.clock,
+        )
+        self.addCleanup(reopened.close)
+        self.app.cognition = Cognition(
+            self.model, self.config, memory=reopened, clock=self.clock
+        )
+        self.app.cognition.prompts = self.prompts
+        self.model.text = None
+        await self.app.comment(SpeechReason.CHECK_IN)
+        request, reason = self.model.requests[-1]
+        self.assertEqual(reason, SpeechReason.CHECK_IN)
+        quiet = self.prompts.inspect_payload(request)
+        self.assertNotIn("current_work", quiet)
+        self.assertIn("time_since_last_activity", quiet["current_moment"])
+        self.assertNotIn("activity", quiet["current_moment"])
+        self.assertNotIn("reported_progress", quiet["current_moment"])
+        self.assertNotIn("earlier_context", quiet)
+        self.assertNotIn("overlays", json.dumps(quiet))
+        content = request["messages"][0]["content"]
+        self.assertNotIn("Improve quoted-field parsing", content)
+        self.assertNotIn("overlays", content)
+        self.assertEqual(self.prompts.requests[content].citations.sources, ())
+        self.assertNotRegex(content, r"\[s\d+\]")
+
+        self.now += 1
+        updated = "The editor refresh clears the annotations."
+        self.report(updated)
+        await self.app.comment(SpeechReason.CHECK_IN)
+        fresh = self.prompts.inspect_payload(self.model.requests[-1][0])
+        self.assertEqual(
+            fresh["current_work"]["request"], "Improve quoted-field parsing"
+        )
+        self.assertEqual(fresh["current_moment"]["reported_progress"], updated)
+        self.assertNotIn("story", fresh["current_work"])
+        self.assertIn(updated, self.model.requests[-1][0]["messages"][0]["content"])
+
+    async def test_silent_check_ins_keep_findings_available(self) -> None:
+        report = "The feedback file is gone; leftover editor overlays need a redraw."
+        self.report(report)
+        self.model.text = None
+        await self.app.comment(SpeechReason.CHECK_IN)
+        self.now += 1
+        await self.app.comment(SpeechReason.CHECK_IN)
+        self.assertEqual(len(self.model.requests), 2)
+        payload = self.prompts.inspect_payload(self.model.requests[-1][0])
+        self.assertIn(report, json.dumps(payload))
+        self.assertEqual(self.memory.speech(), [])
+
+    async def test_failed_speech_keeps_findings_available_to_quiet_check_ins(
+        self,
+    ) -> None:
+        report = "The feedback file is gone; leftover editor overlays need a redraw."
+        self.report(report)
+        packet, _ = await self.submit_commentary()
+        for _ in range(2):
+            self.now += 2
+            self.app.delivery.tick()
+        self.assertEqual(
+            require(self.memory.message_outcome(packet["delivery_id"])).outcome,
+            DeliveryStatus.FAILED,
+        )
+        self.model.text = None
+        await self.app.comment(SpeechReason.CHECK_IN)
+        payload = self.prompts.inspect_payload(self.model.requests[-1][0])
+        self.assertIn(report, json.dumps(payload))
+
+    async def test_running_check_ins_keep_findings_after_accepted_speech(
+        self,
+    ) -> None:
+        report = "The parser preserves escaped delimiters."
+        self.report(report)
+        packet, _ = await self.submit_commentary()
+        self.accept(packet)
+        self.now += 1
+        self.provider.publish(
+            HookEvent(
+                capture_at=self.now,
+                source=SessionSource.CODEX,
+                session="parser",
+                event=HookEventKind.TOOL_START,
+                call="parser-checks",
+                tool="Run parser checks",
+            )
+        )
+        self.model.text = None
+        await self.app.comment(SpeechReason.CHECK_IN)
+        payload = self.prompts.inspect_payload(self.model.requests[-1][0])
+        self.assertEqual(payload["current_moment"]["tool"], "Run parser checks")
+        self.assertIn(report, json.dumps(payload))
 
     async def test_parent_and_child_reports_share_stack_context_and_one_accepted_speech(
         self,
@@ -1043,7 +1170,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         packet, selection = await self.submit_commentary()
-        payload = json.loads(self.model.requests[0][0]["messages"][0]["content"])
+        payload = self.prompts.inspect_payload(self.model.requests[0][0])
         self.assertIn(parent_report, json.dumps(payload["earlier_context"]))
         self.assertIn(child_report, json.dumps(payload["current_moment"]))
         story_payload = json.loads(
@@ -1529,7 +1656,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         await self.app.comment(
             SpeechReason.ROUTINE, snapshot=snapshot, selection=selection
         )
-        payload = json.loads(self.model.requests[-1][0]["messages"][0]["content"])
+        payload = self.prompts.inspect_payload(self.model.requests[-1][0])
         self.assertEqual(
             payload["current_moment"]["reported_progress"], selected_report
         )
@@ -1764,9 +1891,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         evidence = story_payload["current_moment"]["evidence"]
         self.assertTrue(any(item.get("text") == earlier for item in evidence))
-        speech_payload = json.loads(
-            self.model.requests[-1][0]["messages"][0]["content"]
-        )
+        speech_payload = self.prompts.inspect_payload(self.model.requests[-1][0])
         self.assertIn(earlier, json.dumps(speech_payload))
 
     async def test_new_request_in_another_conversation_preserves_queued_completion(
@@ -1929,7 +2054,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         def mention_peer(
             request: ModelRequest, reason: SpeechReason
         ) -> dict[str, object]:
-            payload = json.loads(request["messages"][0]["content"])
+            payload = self.prompts.inspect_payload(request)
             source = next(
                 item
                 for item in payload["earlier_context"]
@@ -1990,7 +2115,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
 
         def recall(request: ModelRequest, reason: SpeechReason) -> dict[str, object]:
             self.assertEqual(reason, SpeechReason.CHECK_IN)
-            payload = json.loads(request["messages"][0]["content"])
+            payload = self.prompts.inspect_payload(request)
             candidates = [
                 item["memory_candidate"]
                 for item in payload.get("earlier_context", ())
@@ -2087,7 +2212,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
 
         def respond(request: ModelRequest, reason: SpeechReason) -> dict[str, object]:
             self.assertEqual(reason, SpeechReason.CHECK_IN)
-            payload = json.loads(request["messages"][0]["content"])
+            payload = self.prompts.inspect_payload(request)
             work = payload["current_work"]["request"]
             if work == "Review quoted-field parser behavior":
                 return {"speak": None, "memory": None}
@@ -2117,8 +2242,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.app.tick()
         await require(self.app.task)
         requests = [
-            json.loads(request["messages"][0]["content"])
-            for request, _ in self.model.requests
+            self.prompts.inspect_payload(request) for request, _ in self.model.requests
         ]
         self.assertEqual(
             [item["current_work"]["request"] for item in requests],
@@ -2198,7 +2322,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
 
         def cite_old(request: ModelRequest, reason: SpeechReason) -> dict[str, object]:
             self.assertEqual(reason, SpeechReason.CHECK_IN)
-            payload = json.loads(request["messages"][0]["content"])
+            payload = self.prompts.inspect_payload(request)
             candidates = [
                 item["memory_candidate"]
                 for item in payload.get("earlier_context", ())
@@ -2251,7 +2375,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         automatic_candidates: list[list[dict[str, object]]] = []
 
         def respond(request: ModelRequest, reason: SpeechReason) -> dict[str, object]:
-            payload = json.loads(request["messages"][0]["content"])
+            payload = self.prompts.inspect_payload(request)
             candidates = [
                 item["memory_candidate"]
                 for item in payload.get("earlier_context", ())
@@ -2350,7 +2474,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         selected: list[str] = []
 
         def recall(request: ModelRequest, reason: SpeechReason) -> dict[str, object]:
-            payload = json.loads(request["messages"][0]["content"])
+            payload = self.prompts.inspect_payload(request)
             candidate = next(
                 item["memory_candidate"]
                 for item in payload.get("earlier_context", ())
@@ -2452,7 +2576,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
     def interaction_model_response(
         self, request: ModelRequest, reason: SpeechReason
     ) -> dict[str, object]:
-        payload = json.loads(request["messages"][0]["content"])
+        payload = self.prompts.inspect_payload(request)
         candidates = [
             item["memory_candidate"]
             for item in payload.get("earlier_context", [])
@@ -2499,7 +2623,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         properties = schema["properties"]
         assert isinstance(properties, dict)
         self.assertEqual(set(properties), {"speak", "mentions"})
-        payload = json.loads(request["messages"][0]["content"])
+        payload = self.prompts.inspect_payload(request)
         self.assertNotIn("available_actions", payload)
 
     async def test_click_during_active_work_opens_a_conversation(self) -> None:
@@ -2539,7 +2663,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 ("context", "How did we get here?"),
             ],
         )
-        payload = json.loads(self.model.requests[-1][0]["messages"][0]["content"])
+        payload = self.prompts.inspect_payload(self.model.requests[-1][0])
         self.assertEqual(
             {action["id"] for action in payload["available_actions"]},
             {
@@ -2651,6 +2775,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             clock=self.clock,
             rng=random.Random(0),
         )
+        self.prompts = RecordingPromptBuilder(self.config, self.clock)
+        self.app.cognition.prompts = self.prompts
+        self.model.prompts = self.prompts
         self.provider.emit = self.app.ingest
         self.model.response = self.interaction_model_response
         self.assertTrue(self.memory.load_source_attention()[source].handled)

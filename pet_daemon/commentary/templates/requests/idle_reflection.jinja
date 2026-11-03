@@ -1,0 +1,6 @@
+Recall one of the earlier memories above rather than replying to the task request. Choose a useful recorded decision, result, or explicitly reported remaining step, or choose silence. A memory's timestamp describes when it was recorded; reported ongoing work may have changed since that time.
+A work-related remark must return the chosen memory's source ID in memory and mentions. Choose a memory allowed as an earlier observation, or set ongoing true for a memory allowed as ongoing work that explicitly describes ongoing, paused, or remaining work. A later resolution or cancellation disqualifies an earlier remaining step.
+A silent selected recollection keeps its memory ID and has empty mentions. If no memory supports a useful remark, return silence with memory null.
+{% if prompt.requested_by_click %}
+The developer requested this recollection with a click. If no memory is useful, a brief playful greeting with memory null is appropriate.
+{% endif %}

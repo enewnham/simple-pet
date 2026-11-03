@@ -1,0 +1,3 @@
+{% macro cite(sources) -%}
+{% for source in sources %}[{{ citations.label(source) }}]{% endfor %}
+{%- endmacro %}

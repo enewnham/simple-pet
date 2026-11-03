@@ -10,6 +10,7 @@ from .commentary import Cognition, CommentaryResult
 from .commentary.contracts import ActionOffer
 from .commentary.conversation import ActionChoice, Exchange
 from .commentary.request import SpeechConditions, commentary_facts
+from .commentary.templates import render
 from .config import Config
 from .delivery import DeliveryOutcome, SpeechDelivery, SpeechMessage, SpeechPacket
 from .domain import DeliveryStatus, SpeechReason, SpeechSituation
@@ -180,36 +181,24 @@ class Interactions:
                     offers[target.kind.value] = ActionOffer(
                         target.kind.value,
                         self.navigator.label(target),
-                        "Open the recorded "
-                        + target.kind.value.replace("_", " ")
-                        + " for the cited point.",
+                        render("buttons.jinja", kind=target.kind.value),
                     )
-            for identifier, label, description in (
-                (
-                    "context",
-                    "What's the context?",
-                    "Show a short explanation of the cited point.",
-                ),
-                (
-                    "tomorrow",
-                    "Tomorrow",
-                    "Defer this point until tomorrow morning. Useful for an explicitly remaining thread.",
-                ),
-                (
-                    "handled",
-                    "Already handled",
-                    "Record the developer's correction that this remaining point is already handled.",
-                ),
+            for identifier, label in (
+                ("context", "What's the context?"),
+                ("tomorrow", "Tomorrow"),
+                ("handled", "Already handled"),
             ):
-                offers[identifier] = ActionOffer(identifier, label, description)
+                offers[identifier] = ActionOffer(
+                    identifier, label, render("buttons.jinja", kind=identifier)
+                )
         if self.context().work:
             offers["more"] = ActionOffer(
-                "more", "Another thread", "Look at another work thread."
+                "more", "Another thread", render("buttons.jinja", kind="more")
             )
             offers["rounds"] = ActionOffer(
                 "rounds",
                 "Recent work",
-                "Show a brief tour of recent work and explicitly remaining threads.",
+                render("buttons.jinja", kind="rounds"),
             )
         return tuple(offers.values())
 

@@ -1,0 +1,9 @@
+{% set descriptions = {
+    'speak_optional': 'One brief spoken remark, or null for silence.',
+    'speak_required': 'One brief spoken remark.',
+    'speech_mentions': 'Heading IDs supporting work facts in the spoken remark. Return exact lowercase IDs without brackets: [s1] becomes ["s1"]. Use [] for silence or companionship without work facts.',
+    'conversation_mentions': 'Heading IDs supporting work facts in the headline, remark, context, or choices. Return exact lowercase IDs without brackets: [s1] becomes ["s1"]. Use [] for silence or companionship without work facts.',
+    'memory': 'One eligible memory heading ID without brackets, such as "s1", chosen for idle recollection.',
+    'ongoing': 'Whether that source explicitly reports ongoing, paused, or remaining work.'
+} %}
+{{ descriptions[field] }}

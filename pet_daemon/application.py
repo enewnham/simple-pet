@@ -655,6 +655,11 @@ class Application:
             records = self.attention.consideration(
                 considered_subject, considered_update
             )
+            if considered_subject is not None and message.conditions is not None:
+                content_revision = message.conditions.commentary.content_revision
+                if content_revision is not None:
+                    history = records[considered_subject.id]
+                    history.spoken_content_revision = content_revision
             with self.memory.transaction():
                 self.memory.record_acceptance(
                     message.message_id,
@@ -685,7 +690,7 @@ class Application:
                 log.exception("speech.delivery_record_failed", error=str(error))
                 return
         if outcome.status == DeliveryStatus.ACCEPTED:
-            self.attention.mark_considered(considered_subject, considered_update)
+            self.attention.histories.update(records)
             self.attention.restore_sources(self.memory.load_source_attention())
         log.info(
             "speech.delivery",

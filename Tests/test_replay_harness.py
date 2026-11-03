@@ -2,6 +2,7 @@ import asyncio
 import json
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -15,10 +16,25 @@ from pet_daemon.domain import (
     SpeechReason,
 )
 from pet_daemon.identity import SessionIdentity
-from pet_daemon.replay import FixtureModel, ReplayClock, ReplayHarness
+from pet_daemon.replay import FixtureModel, ReplayClock
+from pet_daemon.replay import ReplayHarness as ApplicationReplayHarness
 from pet_daemon.runtime import HookEvent, ProcessIdentity, WaitingKind
 from pet_daemon.work.evidence import ExecutionStatus
 from pet_daemon.work.models import ExecutionEvidence, ProgressEvidence
+from Tests.prompt_fixtures import RecordingPromptBuilder
+
+
+class ReplayHarness(ApplicationReplayHarness):
+    def _build(self) -> None:
+        super()._build()
+        self.app.cognition.prompts = RecordingPromptBuilder(
+            self.config, self.clock.wall
+        )
+
+    def speech_context(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        prompts = self.app.cognition.prompts
+        assert isinstance(prompts, RecordingPromptBuilder)
+        return prompts.inspect_payload(request)
 
 
 def test_scheduler_persists_only_renderer_accepted_speech() -> None:
@@ -45,9 +61,7 @@ def test_scheduler_persists_only_renderer_accepted_speech() -> None:
                 "story",
                 "prompt",
             ]
-            payload = json.loads(
-                replay.model.calls[-1]["request"]["messages"][0]["content"]
-            )
+            payload = replay.speech_context(replay.model.calls[-1]["request"])
             assert (
                 payload["current_moment"]["event"]
                 == "The developer sent a message about this work."
@@ -208,12 +222,7 @@ def test_injected_client_uses_current_prompt_and_configured_pack(
                 await replay.comment(SpeechReason.EXPLICIT, "A parser check passed.")
                 request = replay.model.calls[-1]["request"]
                 assert "Use a quiet botanical voice." in request["system"][0]["text"]
-                assert (
-                    json.loads(request["messages"][0]["content"])["current_moment"][
-                        "text"
-                    ]
-                    == "A parser check passed."
-                )
+                assert "A parser check passed." in request["messages"][0]["content"]
                 assert replay.result()["model_mode"] == "provided_client"
                 assert replay.pack.directory == source.pack.directory
 
@@ -245,7 +254,7 @@ def claude_hook() -> Callable[[str, Mapping[str, object]], HookEvent]:
             "PermissionRequest",
             {},
             WaitingKind.PERMISSION_CHECK,
-            "An observation of the selected work is available.",
+            "A tool call is still running. Its result is not known yet.",
         ),
         (
             "Notification",
@@ -332,17 +341,18 @@ def test_wait_kind_controls_scheduled_and_clicked_commentary(
                 assert len(replay.model.calls) == calls_before_wait
             else:
                 assert replay.model.calls[-1]["purpose"] == "check_in"
-                payload = json.loads(
-                    replay.model.calls[-1]["request"]["messages"][0]["content"]
-                )
+                payload = replay.speech_context(replay.model.calls[-1]["request"])
                 assert payload["current_moment"]["event"] == moment_event
             replay.receive({"kind": "renderer", "event": "click"})
             await replay.advance(0)
             assert replay.model.calls[-1]["purpose"] == "click"
-            payload = json.loads(
-                replay.model.calls[-1]["request"]["messages"][0]["content"]
+            payload = replay.speech_context(replay.model.calls[-1]["request"])
+            clicked_event = (
+                "The developer clicked you for a conversation about the supplied work."
+                if waiting_kind == WaitingKind.PERMISSION_CHECK
+                else moment_event
             )
-            assert payload["current_moment"]["event"] == moment_event
+            assert payload["current_moment"]["event"] == clicked_event
             conversation = next(
                 packet["conversation"]
                 for packet in reversed(replay.packets)
@@ -359,13 +369,11 @@ def test_wait_kind_controls_scheduled_and_clicked_commentary(
             )
             await replay.advance(10, tick_seconds=1)
             assert replay.model.calls[-1]["purpose"] == "check_in"
-            payload = json.loads(
-                replay.model.calls[-1]["request"]["messages"][0]["content"]
-            )
+            payload = replay.speech_context(replay.model.calls[-1]["request"])
             assert payload["current_moment"]["event"] == moment_event
             if waiting_kind == WaitingKind.QUESTION:
                 assert (
-                    payload["current_moment"]["reported_progress"]
+                    payload["current_moment"]["input_needed"]
                     == "Which parser should I check?"
                 )
             activity = replay.app.context().work[0].story.activity
@@ -411,11 +419,10 @@ def test_wait_kind_controls_scheduled_and_clicked_commentary(
             await replay.advance(1)
             assert session.outcome == ExecutionOutcome.SUCCESS
             assert replay.model.calls[-1]["purpose"] == "completion"
-            payload = json.loads(
-                replay.model.calls[-1]["request"]["messages"][0]["content"]
-            )
+            payload = replay.speech_context(replay.model.calls[-1]["request"])
             assert (
-                payload["current_moment"]["event"] == "The current work segment ended."
+                payload["current_moment"]["event"]
+                == "An execution of this work ended. The reported outcome describes that execution, not whether the whole task is complete."
             )
             assert (
                 payload["current_moment"]["execution"]
@@ -500,9 +507,7 @@ def test_child_check_ins_follow_requests_for_input(
             else:
                 assert replay.model.calls[-1]["purpose"] == "check_in"
                 assert child.last_check_in == replay.clock()
-                payload = json.loads(
-                    replay.model.calls[-1]["request"]["messages"][0]["content"]
-                )
+                payload = replay.speech_context(replay.model.calls[-1]["request"])
                 assert (
                     payload["current_moment"]["event"]
                     == "The work is waiting for the developer to approve an operation."

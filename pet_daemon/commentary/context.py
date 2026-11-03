@@ -5,7 +5,7 @@ from typing import Literal, TypedDict
 from ..domain import Activity, ExecutionOutcome
 from ..types import JSONObject
 from .citations import Citations
-from .observations import ACTIVITIES, EVENTS, OUTCOMES, STATES
+from .observations import activity_text, event_text, outcome_text, state_text
 from .sources import SourceKind
 
 
@@ -18,6 +18,11 @@ class Event(StrEnum):
     TURN_ENDED = "turn_ended"
     REQUEST_RECEIVED = "request_received"
     QUIET_TIME = "quiet_time"
+    QUIET_CHECK_IN = "quiet_check_in"
+    TOOL_RUNNING = "tool_running"
+    PET_CLICKED = "pet_clicked"
+    PET_CLICKED_IDLE = "pet_clicked_idle"
+    RECOLLECTION = "recollection"
     EXPLICIT_CONTEXT = "explicit_context"
 
 
@@ -86,25 +91,41 @@ class Moment:
         return self.progress.sources if self.progress else ()
 
     def payload(self, citations: Citations) -> JSONObject:
-        result: JSONObject = {"event": EVENTS[self.event]}
+        result: JSONObject = {"event": event_text(self.event)}
         if self.text is not None:
             result["text"] = self.text
         if self.progress is not None:
-            result["reported_progress"] = self.progress.text
+            progress_key = (
+                "input_needed"
+                if self.event
+                in (Event.PERMISSION_REQUEST, Event.INPUT_REQUESTED, Event.WAITING)
+                else "reported_progress"
+            )
+            result[progress_key] = self.progress.text
             if self.progress.sources:
                 result["source_ids"] = tuple(citations.labels(self.progress.sources))
         if self.state is not None:
-            result["activity"] = STATES[self.state]
+            result["activity"] = state_text(self.state)
         if self.outcome is not None:
-            result["execution"] = OUTCOMES[self.outcome]
+            result["execution"] = outcome_text(self.outcome)
         if self.operation is not None:
-            result["operation"] = ACTIVITIES[self.operation]
+            result["operation"] = activity_text(self.operation)
         if self.tool is not None:
             result["tool"] = self.tool
         if self.elapsed is not None:
-            result["elapsed"] = self.elapsed
+            elapsed_key = (
+                "time_since_last_activity"
+                if self.event == Event.QUIET_CHECK_IN
+                else "tool_running_for"
+                if self.event == Event.TOOL_RUNNING
+                else "waiting_for_input_for"
+            )
+            result[elapsed_key] = self.elapsed
         if self.age is not None:
-            result["age"] = self.age
+            age_key = (
+                "reported_progress_age" if self.progress else "execution_ended_age"
+            )
+            result[age_key] = self.age
         if self.sleeping:
             result["sleeping"] = True
         return result
@@ -131,7 +152,7 @@ class ContextFact:
         if self.scope is not None:
             result["scope"] = self.scope
         if self.outcome is not None:
-            result["execution"] = OUTCOMES[self.outcome]
+            result["execution"] = outcome_text(self.outcome)
         return result
 
 

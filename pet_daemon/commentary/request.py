@@ -1,6 +1,6 @@
 import json
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import Literal, cast
 
@@ -8,7 +8,7 @@ from anthropic.types import CacheControlEphemeralParam, TextBlockParam
 from pydantic import BaseModel, Field
 
 from ..attention import AttentionSelection
-from ..config import DEFAULT_PERSONA, DEFAULT_PERSONA_EXAMPLES, Config
+from ..config import DEFAULT_PERSONA, Config
 from ..domain import (
     ExecutionOutcome,
     SpeechReason,
@@ -19,7 +19,6 @@ from ..identity import SessionIdentity
 from ..prompts import bounded, request_excerpt
 from ..prose import prose_text, work_prose
 from ..runtime import PetContext, WaitingKind
-from ..types import JSONObject
 from ..work.evidence import (
     CommentaryEvidence,
     ExecutionStatus,
@@ -48,8 +47,9 @@ from .context import (
     WorkState,
 )
 from .contracts import ActionOffer, ModelRequest, RequestFactory
-from .prompt import COMMON_INSTRUCTIONS, Prompt, select_prompt
+from .prompt import Prompt, select_prompt
 from .sources import NarrativeSource, SourceKind
+from .templates import render
 
 CARE_SITUATIONS = frozenset(
     {
@@ -123,12 +123,13 @@ def _record_source_ids(
     sources: Sequence[NarrativeSource],
     excluded: Sequence[str],
 ) -> list[str]:
-    if not sources or record.observed_at is None:
-        return []
     original = _request_text(record) or _reported_progress(record)
     text = work_prose(original, 1200, excluded)
     if not text:
         return []
+    direct = [record.source_key] if record.source_key is not None else []
+    if not sources or record.observed_at is None:
+        return direct
     original_source = next(
         (source for source in sources if source.identifier == record.source_key), None
     )
@@ -156,8 +157,8 @@ def _record_source_ids(
     if any(
         len([item for item in candidates if item.kind == kind]) > 1 for kind in kinds
     ):
-        return []
-    return [source.identifier for source in candidates]
+        return direct
+    return list(dict.fromkeys((*direct, *(source.identifier for source in candidates))))
 
 
 def _add_earlier(
@@ -242,10 +243,14 @@ def _current_moment(selection: AttentionSelection, excluded: Sequence[str]) -> M
             text=work_prose(selection.context, 2000, excluded),
         )
     if selection.situation == SpeechSituation.IDLE_REFLECTION:
-        return Moment(Event.QUIET_TIME)
+        return Moment(Event.RECOLLECTION)
     focus = selection.focus_session
     situation = selection.situation
-    moment = Moment(Event.WORK_UPDATE)
+    moment = Moment(
+        Event.PET_CLICKED
+        if situation == SpeechSituation.CLICK_WORKING
+        else Event.WORK_UPDATE
+    )
     if focus is None:
         return moment
     if focus.waiting_for_input:
@@ -293,11 +298,17 @@ def _current_moment(selection: AttentionSelection, excluded: Sequence[str]) -> M
         tool = max(focus.active_tools, key=lambda tool: tool.duration_seconds)
         moment = replace(
             moment,
+            event=Event.TOOL_RUNNING,
             tool=work_prose(tool.tool, 160, excluded) or None,
             elapsed=duration(tool.duration_seconds),
         )
     if situation == SpeechSituation.CHECK_IN_QUIET:
-        moment = replace(moment, elapsed=duration(focus.quiet_seconds))
+        moment = replace(
+            moment,
+            event=Event.QUIET_CHECK_IN,
+            state=None,
+            elapsed=duration(focus.quiet_seconds),
+        )
     return moment
 
 
@@ -491,7 +502,12 @@ def commentary_facts(
     situation = selection.situation
     if situation in CARE_SITUATIONS or situation == SpeechSituation.CLICK_IDLE:
         return CommentaryContext(
-            moment=Moment(Event.QUIET_TIME, sleeping=snapshot.sleeping)
+            moment=Moment(
+                Event.PET_CLICKED_IDLE
+                if situation == SpeechSituation.CLICK_IDLE
+                else Event.QUIET_TIME,
+                sleeping=snapshot.sleeping,
+            )
         )
     if selection.reason == SpeechReason.EXPLICIT and not selection.context:
         return CommentaryContext()
@@ -587,6 +603,7 @@ def commentary_facts(
         if focus.waiting_prompt != current_report:
             current_ids = []
         current_report = clean_text(focus.id.source, focus.waiting_prompt or "")
+        current_observed_at = None
     if current_report and situation not in (
         SpeechSituation.PROMPT,
         SpeechSituation.FAILURE,
@@ -614,6 +631,7 @@ class SpeechConditions(BaseModel):
     selection: AttentionSelection
     context: CommentaryContext
     narrative_revision: str | None = None
+    content_revision: str | None = None
     source_scope_revisions: dict[str, str] = Field(default_factory=dict)
 
     def is_valid(self, snapshot: PetContext) -> bool:
@@ -639,6 +657,15 @@ class SpeechConditions(BaseModel):
         if not self.selection.is_valid(snapshot):
             return False
         refreshed = self.selection.refresh(snapshot)
+        if (
+            self.selection.situation == SpeechSituation.CHECK_IN_QUIET
+            and self.content_revision is not None
+            and (
+                refreshed.subject is None
+                or semantic_revision(refreshed.subject.story) != self.content_revision
+            )
+        ):
+            return False
         if self.narrative_revision is not None and (
             refreshed.subject is None
             or semantic_revision(refreshed.subject.story, related=False)
@@ -683,6 +710,7 @@ class SpeechConditions(BaseModel):
 
 class CommentaryRequest(BaseModel):
     selection: AttentionSelection
+    context: CommentaryContext
     request: ModelRequest
     conditions: SpeechConditions
     citations: Citations
@@ -851,34 +879,25 @@ class PromptBuilder:
         self.clock = clock
 
     def system(self, prompt: Prompt) -> list[TextBlockParam]:
-        sections = [
-            "<persona>\n" + self.config.persona + "\n</persona>",
-            "<rules>\n" + COMMON_INSTRUCTIONS + "\n</rules>",
-            "<instructions>\n" + prompt.instructions + "\n</instructions>",
-        ]
         examples = self.config.persona_examples
-        if examples is None and self.config.persona == DEFAULT_PERSONA:
-            examples = DEFAULT_PERSONA_EXAMPLES
-        if examples is not None:
-            text = (
-                examples.conversation if prompt.is_conversation else examples.activity
-            )
-            if text.strip():
-                sections.append(
-                    "<examples>\n"
-                    "These illustrate voice and factual scope, not facts about the current work. "
-                    "Follow the configured persona, current observations, available action IDs, "
-                    "and response schema. Vary the wording and rhythm. Silence is still valid.\n\n"
-                    + text
-                    + "\n</examples>"
-                )
+        text = (
+            (examples.conversation if prompt.is_conversation else examples.activity)
+            if examples is not None
+            else render(prompt.examples_template)
+            if self.config.persona == DEFAULT_PERSONA
+            else ""
+        )
         return [
             {
                 "type": "text",
-                "text": "\n\n".join(sections),
+                "text": render(
+                    "system.jinja",
+                    persona=self.config.persona,
+                    prompt=prompt,
+                    examples=text,
+                ),
                 "cache_control": CACHE_CONTROL,
             },
-            {"type": "text", "text": "<request>\n" + prompt.direction + "\n</request>"},
         ]
 
     def prompt(
@@ -978,6 +997,7 @@ class PromptBuilder:
         memory_eligible: Callable[[SelectedMemory], bool] | None = None,
         actions: Sequence[ActionOffer] = (),
         mentioned_at: Mapping[str, float] | None = None,
+        spoken_content_revision: str | None = None,
     ) -> CommentaryRequest:
         context = self.prompt(
             snapshot,
@@ -987,6 +1007,38 @@ class PromptBuilder:
             excluded=excluded,
             memory_eligible=memory_eligible,
         )
+        if (
+            context.work
+            and context.work.request
+            and context.work.story
+            and context.work.request.text == context.work.story.text
+        ):
+            context = replace(context, work=replace(context.work, story=None))
+        if selection.situation == SpeechSituation.IDLE_REFLECTION:
+            context = replace(
+                context,
+                earlier=tuple(
+                    item
+                    for item in context.earlier
+                    if isinstance(item, MemoryCandidate)
+                ),
+            )
+        content_revision = (
+            semantic_revision(selection.subject.story) if selection.subject else None
+        )
+        if (
+            selection.situation == SpeechSituation.CHECK_IN_QUIET
+            and content_revision is not None
+            and content_revision == spoken_content_revision
+        ):
+            context = replace(
+                context,
+                work=None,
+                moment=replace(context.moment, progress=None, age=None)
+                if context.moment
+                else None,
+                earlier=(),
+            )
         selected_prompt = prompt or select_prompt(selection)
         system = self.system(selected_prompt)
         selected = replace(context, earlier=())
@@ -1022,14 +1074,14 @@ class PromptBuilder:
         }
         return CommentaryRequest(
             selection=selection,
+            context=selected,
             request=request,
             citations=citations,
             memory_options=options,
             conditions=SpeechConditions(
                 selection=selection,
-                context=commentary_facts(snapshot, selection, self.clock())
-                if narrative is not None or basic
-                else selected,
+                context=commentary_facts(snapshot, selection, self.clock()),
+                content_revision=content_revision,
                 narrative_revision=semantic_revision(
                     selection.subject.story, related=False
                 )
@@ -1044,17 +1096,18 @@ class PromptBuilder:
         prompt: Prompt,
         actions: Sequence[ActionOffer],
         mentioned_at: Mapping[str, float] | None,
-    ) -> JSONObject:
+    ) -> str:
         citations = context.citations
-        payload = cast(JSONObject, dict(context.payload(citations)))
-        if prompt.is_conversation:
-            payload["available_actions"] = [asdict(action) for action in actions]
-            payload["recent_mentions"] = [
-                {
-                    "source_id": citations.label(source),
-                    "age": f"{duration(self.clock() - timestamp)} ago",
-                }
-                for source, timestamp in (mentioned_at or {}).items()
-                if source in citations.sources
-            ]
-        return payload
+        recent_mentions = {
+            citations.label(source): f"{duration(self.clock() - timestamp)} ago"
+            for source, timestamp in (mentioned_at or {}).items()
+            if source in citations.sources
+        }
+        return render(
+            "request.jinja",
+            context=context,
+            prompt=prompt,
+            citations=citations,
+            actions=actions if prompt.is_conversation else (),
+            recent_mentions=recent_mentions if prompt.is_conversation else {},
+        )

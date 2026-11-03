@@ -1,0 +1,11 @@
+{% set descriptions = {
+    'worktree': 'Open the recorded worktree for the cited point.',
+    'pull_request': 'Open the recorded pull request for the cited point.',
+    'session': 'Open the recorded session for the cited point.',
+    'context': 'Show a short explanation of the cited point.',
+    'tomorrow': 'Defer this point until tomorrow morning. Offer only for explicitly remaining work.',
+    'handled': 'Record that the developer has already handled this remaining point.',
+    'more': 'Look at another work thread.',
+    'rounds': 'Show a brief tour of recent work and explicitly remaining threads.'
+} %}
+{{ descriptions[kind] }}

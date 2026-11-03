@@ -8,7 +8,7 @@ from typing import Unpack
 
 from pydantic import BaseModel
 
-from pet_daemon.attention import Attention, AttentionSelection
+from pet_daemon.attention import Attention, AttentionSelection, SelectedWorkState
 from pet_daemon.commentary import Cognition
 from pet_daemon.commentary.context import (
     CommentaryPayload,
@@ -175,7 +175,10 @@ class ContextTests(unittest.TestCase):
                 self.finished_work(outcome)
                 prepared = self.prepare(SpeechReason.COMPLETION)
                 moment = self.payload(prepared)["current_moment"]
-                self.assertEqual(moment["event"], "The current work segment ended.")
+                self.assertEqual(
+                    moment["event"],
+                    "An execution of this work ended. The reported outcome describes that execution, not whether the whole task is complete.",
+                )
                 self.assertIn(meaning, str(moment["execution"]))
                 if outcome == ExecutionOutcome.SUCCESS:
                     self.assertIn(
@@ -287,7 +290,7 @@ class ContextTests(unittest.TestCase):
             snapshot, selection, self.cognition.request, narrative=narrative
         )
         moment = self.payload(prepared)["current_moment"]
-        self.assertEqual(moment["reported_progress"], question)
+        self.assertEqual(moment["input_needed"], question)
         self.assertNotIn("source_ids", moment)
 
     def test_truncated_report_keeps_a_summary_of_the_omitted_result(self) -> None:
@@ -361,6 +364,91 @@ class ContextTests(unittest.TestCase):
         )
         self.assertTrue(prepared.conditions.is_valid(snapshot))
 
+    def test_raw_records_keep_citations_without_a_summary_catalog(self) -> None:
+        self.finished_work()
+        snapshot = self.current_snapshot()
+        selection = self.attention.select(snapshot, SpeechReason.COMPLETION)
+        subject = selection.subject
+        assert subject is not None
+        request_key = subject.story.requests[-1].source_key
+        report_key = subject.story.activity[-1].source_key
+        assert request_key is not None and report_key is not None
+        narrative = WorkNarrative(
+            subject_id=subject.id,
+            revision=semantic_revision(subject.story),
+            intent=NarrativeStatement(
+                text="Check compatibility.", sources=(request_key,)
+            ),
+            sources={},
+        )
+        for summary in (None, narrative):
+            with self.subTest(summary=summary is not None):
+                prepared = self.cognition.prompts.prepare(
+                    snapshot, selection, self.cognition.request, narrative=summary
+                )
+                payload = self.payload(prepared)
+                self.assertEqual(
+                    payload["current_work"]["source_ids"],
+                    [prepared.citations.label(request_key)],
+                )
+                self.assertEqual(
+                    payload["current_moment"]["source_ids"],
+                    [prepared.citations.label(report_key)],
+                )
+                self.assertEqual(
+                    prepared.citations.resolve(prepared.citations.label(report_key)),
+                    report_key,
+                )
+                self.assertTrue(prepared.conditions.is_valid(snapshot))
+                changed_story = subject.story.model_copy(
+                    update={
+                        "activity": tuple(
+                            record.model_copy(
+                                update={
+                                    "details": ReportedProgress(
+                                        reported_progress="Compatibility checks failed."
+                                    )
+                                }
+                            )
+                            if record.source_key == report_key
+                            else record
+                            for record in subject.story.activity
+                        )
+                    }
+                )
+                self.work = (subject.model_copy(update={"story": changed_story}),)
+                self.assertFalse(prepared.conditions.is_valid(self.current_snapshot()))
+                self.work = (subject,)
+
+    def test_keyed_raw_report_keeps_its_identity_outside_the_summary_catalog(
+        self,
+    ) -> None:
+        root = SessionIdentity(source=SessionSource.COMMAND, native_id="child")
+        record = CommentaryEvidence(
+            source=EvidenceSource.SOURCE,
+            kind=EvidenceKind.PROGRESS,
+            details=ReportedProgress(reported_progress="Checked parser compatibility."),
+            source_key="actual-child-report",
+        )
+        unrelated = NarrativeSource(
+            identifier="different-report",
+            kind=SourceKind.PROGRESS,
+            text="Checked parser compatibility.",
+            full_text="Checked parser compatibility.",
+            scope="related task",
+            outcome=None,
+            observed_at=None,
+            origin=root,
+        )
+        for catalog in ((), (unrelated,)):
+            with self.subTest(catalog=bool(catalog)):
+                self.assertEqual(
+                    _record_source_ids(
+                        record, root, ("reported_progress",), root, catalog, ()
+                    ),
+                    ["actual-child-report"],
+                )
+
     def test_source_ids_keep_equal_reports_separate_by_reporter_and_time(self) -> None:
         root = SessionIdentity(source=SessionSource.COMMAND, native_id="parser")
         peer = SessionIdentity(source=SessionSource.COMMAND, native_id="peer")
@@ -411,7 +499,7 @@ class ContextTests(unittest.TestCase):
         )
 
     def payload(self, prepared: CommentaryRequest) -> CommentaryPayload:
-        return json.loads(prepared.request["messages"][0]["content"])
+        return json.loads(json.dumps(prepared.context.payload(prepared.citations)))
 
     def test_validated_story_keeps_selected_progress_and_aged_support(
         self,
@@ -456,6 +544,86 @@ class ContextTests(unittest.TestCase):
         self.assertTrue(prepared.conditions.is_valid(snapshot))
         self.update_session(progress="Compatibility check failed")
         self.assertFalse(prepared.conditions.is_valid(self.current_snapshot()))
+
+    def test_covered_quiet_check_ins_omit_findings_after_narrative_enrichment(
+        self,
+    ) -> None:
+        self.finished_work()
+        self.update_session(quiet_seconds=21600)
+        snapshot = self.current_snapshot()
+        selection = AttentionSelection(
+            subject=self.work[0],
+            focus_session=snapshot.sessions[0],
+            context_sessions=(),
+            reason=SpeechReason.CHECK_IN,
+            situation=SpeechSituation.CHECK_IN_QUIET,
+            selected_state=SelectedWorkState.capture(
+                self.work[0], snapshot.sessions[0]
+            ),
+        )
+        subject = selection.subject
+        assert subject is not None
+        narrative = WorkNarrative(
+            subject_id=subject.id,
+            revision="narrative",
+            intent=NarrativeStatement(
+                text="The stale overlays need a refresh.", sources=("intent",)
+            ),
+            decisions=(
+                NarrativeStatement(
+                    text="Refresh the stale overlays.", sources=("decision",)
+                ),
+            ),
+            progress=(
+                NarrativeStatement(
+                    text="The overlay source file is gone.", sources=("progress",)
+                ),
+            ),
+        )
+        for revision, covered in (
+            (None, False),
+            (semantic_revision(subject.story), True),
+            ("different-content", False),
+        ):
+            with self.subTest(covered=covered, revision=revision):
+                prepared = self.cognition.prompts.prepare(
+                    snapshot,
+                    selection,
+                    self.cognition.request,
+                    narrative=narrative,
+                    spoken_content_revision=revision,
+                )
+                payload = self.payload(prepared)
+                self.assertEqual(
+                    payload["current_moment"]["time_since_last_activity"], "6 hours"
+                )
+                self.assertNotIn("activity", payload["current_moment"])
+                self.assertEqual(
+                    payload["current_moment"]["event"],
+                    "The work session remains open. No new activity has been observed.",
+                )
+                self.assertTrue(prepared.conditions.is_valid(snapshot))
+                if covered:
+                    self.assertIsNone(prepared.context.work)
+                    self.assertNotIn("current_work", payload)
+                    self.assertEqual(prepared.citations.sources, ())
+                    self.assertNotIn("overlay", json.dumps(payload))
+                    self.assertNotIn("earlier_context", payload)
+                    self.assertNotIn("reported_progress", payload["current_moment"])
+                    self.assertNotIn(
+                        "Check parser compatibility",
+                        prepared.request["messages"][0]["content"],
+                    )
+                else:
+                    self.assertEqual(
+                        payload["current_work"]["request"], "Check parser compatibility"
+                    )
+                    self.assertEqual(
+                        payload["current_work"]["story"],
+                        "The stale overlays need a refresh.",
+                    )
+                    self.assertIn("earlier_context", payload)
+                    self.assertIn("reported_progress", payload["current_moment"])
 
     def test_cached_narrative_ages_follow_wall_time_without_changing_support(
         self,
@@ -521,6 +689,51 @@ class ContextTests(unittest.TestCase):
                 SessionIdentity(source=SessionSource.COMMAND, native_id="parser")
             ),
         )
+
+    def test_short_followup_keeps_the_supported_intent_in_the_rendered_request(
+        self,
+    ) -> None:
+        self.update_session(
+            recent_requests=("Keep the existing retry mechanism", "yes, do that")
+        )
+        snapshot = self.current_snapshot()
+        selection = self.attention.select(snapshot, SpeechReason.ROUTINE)
+        narrative = WorkNarrative(
+            subject_id=snapshot.sessions[0].id,
+            revision="retry-intent",
+            intent=NarrativeStatement(
+                text="Keep the existing retry mechanism and close the obsolete retry-queue PR.",
+                sources=("intent-source",),
+            ),
+        )
+        prepared = self.cognition.prompts.prepare(
+            snapshot, selection, self.cognition.request, narrative=narrative
+        )
+        text = prepared.request["messages"][0]["content"]
+        self.assertIn("yes, do that", text)
+        self.assertIn("Supported work intent [s1]:", text)
+        self.assertIn(
+            "Keep the existing retry mechanism and close the obsolete retry-queue PR.",
+            text,
+        )
+        self.assertEqual(prepared.citations.resolve("s1"), "intent-source")
+
+    def test_identical_supported_intent_is_rendered_once(self) -> None:
+        request = "Preserve parser compatibility."
+        self.update_session(recent_requests=(request,))
+        snapshot = self.current_snapshot()
+        selection = self.attention.select(snapshot, SpeechReason.ROUTINE)
+        narrative = WorkNarrative(
+            subject_id=snapshot.sessions[0].id,
+            revision="parser-intent",
+            intent=NarrativeStatement(text=request, sources=("intent-source",)),
+        )
+        prepared = self.cognition.prompts.prepare(
+            snapshot, selection, self.cognition.request, narrative=narrative
+        )
+        text = prepared.request["messages"][0]["content"]
+        self.assertEqual(text.count(request), 1)
+        self.assertNotIn("Supported work intent", text)
 
     def test_request_age_follows_its_observation_despite_recent_activity(self) -> None:
         self.output()
@@ -1168,7 +1381,7 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(
             moment["event"], "The work is waiting for an answer to a question."
         )
-        self.assertEqual(moment["reported_progress"], "Which examples should I use?")
+        self.assertEqual(moment["input_needed"], "Which examples should I use?")
         self.update_session(
             waiting_kind=WaitingKind.PERMISSION,
             waiting_prompt=None,
@@ -1539,7 +1752,7 @@ class ContextTests(unittest.TestCase):
         )
         moment = self.payload(prepared)["current_moment"]
         self.assertEqual(
-            moment["event"], "An observation of the selected work is available."
+            moment["event"], "The supplied activity and findings describe this work."
         )
         self.assertEqual(
             moment["activity"], "No current execution is confirmed for this work."
@@ -1569,7 +1782,7 @@ class ContextTests(unittest.TestCase):
         )
         moment = self.payload(prepared)["current_moment"]
         self.assertNotIn("tool", moment)
-        self.assertEqual(moment["elapsed"], "3 minutes")
+        self.assertEqual(moment["tool_running_for"], "3 minutes")
 
     def test_historical_reports_preserve_terminal_outcomes_without_duplicates(
         self,

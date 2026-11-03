@@ -57,6 +57,7 @@ class AttentionHistory(BaseModel):
     last_reflection_at: float | None = None
     considered_subject_revision: str | None = None
     considered_session_revision: str | None = None
+    spoken_content_revision: str | None = None
 
 
 class SourceAttention(BaseModel):
@@ -151,7 +152,7 @@ class Memory:
 
     def load_attention_history(self) -> dict[SessionIdentity, AttentionHistory]:
         rows = self.db.execute(
-            "SELECT subject_source,subject_session,last_selected,last_reflection_at,considered_subject_revision,considered_session_revision FROM attention_history WHERE pet=?",
+            "SELECT subject_source,subject_session,last_selected,last_reflection_at,considered_subject_revision,considered_session_revision,spoken_content_revision FROM attention_history WHERE pet=?",
             (self.pet,),
         ).fetchall()
         return {
@@ -422,7 +423,7 @@ class Memory:
     ) -> None:
         with self.transaction():
             self.db.execute(
-                """INSERT INTO attention_history VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(pet,subject_source,subject_session) DO UPDATE SET
+                """INSERT INTO attention_history VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(pet,subject_source,subject_session) DO UPDATE SET
                 last_selected=excluded.last_selected,
                 last_reflection_at=CASE
                     WHEN attention_history.last_reflection_at IS NULL THEN excluded.last_reflection_at
@@ -431,6 +432,7 @@ class Memory:
                 END,
                 considered_subject_revision=excluded.considered_subject_revision,
                 considered_session_revision=excluded.considered_session_revision,
+                spoken_content_revision=excluded.spoken_content_revision,
                 updated_at=excluded.updated_at""",
                 (
                     self.pet,
@@ -439,6 +441,7 @@ class Memory:
                     history.last_reflection_at,
                     history.considered_subject_revision,
                     history.considered_session_revision,
+                    history.spoken_content_revision,
                     self.clock(),
                 ),
             )

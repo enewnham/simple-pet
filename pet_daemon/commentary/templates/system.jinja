@@ -1,0 +1,19 @@
+<persona>
+{{ persona }}
+</persona>
+
+<rules>
+{% include 'system/rules.jinja' %}
+</rules>
+
+<instructions>
+{% include prompt.instruction_template %}
+</instructions>
+{% if examples.strip() %}
+
+<examples>
+These illustrate voice and factual scope, not facts about the current work. Follow the configured persona, current observations, offered responses, and response schema. Vary the wording and rhythm. Silence is still valid.
+
+{{ examples }}
+</examples>
+{% endif %}

@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import TypedDict, Unpack
 
 from pet_daemon.commentary.contracts import ModelRequest
+from pet_daemon.commentary.observations import event_text
 from pet_daemon.domain import (
     Activity,
     ExecutionOutcome,
@@ -37,8 +38,8 @@ def story_response(request: ModelRequest) -> dict[str, object]:
         for item in evidence
         if item["event"]
         in (
-            "A report describes progress on this work.",
-            "The current work segment ended.",
+            event_text("reported_progress"),
+            event_text("turn_ended"),
         )
         and item.get("text")
     ][-4:]

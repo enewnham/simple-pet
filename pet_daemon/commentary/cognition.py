@@ -67,7 +67,12 @@ class Cognition:
             "thinking": {"type": "disabled"},
             "system": system,
             "messages": [
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}
+                {
+                    "role": "user",
+                    "content": payload
+                    if isinstance(payload, str)
+                    else json.dumps(payload, ensure_ascii=False),
+                }
             ],
             "output_config": {
                 "effort": "low",
@@ -176,6 +181,7 @@ class Cognition:
         if eligible and not eligible(selection, snapshot):
             raise StoryUnavailable("Work is no longer eligible")
         prompt = select_prompt(selection)
+        history = self.memory.load_attention_history().get(selection.id)
         commentary_request = self.prompts.prepare(
             snapshot,
             selection,
@@ -183,6 +189,9 @@ class Cognition:
             prompt=prompt,
             narrative=narrative,
             basic=basic,
+            spoken_content_revision=history.spoken_content_revision
+            if history
+            else None,
             excluded=tuple(record.text for record in self.memory.speech(limit=256)),
             memory_eligible=memory_eligible,
             actions=actions,

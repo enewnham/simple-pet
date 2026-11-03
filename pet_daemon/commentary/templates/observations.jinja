@@ -1,0 +1,73 @@
+{% macro event(value) -%}
+{% if value == 'work_update' -%}
+The supplied activity and findings describe this work.
+{%- elif value == 'permission_request' -%}
+The work is waiting for the developer to approve an operation.
+{%- elif value == 'input_requested' -%}
+The work is waiting for an answer to a question.
+{%- elif value == 'waiting' -%}
+The work is waiting for input.
+{%- elif value == 'failed_call' -%}
+An operation reported a failure.
+{%- elif value == 'turn_ended' -%}
+An execution of this work ended. The reported outcome describes that execution, not whether the whole task is complete.
+{%- elif value == 'request_received' -%}
+The developer sent a message about this work.
+{%- elif value == 'quiet_time' -%}
+No work is confirmed to be executing. Earlier tasks may still be unfinished.
+{%- elif value == 'quiet_check_in' -%}
+The work session remains open. No new activity has been observed.
+{%- elif value == 'tool_running' -%}
+A tool call is still running. Its result is not known yet.
+{%- elif value == 'pet_clicked' -%}
+The developer clicked you for a conversation about the supplied work.
+{%- elif value == 'pet_clicked_idle' -%}
+The developer clicked you. No work is confirmed to be executing.
+{%- elif value == 'recollection' -%}
+This is a quiet moment to recall earlier work. The supplied memories describe earlier observations.
+{%- elif value == 'explicit_context' -%}
+The developer supplied context for a reaction.
+{%- elif value == 'request' -%}
+The developer supplied a request or follow-up.
+{%- elif value == 'reported_progress' -%}
+A report describes progress on this work.
+{%- endif -%}
+{%- endmacro %}
+
+{% macro outcome(value) -%}
+{% if value == 'success' -%}
+The work segment ended without a reported execution error. This alone does not establish task completion.
+{%- elif value == 'error' -%}
+The work segment ended with a reported execution error.
+{%- elif value == 'cancelled' -%}
+The work segment was cancelled. The report may describe partial progress.
+{%- elif value == 'stale' -%}
+The execution status became stale; its result is unknown.
+{%- endif -%}
+{%- endmacro %}
+
+{% macro activity(value) -%}
+{% if value == 'investigating' -%}
+code investigation
+{%- elif value == 'editing' -%}
+code editing
+{%- elif value == 'testing' -%}
+test execution
+{%- elif value == 'building' -%}
+build execution
+{%- elif value == 'checking' -%}
+work verification
+{%- elif value == 'command' -%}
+command execution
+{%- elif value == 'source' -%}
+coding tool execution
+{%- endif -%}
+{%- endmacro %}
+
+{% macro state(value) -%}
+{% if value == 'working' -%}
+A work turn is open. This alone does not establish current progress.
+{%- elif value == 'quiet' -%}
+No current execution is confirmed for this work.
+{%- endif -%}
+{%- endmacro %}
