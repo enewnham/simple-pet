@@ -714,7 +714,7 @@ class Memory:
                 data["initial_request"] = request_excerpt(
                     prose_text(report_prose(report))
                 )
-                data["initial_request_at"] = report.evidence_at
+                data["initial_request_at"] = report.observed_at
         if reports:
             data["recent_requests"] = [
                 request_excerpt(prose_text(report_prose(report)))

@@ -107,7 +107,7 @@ class WorkTests(unittest.TestCase):
                 subjects = self.memory.connected_work(sessions_snapshot())
                 subject = subjects[0]
                 update = subject.updates[0]
-                self.assertIsNone(subject.story.activity[-1].observed_at)
+                self.assertEqual(subject.story.activity[-1].observed_at, self.now)
                 self.assertIsNone(update.ended_at)
                 snapshot = capture_snapshot(sessions_snapshot(), work=subjects)
                 self.assertFalse(attention.is_update_eligible(update, snapshot))

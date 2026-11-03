@@ -231,7 +231,7 @@ def _collect_reports(
                     report_prose(report),
                     scope,
                     origin=identity,
-                    observed_at=report.evidence_at,
+                    observed_at=report.observed_at,
                     source_key=report_source_key(report),
                 )
             case ProgressEvidence():
@@ -240,7 +240,7 @@ def _collect_reports(
                     report_prose(report),
                     scope,
                     origin=identity,
-                    observed_at=report.evidence_at,
+                    observed_at=report.observed_at,
                     source_key=report_source_key(report),
                 )
             case ExecutionEvidence(event=event, outcome=outcome) if event in {
@@ -255,7 +255,7 @@ def _collect_reports(
                     scope,
                     outcome,
                     origin=identity,
-                    observed_at=report.evidence_at,
+                    observed_at=report.observed_at,
                     source_key=report_source_key(report),
                 )
 

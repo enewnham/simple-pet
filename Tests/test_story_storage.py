@@ -10,7 +10,7 @@ from pet_daemon.identity import SessionIdentity
 from pet_daemon.storage import Memory
 from pet_daemon.storage.memory import AttentionHistory
 from pet_daemon.storage.migrations import SCHEMA_VERSION
-from pet_daemon.work.models import IntentEvidence
+from pet_daemon.work.models import IntentEvidence, ProgressEvidence
 from pet_daemon.work.narrative import NarrativeStatement, WorkNarrative
 from pet_daemon.work.observations import SessionObservation
 
@@ -22,6 +22,53 @@ class StoryStorageTests(unittest.TestCase):
         self.path = Path(directory.name) / "memory.sqlite3"
         self.memory = Memory(self.path, "pet", clock=lambda: 1000)
         self.addCleanup(lambda: self.memory.close())
+
+    def test_recorded_observation_times_survive_reopen_and_inherited_requests(
+        self,
+    ) -> None:
+        now = 1000.0
+        self.memory.close()
+        self.memory = Memory(self.path, "pet", clock=lambda: now)
+        root = SessionIdentity(source=SessionSource.CODEX, native_id="root")
+        child = SessionIdentity(source=SessionSource.CODEX, native_id="child")
+        request = SessionObservation(
+            session=root,
+            reports=(IntentEvidence(session=root, text="Inspect parser"),),
+        )
+        self.memory.work.record_session(request)
+        self.memory.observe_session_context(request)
+        now = 1060.0
+        progress = SessionObservation(
+            session=root,
+            capture_at=700,
+            reports=(ProgressEvidence(session=root, text="Parser checks passed"),),
+        )
+        self.memory.work.record_session(progress)
+        self.memory.observe_session_context(progress)
+        inherited = SessionObservation(session=child, parent=root, capture_at=1060)
+        self.memory.work.record_session(inherited)
+        self.memory.observe_session_context(inherited)
+        self.memory.close()
+        now = 2000.0
+        self.memory = Memory(self.path, "pet", clock=lambda: now)
+
+        reports = self.memory.narrative_reports((root,))
+        retained_request = next(
+            report for report in reports if isinstance(report.payload, IntentEvidence)
+        )
+        retained_progress = next(
+            report for report in reports if isinstance(report.payload, ProgressEvidence)
+        )
+        self.assertEqual(retained_request.record().observed_at, 1000)
+        self.assertEqual(retained_request.ingested_at, 1000)
+        self.assertIsNone(retained_request.capture_at)
+        self.assertIsNone(retained_request.evidence_at)
+        self.assertEqual(retained_progress.record().observed_at, 700)
+        self.assertEqual(retained_progress.capture_at, 700)
+        self.assertEqual(retained_progress.ingested_at, 1060)
+        context = self.memory.context(child)
+        assert context is not None
+        self.assertEqual(context.initial_request_at, 1000)
 
     def test_retained_text_supports_new_cleaners_and_inherited_context(self) -> None:
         root = SessionIdentity(source=SessionSource.CODEX, native_id="root")

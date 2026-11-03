@@ -199,7 +199,7 @@ class SessionReport(BaseModel):
         return EvidenceRecord(
             source_key=report_source_key(self),
             payload=self.payload,
-            observed_at=self.evidence_at,
+            observed_at=self.observed_at,
             context=self.context,
         )
 
