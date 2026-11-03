@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from pet_daemon.attention import AttentionSelection
 from pet_daemon.commentary.cognition import Cognition
 from pet_daemon.commentary.contracts import ModelRequest
+from pet_daemon.commentary.correction import CorrectableOutput
 from pet_daemon.commentary.story import (
     WorkNarrativeRequest,
     prepare,
@@ -891,12 +892,15 @@ class StoryTests(unittest.TestCase):
             for source in prepared.sources
             if source != prepared.latest_request_source
         )
-        for refs in (
-            ["unknown"],
-            [prepared.citations.label(old)],
-            [prepared.latest_request_source],
+        for refs, issue in (
+            (["unknown"], "unknown_citation"),
+            ([prepared.citations.label(old)], "missing_current_request"),
+            ([prepared.latest_request_source], "unknown_citation"),
         ):
-            with self.subTest(refs=refs), self.assertRaises(ValueError):
+            with (
+                self.subTest(refs=refs),
+                self.assertRaises(CorrectableOutput) as raised,
+            ):
                 validate(
                     {
                         "intent": {"text": "Improve parser", "sources": refs},
@@ -905,6 +909,7 @@ class StoryTests(unittest.TestCase):
                     },
                     prepared,
                 )
+            self.assertEqual(raised.exception.issue, issue)
         narrative = validate(
             {
                 "intent": {

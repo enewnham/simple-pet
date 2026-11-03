@@ -2352,7 +2352,8 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.app.tick()
         await require(self.app.task)
 
-        self.assertEqual(len(older_source), 1)
+        self.assertEqual(len(older_source), 2)
+        self.assertEqual(older_source[0], older_source[1])
         self.assertFalse(any("delivery_id" in packet for packet in self.packets))
         self.assertEqual(self.memory.load_source_attention(), {})
         parser = SessionIdentity(source=SessionSource.CODEX, native_id="parser")

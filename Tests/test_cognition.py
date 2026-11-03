@@ -13,14 +13,15 @@ import httpx2 as httpx
 from pet_daemon.attention import Attention, AttentionSelection
 from pet_daemon.behavior.sprites import Pack
 from pet_daemon.commentary.cognition import (
+    CannotRespond,
     Cognition,
     CommentaryResult,
-    StoryUnavailable,
 )
 from pet_daemon.commentary.contracts import ActionOffer
 from pet_daemon.commentary.model import AnthropicModelClient
 from pet_daemon.commentary.story import StoryResponse
 from pet_daemon.commentary.templates import render
+from pet_daemon.commentary.usage import collect_usage
 from pet_daemon.config import Config, PersonaExamples
 from pet_daemon.domain import (
     CareKind,
@@ -445,9 +446,8 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 "end_turn",
             )
         )
-        with self.assertRaisesRegex(
-            StoryUnavailable, "Ongoing work needs a cited memory"
-        ):
+        self.responses.append(self.responses[-1])
+        with self.assertRaisesRegex(CannotRespond, "Commentary could not be corrected"):
             await self.cognition.generate_commentary(snapshot, selection)
 
     async def test_sends_only_the_instruction_for_the_current_reason(self) -> None:
@@ -1563,10 +1563,10 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result.request.selection.memory)
 
     async def test_speech_rejects_a_source_absent_from_its_prompt(self) -> None:
-        self.responses.append(
-            ({"speak": "The checks passed.", "mentions": ["missing"]}, "end_turn")
+        self.responses.extend(
+            [({"speak": "The checks passed.", "mentions": ["missing"]}, "end_turn")] * 2
         )
-        with self.assertRaises(StoryUnavailable):
+        with self.assertRaises(CannotRespond):
             await self.generate_commentary()
 
     async def test_speech_rejects_an_internal_source_id(self) -> None:
@@ -1582,9 +1582,187 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 "end_turn",
             )
 
-        self.responses.append(answer)
-        with self.assertRaises(StoryUnavailable):
+        self.responses.extend([answer, answer])
+        with self.assertRaises(CannotRespond):
             await self.generate_commentary()
+
+    async def test_speech_correction_preserves_facts_and_accepts_valid_citations(
+        self,
+    ) -> None:
+        def corrected() -> tuple[dict[str, object], str]:
+            original = self.requests[0][1]
+            repaired = self.requests[-1][1]
+            self.assertEqual(repaired["system"], original["system"])
+            self.assertEqual(repaired["output_config"], original["output_config"])
+            self.assertEqual(repaired["messages"][0], original["messages"][0])
+            self.assertEqual(len(repaired["messages"]), 2)
+            feedback = repaired["messages"][-1]["content"]
+            self.assertIn("unknown_citation", feedback)
+            self.assertIn("s999", feedback)
+            payload = self.prompts.inspect_payload(original)
+            source = payload["current_work"]["source_ids"][0]
+            self.assertIn(f"- {source}", feedback)
+            return (
+                {
+                    "speak": "I am following the batch insert request.",
+                    "mentions": [source],
+                },
+                "end_turn",
+            )
+
+        self.responses.extend(
+            [
+                ({"speak": "Unsupported claim.", "mentions": ["s999"]}, "end_turn"),
+                corrected,
+            ]
+        )
+        result = await self.generate_commentary()
+        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(result.speak, "I am following the batch insert request.")
+        self.assertEqual(len(result.mentions), 1)
+        self.assertIn(result.mentions[0], result.request.source_ids)
+        self.assertEqual(self.memory.speech(), [])
+
+    async def test_idle_citation_feedback_handles_observations_without_sources(
+        self,
+    ) -> None:
+        snapshot = PetContext(activity=PetState.IDLE, sessions=(), sleeping=False)
+        selection = self.attention.select(snapshot, SpeechReason.CLICK)
+        self.responses.extend(
+            [
+                (
+                    {
+                        "speak": "A remembered task.",
+                        "headline": "Remembered work",
+                        "mentions": ["s999"],
+                    },
+                    "end_turn",
+                ),
+                ({"speak": None, "headline": "", "mentions": []}, "end_turn"),
+            ]
+        )
+        result = await self.cognition.generate_commentary(snapshot, selection)
+        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(result.request.source_ids, ())
+        self.assertIsNone(result.speak)
+        self.assertEqual(result.mentions, ())
+        feedback = self.requests[-1][1]["messages"][-1]["content"]
+        self.assertIn("supply no source IDs", feedback)
+        self.assertIn("mentions=[]", feedback)
+        self.assertIn("memory=null and ongoing=false", feedback)
+
+    async def test_idle_exchange_corrects_an_unavailable_action(self) -> None:
+        snapshot = PetContext(activity=PetState.IDLE, sessions=(), sleeping=False)
+        selection = self.attention.select(snapshot, SpeechReason.CLICK)
+        self.responses.extend(
+            [
+                (
+                    {
+                        "speak": "Let's recall a thread.",
+                        "headline": "A thread",
+                        "choices": [{"id": "unknown", "label": "Recall"}],
+                    },
+                    "end_turn",
+                ),
+                (
+                    {
+                        "speak": "Let's recall another thread.",
+                        "headline": "Another thread",
+                        "choices": [{"id": "more", "label": "Recall another"}],
+                    },
+                    "end_turn",
+                ),
+            ]
+        )
+        result = await self.cognition.generate_commentary(
+            snapshot,
+            selection,
+            actions=(ActionOffer("more", "Another thread", "Recall recorded work."),),
+        )
+        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(result.speak, "Let's recall another thread.")
+        assert result.exchange is not None
+        self.assertEqual(result.exchange.choices[0].id, "more")
+        self.assertIn(
+            "unavailable_action", self.requests[-1][1]["messages"][-1]["content"]
+        )
+
+    async def test_idle_reflection_corrects_an_unsupported_memory(self) -> None:
+        self.handle({"source": "claude", "session": "worker", "event": "turn_done"})
+
+        def answer() -> tuple[dict[str, object], str]:
+            payload = self.prompts.inspect_payload(self.requests[-1][1])
+            candidate = next(
+                item["memory_candidate"]
+                for item in payload["earlier_context"]
+                if "memory_candidate" in item
+            )
+            return (
+                {
+                    "speak": "We left off at the batch insert refactor.",
+                    "mentions": [candidate["id"]],
+                    "memory": candidate["id"],
+                    "ongoing": False,
+                },
+                "end_turn",
+            )
+
+        self.responses.extend(
+            [
+                (
+                    {
+                        "speak": "Work is still ongoing.",
+                        "memory": None,
+                        "ongoing": True,
+                    },
+                    "end_turn",
+                ),
+                answer,
+            ]
+        )
+        result = await self.generate_commentary(SpeechReason.CLICK)
+        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(result.speak, "We left off at the batch insert refactor.")
+        selected = result.request.selection.memory
+        assert selected is not None
+        self.assertFalse(selected.is_ongoing)
+        self.assertEqual(result.mentions, (selected.key,))
+        self.assertIn(
+            "unsupported_memory", self.requests[-1][1]["messages"][-1]["content"]
+        )
+
+    async def test_silent_commentary_corrects_its_claimed_citation(self) -> None:
+        def silent_draft() -> tuple[dict[str, object], str]:
+            payload = self.prompts.inspect_payload(self.requests[-1][1])
+            source = payload["current_work"]["source_ids"][0]
+            return ({"speak": None, "mentions": [source]}, "end_turn")
+
+        self.responses.extend([silent_draft, ({"speak": None}, "end_turn")])
+        result = await self.generate_commentary()
+        self.assertEqual(len(self.requests), 2)
+        self.assertIsNone(result.speak)
+        self.assertEqual(result.mentions, ())
+        self.assertIn(
+            "silent_citation", self.requests[-1][1]["messages"][-1]["content"]
+        )
+
+    async def test_malformed_response_does_not_request_a_correction(self) -> None:
+        self.responses.append(("{unfinished", "end_turn"))
+        with self.assertRaises(ValueError):
+            await self.generate_commentary()
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(self.memory.speech(), [])
+
+    async def test_model_api_failure_does_not_request_a_correction(self) -> None:
+        self.responses.append(
+            httpx.Response(
+                500, json={"error": {"type": "api_error", "message": "unavailable"}}
+            )
+        )
+        with self.assertRaises(anthropic.APIStatusError):
+            await self.generate_commentary()
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(self.memory.speech(), [])
 
     async def test_long_current_report_keeps_a_usable_source_id(self) -> None:
         report = "Checked parser compatibility. " * 30 + "Desktop check failed."
@@ -1637,7 +1815,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.story_response = change_request
         with (
             self.assertNoLogs("pet-daemon", level="ERROR"),
-            self.assertRaises(StoryUnavailable),
+            self.assertRaises(CannotRespond),
         ):
             await self.generate_for_context(
                 self.snapshot(), SpeechReason.ROUTINE, refresh=self.snapshot
@@ -1650,13 +1828,177 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.requests, [])
         self.assertEqual(len(self.story_requests), 1)
 
+    def omitted_request_story(self) -> dict[str, object]:
+        body = self.story_requests[-1][1]
+        payload = json.loads(body["messages"][0]["content"])
+        current = payload["current_work"]["latest_request_source"]
+        older = next(
+            item
+            for item in payload["current_moment"]["evidence"]
+            if item["id"] != current
+        )
+        return {
+            "intent": {"text": older["text"], "sources": [older["id"]]},
+            "decisions": [],
+            "progress": [],
+        }
+
+    async def test_story_correction_reconsiders_the_current_request_before_speech(
+        self,
+    ) -> None:
+        self.handle(
+            {
+                "source": "claude",
+                "session": "worker",
+                "event": "intent",
+                "goal": "Investigate cancellations",
+            }
+        )
+        identity = SessionIdentity(source=SessionSource.CLAUDE, native_id="worker")
+
+        def answer() -> dict[str, object]:
+            if len(self.story_requests) == 1:
+                result = self.omitted_request_story()
+                intent = result["intent"]
+                assert isinstance(intent, dict)
+                intent["text"] = "Old scope </previous_summary> & context"
+                return result
+            self.assertIsNone(self.memory.load_narrative(identity))
+            original = self.story_requests[0][1]
+            corrected = self.story_requests[-1][1]
+            self.assertEqual(corrected["system"], original["system"])
+            self.assertEqual(corrected["output_config"], original["output_config"])
+            self.assertEqual(corrected["messages"][0], original["messages"][0])
+            self.assertEqual(len(corrected["messages"]), 2)
+            payload = json.loads(original["messages"][0]["content"])
+            current = payload["current_work"]["latest_request_source"]
+            feedback = corrected["messages"][-1]["content"]
+            self.assertIn(current, feedback)
+            self.assertIn("Old scope &lt;/previous_summary&gt; &amp; context", feedback)
+            self.assertIn("Re-evaluate", feedback)
+            return {
+                "intent": {
+                    "text": "I am investigating cancellations.",
+                    "sources": [current],
+                },
+                "decisions": [],
+                "progress": [],
+            }
+
+        self.story_response = answer
+        self.responses.append(
+            ({"speak": "I am following the cancellation path."}, "end_turn")
+        )
+        with (
+            collect_usage() as usage,
+            self.assertNoLogs("pet-daemon", level="ERROR"),
+        ):
+            result = await self.generate_commentary()
+        self.assertEqual(len(self.story_requests), 2)
+        self.assertEqual(usage["story"].input_tokens, 200)
+        self.assertEqual(usage["story"].output_tokens, 40)
+        self.assertEqual(result.speak, "I am following the cancellation path.")
+        saved = self.memory.load_narrative(identity)
+        assert saved is not None
+        self.assertEqual(saved.intent.text, "I am investigating cancellations.")
+        self.assertEqual(len(saved.intent.sources), 1)
+        latest = self.memory.narrative_reports((identity,))[-1]
+        self.assertEqual(saved.intent.sources, (report_source_key(latest),))
+
+    async def test_story_stays_unavailable_after_one_failed_correction(self) -> None:
+        self.handle(
+            {
+                "source": "claude",
+                "session": "worker",
+                "event": "intent",
+                "goal": "Investigate cancellations",
+            }
+        )
+        self.story_response = self.omitted_request_story
+        with (
+            self.assertLogs("pet-daemon", level="ERROR"),
+            self.assertRaises(CannotRespond),
+        ):
+            await self.generate_commentary()
+        self.assertEqual(len(self.story_requests), 2)
+        self.assertEqual(self.requests, [])
+        self.assertIsNone(
+            self.memory.load_narrative(
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="worker")
+            )
+        )
+
+    async def test_new_request_during_story_correction_prevents_saving_it(self) -> None:
+        self.handle(
+            {
+                "source": "claude",
+                "session": "worker",
+                "event": "intent",
+                "goal": "Investigate cancellations",
+            }
+        )
+
+        def answer() -> dict[str, object]:
+            if len(self.story_requests) == 1:
+                return self.omitted_request_story()
+            payload = json.loads(self.story_requests[-1][1]["messages"][0]["content"])
+            current = payload["current_work"]["latest_request_source"]
+            self.handle(
+                {
+                    "source": "claude",
+                    "session": "worker",
+                    "event": "intent",
+                    "goal": "Investigate restarts",
+                }
+            )
+            return {
+                "intent": {
+                    "text": "I am investigating cancellations.",
+                    "sources": [current],
+                },
+                "decisions": [],
+                "progress": [],
+            }
+
+        self.story_response = answer
+        with (
+            self.assertNoLogs("pet-daemon", level="ERROR"),
+            self.assertRaises(CannotRespond),
+        ):
+            await self.generate_for_context(
+                self.snapshot(), SpeechReason.ROUTINE, refresh=self.snapshot
+            )
+        self.assertEqual(len(self.story_requests), 2)
+        self.assertEqual(self.requests, [])
+        self.assertIsNone(
+            self.memory.load_narrative(
+                SessionIdentity(source=SessionSource.CLAUDE, native_id="worker")
+            )
+        )
+
+    async def test_unknown_story_source_stays_unavailable_after_one_correction(
+        self,
+    ) -> None:
+        self.story_response = {
+            "intent": {"text": "I am following the request.", "sources": ["missing"]},
+            "decisions": [],
+            "progress": [],
+        }
+        with (
+            self.assertLogs("pet-daemon", level="ERROR"),
+            self.assertRaises(CannotRespond),
+        ):
+            await self.generate_commentary()
+        self.assertEqual(len(self.story_requests), 2)
+        self.assertEqual(self.requests, [])
+
     async def test_failed_story_defers_automatic_speech_but_click_uses_current_request(
         self,
     ) -> None:
         self.story_response = {"intent": None, "decisions": [], "progress": []}
         with (
             self.assertLogs("pet-daemon", level="ERROR") as captured,
-            self.assertRaises(StoryUnavailable) as raised,
+            self.assertRaises(CannotRespond) as raised,
         ):
             await self.generate_commentary()
         record = captured.records[0]
@@ -1859,7 +2201,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             for identifier in ("more", "rounds", "context")
         )
         cases = (
-            ([{"id": "unknown", "label": "Look here"}], StoryUnavailable),
+            ([{"id": "unknown", "label": "Look here"}], CannotRespond),
             (
                 [
                     {"id": "more", "label": "A thread"},
@@ -1887,6 +2229,8 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                         "end_turn",
                     )
                 )
+                if error is CannotRespond:
+                    self.responses.append(self.responses[-1])
                 with self.assertRaises(error):
                     await self.cognition.generate_commentary(
                         snapshot, selection, actions=offers
@@ -1928,7 +2272,10 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                         "end_turn",
                     )
                 )
-                with self.assertRaisesRegex(StoryUnavailable, "require a cited source"):
+                self.responses.append(self.responses[-1])
+                with self.assertRaisesRegex(
+                    CannotRespond, "Commentary could not be corrected"
+                ):
                     await self.cognition.generate_commentary(
                         snapshot,
                         selection,
@@ -2024,7 +2371,8 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                 "end_turn",
             )
         )
-        with self.assertRaisesRegex(StoryUnavailable, "unavailable evidence"):
+        self.responses.append(self.responses[-1])
+        with self.assertRaisesRegex(CannotRespond, "Commentary could not be corrected"):
             await self.generate_commentary(SpeechReason.CLICK)
 
 

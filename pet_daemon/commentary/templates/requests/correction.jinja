@@ -1,0 +1,11 @@
+Re-evaluate the response against the original request and observations.
+
+<rejected_draft>
+{{ draft|xmltext }}
+</rejected_draft>
+
+<correction issue="{{ issue|xmltext }}">
+{% include "requests/corrections/" ~ issue ~ ".jinja" %}
+
+Return a complete corrected response using the original response schema.
+</correction>

@@ -11,7 +11,7 @@ import structlog
 from .attention import Attention, AttentionSelection
 from .behavior.controller import Behavior
 from .commentary import Cognition, SpeechConditions
-from .commentary.cognition import CommentaryResult, StoryUnavailable
+from .commentary.cognition import CannotRespond, CommentaryResult
 from .commentary.usage import collect_usage
 from .config import Config
 from .delivery import DeliveryConditions, DeliveryOutcome, SpeechDelivery, SpeechMessage
@@ -520,7 +520,7 @@ class Application:
                         )
                         self.delivery.submit(message)
                         outcome = "submitted"
-            except StoryUnavailable as error:
+            except CannotRespond as error:
                 outcome = "deferred"
                 log.info(
                     "observation.deferred", reason=str(error), subject=selection.id

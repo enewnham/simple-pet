@@ -1,0 +1,12 @@
+The response contains unavailable evidence among these citations: {{ citations|xmltext }}.
+{% if available_citations %}
+The valid source IDs in the original observations are:
+{% for label in available_citations %}
+- {{ label|xmltext }}
+{% endfor %}
+Reconsider the response against those observations. Cite only evidence that supports the revised content.
+{% else %}
+The original observations supply no source IDs. Return mentions=[].
+If the response schema includes memory and ongoing, return memory=null and ongoing=false.
+Do not offer a work action that requires supporting evidence. Revise unsupported content or return silence as permitted by the original schema.
+{% endif %}

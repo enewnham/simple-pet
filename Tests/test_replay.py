@@ -134,7 +134,7 @@ class ReplayTests(unittest.IsolatedAsyncioTestCase):
         failed, retried = result["steps"]
         self.assertEqual(failed["decision"], "deferred")
         self.assertFalse(failed["accepted"])
-        self.assertEqual(failed["error"]["type"], "StoryUnavailable")
+        self.assertEqual(failed["error"]["type"], "CannotRespond")
         self.assertEqual(failed["calls"][0]["response"]["intent"], None)
         self.assertTrue(retried["accepted"])
         self.assertEqual(len(retried["calls"]), 2)
@@ -190,9 +190,7 @@ class ReplayTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(results[0]["steps"][0]["decision"], "deferred")
             self.assertTrue(results[0]["steps"][1]["accepted"])
             self.assertTrue(results[1]["steps"][0]["accepted"])
-            self.assertIn(
-                "StoryUnavailable", (destination / "comparison.md").read_text()
-            )
+            self.assertIn("CannotRespond", (destination / "comparison.md").read_text())
             anthropic.close.assert_awaited_once()
 
     async def test_accepted_speech_does_not_enter_later_model_inputs(self) -> None:

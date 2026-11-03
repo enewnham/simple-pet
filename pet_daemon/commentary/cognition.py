@@ -18,15 +18,17 @@ from ..work.narrative import SelectedMemory, WorkNarrative, semantic_revision
 from . import conversation, story
 from .contracts import ActionOffer, ModelRequest
 from .conversation import Exchange
+from .correction import CorrectableOutput
 from .model import ModelClient
-from .prompt import select_prompt
+from .prompt import Response, select_prompt
 from .repetition import RepeatMatch, repeat_match
 from .request import CommentaryRequest, PromptBuilder, SpeechConditions
+from .templates import render
 
 log = get_logger("pet-daemon")
 
 
-class StoryUnavailable(RuntimeError):
+class CannotRespond(RuntimeError):
     pass
 
 
@@ -83,6 +85,54 @@ class Cognition:
             },
         }
 
+    async def respond[T](
+        self,
+        request: ModelRequest,
+        reason: SpeechReason | ModelPurpose,
+        *,
+        response_type: type[BaseModel],
+        validate: Callable[[dict[str, object]], T],
+        corrections_left: int = 1,
+    ) -> T:
+        draft = await self.client.complete(request, reason, response_type=response_type)
+        try:
+            return validate(draft)
+        except CorrectableOutput as error:
+            if corrections_left <= 0:
+                log.info(
+                    "observation.correction_exhausted",
+                    reason=reason,
+                    issue=error.issue,
+                    context=error.context,
+                )
+                raise
+            log.info(
+                "observation.correction",
+                reason=reason,
+                issue=error.issue,
+                corrections_left=corrections_left,
+            )
+            feedback = render(
+                "requests/correction.jinja",
+                draft=json.dumps(draft, ensure_ascii=False, indent=2),
+                issue=error.issue,
+                **error.context,
+            )
+            corrected_request: ModelRequest = {
+                **request,
+                "messages": [
+                    *request["messages"],
+                    {"role": "user", "content": feedback},
+                ],
+            }
+            return await self.respond(
+                corrected_request,
+                reason,
+                response_type=response_type,
+                validate=validate,
+                corrections_left=corrections_left - 1,
+            )
+
     async def update_work_narrative(
         self,
         snapshot: PetContext,
@@ -113,12 +163,12 @@ class Cognition:
         ):
             return existing
         try:
-            raw = await self.client.complete(
+            narrative = await self.respond(
                 narrative_request.request,
                 ModelPurpose.STORY,
                 response_type=story.StoryResponse,
+                validate=lambda draft: story.validate(draft, narrative_request),
             )
-            narrative = story.validate(raw, narrative_request)
             current = refresh() if refresh else snapshot
             refreshed = selection.refresh(current)
             if (
@@ -130,7 +180,7 @@ class Cognition:
                     != semantic_revision(selection.subject.story, related=False)
                 )
             ):
-                raise StoryUnavailable("Work changed during story generation")
+                raise CannotRespond("Work changed during story generation")
             if (
                 not transient
                 and story.context_revision(refreshed, self.memory)
@@ -138,7 +188,7 @@ class Cognition:
             ):
                 self.memory.save_narrative(narrative)
             return narrative
-        except StoryUnavailable:
+        except CannotRespond:
             raise
         except Exception as error:
             log.exception(
@@ -147,7 +197,7 @@ class Cognition:
                 subject=selection.id,
                 error=str(error),
             )
-            raise StoryUnavailable("Work story could not be updated") from error
+            raise CannotRespond("Work story could not be updated") from error
 
     async def generate_commentary(
         self,
@@ -160,7 +210,7 @@ class Cognition:
     ) -> CommentaryResult:
         snapshot = refresh() if refresh else snapshot
         if eligible and not eligible(selection, snapshot):
-            raise StoryUnavailable("Work is no longer eligible")
+            raise CannotRespond("Work is no longer eligible")
         reason = selection.reason
         manual = selection.context is not None or reason in (
             SpeechReason.CLICK,
@@ -169,7 +219,7 @@ class Cognition:
         basic = False
         try:
             narrative = await self.update_work_narrative(snapshot, selection, refresh)
-        except StoryUnavailable:
+        except CannotRespond:
             if not manual:
                 raise
             snapshot = refresh() if refresh else snapshot
@@ -179,7 +229,7 @@ class Cognition:
         snapshot = refresh() if refresh else snapshot
         selection = selection.refresh(snapshot)
         if eligible and not eligible(selection, snapshot):
-            raise StoryUnavailable("Work is no longer eligible")
+            raise CannotRespond("Work is no longer eligible")
         prompt = select_prompt(selection)
         history = self.memory.load_attention_history().get(selection.id)
         commentary_request = self.prompts.prepare(
@@ -203,39 +253,30 @@ class Cognition:
             if prompt.is_conversation
             else {},
         )
-        raw_result = await self.client.complete(
-            commentary_request.request, reason, response_type=prompt.response
-        )
-        response = prompt.response.model_validate(raw_result)
-        exchange = None
-        if isinstance(response, conversation.Response):
-            offered = {action.id for action in actions}
-            if any(choice.id not in offered for choice in response.choices):
-                raise StoryUnavailable("Conversation selected an unavailable action")
-            if response.speak is not None:
-                exchange = Exchange(
-                    headline=response.headline.strip(),
-                    context=response.context.strip(),
-                    choices=response.choices,
-                )
         try:
-            mentions = commentary_request.citations.resolve_many(response.mentions)
-        except ValueError as error:
-            raise StoryUnavailable("Speech cited unavailable evidence") from error
-        if (
-            exchange is not None
-            and not mentions
-            and any(choice.id not in {"more", "rounds"} for choice in exchange.choices)
-        ):
-            raise StoryUnavailable("Conversation work choices require a cited source")
-        speech = response.speak
-        if speech is None and mentions:
-            raise StoryUnavailable("Silent commentary cited work")
-        if isinstance(response, conversation.RecollectionResponse):
-            commentary_request = self.select_memory(
-                response, commentary_request, narrative, mentions, memory_eligible
+            result = await self.respond(
+                commentary_request.request,
+                reason,
+                response_type=prompt.response,
+                validate=lambda draft: self.validate_commentary(
+                    draft,
+                    response_type=prompt.response,
+                    commentary_request=commentary_request,
+                    narrative=narrative,
+                    actions=actions,
+                ),
             )
-            selection = commentary_request.selection
+        except CorrectableOutput as error:
+            raise CannotRespond("Commentary could not be corrected") from error
+        commentary_request = result.request
+        selection = commentary_request.selection
+        if (
+            selection.memory
+            and memory_eligible
+            and not memory_eligible(selection.memory)
+        ):
+            raise CannotRespond("Idle memory is no longer eligible")
+        speech, mentions, exchange = result.speak, result.mentions, result.exchange
         match = await self.find_repetition(speech)
         if match:
             log.info(
@@ -272,7 +313,66 @@ class Cognition:
             }
         )
         if not self.are_source_scopes_valid(commentary_request.conditions):
-            raise StoryUnavailable("Supporting work changed during speech generation")
+            raise CannotRespond("Supporting work changed during speech generation")
+        return CommentaryResult(
+            speak=speech,
+            request=commentary_request,
+            mentions=mentions,
+            exchange=exchange,
+        )
+
+    def validate_commentary(
+        self,
+        draft: dict[str, object],
+        *,
+        response_type: type[Response],
+        commentary_request: CommentaryRequest,
+        narrative: WorkNarrative | None,
+        actions: Sequence[ActionOffer],
+    ) -> CommentaryResult:
+        response = response_type.model_validate(draft)
+        exchange = None
+        if isinstance(response, conversation.Response):
+            offered = {action.id for action in actions}
+            if any(choice.id not in offered for choice in response.choices):
+                raise CorrectableOutput(
+                    "unavailable_action",
+                    choices=tuple(
+                        choice.id
+                        for choice in response.choices
+                        if choice.id not in offered
+                    ),
+                    actions=tuple(action.id for action in actions),
+                )
+            if response.speak is not None:
+                exchange = Exchange(
+                    headline=response.headline.strip(),
+                    context=response.context.strip(),
+                    choices=response.choices,
+                )
+        try:
+            mentions = commentary_request.citations.resolve_many(response.mentions)
+        except ValueError as error:
+            raise CorrectableOutput(
+                "unknown_citation",
+                citations=response.mentions,
+                available_citations=commentary_request.citations.labels(
+                    commentary_request.citations.sources
+                ),
+            ) from error
+        if (
+            exchange is not None
+            and not mentions
+            and any(choice.id not in {"more", "rounds"} for choice in exchange.choices)
+        ):
+            raise CorrectableOutput("missing_work_citation")
+        speech = response.speak
+        if speech is None and mentions:
+            raise CorrectableOutput("silent_citation")
+        if isinstance(response, conversation.RecollectionResponse):
+            commentary_request = self.select_memory(
+                response, commentary_request, narrative, mentions
+            )
         return CommentaryResult(
             speak=speech,
             request=commentary_request,
@@ -286,34 +386,48 @@ class Cognition:
         request: CommentaryRequest,
         narrative: WorkNarrative | None,
         mentions: tuple[str, ...],
-        eligible: Callable[[SelectedMemory], bool] | None,
     ) -> CommentaryRequest:
         if response.memory is None:
             if response.ongoing:
-                raise StoryUnavailable("Ongoing work needs a cited memory")
+                raise CorrectableOutput(
+                    "unsupported_memory", violation="ongoing_without_memory"
+                )
             if request.selection.reason != SpeechReason.CLICK and response.speak:
-                raise StoryUnavailable("Idle reflection needs a supported memory")
+                raise CorrectableOutput(
+                    "unsupported_memory", violation="reflection_without_memory"
+                )
             return request
         try:
             source_id = request.citations.resolve(response.memory)
         except ValueError as error:
-            raise StoryUnavailable("Speech cited unavailable evidence") from error
+            raise CorrectableOutput(
+                "unknown_citation",
+                citations=(response.memory,),
+                available_citations=request.citations.labels(request.citations.sources),
+            ) from error
         options = request.memory_options.get(source_id)
         source = narrative.sources.get(source_id) if narrative else None
         observed_at = source.get("observed_at") if source else None
-        if (
-            options is None
-            or response.speak is not None
-            and source_id not in mentions
-            or not isinstance(observed_at, (int, float))
-            or not options[int(response.ongoing)]
-        ):
-            raise StoryUnavailable("Idle memory was not supported by the prompt")
+        if options is None or not isinstance(observed_at, (int, float)):
+            raise CorrectableOutput(
+                "unsupported_memory",
+                violation="unavailable_memory",
+                memory=response.memory,
+            )
+        if response.speak is not None and source_id not in mentions:
+            raise CorrectableOutput(
+                "unsupported_memory", violation="uncited_memory", memory=response.memory
+            )
+        if not options[int(response.ongoing)]:
+            raise CorrectableOutput(
+                "unsupported_memory",
+                violation="unsupported_status",
+                memory=response.memory,
+                ongoing=response.ongoing,
+            )
         memory = SelectedMemory(
             key=source_id, observed_at=observed_at, is_ongoing=response.ongoing
         )
-        if eligible and not eligible(memory):
-            raise StoryUnavailable("Idle memory is no longer eligible")
         selection = request.selection.model_copy(update={"memory": memory})
         return request.model_copy(
             update={

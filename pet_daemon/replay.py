@@ -591,7 +591,7 @@ async def replay_sequence(
                         if item["event"] == "observation.deferred"
                     )
                     step["error"] = {
-                        "type": "StoryUnavailable",
+                        "type": "CannotRespond",
                         "message": deferred["reason"],
                     }
                 elif outcome == "failed":

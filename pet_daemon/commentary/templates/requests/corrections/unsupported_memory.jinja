@@ -1,0 +1,13 @@
+{% if violation == "ongoing_without_memory" %}
+The response marked work ongoing without selecting a memory. Ongoing work requires a supported memory.
+{% elif violation == "reflection_without_memory" %}
+The response spoke an idle reflection without selecting a supported memory. This request requires a supported memory when speaking.
+{% elif violation == "unavailable_memory" %}
+The selected memory {{ memory|xmltext }} is not among the supported memory options in the original prompt.
+{% elif violation == "uncited_memory" %}
+The response selected memory {{ memory|xmltext }} and spoke without citing that memory in mentions.
+{% elif violation == "unsupported_status" %}
+The selected memory {{ memory|xmltext }} does not support ongoing={{ ongoing|xmltext }} in the original prompt.
+{% endif %}
+Choose a supplied memory with a supported ongoing status and cite it in mentions when speaking, or return silence with speak=null, memory=null, ongoing=false, and mentions=[]. Clear any displayed conversation content as required by the original schema.
+Reconsider the speech against the selected memory. Revise unsupported content rather than attaching an arbitrary memory or citation.

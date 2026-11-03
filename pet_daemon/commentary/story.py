@@ -29,6 +29,7 @@ from ..work.narrative import NarrativeStatement, WorkNarrative, semantic_revisio
 from ..work.stories import revision_key
 from .citations import Citations
 from .contracts import ModelRequest, RequestFactory
+from .correction import CorrectableOutput
 from .observations import event_text, outcome_text
 from .request import duration
 from .sources import NarrativeSource, SourceKind
@@ -533,9 +534,15 @@ def validate(raw: dict[str, object], request: WorkNarrativeRequest) -> WorkNarra
     response = StoryResponse.model_validate(raw)
 
     def resolve(statement: NarrativeStatement) -> NarrativeStatement:
-        return statement.model_copy(
-            update={"sources": request.citations.resolve_many(statement.sources)}
-        )
+        try:
+            sources = request.citations.resolve_many(statement.sources)
+        except ValueError as error:
+            raise CorrectableOutput(
+                "unknown_citation",
+                citations=statement.sources,
+                available_citations=request.citations.labels(request.citations.sources),
+            ) from error
+        return statement.model_copy(update={"sources": sources})
 
     response = response.model_copy(
         update={
@@ -545,7 +552,12 @@ def validate(raw: dict[str, object], request: WorkNarrativeRequest) -> WorkNarra
         }
     )
     if request.latest_request_source not in response.intent.sources:
-        raise ValueError("Story intent must reference the current request")
+        raise CorrectableOutput(
+            "missing_current_request",
+            current_request_source=request.citations.label(
+                request.latest_request_source
+            ),
+        )
     return WorkNarrative(
         subject_id=request.subject_id,
         revision=request.revision,
