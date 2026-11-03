@@ -41,7 +41,6 @@ def report_context(
     location: str,
     checkout: CheckoutObservation | None,
     branch: BranchObservation | None,
-    prose: str = "",
 ) -> ReportContext:
     local = checkout.local if checkout else None
     return ReportContext(
@@ -49,7 +48,6 @@ def report_context(
         repository=local.repository if local else None,
         branch=local.branch if local else "",
         pull_request=branch.pr.url if branch and branch.pr else "",
-        references=references(prose),
         branch_resolution=len(branch.resolutions)
         if branch and branch.pr is None
         else 0,

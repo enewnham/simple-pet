@@ -81,25 +81,24 @@ class WorkIngestion:
         now = self.clock()
         with self.repository.transaction():
             self.repository.save_session(observation, now)
+            if not observation.reports:
+                return
             location = (
                 observation.location
                 if observation.location is not None
                 else self.repository.session_location(observation.session)
             )
-            contexts = tuple(
-                self._context(
-                    location,
-                    repository=observation.repository,
-                    branch=observation.branch,
-                    pull_request=observation.pull_request,
-                )
-                for payload in observation.reports
+            context = self._context(
+                location,
+                repository=observation.repository,
+                branch=observation.branch,
+                pull_request=observation.pull_request,
             )
-            for payload, context in zip(observation.reports, contexts, strict=True):
+            for payload in observation.reports:
                 appended = self.repository.append_report(
                     SessionReport(
                         payload=payload,
-                        context=context,
+                        context=context.model_copy(),
                         observed_at=observation.capture_at
                         if observation.capture_at is not None
                         else now,
