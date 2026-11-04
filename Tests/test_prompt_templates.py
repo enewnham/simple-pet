@@ -99,30 +99,28 @@ class PromptTemplateTests(unittest.TestCase):
                 )
                 self.assertIn(expected, text)
 
-    def test_routine_request_keeps_report_time_beside_the_requested_reaction(
+    def test_routine_request_keeps_report_day_in_the_observations(
         self,
     ) -> None:
         context = CommentaryContext(
             work=WorkContext(
                 request=SupportedText("Fix the flaky parser checks.", ("request",)),
-                request_age="20 minutes ago",
+                request_age="today",
             ),
             moment=Moment(
                 Event.WORK_UPDATE,
                 progress=SupportedText(
                     "Parser checks passed locally. CI is running.", ("report",)
                 ),
-                age="8 minutes ago",
+                age="today",
             ),
         )
         prompt = select_prompt(self.selection(SpeechSituation.ROUTINE))
         text = self.builder.payload(context, prompt, (), None)
-        self.assertIn("The developer asked 20 minutes ago [s1]:", text)
-        self.assertIn("Report recorded 8 minutes ago [s2]:", text)
-        self.assertIn(
-            "React briefly to one detail in the report recorded 8 minutes ago", text
-        )
-        self.assertIn("use past tense for its work facts", text)
+        self.assertIn("The developer asked today [s1]:", text)
+        self.assertIn("Report recorded today [s2]:", text)
+        self.assertIn("React briefly to one detail in the report above", text)
+        self.assertIn("Use past tense for its work facts", text)
         self.assertEqual(text.count("Fix the flaky parser checks."), 1)
         self.assertEqual(text.count("Parser checks passed locally. CI is running."), 1)
         self.assertNotIn("current_moment", text)
@@ -176,7 +174,7 @@ class PromptTemplateTests(unittest.TestCase):
             moment=Moment(
                 Event.WORK_UPDATE,
                 progress=SupportedText(observed, ("report",)),
-                age="8 minutes ago",
+                age="today",
             ),
         )
         text = self.builder.payload(
@@ -241,7 +239,7 @@ class PromptTemplateTests(unittest.TestCase):
         context = CommentaryContext(
             work=WorkContext(
                 request=SupportedText("Review stale editor annotations.", ("request",)),
-                request_age="6 hours ago",
+                request_age="today",
             ),
             moment=Moment(Event.QUIET_CHECK_IN, elapsed="6 hours"),
         )
@@ -269,7 +267,7 @@ class PromptTemplateTests(unittest.TestCase):
                     scope="parser compatibility",
                     eligible_recent=False,
                     eligible_ongoing=True,
-                    age="2 hours ago",
+                    age="today",
                     outcome=ExecutionOutcome.SUCCESS,
                 ),
             )
@@ -281,7 +279,7 @@ class PromptTemplateTests(unittest.TestCase):
             (ActionOffer("context", "Explain", "Explain the recorded result"),),
             {"report": 940},
         )
-        self.assertIn("Memory [s1] (recorded 2 hours ago):", text)
+        self.assertIn("Memory [s1] (recorded today):", text)
         self.assertIn("May recall as: ongoing work.", text)
         self.assertNotIn("May recall as: earlier observation", text)
         self.assertIn("- context — Explain: Explain the recorded result", text)
@@ -314,7 +312,7 @@ class PromptTemplateTests(unittest.TestCase):
                 request=SupportedText(
                     "Why separate validation from storage?", ("request",)
                 ),
-                request_age="less than a minute ago",
+                request_age=None,
             ),
             moment=Moment(Event.REQUEST_RECEIVED),
         )

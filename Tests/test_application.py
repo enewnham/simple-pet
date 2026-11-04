@@ -448,7 +448,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             require(require(payload.work).request).text, "Improve quoted-field parsing"
         )
-        self.assertEqual(require(payload.work).request_age, "2 hours ago")
+        self.assertEqual(require(payload.work).request_age, "today")
         reopened = Memory(
             Path(self.temporary.name) / "memory.sqlite3",
             "fixture-pet",

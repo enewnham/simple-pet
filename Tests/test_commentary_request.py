@@ -4,8 +4,10 @@ import tempfile
 import unittest
 from copy import deepcopy
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Unpack
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
 
@@ -24,6 +26,7 @@ from pet_daemon.commentary.request import (
     CommentaryRequest,
     _record_source_ids,
     encoded_size,
+    evidence_age,
     select_prompt,
 )
 from pet_daemon.commentary.sources import NarrativeSource, SourceKind
@@ -95,6 +98,47 @@ class NoRequestsModel:
         response_type: type[BaseModel],
     ) -> dict[str, object]:
         raise AssertionError("PromptBuilder preparation must not request model output")
+
+
+class EvidenceAgeTests(unittest.TestCase):
+    def test_ages_use_local_calendar_days_and_omit_recent_times(self) -> None:
+        timezone = ZoneInfo("America/New_York")
+        timestamp = datetime(2026, 11, 4, 12, tzinfo=timezone).timestamp()
+        for observed, expected in (
+            (datetime(2026, 11, 4, 11, 58, tzinfo=timezone), None),
+            (datetime(2026, 11, 4, 11, 0, 1, tzinfo=timezone), None),
+            (datetime(2026, 11, 4, 11, tzinfo=timezone), "today"),
+            (datetime(2026, 11, 4, 8, tzinfo=timezone), "today"),
+            (datetime(2026, 11, 3, 23, tzinfo=timezone), "yesterday"),
+            (datetime(2026, 11, 2, 23, tzinfo=timezone), "earlier"),
+        ):
+            with self.subTest(observed=observed):
+                self.assertEqual(
+                    evidence_age(timestamp, observed.timestamp(), timezone), expected
+                )
+        self.assertIsNone(evidence_age(timestamp, None, timezone))
+
+    def test_midnight_and_daylight_saving_use_calendar_dates(self) -> None:
+        timezone = ZoneInfo("America/New_York")
+        for current, observed in (
+            (
+                datetime(2026, 11, 4, 0, 1, tzinfo=timezone),
+                datetime(2026, 11, 3, 23, 59, tzinfo=timezone),
+            ),
+            (
+                datetime(2026, 11, 1, 23, 30, tzinfo=timezone),
+                datetime(2026, 10, 31, 23, 45, tzinfo=timezone),
+            ),
+            (
+                datetime(2026, 3, 9, 0, 15, tzinfo=timezone),
+                datetime(2026, 3, 8, 0, 0, tzinfo=timezone),
+            ),
+        ):
+            with self.subTest(current=current):
+                self.assertEqual(
+                    evidence_age(current.timestamp(), observed.timestamp(), timezone),
+                    "yesterday",
+                )
 
 
 class ContextTests(unittest.TestCase):
@@ -697,13 +741,13 @@ class ContextTests(unittest.TestCase):
             snapshot, selection, self.cognition.request, narrative=cached
         )
         report = prepared.context.earlier[-1]
-        self.assertEqual(report.age, "2 minutes ago")
+        self.assertIsNone(report.age)
         self.cognition.clock = lambda: 8200
         later = self.cognition.prompts.prepare(
             snapshot, selection, self.cognition.request, narrative=cached
         )
         report = later.context.earlier[-1]
-        self.assertEqual(report.age, "2 hours ago")
+        self.assertEqual(report.age, "today")
         self.assertEqual(prepared.conditions, later.conditions)
         self.assertEqual(
             cached,
@@ -765,10 +809,7 @@ class ContextTests(unittest.TestCase):
             snapshot, selection, self.cognition.request
         )
         assert prepared.context.work is not None
-        self.assertEqual(
-            prepared.context.work.request_age,
-            "less than a minute ago",
-        )
+        self.assertIsNone(prepared.context.work.request_age)
         self.cognition.clock = lambda: 15400
         update = selection.update
         assert update is not None
@@ -779,7 +820,7 @@ class ContextTests(unittest.TestCase):
             snapshot, later_selection, self.cognition.request
         )
         assert later.context.work is not None
-        self.assertEqual(later.context.work.request_age, "4 hours ago")
+        self.assertEqual(later.context.work.request_age, "today")
         self.assertEqual(
             prepared.conditions.context.stable(), later.conditions.context.stable()
         )
@@ -1405,12 +1446,10 @@ class ContextTests(unittest.TestCase):
                 ContextFact(
                     FactKind.PROGRESS,
                     SupportedText("Finished simplifying log labels"),
-                    age="3 minutes ago",
                 ),
                 ContextFact(
                     FactKind.PROGRESS,
                     SupportedText("Found two redundant assertions"),
-                    age="2 minutes ago",
                     scope="Audit tests",
                 ),
             ),
@@ -1622,13 +1661,13 @@ class ContextTests(unittest.TestCase):
             context.moment.progress.text,
             "Child is inspecting escape handling",
         )
-        self.assertEqual(context.moment.age, "1 minute ago")
+        self.assertIsNone(context.moment.age)
         self.assertTrue(
             any(
                 isinstance(item, ContextFact)
                 and item.kind == FactKind.PROGRESS
                 and item.statement.text == "Parent checks passed"
-                and item.age == "5 minutes ago"
+                and item.age is None
                 for item in context.earlier
             )
         )

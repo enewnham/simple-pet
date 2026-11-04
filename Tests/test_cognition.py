@@ -1373,7 +1373,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(len(completion_item.sources), 1)
             self.assertNotIn(completion_id, content)
-            self.assertEqual(completion_item.age, "1 day ago")
+            self.assertEqual(completion_item.age, "yesterday")
             return (
                 {
                     "speak": "The parser recovery checks passed, and the task is complete.",

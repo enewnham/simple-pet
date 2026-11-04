@@ -1,6 +1,7 @@
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
+from datetime import datetime, tzinfo
 from typing import Literal, cast
 
 from anthropic.types import CacheControlEphemeralParam, TextBlockParam
@@ -78,6 +79,19 @@ def duration(seconds: float | None) -> str | None:
         return f"{hours} hour{'s' if hours != 1 else ''}"
     days = hours // 24
     return f"{days} day{'s' if days != 1 else ''}"
+
+
+def evidence_age(
+    timestamp: float, observed_at: float | None, timezone: tzinfo | None = None
+) -> str | None:
+    if observed_at is None:
+        return None
+    current = datetime.fromtimestamp(timestamp, timezone)
+    observed = datetime.fromtimestamp(observed_at, timezone)
+    days = (current.date() - observed.date()).days
+    if days == 0:
+        return "today" if timestamp - observed_at >= 3600 else None
+    return "yesterday" if days == 1 else "earlier"
 
 
 def context_priority(earlier: Sequence[ContextItem]) -> list[int]:
@@ -176,13 +190,13 @@ def _add_earlier(
     text = work_prose(text, 600, excluded)
     if not text:
         return
-    age = duration(timestamp - observed_at) if observed_at is not None else None
+    age = evidence_age(timestamp, observed_at)
     scope_text = work_prose(scope, 200, excluded)
     earlier.append(
         ContextFact(
             kind=kind,
             statement=SupportedText(text, tuple(source_ids)),
-            age=age + " ago" if age else None,
+            age=age,
             scope=scope_text or None,
             outcome=outcome,
         )
@@ -222,11 +236,11 @@ def _current_work(
                     latest, origin, ("request",), root, sources, excluded
                 )
             statement = SupportedText(prose, tuple(ids))
-    age = duration(timestamp - observed_at) if observed_at is not None else None
+    age = evidence_age(timestamp, observed_at)
     return (
         WorkContext(
             request=statement,
-            request_age=age + " ago" if age else None,
+            request_age=age,
         )
         if statement
         else None
@@ -339,11 +353,11 @@ def _terminal_moment(
     )
     if terminal is None:
         return moment
-    age = duration(timestamp - update.ended_at)
+    age = evidence_age(timestamp, update.ended_at)
     return Moment(
         Event.TURN_ENDED,
         outcome=_reported_outcome(terminal),
-        age=age + " ago" if age else None,
+        age=age,
     )
 
 
@@ -608,13 +622,7 @@ def commentary_facts(
         prose = work_prose(current_report, 600, excluded)
         if prose:
             moment = replace(moment, progress=SupportedText(prose, tuple(current_ids)))
-            age = (
-                duration(timestamp - current_observed_at)
-                if current_observed_at is not None
-                else None
-            )
-            if age:
-                moment = replace(moment, age=age + " ago")
+            moment = replace(moment, age=evidence_age(timestamp, current_observed_at))
     return CommentaryContext(
         work=current_work,
         moment=moment,
@@ -736,7 +744,7 @@ def _narrative_item(
     observed = [
         source.observed_at for source in sources if source.observed_at is not None
     ]
-    age = duration(clock() - max(observed)) if observed else None
+    age = evidence_age(clock(), max(observed)) if observed else None
     scopes: list[str] = []
     for source in sources:
         if not source.scope:
@@ -757,7 +765,7 @@ def _narrative_item(
     return ContextFact(
         kind=kind,
         statement=SupportedText(text, statement.sources),
-        age=age + " ago" if age else None,
+        age=age,
         scope="; ".join(scopes) if scopes else None,
     )
 
@@ -842,7 +850,7 @@ def _memory_candidates(
                 )
                 if not allowed_recent and not allowed_ongoing:
                     continue
-                age = duration(clock() - observed_at)
+                age = evidence_age(clock(), observed_at)
                 candidate = MemoryCandidate(
                     source_id=identifier,
                     kind=source.kind,
@@ -850,7 +858,7 @@ def _memory_candidates(
                     scope=source.scope,
                     eligible_recent=allowed_recent,
                     eligible_ongoing=allowed_ongoing,
-                    age=age + " ago" if age else None,
+                    age=age,
                     outcome=source.outcome,
                 )
             elif progress_report and not candidate.eligible_ongoing:
