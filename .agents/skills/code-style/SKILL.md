@@ -96,6 +96,9 @@ concrete example or when deciding whether an existing pattern fits new code.
 - Keep source facts separate from interpretations. A report, a repository
   observation, and a renderer acknowledgment establish different facts. Preserve
   the context needed to interpret each one later.
+- Treat model input as an application contract. Follow
+  [prompting-style](../prompting-style/SKILL.md) for the principles that guide
+  information selection and the division of reasoning between code and models.
 
 ## Make time and asynchronous effects explicit
 

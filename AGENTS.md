@@ -21,11 +21,17 @@ make test-python ARGS='Tests/test_notify.py'
 make test-swift ARGS='--filter PetCoreTests'
 ```
 
-## Code style
+## Code and prompting style
 
 When writing, refactoring, or reviewing code, load the
 [code-style skill](.agents/skills/code-style/SKILL.md) for repository conventions
 that require judgment beyond formatting, linting, and type checks.
+
+When changing model inputs, templates, examples, response contracts, or commentary
+selection, load the [prompting-style skill](.agents/skills/prompting-style/SKILL.md).
+It defines principles for spending model reasoning deliberately, selecting relevant
+information, establishing meaning before persona expression, and preserving truth
+through summarization.
 
 ## Follow the work
 
