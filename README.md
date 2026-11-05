@@ -1,6 +1,6 @@
 # Simple Pet
 
-A macOS desktop pet that speaks about your coding agents’ work.
+A macOS desktop companion for your ongoing work.
 
 ![Simple Pet demo](docs/media/simple-pet.webp)
 
@@ -42,6 +42,97 @@ settings, then restart. If you imported a pack with a different name, set `pet_d
 to its directory under `assets/pets/`.
 
 Drag the pet to move it. Click it to start a conversation.
+
+## Conversation and work context
+
+Click the pet to ask about your work, correct its understanding, or adopt a bounded
+responsibility. Conversation history, corrections, responsibilities, and task
+outcomes survive daemon restarts. Activity shows investigations and delegated work.
+Pausing coordination and stopping a desktop task are separate controls.
+
+The coordinator uses Claude Haiku 5.5 with adaptive thinking and medium effort.
+`make setup` installs the Python Claude Agent SDK and its bundled CLI. The
+coordinator has separate model, timeout, turn, response, and cost settings under
+`coordinator` in [pet.config.example.json](pet.config.example.json). Ambient speech
+retains its own model settings. Desktop implementation uses a configured external
+adapter, described in [Desktop adapters](docs/desktop-adapter.md).
+
+The pet starts with stored work reports. To include existing harness history and
+local meeting exports, merge this into your configuration:
+
+```json
+{
+  "coordinator": {
+    "history": [
+      {
+        "name": "codex",
+        "path": "~/.codex/sessions",
+        "format": "codex"
+      }
+    ],
+    "meetings": {
+      "folders": ["~/Documents/meeting-exports"]
+    }
+  }
+}
+```
+
+History reads are bounded by configured file, byte, and record limits. Supported
+formats are Claude and Codex JSONL session records and JSONL message exports with
+`role` and `content` fields. Historical sessions supply context without granting
+control of those sessions. Meeting exports use Markdown or plain text. Edits and
+removals appear after source refresh, including reconciliation after wake. An
+undated export retains unknown chronology.
+
+Optional Linear access uses a read-only ticket interface. Enable
+`coordinator.linear`, select team or assignee IDs, or configure followed and linked
+issue IDs. Set the API key in the environment variable named by
+`authorization_env`, which defaults to `LINEAR_API_KEY`. Exact issue lookups and
+scoped searches retain Linear identities, versions, links, and availability.
+Keep credentials in your process environment or the background agent's `.env`.
+
+Selected MCP operations can supplement contextual search. An HTTP example is:
+
+```json
+{
+  "coordinator": {
+    "mcp": [
+      {
+        "name": "work",
+        "type": "http",
+        "url": "https://example.com/mcp",
+        "authorization_env": "WORK_MCP_AUTHORIZATION",
+        "read_only": true,
+        "tools": ["search"],
+        "search_tool": "search",
+        "query_parameter": "query"
+      }
+    ]
+  }
+}
+```
+
+Replace the endpoint and tool names with those supplied by your server.
+`authorization_env` contains the complete authorization header value. A stdio
+connection uses `type: "stdio"`, `command`, `args`, and an explicit `environment`
+list of credential variable names to forward. Select exact remote tool names
+without wildcards. The server must declare each selected tool read-only and must
+not declare destructive effects. Missing tools or incompatible declarations remain
+visible as source failures. Unselected tools are excluded from the pet's tool
+facade, and project settings, hooks, and coding tools are not inherited.
+
+`search_tool`, `query_parameter`, and optional `search_arguments` connect a selected
+operation to contextual search. `bootstrap_query` enables a configured initial
+query. Precise selected operations remain available without a collector. For a
+Linear MCP integration, set `provider: "linear"`, select its lookup operation with
+`lookup_tool`, and set `identifier_parameter` to its issue-ID argument. Complete
+versioned Linear issue results share identities and revisions with the API adapter.
+Partial results remain cited source evidence with their limits visible.
+
+The pet reports unavailable sources and uncertainty. Source text cannot adopt work
+or override a user correction. Clearing pet memory also discards cached SDK
+conversation context. Configured external history remains readable until its
+source configuration is removed.
 
 ## Connect your agents
 

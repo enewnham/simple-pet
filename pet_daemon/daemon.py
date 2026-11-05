@@ -9,24 +9,43 @@ import stat
 import time
 from collections.abc import Callable, Mapping
 from typing import Never
+from urllib.parse import unquote, urlsplit
 
 from anthropic import AsyncAnthropic
+from claude_agent_sdk import query as coordinator_query
 
 from .application import Application
 from .attention import Attention
 from .behavior.controller import Behavior
 from .behavior.sprites import Pack
 from .commentary import AnthropicModelClient, Cognition
+from .companion.index import SourceChange
+from .companion.sdk import SdkCompanion, SdkQuery
 from .config import Config
+from .conversation import Conversations
+from .coordination.models import (
+    CandidateCause,
+    DelegatedTask,
+    Responsibility,
+    ResponsibilityStatus,
+    SourceReference,
+)
+from .coordination.runtime import Coordinator
+from .coordination.watches import Watches
+from .coordination.workflows import Workflows
+from .desktop import AdapterClient, Delegation
 from .logging import get_logger
+from .navigation import Navigator, Target, TargetKind
 from .runtime import RandomSource
 from .sessions.processes import ProcessTracker
 from .sessions.reactions import SessionReactions
 from .sessions.tracking import Sessions
 from .sources import RepositoryTracker
+from .sources.checks import GitHubChecks
 from .sources.hooks import normalize_hook
 from .storage import Memory
 from .transport import MAX_DATAGRAM_BYTES, SOCKET_BUFFER_BYTES
+from .types import JSONObject
 
 log = get_logger("pet-daemon")
 
@@ -97,9 +116,12 @@ class Daemon:
         clock: Callable[[], float] = time.monotonic,
         rng: RandomSource | None = None,
         wall_clock: Callable[[], float] = time.time,
+        companion_query: SdkQuery = coordinator_query,
     ) -> None:
         self.config = config
         self.clock = clock
+        self.wall_clock = wall_clock
+        self.companion_query = companion_query
         self.rng = rng or random.Random()
         self.pack = Pack(config.pet_dir)
         sessions = Sessions(
@@ -131,6 +153,21 @@ class Daemon:
             checkpoints=memory.load_repositories(),
             targets=memory.collection_targets(),
         )
+        self.configure_coordination(config, memory, wall_clock)
+        conversations = (
+            Conversations(
+                memory.coordination,
+                self.companion.reply,
+                self.emit_conversation,
+                clock=wall_clock,
+                act=self.workflows.accept_action,
+                desktop_capabilities=config.desktop.capabilities
+                if config.desktop
+                else (),
+            )
+            if self.companion is not None
+            else None
+        )
         self.application = Application(
             config,
             sessions=sessions,
@@ -150,6 +187,10 @@ class Daemon:
             reconcile_work=lambda: repositories.reconcile_targets(
                 memory.collection_targets()
             ),
+            conversations=conversations,
+            companion=self.companion,
+            coordinator=self.coordinator,
+            desktop=self.desktop,
         )
         self.application.reconcile_targets()
         self.transport: asyncio.DatagramTransport | None = None
@@ -158,6 +199,232 @@ class Daemon:
         self.child: asyncio.subprocess.Process | None = None
         self.loop_task: asyncio.Task[None] | None = None
         self.stopping = asyncio.Event()
+
+    def emit_conversation(self, packet: JSONObject) -> None:
+        self.emit(packet)
+
+    def configure_coordination(
+        self, config: Config, memory: Memory, clock: Callable[[], float]
+    ) -> None:
+        self.coordination_store = memory.coordination
+        self.desktop = (
+            Delegation(
+                memory.coordination,
+                AdapterClient(config.desktop),
+                clock=clock,
+                changed=self.task_changed,
+                coding_slots=config.coordinator.scheduling.coding_slots,
+            )
+            if config.desktop is not None
+            else None
+        )
+        effect = self.desktop.dispatch if self.desktop is not None else None
+        workflows = Workflows(
+            memory.coordination,
+            clock,
+            effect=effect,
+            changed=self.responsibility_changed,
+            navigate=self.open_source,
+            paused=self.coordination_paused,
+            revised=self.responsibility_revised,
+        )
+        self.workflows = workflows
+        self.companion = (
+            SdkCompanion(
+                config.coordinator,
+                memory,
+                clock,
+                config.persona,
+                workflow_tools=workflows.tools,
+                on_source_changes=self.sources_changed,
+                query=self.companion_query,
+            )
+            if config.coordinator.enabled
+            else None
+        )
+        self.watches = Watches(
+            memory.coordination,
+            config.coordinator.scheduling,
+            clock,
+            GitHubChecks(clock=clock).observe,
+        )
+        self.coordinator = (
+            Coordinator(
+                memory.coordination,
+                config.coordinator.scheduling,
+                clock,
+                self.companion.investigate,
+                effect=effect,
+                reconcile=self.desktop.reconcile if self.desktop is not None else None,
+                refresh_watches=self.refresh_coordination_sources,
+                sources_current=self.sources_current,
+                completion_sources_valid=self.companion.completion_sources_valid,
+                completed=self.responsibility_revised,
+            )
+            if self.companion is not None
+            else None
+        )
+
+    def sources_changed(self, changes: tuple[SourceChange, ...]) -> None:
+        if self.coordinator is None or self.companion is None:
+            return
+        for change in changes:
+            document = self.companion.index.document(change.source_id)
+            scope = document.source.scope if document is not None else change.provider
+            self.coordinator.queue(
+                "Do these source changes affect recent work or open questions?",
+                scope,
+                CandidateCause(
+                    change.kind, change.source_id, change.revision, change.observed_at
+                ),
+            )
+
+    def task_changed(self, task: DelegatedTask) -> None:
+        if self.coordinator is None:
+            return
+        responsibility = self.coordination_store.responsibility(task.responsibility_id)
+        if responsibility is not None:
+            self.coordinator.queue(
+                "Assess the next bounded step for the owned task.",
+                responsibility.scope,
+                CandidateCause("task", task.id, str(task.revision), self.wall_clock()),
+                responsibility_id=responsibility.id,
+                project_id=responsibility.project_id,
+                priority=responsibility.priority,
+                due_at=responsibility.due_at,
+                exclusive=responsibility.exclusive,
+            )
+
+    def responsibility_changed(self, responsibility: Responsibility) -> None:
+        if self.coordinator is not None:
+            self.coordinator.queue(
+                responsibility.purpose,
+                responsibility.scope,
+                CandidateCause(
+                    "responsibility",
+                    responsibility.id,
+                    str(responsibility.revision),
+                    self.wall_clock(),
+                ),
+                responsibility_id=responsibility.id,
+                project_id=responsibility.project_id,
+                priority=responsibility.priority,
+                due_at=responsibility.due_at,
+                exclusive=responsibility.exclusive,
+            )
+
+    def responsibility_revised(self, responsibility: Responsibility) -> None:
+        if self.desktop is not None:
+            self.desktop.responsibility_changed(responsibility)
+
+    def coordination_paused(self, paused: bool) -> None:
+        if self.coordinator is not None:
+            self.coordinator.suspended = paused
+            self.coordinator.next_tick = 0
+            if paused and self.coordinator.task is not None:
+                self.coordinator.task.cancel()
+        if self.desktop is not None:
+            self.desktop.suspended = paused or self.application.suspended
+
+    async def refresh_coordination_sources(self) -> None:
+        if self.companion is not None:
+            await self.companion.refresh_sources()
+        await self.watches.refresh()
+        for responsibility in self.coordination_store.responsibilities():
+            if responsibility.status == ResponsibilityStatus.ACTIVE:
+                self.responsibility_changed(responsibility)
+            if (
+                self.coordinator is not None
+                and responsibility.followup_at is not None
+                and responsibility.followup_at <= self.wall_clock()
+            ):
+                self.coordinator.queue(
+                    responsibility.purpose,
+                    responsibility.scope,
+                    CandidateCause(
+                        "followup",
+                        f"followup:{responsibility.id}",
+                        str(responsibility.followup_at),
+                        self.wall_clock(),
+                    ),
+                    responsibility_id=responsibility.id,
+                    project_id=responsibility.project_id,
+                )
+
+    def sources_current(self, sources: tuple[SourceReference, ...]) -> bool:
+        if self.companion is None:
+            return False
+        statuses = {
+            status.provider: status for status in self.companion.index.statuses()
+        }
+        for source in sources:
+            if source.provider == "user":
+                instruction = self.coordination_store.instruction(source.id)
+                if (
+                    instruction is None
+                    or not instruction.active
+                    or str(instruction.revision) != source.revision
+                ):
+                    return False
+                continue
+            status = statuses.get(source.provider)
+            document = self.companion.index.document(source.id.split("#L", 1)[0])
+            operational = document is not None and document.kind in (
+                "observation",
+                "ticket",
+                "checks",
+                "task_observation",
+            )
+            if (
+                not self.companion.index.current(
+                    source,
+                    now=self.wall_clock() if operational else None,
+                    max_age=self.config.coordinator.scheduling.source_fresh_seconds,
+                )
+                or status is None
+                or operational
+                and self.wall_clock() - status.checked_at
+                > self.config.coordinator.scheduling.source_fresh_seconds
+            ):
+                return False
+        return True
+
+    async def open_source(self, source: SourceReference) -> None:
+        if source.provider == "user":
+            instruction = self.coordination_store.instruction(source.id)
+            conversations = self.application.conversations
+            if (
+                instruction is None
+                or conversations is None
+                or str(instruction.revision) != source.revision
+            ):
+                raise ValueError("That user source changed or is unavailable")
+            if instruction.message_id is not None:
+                conversations.show_message(instruction.message_id)
+            else:
+                conversations.show_activity()
+            return
+        known = (
+            self.companion is not None and self.companion.index.current(source)
+        ) or any(
+            source in record.sources for record in self.coordination_store.activity()
+        )
+        if not known or not source.available or not source.uri:
+            raise ValueError("The source changed or is unavailable")
+        parsed = urlsplit(source.uri)
+        if parsed.scheme in ("https", "http"):
+            target = Target(TargetKind.PULL_REQUEST, source.uri)
+        elif parsed.scheme == "agent":
+            target = Target(TargetKind.SESSION, parsed.path.lstrip("/"), parsed.netloc)
+        elif parsed.scheme == "file":
+            target = Target(TargetKind.WORKTREE, unquote(parsed.path))
+        elif not parsed.scheme and source.uri.startswith("/"):
+            target = Target(TargetKind.WORKTREE, source.uri)
+        else:
+            raise ValueError("No navigation route is configured for that source")
+        result = await Navigator(self.config.navigation.handlers).open(target)
+        if not result.success:
+            raise RuntimeError(result.error or "Source navigation failed")
 
     async def start(self) -> None:
         receiver, identity = bind_socket(self.config.daemon_socket)

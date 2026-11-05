@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from enum import StrEnum
 
+from ..identity import SessionIdentity
+
 
 class ChatRole(StrEnum):
     USER = "user"
@@ -72,6 +74,7 @@ class ChatAction:
     kind: str
     target: str = ""
     revision: int | None = None
+    source: SourceReference | None = None
 
 
 @dataclass(frozen=True)
@@ -121,6 +124,8 @@ class Instruction:
     message_id: str | None = None
     active: bool = True
     revision: int = 1
+    excluded_references: tuple[str, ...] = ()
+    context_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -142,6 +147,7 @@ class Note:
     condition: str | None = None
     support: NoteSupport = NoteSupport.TENTATIVE
     actor: str = "agent"
+    excluded_references: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -172,6 +178,8 @@ class Responsibility:
     followup_at: float | None = None
     waiting_on: str | None = None
     revision: int = 1
+    due_at: float | None = None
+    exclusive: bool = False
 
 
 @dataclass(frozen=True)
@@ -192,6 +200,14 @@ class TaskStatus(StrEnum):
     WAITING = "waiting"
     ENDED = "ended"
     STOPPED = "stopped"
+    UNKNOWN = "unknown"
+
+
+class TaskReadiness(StrEnum):
+    READY = "ready"
+    BUSY = "busy"
+    WAITING = "waiting"
+    UNKNOWN = "unknown"
 
 
 class OperationKind(StrEnum):
@@ -216,6 +232,14 @@ class Disposition(StrEnum):
     WAIT = "wait"
     NO_FINDING = "no_finding"
     DEFER = "defer"
+    COMPLETE = "complete"
+
+
+class CompletionBasis(StrEnum):
+    OBSERVED = "observed"
+    REPORTED = "reported"
+    INFERRED = "inferred"
+    USER_CONFIRMED = "user_confirmed"
 
 
 @dataclass(frozen=True)
@@ -241,6 +265,15 @@ class DelegatedTask:
     status: TaskStatus = TaskStatus.PREPARING
     session: HarnessSession | None = None
     revision: int = 1
+    readiness: TaskReadiness = TaskReadiness.UNKNOWN
+    observed_at: float | None = None
+    last_error: str | None = None
+    user_revision: int = 0
+    native_session: SessionIdentity | None = None
+    native_aliases: tuple[SessionIdentity, ...] = ()
+    adapter_revision: str | None = None
+    observed_input: str | None = None
+    input_observed_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -256,6 +289,12 @@ class Operation:
     external_id: str | None = None
     error: str | None = None
     revision: int = 1
+    instruction: str = ""
+    expected_status: TaskStatus | None = None
+    expected_readiness: TaskReadiness | None = None
+    evidence_sources: tuple[SourceReference, ...] = ()
+    task_user_revision: int = 0
+    expected_adapter_revision: str | None = None
 
 
 @dataclass(frozen=True)
@@ -280,6 +319,11 @@ class Candidate:
     waiting_on: str | None = None
     priority: int = 0
     revision: int = 1
+    due_at: float | None = None
+    evidence_revision: int = 1
+    serviced_evidence_revision: int | None = None
+    exclusive: bool = False
+    deferred_until: float | None = None
 
 
 @dataclass(frozen=True)
@@ -310,6 +354,10 @@ class TaskAction:
     repository: str = ""
     sources: tuple[SourceReference, ...] = ()
     constraints: tuple[str, ...] = ()
+    expected_task_revision: int | None = None
+    expected_responsibility_revision: int | None = None
+    expected_instruction_revision: int | None = None
+    expected_user_revision: int | None = None
 
 
 @dataclass(frozen=True)
@@ -319,6 +367,27 @@ class InquiryPass:
     instruction_revision: int
     focus_id: str | None = None
     prior: tuple[Consideration, ...] = ()
+    responsibilities: tuple[Responsibility, ...] = ()
+    tasks: tuple[DelegatedTask, ...] = ()
+
+
+@dataclass(frozen=True)
+class CompletionAssessment:
+    responsibility_id: str
+    responsibility_revision: int
+    condition: str
+    claim: str
+    basis: CompletionBasis
+    sources: tuple[SourceReference, ...] = ()
+
+
+@dataclass(frozen=True)
+class CompletionRecord:
+    id: str
+    assessment: CompletionAssessment
+    created_at: float
+    instruction_revision: int
+    user_message_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -330,9 +399,77 @@ class CandidateDecision:
     action: TaskAction | None = None
     next_review_at: float | None = None
     wake_condition: str | None = None
+    completion: CompletionAssessment | None = None
 
 
 @dataclass(frozen=True)
 class InquiryResult:
     pass_id: str
     decisions: tuple[CandidateDecision, ...]
+
+
+@dataclass(frozen=True)
+class InquiryAttempt:
+    id: str
+    created_at: float
+    candidate_ids: tuple[str, ...]
+    completed_at: float | None = None
+    error: str | None = None
+    revision: int = 1
+
+
+@dataclass(frozen=True)
+class Watch:
+    id: str
+    responsibility_id: str
+    ref: str
+    created_at: float
+    next_check_at: float
+    checked_at: float | None = None
+    head: str = ""
+    source_revision: str = ""
+    error: str | None = None
+    completed_at: float | None = None
+    revision: int = 1
+
+
+class FeedbackKind(StrEnum):
+    LATER = "later"
+    TOMORROW = "tomorrow"
+    HANDLED = "handled"
+    NOT_RELEVANT = "not_relevant"
+
+
+@dataclass(frozen=True)
+class Feedback:
+    id: str
+    kind: FeedbackKind
+    target_id: str
+    scope: str
+    created_at: float
+    instruction_id: str
+    deferred_until: float | None = None
+
+
+@dataclass(frozen=True)
+class Notice:
+    id: str
+    activity_id: str
+    text: str
+    created_at: float
+    sources: tuple[SourceReference, ...] = ()
+    delivered_at: float | None = None
+    revision: int = 1
+
+
+@dataclass(frozen=True)
+class UserAction:
+    id: str
+    kind: str
+    target_id: str
+    label: str
+    created_at: float
+    scope: str = ""
+    outcome: OperationOutcome = OperationOutcome.PENDING
+    error: str | None = None
+    revision: int = 1

@@ -1,6 +1,6 @@
 # Responsibilities and evidence
 
-- Status: Planned, unimplemented
+- Status: Implementation in progress
 - Date: 2026-11-05
 - Scope: Prepared context, working notes, coordination, responsibilities, and authority
 

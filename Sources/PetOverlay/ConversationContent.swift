@@ -10,13 +10,19 @@ final class ConversationContent: NSVisualEffectView {
                                            target: nil, action: nil)
     private let progress = NSProgressIndicator()
     private let pendingLabel = NSTextField(labelWithString: "Working…")
+    let composer = NSTextField()
+    private let sendButton = ConversationButton(title: "Send", target: nil, action: nil)
+    private let composerRow = NSStackView()
     private var heading: NSTextField?
     private var labels: [NSTextField] = []
     private var buttons: [NSButton] = []
+    private var navigationButtons: [NSButton] = []
     private var responses: [NSStackView] = []
     private var bodyWidth: NSLayoutConstraint!
     var onAction: ((String) -> Void)?
     var onDismiss: (() -> Void)?
+    var onSubmit: (() -> Void)?
+    var onDraftChange: ((String) -> Void)?
 
     init() {
         super.init(frame: .zero)
@@ -29,6 +35,7 @@ final class ConversationContent: NSVisualEffectView {
         setAccessibilityLabel("Pet conversation")
         configureContent()
         configureFooter()
+        configureComposer()
         close.target = self
         close.action = #selector(closeConversation)
         close.bezelStyle = .inline
@@ -43,6 +50,7 @@ final class ConversationContent: NSVisualEffectView {
 
     func render(_ conversation: Conversation, pending: Bool) {
         buttons.removeAll()
+        navigationButtons.removeAll()
         labels.removeAll()
         responses.removeAll()
         clear(body)
@@ -60,8 +68,11 @@ final class ConversationContent: NSVisualEffectView {
             if index > 0 { appendSeparator() }
             appendItem(item, conversation: conversation)
         }
+        if conversation.mode == .chat { appendMessages(conversation.messages ?? []) }
+        appendActivity(conversation.activity ?? [])
         appendNavigation(conversation.actions)
-        setPending(pending)
+        composerRow.isHidden = conversation.mode != .chat
+        setPending(pending || conversation.pendingMessageID != nil, permitsControls: conversation.pendingMessageID != nil)
         setAccessibilityLabel("Pet conversation: \(title)")
         window?.recalculateKeyViewLoop()
     }
@@ -168,11 +179,14 @@ final class ConversationContent: NSVisualEffectView {
         button.font = .systemFont(ofSize: 13)
         button.setAccessibilityLabel(action.label)
         buttons.append(button)
+        if [.history, .activityPage, .activity, .chat, .pause, .resume, .stop, .navigate, .evidence].contains(action.kind) { navigationButtons.append(button) }
         return button
     }
 
-    func setPending(_ pending: Bool) {
+    func setPending(_ pending: Bool, permitsControls: Bool = false) {
         for button in buttons { button.isEnabled = !pending }
+        if permitsControls { for button in navigationButtons { button.isEnabled = true } }
+        sendButton.isEnabled = !pending
         progress.removeFromSuperview()
         pendingLabel.removeFromSuperview()
         if pending {
@@ -184,19 +198,25 @@ final class ConversationContent: NSVisualEffectView {
         }
     }
 
+    func showInputError(_ text: String) {
+        appendText(text, to: body, size: 13, color: .systemRed)
+    }
+
     func preferredHeight(width: CGFloat) -> CGFloat {
         measureDocument(width: max(1, width - 40))
-        return ceil(body.fittingSize.height) + 40 + footerHeight + footerGap
+        return ceil(body.fittingSize.height) + 40 + footerHeight + footerGap + composerHeight
     }
 
     private var footerHeight: CGFloat { footer.arrangedSubviews.isEmpty ? 0 : max(22, footer.fittingSize.height) }
     private var footerGap: CGFloat { footer.arrangedSubviews.isEmpty ? 0 : 14 }
+    private var composerHeight: CGFloat { composerRow.isHidden ? 0 : 44 }
 
     func layoutContent() {
         let footerHeight = footerHeight
-        footer.frame = NSRect(x: 20, y: 20, width: bounds.width - 40, height: footerHeight)
-        scroll.frame = NSRect(x: 20, y: 20 + footerHeight + footerGap, width: max(1, bounds.width - 40),
-                              height: max(1, bounds.height - 40 - footerHeight - footerGap))
+        composerRow.frame = NSRect(x: 20, y: 16, width: bounds.width - 40, height: 32)
+        footer.frame = NSRect(x: 20, y: 20 + composerHeight, width: bounds.width - 40, height: footerHeight)
+        scroll.frame = NSRect(x: 20, y: 20 + composerHeight + footerHeight + footerGap, width: max(1, bounds.width - 40),
+                              height: max(1, bounds.height - 40 - composerHeight - footerHeight - footerGap))
         close.frame = NSRect(x: bounds.width - 38, y: bounds.height - 36, width: 20, height: 20)
         measureDocument(width: scroll.contentSize.width)
     }
@@ -229,16 +249,6 @@ final class ConversationContent: NSVisualEffectView {
         layer?.borderColor = NSColor.separatorColor.usingColorSpace(.deviceRGB)?.cgColor
     }
 
-    private func title(for conversation: Conversation) -> String {
-        switch conversation.mode {
-        case .rounds: return "Recent work"
-        case .empty: return "No fresh notes"
-        case .loading: return conversation.headline ?? "One moment"
-        case .thread, .context:
-            return conversation.headline ?? conversation.items.first?.title ?? "A note from Pet"
-        }
-    }
-
     private func clear(_ stack: NSStackView) {
         for view in stack.arrangedSubviews { view.removeFromSuperview() }
     }
@@ -254,9 +264,56 @@ final class ConversationContent: NSVisualEffectView {
     }
 
     @objc private func closeConversation() { onDismiss?() }
+
+    @objc private func submitMessage() {
+        onDraftChange?(composer.stringValue)
+        onSubmit?()
+    }
 }
 
 private extension ConversationContent {
+    func title(for conversation: Conversation) -> String {
+        switch conversation.mode {
+        case .rounds: return "Recent work"
+        case .empty: return "No fresh notes"
+        case .loading: return conversation.headline ?? "One moment"
+        case .chat: return "Conversation"
+        case .activity: return "Activity"
+        case .thread, .context:
+            return conversation.headline ?? conversation.items.first?.title ?? "A note from Pet"
+        }
+    }
+
+    func appendMessages(_ messages: [ChatMessage]) {
+        for message in messages {
+            let author = appendText(message.role == .user ? "You" : "Pet", to: body, size: 12, color: .secondaryLabelColor)
+            author.font = .systemFont(ofSize: 12, weight: .semibold)
+            if let excerpt = message.excerpt { appendText(excerpt, to: body, size: 12, color: .secondaryLabelColor) }
+            appendText(message.text, to: body, size: 14)
+            for source in message.sources ?? [] {
+                appendText(source.title, to: body, size: 12, color: .secondaryLabelColor)
+                if let detail = source.detail { appendText(detail, to: body, size: 12, color: .secondaryLabelColor) }
+            }
+        }
+    }
+
+    func appendActivity(_ entries: [ActivityEntry]) {
+        for entry in entries {
+            appendSeparator()
+            let title = appendText(entry.title, to: body, size: 14)
+            title.font = .systemFont(ofSize: 14, weight: .semibold)
+            appendText("\(entry.category.rawValue.capitalized) · \(entry.state)", to: body, size: 12, color: .secondaryLabelColor)
+            appendText(entry.text, to: body, size: 14)
+            if let reason = entry.reason { appendText(reason, to: body, size: 13, color: .secondaryLabelColor) }
+            if let revisit = entry.revisitAt { appendText("Revisit: \(revisit)", to: body, size: 12, color: .secondaryLabelColor) }
+            for source in entry.sources {
+                appendText(source.title, to: body, size: 12, color: .secondaryLabelColor)
+                if let detail = source.detail { appendText(detail, to: body, size: 12, color: .secondaryLabelColor) }
+            }
+            appendResponses(entry.actions, to: body)
+        }
+    }
+
     func configureContent() {
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
@@ -292,6 +349,28 @@ private extension ConversationContent {
         pendingLabel.textColor = .secondaryLabelColor
     }
 
+    func configureComposer() {
+        composer.placeholderString = "Ask Pet about your work"
+        composer.setAccessibilityLabel("Message Pet")
+        composer.target = self
+        composer.action = #selector(submitMessage)
+        composer.delegate = self
+        composer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        sendButton.target = self
+        sendButton.action = #selector(submitMessage)
+        sendButton.bezelStyle = .rounded
+        composerRow.orientation = .horizontal
+        composerRow.spacing = 8
+        composerRow.addArrangedSubview(composer)
+        composerRow.addArrangedSubview(sendButton)
+        composerRow.isHidden = true
+        addSubview(composerRow)
+    }
+
+}
+
+extension ConversationContent: NSTextFieldDelegate {
+    func controlTextDidChange(_ notification: Notification) { onDraftChange?(composer.stringValue) }
 }
 
 private final class ConversationDocument: NSView {

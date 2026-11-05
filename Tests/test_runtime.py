@@ -7,6 +7,7 @@ import socket
 import tempfile
 import time
 import unittest
+import uuid
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Unpack
@@ -18,7 +19,9 @@ from pet_daemon.behavior.sprites import Pack
 from pet_daemon.cli.hook import update
 from pet_daemon.cli.notify import encode
 from pet_daemon.commentary.contracts import ModelRequest
+from pet_daemon.companion.config import CoordinatorConfig
 from pet_daemon.config import Config
+from pet_daemon.conversation import DEFAULT_CONVERSATION_ID
 from pet_daemon.daemon import Daemon, bind_socket
 from pet_daemon.domain import CareKind, SessionSource, SpeechReason
 from pet_daemon.identity import SessionIdentity
@@ -37,6 +40,7 @@ from pet_daemon.transport import MAX_DATAGRAM_BYTES, SOCKET_BUFFER_BYTES
 from pet_daemon.work.models import IntentEvidence
 from pet_daemon.work.observations import BranchObservation, PullRequestObservation
 from Tests.fixtures import require, story_response
+from Tests.test_companion import FakeSdk
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII="
@@ -119,6 +123,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             observation_seconds=(3600, 3600),
             request_timeout=10,
             memory_file=root / "memory.sqlite3",
+            coordinator=CoordinatorConfig(enabled=False),
         )
         self.config.behavior.automatic_speech_cooldown_seconds = 0
         self.entered = asyncio.Event()
@@ -222,6 +227,68 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     def send(self, packet: Mapping[str, object]) -> None:
         self.hook.sendto(json.dumps(packet).encode(), self.config.daemon_socket)
+
+    async def test_enabled_coordinator_handles_renderer_chat_and_awake_lifecycle(
+        self,
+    ) -> None:
+        await self.daemon.close()
+        model = FakeSdk()
+        self.config.coordinator = CoordinatorConfig(
+            working_directory=Path(self.temp.name) / "sdk"
+        )
+        self.daemon = Daemon(
+            self.config,
+            self.client,
+            clock=self.clock,
+            wall_clock=self.wall_clock,
+            rng=random.Random(7),
+            companion_query=model,
+        )
+        self.daemon.application.memory.coordination.set_paused(True)
+        await self.daemon.start()
+        self.send_status()
+        self.event("intent", goal="Inspect parser review", repo="/fixture/parser")
+        await self.wait_for(
+            lambda: bool(self.daemon.application.memory.recent_work_reports(1))
+        )
+        self.send({"kind": "renderer", "event": "click"})
+        packet = await self.packet(lambda item: bool(item.get("conversation")))
+        snapshot = packet["conversation"]
+        assert isinstance(snapshot, dict)
+        self.send(
+            {
+                "kind": "renderer",
+                "event": "conversation_message",
+                "interaction_id": snapshot["id"],
+                "revision": snapshot["revision"],
+                "conversation_id": DEFAULT_CONVERSATION_ID,
+                "message_id": str(uuid.uuid4()),
+                "text": "What is waiting for review?",
+            }
+        )
+        await model.started.wait()
+        await self.wait_for(
+            lambda: (
+                len(
+                    self.daemon.application.memory.coordination.messages(
+                        DEFAULT_CONVERSATION_ID
+                    )
+                )
+                == 2
+            )
+        )
+        self.assertEqual(len(model.inputs), 1)
+        self.assertTrue(self.daemon.application.memory.coordination.state().paused)
+        self.assertEqual(
+            self.daemon.application.memory.coordination.considerations(), ()
+        )
+        self.send({"kind": "renderer", "event": "system_sleep"})
+        await self.wait_for(lambda: self.daemon.application.suspended)
+        await self.wait_for(lambda: require(self.daemon.companion).suspended)
+        self.send({"kind": "renderer", "event": "system_wake"})
+        await self.wait_for(lambda: not self.daemon.application.suspended)
+        await self.wait_for(lambda: not require(self.daemon.companion).suspended)
+        self.assertEqual(len(model.inputs), 1)
 
     def event(
         self, event: str, session: str = "one", source: str = "cli", **extra: object
@@ -2805,6 +2872,13 @@ class ConfigurationTests(unittest.TestCase):
                         "log_file": "analysis/pet.jsonl",
                         "memory_file": "state/companion.sqlite3",
                         "behavior": {"walk_seconds": [2, 4], "roaming": False},
+                        "coordinator": {
+                            "working_directory": "state/reasoning",
+                            "meetings": {"folders": ["notes"]},
+                            "history": [
+                                {"name": "codex", "path": "sessions", "format": "codex"}
+                            ],
+                        },
                     }
                 )
             )
@@ -2825,6 +2899,18 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(config.memory_max_events, 500)
             self.assertFalse(config.behavior.roaming)
             self.assertEqual(config.behavior.walk_seconds, (2, 4))
+            self.assertEqual(
+                config.coordinator.working_directory,
+                Path(directory).resolve() / "state/reasoning",
+            )
+            self.assertEqual(
+                config.coordinator.meetings.folders,
+                (Path(directory).resolve() / "notes",),
+            )
+            self.assertEqual(
+                config.coordinator.history[0].path,
+                Path(directory).resolve() / "sessions",
+            )
 
     def test_rejects_nonpositive_or_nonfinite_idle_message_intervals(self) -> None:
         for seconds in (0, -1, True, "300", None, float("nan"), float("inf")):

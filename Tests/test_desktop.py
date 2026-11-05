@@ -11,6 +11,7 @@ from pathlib import Path
 import httpx2 as httpx
 from anthropic import AsyncAnthropic
 
+from pet_daemon.companion.config import CoordinatorConfig
 from pet_daemon.config import Config
 from pet_daemon.daemon import Daemon
 from pet_daemon.domain import SessionSource
@@ -40,6 +41,7 @@ class DesktopTests(unittest.IsolatedAsyncioTestCase):
                 observation_seconds=(3600, 3600),
                 speech_ttl=1,
                 memory_file=Path(directory) / "memory.sqlite3",
+                coordinator=CoordinatorConfig(enabled=False),
             )
             config.behavior.naps = False
             config.behavior.idle_pause = config.behavior.working_pause = (0.05, 0.05)

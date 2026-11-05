@@ -1,16 +1,16 @@
 # Conversation and Activity
 
-- Status: Planned
+- Status: Implementation in progress
 - Date: 2026-11-05
-- Implementation: Not started
+- Implementation: Integrated feature under verification
 
-This specification defines the human-facing conversation and coordination surfaces for the desktop coordinator. It is part of the [desktop coordinator plan](overview.md), alongside [responsibilities and evidence](responsibilities-and-evidence.md), [SDK workflows](sdk-workflows.md), and [desktop sessions](desktop-sessions.md). Implementation is planned and is not built.
+This specification defines the human-facing conversation and coordination surfaces for the desktop coordinator. It is part of the [desktop coordinator plan](overview.md), alongside [responsibilities and evidence](responsibilities-and-evidence.md), [SDK workflows](sdk-workflows.md), and [desktop sessions](desktop-sessions.md). The [implementation ledger](implementation.md) records completed checks and remaining acceptance.
 
 ## Current starting points
 
 The renderer already displays ambient speech and a compact AppKit conversation panel. [`ConversationController`](../../../Sources/PetOverlay/ConversationController.swift) positions it near the pet, receives versioned snapshots, tracks engagement, and sends typed actions. [`ConversationContent`](../../../Sources/PetOverlay/ConversationContent.swift) renders conversation items, context, actions, pending state, and errors. [`ConversationSession`](../../../Sources/PetCore/Conversation.swift) rejects stale revisions and tracks presentation lifetime.
 
-The daemon's [`Interactions`](../../../pet_daemon/interactions.py) builds snapshots, offers suggested actions, checks work evidence, and handles navigation, context, Tomorrow, Handled, and dismissal. [`Application.receive_renderer`](../../../pet_daemon/application.py) routes events to it, and the [socket receiver](../../../pet_daemon/daemon.py) accepts renderer datagrams. The code has no free-form input, multi-turn SDK conversation, or Activity view of coordination and owned-task history. Existing interaction state and delivery acknowledgement do not provide durable chat identity or complete Activity records.
+The daemon's [ambient interactions](../../../pet_daemon/interactions.py) build snapshots and handle navigation, context, Tomorrow, Handled, and dismissal. The [durable conversation controller](../../../pet_daemon/conversation.py) accepts typed messages, runs SDK replies, restores history, and projects [Activity](../../../pet_daemon/activity.py). [Application routing](../../../pet_daemon/application.py) and the [socket receiver](../../../pet_daemon/daemon.py) connect renderer datagrams to these owners. Canonical chat and Activity records retain accepted state independently of presentation and delivery acknowledgement.
 
 ## Product behavior
 

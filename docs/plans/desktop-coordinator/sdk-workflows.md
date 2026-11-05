@@ -1,8 +1,8 @@
 # SDK conversations and workflows
 
-- Status: Planned
+- Status: Implementation in progress
 - Date: 2026-11-05
-- Implementation: Not started
+- Implementation: Integrated feature under verification
 
 This document specifies the internal agent in the
 [desktop coordinator plan](overview.md). [Conversation](conversation.md) defines
@@ -341,8 +341,9 @@ unconsidered, and persist none or no-finding outcomes without producing speech.
 Ship established retrieval and SDK patterns through normal automated checks and
 manual acceptance, then iterate. Inspect generated conversations for grounded
 claims, preserved uncertainty, useful investigations, appropriate next steps,
-and persona expression. Implementation has not started, so these acceptance
-checks remain unrun.
+and persona expression. The [implementation ledger](implementation.md) records
+automated checks, and [verification](verification.md) records bounded live model
+acceptance. Remaining integration and desktop checks stay explicit there.
 
 The [overview](overview.md) defines thirteen internal work packages for one
 integrated implementation run and direct merge to `main`. Package 1 specifies

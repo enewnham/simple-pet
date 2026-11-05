@@ -1,16 +1,16 @@
 # Desktop sessions and adapters
 
-- Status: Planned
+- Status: Implementation in progress
 - Date: 2026-11-05
-- Implementation: Not started
+- Implementation: Public adapter verified, personal desktop acceptance pending
 
 ## Context
 
 The pet observes coding tools through hooks and can open recorded worktrees, PRs,
 and sessions through [navigation handlers](../../../pet_daemon/navigation.py).
 Opening a destination does not establish that a new harness session exists or that
-the pet owns it. The feature needs an explicit boundary for starting and maintaining
-work on the user's desktop.
+the pet owns it. The [desktop adapter](../../../pet_daemon/desktop/) records explicit
+delegation for starting and maintaining work on the user's desktop.
 
 This specification owns that boundary. [The overview](overview.md) contains the
 delivery plan. [Responsibilities and evidence](responsibilities-and-evidence.md)

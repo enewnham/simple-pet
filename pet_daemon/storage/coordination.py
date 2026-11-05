@@ -10,19 +10,28 @@ from ..coordination.models import (
     ChatMessage,
     ChatRetry,
     ChatRole,
+    CompletionBasis,
+    CompletionRecord,
     Consideration,
     Conversation,
     CoordinationState,
     DelegatedTask,
+    Feedback,
+    InquiryAttempt,
     Instruction,
     Note,
     NoteKind,
     NoteOrigin,
     NoteStatus,
     NoteSupport,
+    Notice,
     Operation,
     Project,
     Responsibility,
+    ResponsibilityKind,
+    ResponsibilityStatus,
+    UserAction,
+    Watch,
 )
 from .transactions import transaction
 
@@ -72,6 +81,39 @@ class SQLiteCoordinationRepository:
             self._get("state", "coordination", CoordinationState) or CoordinationState()
         )
 
+    def record_user_action(
+        self, action: UserAction, *, changes_instructions: bool = True
+    ) -> bool:
+        with transaction(self.db):
+            if self._get("user_action", action.id, UserAction) is not None:
+                return False
+            self._write("user_action", action.id, 1, action)
+            if changes_instructions:
+                self.save_instruction(
+                    Instruction(
+                        f"action:{action.id}",
+                        action.label,
+                        action.scope,
+                        action.created_at,
+                        context_only=True,
+                    )
+                )
+            return True
+
+    def user_action(self, identifier: str) -> UserAction | None:
+        return self._get("user_action", identifier, UserAction)
+
+    def user_actions(self) -> tuple[UserAction, ...]:
+        return self._all("user_action", UserAction)
+
+    def save_user_action(self, action: UserAction) -> None:
+        with transaction(self.db):
+            previous = self.user_action(action.id)
+            if previous is None:
+                raise ValueError("Accept a user action before recording its outcome")
+            self._check_revision(previous.revision, action.revision)
+            self._write("user_action", action.id, action.revision, action)
+
     def set_paused(self, paused: bool) -> CoordinationState:
         with transaction(self.db):
             state = self.state()
@@ -120,6 +162,16 @@ class SQLiteCoordinationRepository:
             if conversation.pending_message_id is not None:
                 return False
             self._write("message", message.id, 1, message)
+            self.save_instruction(
+                Instruction(
+                    f"user:{message.id}",
+                    message.text,
+                    "",
+                    message.created_at,
+                    message_id=message.id,
+                    context_only=True,
+                )
+            )
             self._write(
                 "conversation",
                 conversation.id,
@@ -303,14 +355,22 @@ class SQLiteCoordinationRepository:
             if (
                 instruction is None
                 or instruction.text != note.text
-                or instruction.scope != note.scope
+                or instruction.scope not in ("", note.scope)
             ):
                 raise ValueError("A user note requires its canonical instruction")
             if instruction.active and note.status not in (
                 NoteStatus.ACTIVE,
                 NoteStatus.NEEDS_RECHECK,
             ):
-                raise ValueError("An active user instruction remains applicable")
+                replacement = any(
+                    record.origin == NoteOrigin.USER
+                    and record.scope == note.scope
+                    and note.id in record.supersedes
+                    and record.status == NoteStatus.ACTIVE
+                    for record in self.notes()
+                )
+                if note.status != NoteStatus.SUPERSEDED or not replacement:
+                    raise ValueError("An active user instruction remains applicable")
             if note.support != NoteSupport.CONFIRMED:
                 raise ValueError("A direct user statement retains confirmed origin")
         elif note.kind in (NoteKind.INSTRUCTION, NoteKind.CORRECTION):
@@ -362,8 +422,108 @@ class SQLiteCoordinationRepository:
                 responsibility,
             )
 
+    def completions(self) -> tuple[CompletionRecord, ...]:
+        return self._all("completion", CompletionRecord)
+
+    def record_completion(
+        self, record: CompletionRecord, *, notify: bool = True
+    ) -> bool:
+        with transaction(self.db):
+            if self._get("completion", record.id, CompletionRecord) is not None:
+                return False
+            assessment = record.assessment
+            responsibility = self.responsibility(assessment.responsibility_id)
+            if (
+                responsibility is None
+                or responsibility.revision != assessment.responsibility_revision
+                or responsibility.completion_condition != assessment.condition
+                or self.state().instruction_revision != record.instruction_revision
+            ):
+                raise RevisionConflict(
+                    "The completion condition or instructions changed"
+                )
+            if responsibility.status == ResponsibilityStatus.COMPLETED:
+                raise ValueError("The responsibility is already complete")
+            if not assessment.sources or any(
+                not source.available for source in assessment.sources
+            ):
+                raise ValueError("Completion requires available supporting evidence")
+            if assessment.basis == CompletionBasis.USER_CONFIRMED:
+                message = self._get(
+                    "message", record.user_message_id or "", ChatMessage
+                )
+                if (
+                    message is None
+                    or message.role != ChatRole.USER
+                    or not any(
+                        source.provider == "user" and source.id == f"user:{message.id}"
+                        for source in assessment.sources
+                    )
+                ):
+                    raise ValueError(
+                        "Human confirmation requires its accepted user event"
+                    )
+            elif (
+                assessment.basis != CompletionBasis.OBSERVED
+                or responsibility.kind != ResponsibilityKind.FINITE
+                or responsibility.status
+                not in (ResponsibilityStatus.ACTIVE, ResponsibilityStatus.WAITING)
+                or not assessment.condition.strip()
+            ):
+                raise ValueError(
+                    "Reports and hypotheses cannot establish goal completion"
+                )
+            self._write("completion", record.id, 1, record)
+            self.save_responsibility(
+                replace(
+                    responsibility,
+                    revision=responsibility.revision + 1,
+                    status=ResponsibilityStatus.COMPLETED,
+                    sources=assessment.sources,
+                )
+            )
+            title = (
+                "User confirmed the goal is complete."
+                if assessment.basis == CompletionBasis.USER_CONFIRMED
+                else assessment.claim
+            )
+            self.record_activity(
+                ActivityRecord(
+                    record.id,
+                    "responsibility_completed",
+                    title,
+                    record.created_at,
+                    entity_id=responsibility.id,
+                    detail=f"{assessment.basis.value}: {assessment.claim}",
+                    sources=assessment.sources,
+                )
+            )
+            if notify:
+                self.save_notice(
+                    Notice(
+                        f"{record.id}:report",
+                        record.id,
+                        title,
+                        record.created_at,
+                        sources=assessment.sources,
+                    )
+                )
+            return True
+
     def activity(self) -> tuple[ActivityRecord, ...]:
         return self._all("activity", ActivityRecord)
+
+    def notices(self) -> tuple[Notice, ...]:
+        return self._all("notice", Notice)
+
+    def notice(self, identifier: str) -> Notice | None:
+        return self._get("notice", identifier, Notice)
+
+    def save_notice(self, notice: Notice) -> None:
+        with transaction(self.db):
+            previous = self.notice(notice.id)
+            self._check_revision(previous.revision if previous else 0, notice.revision)
+            self._write("notice", notice.id, notice.revision, notice)
 
     def record_activity(self, activity: ActivityRecord) -> bool:
         with transaction(self.db):
@@ -406,6 +566,41 @@ class SQLiteCoordinationRepository:
     def candidates(self) -> tuple[Candidate, ...]:
         return self._all("candidate", Candidate)
 
+    def attempts(self) -> tuple[InquiryAttempt, ...]:
+        return self._all("inquiry_attempt", InquiryAttempt)
+
+    def attempt(self, identifier: str) -> InquiryAttempt | None:
+        return self._get("inquiry_attempt", identifier, InquiryAttempt)
+
+    def save_attempt(self, attempt: InquiryAttempt) -> None:
+        with transaction(self.db):
+            previous = self._get("inquiry_attempt", attempt.id, InquiryAttempt)
+            self._check_revision(previous.revision if previous else 0, attempt.revision)
+            self._write("inquiry_attempt", attempt.id, attempt.revision, attempt)
+
+    def watches(self) -> tuple[Watch, ...]:
+        return self._all("watch", Watch)
+
+    def save_watch(self, watch: Watch) -> None:
+        with transaction(self.db):
+            previous = self._get("watch", watch.id, Watch)
+            self._check_revision(previous.revision if previous else 0, watch.revision)
+            if self.responsibility(watch.responsibility_id) is None:
+                raise ValueError("A watch requires its adopted responsibility")
+            self._write("watch", watch.id, watch.revision, watch)
+
+    def feedback(self) -> tuple[Feedback, ...]:
+        return self._all("feedback", Feedback)
+
+    def record_feedback(self, feedback: Feedback) -> bool:
+        with transaction(self.db):
+            if self._get("feedback", feedback.id, Feedback) is not None:
+                return False
+            if self.instruction(feedback.instruction_id) is None:
+                raise ValueError("Feedback requires an accepted user instruction")
+            self._write("feedback", feedback.id, 1, feedback)
+            return True
+
     def candidate(self, identifier: str) -> Candidate | None:
         return self._get("candidate", identifier, Candidate)
 
@@ -439,7 +634,16 @@ class SQLiteCoordinationRepository:
             updated = replace(
                 candidate,
                 revision=candidate.revision + 1,
-                last_serviced_at=record.serviced_at or candidate.last_serviced_at,
+                last_serviced_at=(
+                    record.serviced_at
+                    if record.serviced_at is not None
+                    else candidate.last_serviced_at
+                ),
+                serviced_evidence_revision=(
+                    candidate.evidence_revision
+                    if record.serviced_at is not None
+                    else candidate.serviced_evidence_revision
+                ),
                 next_review_at=record.next_review_at,
                 waiting_on=record.wake_condition,
             )

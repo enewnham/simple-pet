@@ -13,6 +13,7 @@ import httpx2 as httpx
 from anthropic import AsyncAnthropic
 
 from pet_daemon.commentary.contracts import ModelRequest
+from pet_daemon.companion.config import CoordinatorConfig
 from pet_daemon.config import Config
 from pet_daemon.daemon import Daemon
 from pet_daemon.domain import SessionSource
@@ -55,6 +56,7 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
             observation_seconds=(3600, 3600),
             request_timeout=10,
             memory_file=root / "memory.sqlite3",
+            coordinator=CoordinatorConfig(enabled=False),
         )
         self.config.behavior.automatic_speech_cooldown_seconds = 3600
         self.requests: list[ModelRequest] = []

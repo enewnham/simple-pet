@@ -12,7 +12,7 @@ final class PetView: NSView {
     private var spriteRect = NSRect(x: 52, y: 4, width: 96, height: 96)
     private var speechRect: NSRect?
     private let speechScroll = NSScrollView()
-    private let speechText = NSTextView()
+    private let speechText = SpeechText()
     var onTick: ((Double) -> Void)?
     var onDrop: ((NSPoint) -> Void)?
     var onPlayback: ((Int, String) -> Void)?
@@ -56,6 +56,7 @@ final class PetView: NSView {
         speechText.isVerticallyResizable = true
         speechText.isHorizontallyResizable = false
         speechScroll.documentView = speechText
+        speechText.onClick = { [weak self] in self?.onClick?() }
         addSubview(speechScroll)
         model.onChange = { [weak self] in
             guard let self = self else { return }
@@ -225,13 +226,14 @@ final class PetView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         guard let window = window else { return }
-        let clickedSprite = spriteRect.contains(convert(event.locationInWindow, from: nil))
+        let pointer = convert(event.locationInWindow, from: nil)
+        let clickedCompanion = spriteRect.contains(pointer) || speechRect?.contains(pointer) == true
         var dragged = false
         onInteraction?(true, false)
         defer {
             onInteraction?(false, false)
             if dragged { onDrop?(petFrameInScreen.origin) }
-            if clickedSprite && !dragged { onClick?() }
+            if clickedCompanion && !dragged { onClick?() }
         }
         let initialPointer = window.convertPoint(toScreen: event.locationInWindow)
         let initialOrigin = NSPoint(x: window.frame.minX + spriteRect.minX, y: window.frame.minY + spriteRect.minY)
@@ -262,4 +264,9 @@ final class PetView: NSView {
     @objc private func makeRounds() { onRounds?() }
 
     deinit { timer?.invalidate() }
+}
+
+private final class SpeechText: NSTextView {
+    var onClick: (() -> Void)?
+    override func mouseDown(with event: NSEvent) { onClick?() }
 }

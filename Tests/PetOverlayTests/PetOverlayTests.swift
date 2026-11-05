@@ -273,3 +273,20 @@ struct PetOverlayTests {
         }
     }
 }
+
+@MainActor
+extension PetOverlayTests {
+    @Test func anExplicitAmbientTextClickRequestsConversationWithoutPassiveFocus() throws {
+        try withFixture { fixture in
+            var clicks = 0
+            fixture.view.onClick = { clicks += 1 }
+            try fixture.apply(["text": "A grounded thought about the migration", "ttl": 60])
+            #expect(clicks == 0)
+            #expect(!fixture.panel.isKeyWindow)
+            let point = fixture.text.convert(NSPoint(x: 4, y: 4), to: nil)
+            fixture.text.mouseDown(with: try fixture.mouseEvent(.leftMouseDown, at: point))
+            #expect(clicks == 1)
+        }
+    }
+
+}

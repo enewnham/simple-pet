@@ -1,8 +1,8 @@
 # Desktop companion for ongoing work
 
-- Status: Planned
+- Status: Implementation in progress
 - Date: 2026-11-05
-- Implementation: Not started
+- Implementation: Integrated feature under verification
 
 ## Purpose
 
@@ -39,24 +39,23 @@ parallelize implementation, integrate the work on one feature branch, and merge 
 verified result directly to trunk. Work packages and checkpoints organize the work
 within that delivery. They do not require pull requests or separate releases.
 
-Documentation drafting does not establish implementation or completion of the
-protocol fixtures. All implementation checks and desktop acceptance runs remain
-pending. The repository's trunk is `main`, with `origin/HEAD` pointing to
+The [implementation ledger](implementation.md) records completed component checks
+and remaining integrated acceptance. [Verification](verification.md) records bounded
+live model results. The repository's trunk is `main`, with `origin/HEAD` pointing to
 `origin/main`. Use that verified trunk for the direct merge.
 
 ## Context
 
 The Python daemon observes coding sessions and Git/GitHub state, stores reports and
 source references, selects commentary, and delivers conversations to the Swift
-overlay. Clicking the pet opens a compact panel with suggested actions. It supports
-navigation, additional context, recent work, and source-scoped Tomorrow/Handled
-feedback. The renderer's persistent presentation flag controls dismissal behavior,
-not a durable human conversation transcript.
+overlay. Clicking the pet opens persistent typed chat with suggested actions and
+Activity. SQLite stores accepted messages independently of renderer presentation.
+Source-scoped feedback, navigation, and evidence inspection remain available.
 
-Work subjects are identified by agent sessions. Related sessions and recorded
-artifacts provide connections, but continuing responsibilities need identities that
-survive individual sessions. Desktop navigation opens recorded destinations. It
-does not establish that the pet launched or controls a harness session.
+Ambient work subjects use agent session identities. Durable responsibilities and
+projects have independent identities. Recorded artifacts and explicit associations
+connect evidence across sessions. Desktop control requires a recorded delegation
+through the configured adapter. Navigation alone establishes no ownership.
 
 Useful starting points are [application orchestration](../../../pet_daemon/application.py),
 [interactions](../../../pet_daemon/interactions.py),

@@ -24,7 +24,13 @@ from pet_daemon.commentary.context import (
 from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.commentary.observations import event_text
 from pet_daemon.commentary.request import SpeechConditions
+from pet_daemon.companion.sdk import SdkCompanion
+from pet_daemon.companion.tools import ToolAuthority
 from pet_daemon.config import Config
+from pet_daemon.conversation import DEFAULT_CONVERSATION_ID, Conversations
+from pet_daemon.coordination.models import ChatMessage, ChatRole
+from pet_daemon.coordination.watches import Watches
+from pet_daemon.coordination.workflows import Workflows
 from pet_daemon.delivery import (
     DeliveryConditions,
     DeliveryOutcome,
@@ -56,6 +62,7 @@ from pet_daemon.sessions.processes import ProcessTracker
 from pet_daemon.sessions.reactions import SessionReactions
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources import RepositoryTracker
+from pet_daemon.sources.checks import ChecksObservation, ChecksStatus
 from pet_daemon.sources.hooks import normalize_hook
 from pet_daemon.storage import Memory
 from pet_daemon.types import JSONObject
@@ -71,6 +78,7 @@ from pet_daemon.work.observations import (
 )
 from Tests.fixtures import require, story_response
 from Tests.prompt_fixtures import RecordingPromptBuilder
+from Tests.test_companion import FakeSdk
 
 
 class FixtureProvider:
@@ -295,6 +303,102 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.memory.close()
         self.temporary.cleanup()
 
+    async def restart_without_sessions(self) -> None:
+        behavior = self.app.behavior
+        await self.app.close()
+        self.memory.close()
+        self.memory = Memory(
+            Path(self.temporary.name) / "memory.sqlite3",
+            "fixture-pet",
+            clock=self.clock,
+        )
+        self.attention = Attention(
+            self.config, self.clock, random.Random(0), wall_clock=self.clock
+        )
+        self.app = Application(
+            self.config,
+            sessions=Sessions(self.clock, wall_clock=self.clock),
+            reactions=SessionReactions(),
+            attention=self.attention,
+            behavior=behavior,
+            cognition=Cognition(
+                self.model, self.config, memory=self.memory, clock=self.clock
+            ),
+            providers=(self.provider,),
+            processes=ProcessTracker(clock=self.clock),
+            memory=self.memory,
+            emit=self.packets.append,
+            clock=self.clock,
+            rng=random.Random(0),
+        )
+        self.provider.emit = self.app.ingest
+
+    async def test_watch_report_survives_restart_and_acknowledges_without_an_active_session(
+        self,
+    ) -> None:
+        message = ChatMessage(
+            str(uuid.uuid4()),
+            "watch-chat",
+            ChatRole.USER,
+            "Watch this PR until checks pass",
+            self.now,
+        )
+        store = self.memory.coordination
+        store.begin_turn(message)
+        authority = ToolAuthority(
+            store.state().instruction_revision, message.conversation_id, message.id
+        )
+        workflows = Workflows(store, self.clock)
+        tool = next(
+            tool
+            for tool in workflows.tools(message.conversation_id, message.id)
+            if tool.name == "adopt_responsibility"
+        )
+        ref = "https://github.com/team/parser/pull/23"
+        await tool.handler(
+            {"purpose": "Watch parser checks", "scope": "/parser", "pull_request": ref},
+            authority,
+        )
+
+        async def observe(target: str) -> ChecksObservation:
+            return ChecksObservation(
+                target,
+                self.now,
+                ChecksStatus.PASSED,
+                "checked-head",
+                "checked-revision",
+            )
+
+        await Watches(
+            store, self.config.coordinator.scheduling, self.clock, observe
+        ).refresh()
+        notice = store.notices()[0]
+        await self.restart_without_sessions()
+        self.packets.clear()
+        self.assertEqual(self.app.sessions.by_id, {})
+        self.assertIsNone(
+            require(self.memory.coordination.notice(notice.id)).delivered_at
+        )
+        self.app.tick()
+        delivered = next(
+            packet for packet in self.packets if packet.get("delivery_id") == notice.id
+        )
+        self.assertEqual(delivered["text"], notice.text)
+        self.assertNotIn("conversation", delivered)
+        self.app.receive_renderer(
+            {"event": "speech_accepted", "delivery_id": notice.id}
+        )
+        self.assertIsNotNone(
+            require(self.memory.coordination.notice(notice.id)).delivered_at
+        )
+        await self.restart_without_sessions()
+        self.packets.clear()
+        self.app.tick()
+        self.assertFalse(
+            any(packet.get("delivery_id") == notice.id for packet in self.packets)
+        )
+        self.assertEqual(len(self.memory.coordination.notices()), 1)
+
     def report(self, text: str, *, session: str = "parser") -> None:
         self.provider.publish(
             HookEvent(
@@ -305,6 +409,93 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 progress=text,
             )
         )
+
+    async def test_renderer_chat_uses_existing_work_and_records_one_sdk_reply(
+        self,
+    ) -> None:
+        model = FakeSdk()
+        companion = SdkCompanion(
+            self.config.coordinator.model_copy(
+                update={"working_directory": Path(self.temporary.name) / "sdk"}
+            ),
+            self.memory,
+            self.clock,
+            query=model,
+        )
+        packets: list[JSONObject] = []
+        conversations = Conversations(
+            self.memory.coordination, companion.reply, packets.append, clock=self.clock
+        )
+        self.app.companion = companion
+        self.app.conversations = conversations
+        self.app.receive({"kind": "renderer", "event": "click"})
+        packet = {
+            "kind": "renderer",
+            "event": "conversation_message",
+            "interaction_id": conversations.identifier,
+            "revision": conversations.revision,
+            "conversation_id": DEFAULT_CONVERSATION_ID,
+            "message_id": str(uuid.uuid4()),
+            "text": "What is happening with the parser?",
+        }
+        self.app.receive(packet)
+        await require(conversations.task)
+        self.app.receive(packet)
+        self.assertEqual(len(model.inputs), 1)
+        self.assertIn("Improve quoted-field parsing", str(model.inputs[0]["brief"]))
+        messages = self.memory.coordination.messages(DEFAULT_CONVERSATION_ID)
+        self.assertEqual(len(messages), 2)
+        self.assertEqual(messages[-1].reply_to, packet["message_id"])
+        self.assertEqual(messages[-1].sources[0].provider, "work")
+        self.app.tick()
+        self.assertIsNone(self.app.task)
+        self.assertFalse(self.app.clicked)
+
+    async def test_application_sleep_interrupts_sdk_reply_and_preserves_explicit_retry(
+        self,
+    ) -> None:
+        model = FakeSdk()
+        model.release.clear()
+        companion = SdkCompanion(
+            self.config.coordinator.model_copy(
+                update={"working_directory": Path(self.temporary.name) / "sdk"}
+            ),
+            self.memory,
+            self.clock,
+            query=model,
+        )
+        packets: list[JSONObject] = []
+        conversations = Conversations(
+            self.memory.coordination, companion.reply, packets.append, clock=self.clock
+        )
+        self.app.companion = companion
+        self.app.conversations = conversations
+        self.app.click()
+        self.app.receive_renderer(
+            {
+                "event": "conversation_message",
+                "interaction_id": conversations.identifier,
+                "revision": conversations.revision,
+                "conversation_id": DEFAULT_CONVERSATION_ID,
+                "message_id": str(uuid.uuid4()),
+                "text": "Catch me up",
+            }
+        )
+        await model.started.wait()
+        self.app.system_sleep_changed(True)
+        await asyncio.gather(*tuple(self.app.companion_tasks))
+        conversation = self.memory.coordination.ensure_conversation(
+            DEFAULT_CONVERSATION_ID
+        )
+        self.assertIsNone(conversation.pending_message_id)
+        self.assertIn("interrupted", require(conversation.error))
+        self.assertEqual(
+            len(self.memory.coordination.messages(DEFAULT_CONVERSATION_ID)), 1
+        )
+        self.app.system_sleep_changed(False)
+        await asyncio.gather(*tuple(self.app.companion_tasks))
+        self.assertFalse(companion.suspended)
+        self.assertEqual(len(model.inputs), 1)
 
     def test_notifications_retain_evidence_without_replacing_or_counting_requests(
         self,

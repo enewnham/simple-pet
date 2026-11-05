@@ -13,6 +13,9 @@ from pydantic import (
     model_validator,
 )
 
+from .companion.config import CoordinatorConfig
+from .desktop.config import DesktopConfig
+
 DEFAULT_PERSONA = """
 You're a small, perceptive companion: curious, warm, quietly mischievous,
 and invested in the work.
@@ -152,6 +155,8 @@ class Config(BaseModel):
     max_tokens: PositiveInt = 512
     behavior: BehaviorConfig = Field(default_factory=BehaviorConfig)
     navigation: NavigationConfig = Field(default_factory=NavigationConfig)
+    coordinator: CoordinatorConfig = Field(default_factory=CoordinatorConfig)
+    desktop: DesktopConfig | None = None
 
     @classmethod
     def load(cls, path: str | Path) -> Config:
@@ -160,6 +165,31 @@ class Config(BaseModel):
         for name in ("pet_dir", "overlay_binary", "log_file", "memory_file"):
             value = Path(getattr(config, name)).expanduser()
             setattr(config, name, (path.parent / value).resolve())
+        coordinator = config.coordinator
+        meetings = coordinator.meetings.model_copy(
+            update={
+                "folders": tuple(
+                    (path.parent / folder.expanduser()).resolve()
+                    for folder in coordinator.meetings.folders
+                )
+            }
+        )
+        config.coordinator = coordinator.model_copy(
+            update={
+                "working_directory": (
+                    path.parent / coordinator.working_directory.expanduser()
+                ).resolve(),
+                "meetings": meetings,
+                "history": tuple(
+                    item.model_copy(
+                        update={
+                            "path": (path.parent / item.path.expanduser()).resolve()
+                        }
+                    )
+                    for item in coordinator.history
+                ),
+            }
+        )
         return config
 
     @field_validator("persona")

@@ -16,10 +16,12 @@ Read-only discovery can precede adoption. Task actions require canonical authori
 Use the existing reset-and-recreate schema policy. Keep user instructions, note
 support, action authority, source freshness, and reported execution distinct.
 
-The authorization covers the complete implementation, eventual live model and
-desktop acceptance, and direct merge. The orchestrator defers live effects until
-the automated checkpoint is ready and the first personal harness is selected.
-Real personal-adapter acceptance remains pending configuration.
+The authorization covers the complete implementation, live model and desktop
+acceptance, and direct merge. Live Haiku conversation and scheduled inquiry passed
+the bounded acceptance in [verification](verification.md). Personal Codex acceptance
+uses launch, inspect, open, and stop. Its installed native API lacks an interaction
+revision comparison for continuation, so automatic Codex continuation remains
+disabled. Public automatic continuation retains its adapter revision requirement.
 
 ## Active ownership
 
@@ -28,6 +30,7 @@ Real personal-adapter acceptance remains pending configuration.
 | Foundation and integration | `pet_daemon/coordination/`, `pet_daemon/storage/coordination.py`, migrations, Memory facade, top-level config, application/daemon wiring, foundation tests, and this ledger. |
 | Conversation | `pet_daemon/conversation.py`, Swift conversation/event/panel files, and focused conversation tests. Consumes `memory.coordination` and the SDK reply callable. |
 | SDK and retrieval | `pet_daemon/companion/`, provider adapters and source-index codec, dependency manifests, and focused companion tests. Consumes canonical records and the Memory work snapshot APIs. |
+| Desktop and Activity | `pet_daemon/desktop/`, explicit delegation hook fields, public adapter examples, Activity projection, and focused adapter/interaction tests. Consumes shared task, operation, and scheduler contracts. |
 
 Workers share the checkout and preserve one another's purposeful edits. The
 foundation worker integrates lifecycle wiring. Source-index schema belongs to the
@@ -40,18 +43,18 @@ records implementation status without declaring unrun acceptance complete.
 
 | Package | Depends on | Status and remaining acceptance |
 | --- | --- | --- |
-| 1: Contracts and fixtures | None | Specifications present. Canonical domain contracts published. Serialized fixtures and checks in progress. |
-| 2: Durable foundation | 1 | Frozen records, transactional repository, schema 27, Memory facade, source-index tables, and config integration implemented. Focused persistence/reset checks passed. Complete integrated consumers before signoff. |
-| 3: Prepared context and retrieval | 2 | Companion worker implementing brief, bootstrap, source map, ranking, passage expansion, and changes tools. |
-| 4: Typed conversation | 2 | Controller and Swift composer implemented. Three Python controller checks, 23 existing Swift checks, six new Swift checks, Swift lint, and complexity passed. Application-to-SDK fake-boundary checks passed. Review fixes for bounded snapshots, renderer sync, and retry command identity in progress. |
-| 5: SDK conversation and notes | 3, 4 | SDK callable, typed note tools, and host authority context implemented. Five companion checks and application fake-SDK integration passed. Retrieval/source freshness review fixes and full provider integration continue. |
-| 6: Ticket interface and Linear | 2, 3 | SDK worker implementing generic read-only contract and first adapter. Scoped provider checks pending. |
-| 7: Meeting exports | 2, 3 | SDK worker implementing passage index and revision/removal handling. Provider checks pending. |
-| 8: Adopted responsibility/watch | 5 | Foundation owns implementation after shared state and conversation integration. Basic timers and one-time completion pending. |
-| 9: Desktop launch and recovery | 8 | Public adapter and intent-before-effect integration pending. Personal acceptance pending configured harness. |
-| 10: Owned follow-through | 9, 11 | Session readiness, authority, continuation, stop/open controls, and recovery pending. |
-| 11: Ongoing scheduling | 5, 6, 7, 8 | Foundation owns candidate policy, fairness, disposition history, and runtime facade. SDK supplies reasoning callable, desktop adapter supplies validated effects. No separate desktop dispatch loop. |
-| 12: Full Activity/ambient | 10, 11 | Minimal Activity records present. Presentation, controls, and interruption integration pending. |
+| 1: Contracts and fixtures | None | Specifications, canonical domain contracts, and serialized desktop protocol fixtures present. Focused contract checks passed. |
+| 2: Durable foundation | 1 | Frozen records, transactional repository, schema 27, Memory facade, source-index tables, and config integration implemented. Thirteen focused persistence/reset checks and integrated consumers passed. |
+| 3: Prepared context and retrieval | 2 | Brief, bounded native history bootstrap, source map, ranking, passage expansion, freshness, changes, and selected MCP proxy implemented. Source/SDK suite passed 25 checks. |
+| 4: Typed conversation | 2 | Controller, bounded history pages, renderer sync, and Swift composer implemented. Seven conversation transport checks, application-to-SDK checks, and nine Swift Chat checks passed. |
+| 5: SDK conversation and notes | 3, 4 | SDK callable, typed note tools, and host authority context implemented. Ten SDK correctness checks, application fake-SDK integration, and bounded live conversation/inquiry acceptance passed. Source integration continues. |
+| 6: Ticket interface and Linear | 2, 3 | Generic read-only contract, direct Linear adapter, and selected MCP normalization implemented. Fixtures and real stdio/HTTP MCP transport checks passed in the 25-check source/SDK suite. Live account retrieval is optional. |
+| 7: Meeting exports | 2, 3 | Searchable passages, complete snapshot edits/removals, bounded files, dates, and freshness implemented. Source suite passed. |
+| 8: Adopted responsibility/watch | 5 | Accepted user ingress, adoption, exact check timers, scoped feedback, and durable one-report outbox implemented. Ten watch/workflow cases passed, plus no-active-session delivery/ack/restart proof. |
+| 9: Desktop launch and recovery | 8 | Public process adapter, intent-before-effect, receipts, hook association, and reconciliation implemented. Adapter/hook/notify suite passed 62 checks and 93 subtests, with twelve desktop cases. Personal Codex acceptance pending. |
+| 10: Owned follow-through | 9, 11 | Current authority, task/user/native interaction revisions, readiness, continuation, stop/open, lost-receipt recovery implemented and fake-adapter checks passed. Actual Codex automatic continuation unsupported and disabled. |
+| 11: Ongoing scheduling | 5, 6, 7, 8 | Coalescing, bounded reasoning, quiet fairness, scoped unknown-operation handling, source refresh, and disposition/budget history implemented. Ten loop regressions passed, including review fixes. Shared app/daemon wiring complete. |
+| 12: Full Activity/ambient | 10, 11 | Activity projection, canonical controls, source inspection, and notice delivery bridge implemented. Eleven Activity/conversation checks and nine Swift Chat checks passed. Full integrated acceptance pending. |
 | 13: Integrated release checks | 12 | Full automated checks, generated-response assessment, real desktop acceptance, configuration guidance, and direct merge pending. |
 
 ## Published foundation contracts
@@ -89,12 +92,28 @@ Scoped `make lint-python PYTHON_PATHS=...` passed lint, formatting, and type che
 for canonical records, storage, configuration, application, daemon, and their tests.
 `PYTHON_PATHS` defaults to the full repository and supports exclusive worker checks.
 
+The responsibility, scheduler, watch, and application run passed 104 tests and four
+subtests. Separate application/runtime regressions passed the watch report across
+restart before delivery, no active coding session, renderer acknowledgement, and
+restart without reannouncement. The enabled daemon socket test used a fake SDK
+stream and verified typed chat and sleep/wake without replay. The focused
+`Tests/test_coordination_loop.py Tests/test_watches.py` run passed 23 checks after
+review fixes for inspection failures, max deferral, explicit Later, effect
+revalidation, finite watch conditions, cancellation/restart, failed control outcomes,
+and explicit user correction supersession. Scoped Python lint/type/format checks
+and repository Python complexity checks passed.
+
 Schema 27 recreates schema 26 storage, clearing instructions and adopted authority.
 Same-schema restarts preserve accepted state. Future schemas are rejected before
 writes. Review findings added guarded failed-attempt revisions, immutable note
 actors/evidence dates, and durable retry command receipts. UI review fixes bound
 presentation history while retaining the complete canonical transcript, and add
 renderer reconciliation. Companion review fixes revalidate expanded source passages.
-Typed provider and UI checks continue in their streams.
+The frozen source/SDK suite passed 25 checks. Legacy ambient runtime and desktop
+fixtures disable the coordinator explicitly. Enabled-coordinator tests inject the
+SDK query effect, so broad automated tests cannot make accidental live model calls.
 
-No daemon restart, live API request, or desktop harness launch has been performed.
+Local checkpoints are `ea499e0` for specifications and `e43b4dd` for canonical
+records/storage. The source/UI/desktop snapshot is frozen for its integrated
+checkpoint. Full `make check`, private desktop acceptance, final
+review, and direct merge remain pending. Production daemon restart has not run.
