@@ -131,5 +131,19 @@ Independent reviews verified operational source timestamps, valid empty retrieva
 finite completion, responsibility scope revision, and exact hook association.
 Observed dated decision evidence completed a finite goal through the real model and
 coordinator with one completion record and notice; a report-only CI claim remained
-incomplete. Private desktop acceptance and direct merge remain pending. Production
-daemon restart has not run.
+incomplete.
+
+The personal Claude Code adapter passed ten offline callback checks. A fresh Kitty
+launch and real hook correlation succeeded. Claude Code requires authentication,
+so native continuation and stop remain unverified. The private adapter's independent
+review and persistent installation remain pending. Production daemon restart has
+not run. These checks do not establish complete personal desktop acceptance.
+
+## Direct integration readiness
+
+The fetched `origin/main` and local `main` both point to `8475c30`. The feature
+checkpoint `a4075f5` is four commits ahead and has no divergent remote commits.
+The working tree was clean before this ledger update. A fast-forward integration
+is available. Hold the merge until root confirms native acceptance or the user
+chooses delivery with that acceptance explicitly unverified. Preserve the existing
+native-acceptance worktrees and their branches.
