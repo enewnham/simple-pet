@@ -369,6 +369,7 @@ class InquiryPass:
     prior: tuple[Consideration, ...] = ()
     responsibilities: tuple[Responsibility, ...] = ()
     tasks: tuple[DelegatedTask, ...] = ()
+    available_coding_slots: int = 0
 
 
 @dataclass(frozen=True)

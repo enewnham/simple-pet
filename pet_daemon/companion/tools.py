@@ -111,6 +111,9 @@ class CompanionTools:
         self.source_kinds = {
             document.source.id: document.kind for document in brief.recent_work
         }
+        for user_input in brief.recent_user_inputs:
+            self.sources[user_input.source.id] = user_input.source
+            self.source_kinds[user_input.source.id] = "user_instruction"
         for note in brief.notes:
             sources = context.note_sources(note)
             for source in sources:

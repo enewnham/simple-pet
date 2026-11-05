@@ -270,8 +270,12 @@ freshness, scope, current operations, available time, concurrency, and budget. P
 exact checks in code where possible, including watch conditions and operation
 identity. Reconcile unknown operations before issuing further effects for the
 affected work. A blocked candidate leaves unrelated eligible work available.
-Retain one background investigation and one pet-owned coding task concurrently,
-subject to configured limits. Fair selection does not preempt a running harness.
+Retain one background investigation and one active pet-initiated coding execution
+under the configured limits. Preparation, active execution, native approval waits,
+and uncertain consequential dispatch reserve coding capacity. An observed idle
+READY session remains reusable and releases active execution capacity. Launch and
+continue share the same effect-boundary capacity check. Fair selection does not
+preempt a running harness.
 
 Quiet eligible work receives a configurable review due time and maximum deferral
 from its last meaningful consideration, or initial queue time before its first
@@ -295,11 +299,13 @@ commitments conflict beyond this scheduling policy, ask the user. Recording an
 override preserves the displaced work's waiting age and next review.
 
 A reasoning pass receives a bounded set of eligible candidates, their reasons,
-changed references, and prior dispositions. The scheduler reserves a focus when
+changed references, prior dispositions, and available coding capacity across
+projects. The scheduler reserves a focus when
 overdue fair service or an explicit user direction requires it. Otherwise the model
 can select among the offered routine candidates and explain what deserves inquiry.
 Return dispositions for the candidates actually assessed, including any reserved
-focus, choosing investigation, authorized continuation, a question, waiting, or no
+focus, choosing investigation, authorized continuation, a question, waiting,
+completion assessment, or no
 finding, with reasons. Unassessed candidates remain pending.
 Code validates authority, freshness, operation identity, and eligibility before
 applying any choice. Selection can satisfy a review through a reasoned wait or
@@ -337,6 +343,16 @@ changes, source failures, and evidence. Chat supports inspection, correction, an
 adoption. Feedback applies to its named claim, association, or suggestion under
 the note lifecycle. Dismissal does not silently cancel a responsibility or suppress
 unrelated work.
+
+Finite completion assessment compares current leaf evidence with the recorded
+condition and captured responsibility revision. Code checks scope, authority,
+freshness, and source kinds before accepting the model's meaning judgment.
+Reported or inferred success remains unresolved. Exact PR checks retain their
+machine watch. An accepted completion, its evidence, consideration, Activity, and
+pending notice commit together. Renderer acknowledgement records notice delivery.
+A direct user confirmation records its actual human event and remains distinct
+from independent verification. It can also end a standing purpose. Goal completion
+never claims that a native harness was stopped.
 
 ## Lifecycle invariants
 

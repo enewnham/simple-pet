@@ -60,7 +60,7 @@ it offers eligible routine peers for the model to choose among. Follow the canon
 [ongoing coordination loop](responsibilities-and-evidence.md#ongoing-coordination-loop).
 
 Pass eligible bounded candidate briefs, source changes, prior considerations,
-current revisions, and any reserved focus to the agent. Haiku judges meaning,
+current revisions, available coding capacity, and any reserved focus to the agent. Haiku judges meaning,
 selects among offered routine candidates when no focus is reserved, and chooses a
 bounded investigation, eligible continuation, human question, wait, or no finding.
 It returns dispositions for considered candidates and must address any reserved
@@ -68,6 +68,14 @@ focus. It can suggest a
 wake condition or review time. The application validates and bounds actual
 timing. Model output cannot invent operational states or urgency, override
 explicit user ordering or fairness, or bypass a required reserved focus.
+
+For a finite goal, the agent can return a completion assessment against the exact
+recorded condition and responsibility revision. Observed assessments require
+current independent leaf evidence. Harness reports, hypotheses, and derived notes
+cannot supply independent verification. Reported or inferred assessments retain
+their uncertainty. Exact machine watches remain application-owned. Explicit human
+confirmation uses a foreground tool tied to the accepted user event, with a separate
+human-confirmed basis.
 
 The application records considered and serviced separately. Budget-blocked work
 remains unconsidered. Persist waits, wake conditions, and no-finding results so

@@ -66,6 +66,8 @@ class Delegation:
                 task = self._task(action.task_id)
             if action.kind in (OperationKind.LAUNCH, OperationKind.CONTINUE):
                 task = self._authorize(action, task)
+                if action.kind == OperationKind.CONTINUE:
+                    self._require_coding_slot(exclude_task=task.id)
             elif (
                 action.kind in (OperationKind.STOP, OperationKind.OPEN)
                 and task.session is None
@@ -87,11 +89,19 @@ class Delegation:
             finally:
                 self.inflight.pop(task.id, None)
 
-    def _require_coding_slot(self) -> None:
+    def _active_coding_tasks(self) -> set[str]:
         operations = self.store.operations()
-        occupied = 0
+        unresolved = {
+            operation.task_id
+            for operation in operations
+            if operation.kind
+            in (OperationKind.LAUNCH, OperationKind.CONTINUE, OperationKind.STOP)
+            and operation.outcome
+            in (OperationOutcome.PENDING, OperationOutcome.UNKNOWN)
+        }
+        active = set(unresolved)
         for task in self.store.tasks():
-            if task.status in (TaskStatus.ENDED, TaskStatus.STOPPED):
+            if task.status in (TaskStatus.ENDED, TaskStatus.STOPPED, TaskStatus.READY):
                 continue
             launches = tuple(
                 operation
@@ -109,8 +119,17 @@ class Delegation:
                 )
             )
             if not failed_preparation:
-                occupied += 1
-        if occupied >= self.coding_slots:
+                active.add(task.id)
+        return active
+
+    def available_coding_slots(self) -> int:
+        return max(0, self.coding_slots - len(self._active_coding_tasks()))
+
+    def _require_coding_slot(self, *, exclude_task: str | None = None) -> None:
+        occupied = self._active_coding_tasks()
+        if exclude_task is not None:
+            occupied.discard(exclude_task)
+        if len(occupied) >= self.coding_slots:
             raise AuthorityError(
                 "An owned coding task occupies the slot. Wait for its observed execution to end or stop that task."
             )

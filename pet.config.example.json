@@ -21,6 +21,7 @@
       "results": 12,
       "queries": 4,
       "bootstrap_reports": 40,
+      "user_inputs": 12,
       "passage_characters": 2400,
       "neighboring_passages": 1,
       "source_characters": 100000

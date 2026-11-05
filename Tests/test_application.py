@@ -28,7 +28,8 @@ from pet_daemon.companion.sdk import SdkCompanion
 from pet_daemon.companion.tools import ToolAuthority
 from pet_daemon.config import Config
 from pet_daemon.conversation import DEFAULT_CONVERSATION_ID, Conversations
-from pet_daemon.coordination.models import ChatMessage, ChatRole
+from pet_daemon.coordination.models import Candidate, ChatMessage, ChatRole
+from pet_daemon.coordination.runtime import Coordinator
 from pet_daemon.coordination.watches import Watches
 from pet_daemon.coordination.workflows import Workflows
 from pet_daemon.delivery import (
@@ -428,6 +429,23 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.app.companion = companion
         self.app.conversations = conversations
+        coordinator = Coordinator(
+            self.memory.coordination,
+            self.config.coordinator.scheduling,
+            self.clock,
+            companion.investigate,
+        )
+        self.app.coordinator = coordinator
+        waiting = Candidate(
+            "waiting-parser-question",
+            "Which parser scope should I follow?",
+            "parser",
+            self.now - 100,
+            last_serviced_at=self.now - 20,
+            waiting_on="human",
+            serviced_evidence_revision=1,
+        )
+        self.memory.coordination.save_candidate(waiting)
         self.app.receive({"kind": "renderer", "event": "click"})
         packet = {
             "kind": "renderer",
@@ -439,8 +457,17 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             "text": "What is happening with the parser?",
         }
         self.app.receive(packet)
+        awakened = require(self.memory.coordination.candidate(waiting.id))
+        self.assertEqual(awakened.first_queued_at, waiting.first_queued_at)
+        self.assertEqual(awakened.last_serviced_at, waiting.last_serviced_at)
+        self.assertEqual(awakened.scope, "parser")
+        self.assertEqual(awakened.causes[-1].source_id, f"user:{packet['message_id']}")
+        self.assertGreater(
+            awakened.evidence_revision, require(awakened.serviced_evidence_revision)
+        )
         await require(conversations.task)
         self.app.receive(packet)
+        self.assertEqual(self.memory.coordination.candidate(waiting.id), awakened)
         self.assertEqual(len(model.inputs), 1)
         self.assertIn("Improve quoted-field parsing", str(model.inputs[0]["brief"]))
         messages = self.memory.coordination.messages(DEFAULT_CONVERSATION_ID)

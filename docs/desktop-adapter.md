@@ -122,6 +122,22 @@ A terminal being open or a process being alive does not establish readiness or
 this revision. An adapter that cannot establish both supports observation and a
 prepared human handoff without automatic continuation.
 
+A terminal adapter can derive readiness and its revision from accepted native
+hooks and a verified live harness in the explicitly owned window. Serialize its
+own sends, recheck the latest hook revision immediately before sending, and
+confirm acceptance through the matching native prompt callback. Persist dispatch
+intent before sending. A lost callback leaves delivery unknown until inspection
+resolves that command. This boundary does not require a native atomic revision
+precondition and does not promise exactly once delivery. New human input
+invalidates pending instructions for reassessment.
+
+Requests include an `observation` of the coordinator's accepted task and input:
+task and user revisions, status, readiness, observation time, bounded input text,
+input time, and the explicit native provider and session identity. This snapshot
+lets a configured adapter compare its current callback evidence with the
+coordinator's captured context. Native callbacks remain observations and do not
+adopt responsibilities or grant permissions.
+
 An ended execution or an accepted command does not establish that the responsibility
 is complete. The coordinator evaluates the task's expected result against evidence.
 A human direction changes the task's user revision and invalidates conflicting

@@ -18,10 +18,12 @@ support, action authority, source freshness, and reported execution distinct.
 
 The authorization covers the complete implementation, live model and desktop
 acceptance, and direct merge. Live Haiku conversation and scheduled inquiry passed
-the bounded acceptance in [verification](verification.md). Personal Codex acceptance
-uses launch, inspect, open, and stop. Its installed native API lacks an interaction
-revision comparison for continuation, so automatic Codex continuation remains
-disabled. Public automatic continuation retains its adapter revision requirement.
+the bounded acceptance in [verification](verification.md). The primary personal
+harness is Claude Code in Kitty, with hook callbacks for observations and an owned
+Kitty socket for terminal control. Recheck captured hook/readiness revisions before
+serialized input and correlate callbacks with the requested command. Native atomic
+comparison APIs are optional; terminal delivery does not establish exactly-once
+execution. Codex remains an optional backend.
 
 ## Active ownership
 
@@ -45,17 +47,17 @@ records implementation status without declaring unrun acceptance complete.
 | --- | --- | --- |
 | 1: Contracts and fixtures | None | Specifications, canonical domain contracts, and serialized desktop protocol fixtures present. Focused contract checks passed. |
 | 2: Durable foundation | 1 | Frozen records, transactional repository, schema 27, Memory facade, source-index tables, and config integration implemented. Thirteen focused persistence/reset checks and integrated consumers passed. |
-| 3: Prepared context and retrieval | 2 | Brief, bounded native history bootstrap, source map, ranking, passage expansion, freshness, changes, and selected MCP proxy implemented. Source/SDK suite passed 25 checks. |
+| 3: Prepared context and retrieval | 2 | Brief, bounded native history bootstrap, current accepted human inputs, source map, ranking, passage expansion, freshness, changes, and selected MCP proxy implemented. Source/SDK suite passed 30 checks, including imported-input distinction and restart. |
 | 4: Typed conversation | 2 | Controller, bounded history pages, renderer sync, and Swift composer implemented. Seven conversation transport checks, application-to-SDK checks, and nine Swift Chat checks passed. |
-| 5: SDK conversation and notes | 3, 4 | SDK callable, typed note tools, and host authority context implemented. Ten SDK correctness checks, application fake-SDK integration, and bounded live conversation/inquiry acceptance passed. Source integration continues. |
+| 5: SDK conversation and notes | 3, 4 | SDK callable, typed note tools, and host authority context implemented. SDK correctness, application fake-SDK integration, and bounded live conversation/inquiry acceptance passed. |
 | 6: Ticket interface and Linear | 2, 3 | Generic read-only contract, direct Linear adapter, and selected MCP normalization implemented. Fixtures and real stdio/HTTP MCP transport checks passed in the 25-check source/SDK suite. Live account retrieval is optional. |
 | 7: Meeting exports | 2, 3 | Searchable passages, complete snapshot edits/removals, bounded files, dates, and freshness implemented. Source suite passed. |
-| 8: Adopted responsibility/watch | 5 | Accepted user ingress, adoption, exact check timers, scoped feedback, and durable one-report outbox implemented. Ten watch/workflow cases passed, plus no-active-session delivery/ack/restart proof. |
-| 9: Desktop launch and recovery | 8 | Public process adapter, intent-before-effect, receipts, hook association, and reconciliation implemented. Adapter/hook/notify suite passed 62 checks and 93 subtests, with twelve desktop cases. Personal Codex acceptance pending. |
-| 10: Owned follow-through | 9, 11 | Current authority, task/user/native interaction revisions, readiness, continuation, stop/open, lost-receipt recovery implemented and fake-adapter checks passed. Actual Codex automatic continuation unsupported and disabled. |
-| 11: Ongoing scheduling | 5, 6, 7, 8 | Coalescing, bounded reasoning, quiet fairness, scoped unknown-operation handling, source refresh, and disposition/budget history implemented. Ten loop regressions passed, including review fixes. Shared app/daemon wiring complete. |
-| 12: Full Activity/ambient | 10, 11 | Activity projection, canonical controls, source inspection, and notice delivery bridge implemented. Eleven Activity/conversation checks and nine Swift Chat checks passed. Full integrated acceptance pending. |
-| 13: Integrated release checks | 12 | Full automated checks, generated-response assessment, real desktop acceptance, configuration guidance, and direct merge pending. |
+| 8: Adopted responsibility/watch | 5 | Accepted user ingress, adoption/revision, exact checks, scoped feedback, evidence-based finite completion, explicit human confirmation, and durable notice outbox implemented. Watch/workflow, completion, and no-active-session delivery/ack/restart checks passed. |
+| 9: Desktop launch and recovery | 8 | Public process adapter, intent-before-effect, receipts, exact hook association, and reconciliation implemented. Adapter/hook/notify checks passed. Primary Claude Code/Kitty acceptance is in progress. |
+| 10: Owned follow-through | 9, 11 | Current authority, captured task/user/hook revisions, readiness, continuation, stop/open, and lost-receipt recovery implemented. Twenty-four desktop checks passed, including shared launch/continue capacity and idle-session reuse. |
+| 11: Ongoing scheduling | 5, 6, 7, 8 | Coalescing, bounded reasoning, quiet fairness, scoped unknown operations, source refresh, disposition/budget history, and available coding capacity implemented. Eleven loop regressions and integrated app/daemon checks passed. Actual accepted replies wake waiting-human questions without resetting their age. |
+| 12: Full Activity/ambient | 10, 11 | Activity projection, canonical controls, source inspection, and notice delivery bridge implemented. Twelve Activity/conversation checks and 31 overlay checks passed. Isolated desktop acceptance is in progress. |
+| 13: Integrated release checks | 12 | Full automated check, final follow-up lint/Python checks, and release build passed. Generated conversation, inquiry, and finite completion acceptance passed. Personal desktop acceptance and direct merge remain pending. |
 
 ## Published foundation contracts
 
@@ -113,7 +115,21 @@ The frozen source/SDK suite passed 25 checks. Legacy ambient runtime and desktop
 fixtures disable the coordinator explicitly. Enabled-coordinator tests inject the
 SDK query effect, so broad automated tests cannot make accidental live model calls.
 
-Local checkpoints are `ea499e0` for specifications and `e43b4dd` for canonical
-records/storage. The source/UI/desktop snapshot is frozen for its integrated
-checkpoint. Full `make check`, private desktop acceptance, final
-review, and direct merge remain pending. Production daemon restart has not run.
+Local checkpoints are `ea499e0` for specifications, `e43b4dd` for canonical
+records/storage, and `304124e` for integrated conversation, retrieval, scheduling,
+desktop operations, and Activity. Full `make check` passed, including Python 935
+tests and 791 subtests, Swift tests, lint, type checks, complexity, and shell syntax.
+`make build` passed and produced `.build/pet-overlay` for isolated acceptance.
+The final follow-up gate passed `make lint` and the complete Python suite with 937
+tests and 791 subtests in 28.14 seconds. It includes active-execution capacity,
+bounded current human inputs, imported-input distinctions, and the hook observation
+payload. The accepted-user reply wake regression passed through the actual
+application/controller/SDK boundary, preserving queue/service ages and duplicate
+suppression. Swift source remains covered by the complete check and release build.
+
+Independent reviews verified operational source timestamps, valid empty retrieval,
+finite completion, responsibility scope revision, and exact hook association.
+Observed dated decision evidence completed a finite goal through the real model and
+coordinator with one completion record and notice; a report-only CI claim remained
+incomplete. Private desktop acceptance and direct merge remain pending. Production
+daemon restart has not run.

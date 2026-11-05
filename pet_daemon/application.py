@@ -428,7 +428,24 @@ class Application:
                 self.speak(context, ttl)
 
     def receive_renderer(self, packet: Mapping[str, object]) -> None:
+        instruction_revision = (
+            self.memory.coordination.state().instruction_revision
+            if self.coordinator is not None
+            and packet.get("event") == "conversation_message"
+            else None
+        )
         if self.conversations is not None and self.conversations.receive(packet):
+            if (
+                self.coordinator is not None
+                and instruction_revision is not None
+                and self.memory.coordination.state().instruction_revision
+                != instruction_revision
+            ):
+                instruction = self.memory.coordination.instruction(
+                    f"user:{packet.get('message_id')}"
+                )
+                if instruction is not None:
+                    self.coordinator.user_input(instruction)
             return
         if self.interactions.receive(packet):
             return

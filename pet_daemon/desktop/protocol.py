@@ -42,6 +42,21 @@ class AdapterRequest:
             else None,
             "user_revision": operation.task_user_revision,
             "expected_interaction_revision": operation.expected_adapter_revision,
+            "observation": {
+                "task_revision": task.revision,
+                "user_revision": task.user_revision,
+                "status": task.status.value,
+                "readiness": task.readiness.value,
+                "observed_at": task.observed_at,
+                "input": task.observed_input[:4000] if task.observed_input else None,
+                "input_observed_at": task.input_observed_at,
+                "native_session": {
+                    "provider": task.native_session.source.value,
+                    "id": task.native_session.native_id,
+                }
+                if task.native_session
+                else None,
+            },
             "brief": {
                 "objective": task.objective,
                 "expected_result": task.expected_result,

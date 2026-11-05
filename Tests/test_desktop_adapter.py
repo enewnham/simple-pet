@@ -112,6 +112,16 @@ async def test_launch_intent_is_persisted_and_duplicate_command_does_not_launch_
         "SIMPLE_PET_TASK_ID": task.id,
         "SIMPLE_PET_COMMAND_ID": action.id,
     }
+    assert request["observation"] == {
+        "task_revision": task.revision,
+        "user_revision": 0,
+        "status": "preparing",
+        "readiness": "unknown",
+        "observed_at": None,
+        "input": None,
+        "input_observed_at": None,
+        "native_session": None,
+    }
     (tmp_path / "release").touch()
     result = await pending
     assert result.outcome == OperationOutcome.ACCEPTED
@@ -424,7 +434,6 @@ async def test_lost_continuation_receipt_and_its_native_prompt_reconcile_without
     [
         TaskStatus.PREPARING,
         TaskStatus.RUNNING,
-        TaskStatus.READY,
         TaskStatus.WAITING,
         TaskStatus.UNKNOWN,
     ],
@@ -576,13 +585,46 @@ async def test_hooks_without_environment_bind_only_an_explicit_owned_native_rece
             update={"native_id": "unrelated-child"}
         ),
     )
-    ended = hook.model_copy(
-        update={
-            "event": __import__(
-                "pet_daemon.runtime", fromlist=["HookEventKind"]
-            ).HookEventKind.SESSION_END
-        }
-    )
+    ended = hook.model_copy(update={"event": HookEventKind.SESSION_END})
     assert desktop.service.observe_hook(ended)
     assert require(desktop.store.task(task.id)).status == TaskStatus.UNKNOWN
+    desktop.memory.close()
+
+
+@pytest.mark.anyio
+async def test_idle_owned_sessions_release_capacity_but_cannot_continue_while_another_task_runs(
+    tmp_path: Path,
+) -> None:
+    desktop = Desktop(tmp_path)
+    first = await desktop.service.dispatch(desktop.action())
+    ready = await desktop.service.inspect(first.task_id)
+    assert ready.status == TaskStatus.READY
+    assert desktop.service.available_coding_slots() == 1
+    await desktop.service.dispatch(desktop.action())
+    assert desktop.service.available_coding_slots() == 0
+    with pytest.raises(AuthorityError, match="occupies the slot"):
+        await desktop.service.dispatch(desktop.action(OperationKind.CONTINUE, ready.id))
+    assert not desktop.calls("continue")
+    desktop.memory.close()
+
+
+@pytest.mark.anyio
+async def test_unknown_continuation_reserves_execution_capacity_until_inspected(
+    tmp_path: Path,
+) -> None:
+    desktop = Desktop(tmp_path, timeout=0.15)
+    first = await desktop.service.dispatch(desktop.action())
+    ready = await desktop.service.inspect(first.task_id)
+    desktop.mode("timeout")
+    uncertain = await desktop.service.dispatch(
+        desktop.action(OperationKind.CONTINUE, ready.id)
+    )
+    assert uncertain.outcome == OperationOutcome.UNKNOWN
+    assert desktop.service.available_coding_slots() == 0
+    with pytest.raises(AuthorityError, match="occupies the slot"):
+        await desktop.service.dispatch(desktop.action())
+    desktop.mode("ready")
+    await desktop.service.inspect(ready.id)
+    assert desktop.service.available_coding_slots() == 1
+    await desktop.service.dispatch(desktop.action())
     desktop.memory.close()

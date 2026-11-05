@@ -48,6 +48,7 @@ Drag the pet to move it. Click it to start a conversation.
 Click the pet to ask about your work, correct its understanding, or adopt a bounded
 responsibility. Conversation history, corrections, responsibilities, and task
 outcomes survive daemon restarts. Activity shows investigations and delegated work.
+Background inquiries retain recent replies and constraints from your pet conversation.
 Pausing coordination and stopping a desktop task are separate controls.
 
 The coordinator uses Claude Haiku 5.5 with adaptive thinking and medium effort.

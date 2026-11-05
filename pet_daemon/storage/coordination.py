@@ -145,6 +145,9 @@ class SQLiteCoordinationRepository:
             if message.conversation_id == conversation_id
         )
 
+    def message(self, identifier: str) -> ChatMessage | None:
+        return self._get("message", identifier, ChatMessage)
+
     def begin_turn(
         self, message: ChatMessage, expected_revision: int | None = None
     ) -> bool:

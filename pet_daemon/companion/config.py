@@ -57,6 +57,7 @@ class RetrievalConfig(BaseModel):
     results: int = Field(default=12, gt=0)
     queries: int = Field(default=4, gt=0)
     bootstrap_reports: int = Field(default=40, gt=0)
+    user_inputs: int = Field(default=12, gt=0)
     passage_characters: int = Field(default=2400, gt=0)
     neighboring_passages: int = Field(default=1, ge=0)
     source_characters: int = Field(default=100000, gt=0)

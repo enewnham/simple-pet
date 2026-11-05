@@ -3,6 +3,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from ..coordination.models import (
+    ChatRole,
     Consideration,
     DelegatedTask,
     Instruction,
@@ -26,11 +27,21 @@ from .retrieval import SearchContext
 
 
 @dataclass(frozen=True)
+class UserInput:
+    id: str
+    text: str
+    scope: str
+    created_at: float
+    source: SourceReference
+
+
+@dataclass(frozen=True)
 class WorkBrief:
     purpose: str
     scope: str
     instruction_revision: int
     instructions: tuple[Instruction, ...]
+    recent_user_inputs: tuple[UserInput, ...]
     notes: tuple[Note, ...]
     projects: tuple[Project, ...]
     responsibilities: tuple[Responsibility, ...]
@@ -62,6 +73,45 @@ class WorkContext:
         self.index = index
         self.config = config
         self.clock = clock
+
+    def recent_user_inputs(self, scope: str) -> tuple[UserInput, ...]:
+        store = self.memory.coordination
+        result = []
+        for instruction in reversed(store.instructions()):
+            if (
+                not instruction.active
+                or not instruction.context_only
+                or not applies(instruction.scope, scope)
+            ):
+                continue
+            message = store.message(instruction.message_id or "")
+            if (
+                message is None
+                or message.role != ChatRole.USER
+                or message.text != instruction.text
+            ):
+                continue
+            source = SourceReference(
+                instruction.id,
+                "user",
+                str(instruction.revision),
+                message.created_at,
+                uri=f"conversation://message/{message.id}",
+                scope=instruction.scope,
+                original_at=message.created_at,
+            )
+            result.append(
+                UserInput(
+                    message.id,
+                    message.text,
+                    instruction.scope,
+                    message.created_at,
+                    source,
+                )
+            )
+            if len(result) >= self.config.user_inputs:
+                break
+        return tuple(reversed(result))
 
     def note_documents(self) -> tuple[Document, ...]:
         return tuple(
@@ -242,6 +292,7 @@ class WorkContext:
             purpose=purpose,
             scope=scope,
             instruction_revision=store.state().instruction_revision,
+            recent_user_inputs=self.recent_user_inputs(scope),
             instructions=tuple(
                 instruction
                 for instruction in store.instructions()

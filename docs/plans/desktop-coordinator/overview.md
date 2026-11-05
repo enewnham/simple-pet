@@ -247,8 +247,11 @@ Keep existing ambient expression working during delivery. Coordination reasoning
 and persona expression can use separate model paths. Preserve the repository's
 [prompting principles](../../../.agents/skills/prompting-style/SKILL.md).
 
-Initial scheduling permits one background investigation and one pet-owned coding
-task concurrently. Keep time, turn, usage, and concurrency limits configurable.
+Initial scheduling permits one background investigation and one active pet-initiated
+coding execution concurrently. Idle READY sessions remain available for reuse.
+Preparation, native approval waits, and uncertain consequential operations reserve
+capacity. Launch and continue share the configured capacity check. Keep time, turn,
+usage, and concurrency limits configurable.
 Follow the repository's reset-and-recreate schema policy. A schema reset clears
 responsibilities and authority, even if external harness sessions still exist.
 

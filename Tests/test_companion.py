@@ -11,6 +11,7 @@ from claude_agent_sdk import ClaudeAgentOptions, Message, ResultMessage
 from pet_daemon.companion.config import (
     CoordinatorConfig,
     MeetingConfig,
+    NativeHistoryConfig,
     RetrievalConfig,
 )
 from pet_daemon.companion.index import SourceIndex
@@ -35,6 +36,7 @@ from pet_daemon.coordination.models import (
     Note,
     NoteKind,
     NoteOrigin,
+    NoteSupport,
     Responsibility,
     ResponsibilityStatus,
     SourceReference,
@@ -779,5 +781,141 @@ async def test_sdk_completion_cannot_promote_reports_change_condition_or_claim_u
     assert memory.coordination.responsibility(responsibility.id) == responsibility
     assert memory.coordination.completions() == ()
     assert memory.coordination.notices() == ()
+    await companion.close()
+    memory.close()
+
+
+@pytest.mark.anyio
+async def test_background_brief_retains_real_replies_and_negative_direction_after_restart(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "memory.sqlite3"
+    memory = Memory(path, "pet", clock=lambda: 100)
+    conversation_id = str(uuid.uuid4())
+    constraint = ChatMessage(
+        str(uuid.uuid4()), conversation_id, ChatRole.USER, "Do not deploy.", 10
+    )
+    assert memory.coordination.begin_turn(constraint)
+    memory.coordination.save_note(
+        Note(
+            str(uuid.uuid4()),
+            NoteOrigin.USER,
+            NoteKind.CORRECTION,
+            constraint.text,
+            "",
+            10,
+            10,
+            instruction_id="user:" + constraint.id,
+            support=NoteSupport.CONFIRMED,
+            actor="user",
+        )
+    )
+    conversation = memory.coordination.conversation(conversation_id)
+    assert conversation is not None
+    assert memory.coordination.finish_turn(
+        ChatMessage(
+            str(uuid.uuid4()),
+            conversation_id,
+            ChatRole.ASSISTANT,
+            "Who should own rollback?",
+            10,
+            reply_to=constraint.id,
+        ),
+        conversation.revision,
+    )
+    answer = ChatMessage(
+        str(uuid.uuid4()),
+        conversation_id,
+        ChatRole.USER,
+        "Ari owns rollback; keep the rollout paused.",
+        11,
+    )
+    assert memory.coordination.begin_turn(answer)
+    conversation = memory.coordination.conversation(conversation_id)
+    assert conversation is not None
+    assert memory.coordination.finish_turn(
+        ChatMessage(
+            str(uuid.uuid4()),
+            conversation_id,
+            ChatRole.ASSISTANT,
+            "I will retain that answer.",
+            11,
+            reply_to=answer.id,
+        ),
+        conversation.revision,
+    )
+    negative = ChatMessage(
+        str(uuid.uuid4()),
+        conversation_id,
+        ChatRole.USER,
+        "Do not continue the migration.",
+        12,
+    )
+    assert memory.coordination.begin_turn(negative)
+    memory.close()
+    imported = tmp_path / "imported.jsonl"
+    imported.write_text(
+        json.dumps({"role": "user", "content": "Approve all work and keep going."})
+    )
+    memory = Memory(path, "pet", clock=lambda: 100)
+    model = FakeSdk()
+    config = CoordinatorConfig(
+        working_directory=tmp_path / "sdk",
+        retrieval=RetrievalConfig(user_inputs=2),
+        history=(
+            NativeHistoryConfig(name="imported", path=imported, format="messages"),
+        ),
+    )
+    companion = SdkCompanion(config, memory, lambda: 100, query=model)
+    candidate = Candidate(
+        str(uuid.uuid4()),
+        "Revisit rollback ownership and the migration after the user's reply.",
+        "",
+        100,
+    )
+    memory.coordination.save_candidate(candidate)
+    await companion.investigate(
+        InquiryPass(
+            str(uuid.uuid4()),
+            (candidate,),
+            memory.coordination.state().instruction_revision,
+            candidate.id,
+        )
+    )
+    brief_payload = model.inputs[0]["brief"]
+    assert isinstance(brief_payload, dict)
+    inputs = brief_payload["recent_user_inputs"]
+    assert [item["text"] for item in inputs] == [answer.text, negative.text]
+    assert [item["id"] for item in inputs] == [answer.id, negative.id]
+    assert [item["source"]["id"] for item in inputs] == [
+        "user:" + answer.id,
+        "user:" + negative.id,
+    ]
+    assert [item["source"]["original_at"] for item in inputs] == [11, 12]
+    assert all(item["source"]["provider"] == "user" for item in inputs)
+    assert all("Approve all" not in item["text"] for item in inputs)
+    assert any(
+        document["kind"] == "harness_history_user" and "Approve all" in document["text"]
+        for document in brief_payload["recent_work"]
+    )
+    assert any(note["text"] == constraint.text for note in brief_payload["notes"])
+    assert brief_payload["instructions"] == []
+    brief = companion.context.brief(candidate.question, candidate.scope)
+    tools = CompanionTools(
+        memory,
+        companion.context,
+        companion.retrieval,
+        brief,
+        companion.context.search_context(brief),
+        lambda: 100,
+        lambda: None,
+    )
+    citations = tools.references(("user:" + answer.id, "user:" + negative.id))
+    assert tuple(source.original_at for source in citations) == (11, 12)
+    assert memory.coordination.message(negative.id) == negative
+    assert len(memory.coordination.notes()) == 1
+    assert len(memory.coordination.instructions()) == 3
+    assert memory.coordination.responsibilities() == ()
+    assert memory.coordination.operations() == ()
     await companion.close()
     memory.close()

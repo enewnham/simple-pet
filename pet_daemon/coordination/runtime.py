@@ -20,6 +20,7 @@ from .models import (
     InquiryAttempt,
     InquiryPass,
     InquiryResult,
+    Instruction,
     Operation,
     Responsibility,
     SourceReference,
@@ -45,6 +46,7 @@ class Coordinator:
         completion_sources_valid: Callable[[tuple[SourceReference, ...]], bool]
         | None = None,
         completed: Callable[[Responsibility], None] | None = None,
+        available_coding_slots: Callable[[], int] | None = None,
     ) -> None:
         self.store = store
         self.config = config
@@ -56,6 +58,7 @@ class Coordinator:
         self.sources_current = sources_current
         self.completion_sources_valid = completion_sources_valid
         self.completed = completed
+        self.available_coding_slots = available_coding_slots
         self.task: asyncio.Task[None] | None = None
         self.suspended = False
         self.next_tick = 0.0
@@ -125,6 +128,30 @@ class Coordinator:
         self.store.save_candidate(candidate)
         return candidate
 
+    def user_input(self, instruction: Instruction) -> None:
+        cause = CandidateCause(
+            "user_reply",
+            instruction.id,
+            str(instruction.revision),
+            instruction.created_at,
+        )
+        for candidate in self.store.candidates():
+            if candidate.waiting_on != "human":
+                continue
+            causes = {record.source_id: record for record in candidate.causes}
+            if causes.get(cause.source_id) == cause:
+                continue
+            causes[cause.source_id] = cause
+            self.store.save_candidate(
+                replace(
+                    candidate,
+                    revision=candidate.revision + 1,
+                    evidence_revision=candidate.evidence_revision + 1,
+                    causes=tuple(causes[key] for key in sorted(causes)),
+                )
+            )
+        self.next_tick = 0
+
     def tick(self) -> None:
         now = self.clock()
         if self.suspended or self.store.state().paused or now < self.next_tick:
@@ -190,6 +217,9 @@ class Coordinator:
                 if record.responsibility_id
                 in {candidate.responsibility_id for candidate in selection.candidates}
             ),
+            available_coding_slots=self.available_coding_slots()
+            if self.available_coding_slots is not None
+            else 0,
         )
         attempt = InquiryAttempt(
             request.id, now, tuple(candidate.id for candidate in request.candidates)

@@ -260,6 +260,9 @@ class Daemon:
                 sources_current=self.sources_current,
                 completion_sources_valid=self.companion.completion_sources_valid,
                 completed=self.responsibility_revised,
+                available_coding_slots=self.desktop.available_coding_slots
+                if self.desktop is not None
+                else None,
             )
             if self.companion is not None
             else None
