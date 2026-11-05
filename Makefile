@@ -2,6 +2,7 @@
 
 SWIFT_FLAGS ?= --disable-sandbox
 PYTHON_TEST_WORKERS ?= 4
+PYTHON_PATHS ?= .
 SWIFT_TESTING_PLUGIN = $(wildcard $(dir $(shell xcrun --find swiftc))../lib/swift/host/plugins/testing/libTestingMacros.dylib)
 SWIFT_TEST_FLAGS = $(SWIFT_FLAGS) $(if $(SWIFT_TESTING_PLUGIN),-Xswiftc -load-plugin-library -Xswiftc $(SWIFT_TESTING_PLUGIN))
 UV_CACHE_DIR ?= $(CURDIR)/.cache/uv
@@ -72,9 +73,9 @@ test-python: setup
 lint: lint-python lint-swift complexity
 
 lint-python: setup
-	uv run --locked ruff check .
-	uv run --locked ruff format --check .
-	uv run --locked ty check
+	uv run --locked ruff check $(PYTHON_PATHS)
+	uv run --locked ruff format --check $(PYTHON_PATHS)
+	uv run --locked ty check $(PYTHON_PATHS)
 
 lint-swift complexity-swift: export DYLD_FRAMEWORK_PATH := $(dir $(shell xcrun --find swiftc))../lib$(if $(DYLD_FRAMEWORK_PATH),:$(DYLD_FRAMEWORK_PATH))
 
@@ -90,7 +91,7 @@ complexity-swift:
 	swiftlint lint --strict --no-cache --config .swiftlint-complexity.yml
 
 format: setup
-	uv run --locked ruff format .
+	uv run --locked ruff format $(PYTHON_PATHS)
 
 check: lint test
 	bash -n scripts/fetch-assets.sh

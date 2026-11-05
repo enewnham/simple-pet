@@ -29,7 +29,7 @@ from ..work.history import (
     report_search_terms,
     report_source_key,
 )
-from ..work.models import IntentEvidence, ProgressEvidence, SessionReport
+from ..work.models import IntentEvidence, ProgressEvidence, SessionReport, WorkFacts
 from ..work.narrative import WorkNarrative
 from ..work.observations import (
     RepositoryObservation,
@@ -38,6 +38,7 @@ from ..work.observations import (
 )
 from ..work.shared_work import WorkSubject, related_reports, shared_work
 from ..work.stories import collection_targets, revision_key
+from .coordination import SQLiteCoordinationRepository
 from .identities import (
     optional_session_from_row,
     optional_session_values,
@@ -138,6 +139,7 @@ class Memory:
             raise
         path.chmod(0o600)
         self._work_repository = SQLiteWorkRepository(self.db, pet)
+        self.coordination = SQLiteCoordinationRepository(self.db, pet, clock)
         self.work = WorkIngestion(
             self._work_repository,
             clock,
@@ -146,6 +148,18 @@ class Memory:
 
     def session_aliases(self) -> dict[SessionIdentity, SessionIdentity]:
         return self._work_repository.aliases()
+
+    def work_facts(self) -> WorkFacts:
+        return self._work_repository.load()
+
+    def recent_work_reports(self, limit: int) -> tuple[SessionReport, ...]:
+        rows = self.db.execute(
+            "SELECT data FROM work_reports WHERE pet=? ORDER BY observed_at DESC,id DESC LIMIT ?",
+            (self.pet, limit),
+        ).fetchall()
+        return tuple(
+            SessionReport.model_validate_json(row["data"]) for row in reversed(rows)
+        )
 
     def transaction(self) -> AbstractContextManager[None]:
         return transaction(self.db)
@@ -857,6 +871,7 @@ class Memory:
 
     def clear(self) -> None:
         with self.transaction():
+            self.coordination.clear()
             self.work.clear()
             for table in (
                 "events",
@@ -867,6 +882,9 @@ class Memory:
                 "attention_sources",
                 "message_outcomes",
                 "work_narratives",
+                "companion_documents",
+                "companion_source_status",
+                "companion_source_changes",
             ):
                 self.db.execute(f"DELETE FROM {table} WHERE pet=?", (self.pet,))
 
