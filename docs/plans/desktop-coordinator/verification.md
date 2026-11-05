@@ -1,7 +1,7 @@
 # Coordinator acceptance evidence
 
 - Date: 2026-11-05
-- Scope: Synthetic conversation and scheduled inquiry through the production SDK entrypoints
+- Scope: Automated checks, production SDK requests, release overlay, and Claude Code desktop acceptance
 - Model: `claude-haiku-5-5`, adaptive thinking, medium effort
 
 ## Live conversation and inquiry
@@ -108,5 +108,70 @@ once. All five live requests recorded here cost USD 0.01843211 in total.
 
 Automated completion checks also reject report-only observed completion, changed
 conditions, and model-assigned user confirmation. The scoped SDK and source suite
-contains 29 passing tests, including the daemon freshness boundary and both Linear
-MCP empty-result routes.
+contains 30 passing tests, including the daemon freshness boundary, both Linear
+MCP empty-result routes, and current accepted human inputs across restart. Imported
+harness text does not acquire the authority of those human events.
+
+## Integrated automated checks
+
+The complete `make check` passed Python and Swift tests, lint, type checks,
+complexity checks, and shell syntax checks. That checkpoint contained 935 Python
+tests and 791 subtests. The final public-source follow-up passed `make lint` and
+the complete Python suite with 937 tests and 791 subtests in 28.14 seconds. Swift
+source remained unchanged after its complete check. `make build` produced the
+release overlay successfully.
+
+The automated coverage includes durable chat/retry, stale async results, note
+provenance, scope changes, fairness, source freshness, exact check watches, finite
+completion, shared active coding capacity, and both receipt/hook orderings. Local
+stdio and HTTP MCP transport tests passed. A live optional Linear account was not
+used. Its adapter and normalization are covered by fixtures and MCP transport.
+
+## Release overlay
+
+The isolated release overlay acknowledged ambient speech while preserving the
+frontmost application. The production controller retained durable chat across
+close/reopen and sent an Activity snapshot. The renderer emitted conversation sync
+and created a separate native conversation panel. Physical CG input and image
+capture were unavailable. This acceptance makes no physical typing, screenshot,
+or visually inspected Activity-window claim. The 31 focused AppKit overlay tests
+cover bubble clicks, focus, drafts, pending controls, and Activity rendering.
+
+## Claude Code and Kitty
+
+The personal adapter uses an explicitly owned Kitty session and accepted Claude
+Code hook callbacks. Its private implementation passed 40 tests and independent
+review with no critical findings. Public process-adapter tests exercise the same
+task, operation, authority, revision, and receipt contracts.
+
+The reviewed user-local wrapper and modules are installed at persistent locations.
+Their saved configuration validates through the public desktop configuration
+contract, and installed hashes match the reviewed files. No temporary code or
+callback location is required by that configuration. The installed wrapper and a
+fresh delegation service recovered the saved acceptance task and exact native
+identity without launching, reopening, focusing, or sending input. Acceptance
+authority was not copied into the installed default state. Production pet
+configuration and autostart were unchanged.
+
+A fresh worktree and visible Claude Code session launched successfully. Real hooks
+joined the exact delegated session. Claude
+authentication succeeded. A public continuation was accepted through its matching
+`UserPromptSubmit` callback, and normal native Bash commands succeeded without a
+tool error. Their output confirmed the expected worktree, branch, and base HEAD
+`8475c30`.
+
+The active Stop request received a Kitty acknowledgement. Separate native JSONL
+then recorded an interrupted tool for the exact session, prompt identity, and
+dispatch generation. The inspector checks chronology and rejects the interruption
+proof if later prompt or activity evidence supersedes it. The interrupt produced
+no Stop hook, so callback absence alone did not establish success. A subsequent
+SessionEnd or user closure establishes the later session state independently and
+does not show that Stop terminated the harness process.
+
+This backend serializes terminal sends and rechecks hook revisions and readiness
+before delivery. Native atomic comparison APIs and a dedicated harness server are
+optional. Terminal delivery and callback correlation do not provide exactly-once
+execution guarantees.
+
+The home Node/PATH hook issue was delegated separately. The user reports that home
+setup is fixed and rebuilt. This feature made no home shell or Node changes.

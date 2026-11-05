@@ -1,6 +1,6 @@
 # Desktop coordinator implementation
 
-- Status: In progress
+- Status: Complete
 - Date: 2026-11-05
 - Checkout: `/Users/elliot/sc/simple-pet`
 - Integration branch: `desktop-coordinator`
@@ -22,7 +22,7 @@ the bounded acceptance in [verification](verification.md). The primary personal
 harness is Claude Code in Kitty, with hook callbacks for observations and an owned
 Kitty socket for terminal control. Recheck captured hook/readiness revisions before
 serialized input and correlate callbacks with the requested command. Native atomic
-comparison APIs are optional; terminal delivery does not establish exactly-once
+comparison APIs are optional. Terminal delivery does not establish exactly-once
 execution. Codex remains an optional backend.
 
 ## Active ownership
@@ -40,24 +40,23 @@ foundation migration, and source payload codecs belong to the companion worker.
 
 ## Packages and acceptance
 
-Package completion requires its focused checks and integrated consumers. The table
-records implementation status without declaring unrun acceptance complete.
+All 13 work packages are complete. The table records their acceptance evidence.
 
-| Package | Depends on | Status and remaining acceptance |
+| Package | Depends on | Acceptance evidence |
 | --- | --- | --- |
 | 1: Contracts and fixtures | None | Specifications, canonical domain contracts, and serialized desktop protocol fixtures present. Focused contract checks passed. |
 | 2: Durable foundation | 1 | Frozen records, transactional repository, schema 27, Memory facade, source-index tables, and config integration implemented. Thirteen focused persistence/reset checks and integrated consumers passed. |
 | 3: Prepared context and retrieval | 2 | Brief, bounded native history bootstrap, current accepted human inputs, source map, ranking, passage expansion, freshness, changes, and selected MCP proxy implemented. Source/SDK suite passed 30 checks, including imported-input distinction and restart. |
 | 4: Typed conversation | 2 | Controller, bounded history pages, renderer sync, and Swift composer implemented. Seven conversation transport checks, application-to-SDK checks, and nine Swift Chat checks passed. |
 | 5: SDK conversation and notes | 3, 4 | SDK callable, typed note tools, and host authority context implemented. SDK correctness, application fake-SDK integration, and bounded live conversation/inquiry acceptance passed. |
-| 6: Ticket interface and Linear | 2, 3 | Generic read-only contract, direct Linear adapter, and selected MCP normalization implemented. Fixtures and real stdio/HTTP MCP transport checks passed in the 25-check source/SDK suite. Live account retrieval is optional. |
+| 6: Ticket interface and Linear | 2, 3 | Generic read-only contract, direct Linear adapter, and selected MCP normalization implemented. Fixtures and real stdio/HTTP MCP transport checks passed. Optional live Linear account retrieval remains untested. |
 | 7: Meeting exports | 2, 3 | Searchable passages, complete snapshot edits/removals, bounded files, dates, and freshness implemented. Source suite passed. |
 | 8: Adopted responsibility/watch | 5 | Accepted user ingress, adoption/revision, exact checks, scoped feedback, evidence-based finite completion, explicit human confirmation, and durable notice outbox implemented. Watch/workflow, completion, and no-active-session delivery/ack/restart checks passed. |
-| 9: Desktop launch and recovery | 8 | Public process adapter, intent-before-effect, receipts, exact hook association, and reconciliation implemented. Adapter/hook/notify checks passed. Primary Claude Code/Kitty acceptance is in progress. |
-| 10: Owned follow-through | 9, 11 | Current authority, captured task/user/hook revisions, readiness, continuation, stop/open, and lost-receipt recovery implemented. Twenty-four desktop checks passed, including shared launch/continue capacity and idle-session reuse. |
+| 9: Desktop launch and recovery | 8 | Public process adapter, intent-before-effect, receipts, exact hook association, and reconciliation implemented. Adapter/hook/notify checks and fresh Claude Code/Kitty launch with real hooks passed. |
+| 10: Owned follow-through | 9, 11 | Current authority, captured task/user/hook revisions, readiness, continuation, stop/open, and lost-receipt recovery implemented. Twenty-four public desktop checks and 40 private adapter tests passed. Actual continuation and active interruption passed with exact callback/native evidence. |
 | 11: Ongoing scheduling | 5, 6, 7, 8 | Coalescing, bounded reasoning, quiet fairness, scoped unknown operations, source refresh, disposition/budget history, and available coding capacity implemented. Eleven loop regressions and integrated app/daemon checks passed. Actual accepted replies wake waiting-human questions without resetting their age. |
-| 12: Full Activity/ambient | 10, 11 | Activity projection, canonical controls, source inspection, and notice delivery bridge implemented. Twelve Activity/conversation checks and 31 overlay checks passed. Isolated desktop acceptance is in progress. |
-| 13: Integrated release checks | 12 | Full automated check, final follow-up lint/Python checks, and release build passed. Generated conversation, inquiry, and finite completion acceptance passed. Personal desktop acceptance and direct merge remain pending. |
+| 12: Full Activity/ambient | 10, 11 | Activity projection, canonical controls, source inspection, and notice delivery bridge implemented. Twelve Activity/conversation checks and 31 overlay checks passed. Isolated release acceptance confirmed passive speech, durable chat/reopen, Activity protocol delivery, and native conversation panels. Physical input/capture and visual Activity inspection were unavailable. |
+| 13: Integrated release checks | 12 | Full automated check, final follow-up lint/Python checks, release build, generated-response assessment, independent reviews, actual desktop acceptance, and installed configuration/readback passed. |
 
 ## Published foundation contracts
 
@@ -111,13 +110,14 @@ writes. Review findings added guarded failed-attempt revisions, immutable note
 actors/evidence dates, and durable retry command receipts. UI review fixes bound
 presentation history while retaining the complete canonical transcript, and add
 renderer reconciliation. Companion review fixes revalidate expanded source passages.
-The frozen source/SDK suite passed 25 checks. Legacy ambient runtime and desktop
+The final source/SDK suite passed 30 checks. Legacy ambient runtime and desktop
 fixtures disable the coordinator explicitly. Enabled-coordinator tests inject the
 SDK query effect, so broad automated tests cannot make accidental live model calls.
 
 Local checkpoints are `ea499e0` for specifications, `e43b4dd` for canonical
-records/storage, and `304124e` for integrated conversation, retrieval, scheduling,
-desktop operations, and Activity. Full `make check` passed, including Python 935
+records/storage, `304124e` for integrated conversation, retrieval, scheduling,
+desktop operations, and Activity, and `a4075f5` for current human direction and
+shared coding capacity. Full `make check` passed, including Python 935
 tests and 791 subtests, Swift tests, lint, type checks, complexity, and shell syntax.
 `make build` passed and produced `.build/pet-overlay` for isolated acceptance.
 The final follow-up gate passed `make lint` and the complete Python suite with 937
@@ -133,17 +133,21 @@ Observed dated decision evidence completed a finite goal through the real model 
 coordinator with one completion record and notice; a report-only CI claim remained
 incomplete.
 
-The personal Claude Code adapter passed ten offline callback checks. A fresh Kitty
-launch and real hook correlation succeeded. Claude Code requires authentication,
-so native continuation and stop remain unverified. The private adapter's independent
-review and persistent installation remain pending. Production daemon restart has
-not run. These checks do not establish complete personal desktop acceptance.
+The personal Claude Code adapter passed 40 private tests and independent review
+without critical findings. Authentication, fresh Kitty launch, real hook
+correlation, continuation, and active interruption passed. Matching native
+interruption evidence establishes the Stop result independently of the later
+SessionEnd or user closure. [Verification](verification.md) records these evidence
+boundaries, the release overlay checks, physical input/capture limitations, and
+optional account coverage. The reviewed private adapter and validated configuration
+are installed at persistent user-local locations. A fresh service recovered the
+same task/native session through the installed wrapper after restart. Production
+pet configuration, autostart, authentication, and home environment were unchanged.
 
 ## Direct integration readiness
 
 The fetched `origin/main` and local `main` both point to `8475c30`. The feature
-checkpoint `a4075f5` is four commits ahead and has no divergent remote commits.
-The working tree was clean before this ledger update. A fast-forward integration
-is available. Hold the merge until root confirms native acceptance or the user
-chooses delivery with that acceptance explicitly unverified. Preserve the existing
-native-acceptance worktrees and their branches.
+source checkpoint `a4075f5` has no divergent remote commits. Delivery uses a direct
+fast-forward integration to `main`, with no PR workflow. Preserve the
+native-acceptance worktrees and their branches. Remote publication is outside this
+delivery request.

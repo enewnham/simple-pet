@@ -1,8 +1,8 @@
 # Desktop companion for ongoing work
 
-- Status: Implementation in progress
+- Status: Implemented
 - Date: 2026-11-05
-- Implementation: Integrated feature under verification
+- Implementation: Integrated checks and desktop acceptance passed
 
 ## Purpose
 
@@ -337,10 +337,13 @@ checks against the resulting code. Merge the completed feature directly to `main
 Keep branch and worktree cleanup separate from integration and obtain the required
 authorization before destructive cleanup.
 
-The Kitty/worktree adapter is a separate personal task alongside package 9. Its desired
-composition is a fresh worktree, a fresh Kitty session, the user's persistent
-terminal wrapper, and a chosen native harness. The public contract tests use fake
-adapters and must not depend on those personal tools.
+The user-local Kitty/worktree adapter is installed separately from the public
+application. Its verified Claude Code backend combines a fresh worktree, an owned
+Kitty session, the user's terminal wrapper, and normal native harness configuration.
+Hook callbacks and serialized terminal control supply its observation and delivery
+boundaries. Native atomic comparison APIs and a dedicated harness server are
+optional. The public contract tests use fake adapters without depending on these
+personal tools.
 
 ## Verification and release acceptance
 
@@ -349,6 +352,9 @@ package, broader architecture/runtime checks at integration checkpoints, and
 renderer builds plus real desktop acceptance before the direct trunk merge.
 [The Makefile](../../../Makefile) and
 [README](../../../README.md) define available checks.
+
+[Acceptance evidence](verification.md) records the completed checks and the limits
+of physical input, capture, and optional account validation.
 
 The critical integrated cases are:
 

@@ -1,8 +1,8 @@
 # SDK conversations and workflows
 
-- Status: Implementation in progress
+- Status: Implemented
 - Date: 2026-11-05
-- Implementation: Integrated feature under verification
+- Implementation: Integrated checks and live SDK acceptance passed
 
 This document specifies the internal agent in the
 [desktop coordinator plan](overview.md). [Conversation](conversation.md) defines

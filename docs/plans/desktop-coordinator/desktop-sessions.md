@@ -1,8 +1,8 @@
 # Desktop sessions and adapters
 
-- Status: Implementation in progress
+- Status: Implemented
 - Date: 2026-11-05
-- Implementation: Public adapter verified, personal desktop acceptance pending
+- Implementation: Public adapter and Claude Code/Kitty desktop acceptance passed
 
 ## Context
 
@@ -112,11 +112,13 @@ The launch flow is:
 4. Associate native hooks and adapter task events with the explicit delegation ID.
 5. Expose the resulting workspace, session, and state in conversation and Activity.
 
-Extend the existing [hook adapter](../../../scripts/pet-hook) and accepted hook
-contract to carry a delegation ID through a documented environment value or task
-event interface. The launcher supplies the value to its harness process. Validate
-events against recorded task/operation identity before accepting ownership or effects.
-An unrecognized identifier cannot create an adopted responsibility.
+The [hook adapter](../../../scripts/pet-hook) and accepted hook contract carry
+explicit task and command IDs supplied by the launcher. When native hooks omit
+these values, associate only the exact provider and native session identity from
+an accepted launch receipt. Retain earlier accepted hooks within bounded storage
+until that receipt arrives. Supplied invalid delegation IDs remain invalid and
+cannot acquire ownership through another association. Validate recorded task and
+operation identity before accepting ownership or effects.
 
 A hook can arrive before a launch receipt, or a receipt before the first hook.
 Reconcile both orderings into the same task. Keep provider-native session aliases
