@@ -34,16 +34,18 @@ from .logging import get_logger
 from .repository_identity import repository_columns
 from .runtime import (
     HookEvent,
+    HookEventKind,
     OverlayPacket,
     PetContext,
     RandomSource,
     ReactionTrigger,
     Trigger,
+    WaitingKind,
 )
 from .sessions.coordinator import ActivityCoordinator
 from .sessions.processes import ProcessTracker
 from .sessions.reactions import SessionReactions
-from .sessions.tracking import Sessions
+from .sessions.tracking import Sessions, SessionUpdate
 from .storage import Memory
 from .work.history import (
     SessionContext,
@@ -59,6 +61,26 @@ from .work.observations import (
 )
 
 log = get_logger("pet-daemon")
+
+
+def needs_session_followup(
+    hook: HookEvent,
+    result: SessionUpdate,
+    recorded: bool,
+    location_changed: bool,
+) -> bool:
+    return (
+        recorded
+        or result.failure
+        or location_changed
+        or hook.event == HookEventKind.WAITING
+        and hook.waiting_kind != WaitingKind.PERMISSION_CHECK
+        or any(
+            isinstance(report, ExecutionEvidence)
+            and report.event in {"turn_start", "resumed", "turn_done"}
+            for report in result.observation.reports
+        )
+    )
 
 
 class ObservationProvider(Protocol):
@@ -359,11 +381,17 @@ class Application:
         if not result:
             return
         try:
+            location_changed = bool(
+                self.coordinator is not None
+                and hook.repo
+                and hook.repo
+                != self.memory.work.repository.session_location(result.session)
+            )
             with self.memory.transaction():
                 self.memory.work.record_session(result.observation)
                 self.memory.observe_session_context(result.observation)
                 session = self.sessions.by_id[result.session]
-                self.memory.record_event(
+                recorded = self.memory.record_event(
                     build_session_entry(
                         hook,
                         SessionContext(
@@ -383,7 +411,9 @@ class Application:
                 )
             if self.desktop is not None:
                 self.desktop.observe_hook(hook, result.session)
-            if self.coordinator is not None:
+            if self.coordinator is not None and needs_session_followup(
+                hook, result, recorded is not None, location_changed
+            ):
                 scope = hook.repo or self.sessions.by_id[result.session].repo
                 revision = hashlib.sha256(
                     hook.model_dump_json(exclude={"capture_at", "timestamp"}).encode()

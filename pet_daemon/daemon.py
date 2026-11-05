@@ -1,5 +1,6 @@
 import asyncio
 import errno
+import hashlib
 import json
 import os
 import random
@@ -8,6 +9,7 @@ import socket
 import stat
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import asdict
 from typing import Never
 from urllib.parse import unquote, urlsplit
 
@@ -31,10 +33,11 @@ from .coordination.models import (
     SourceReference,
 )
 from .coordination.runtime import Coordinator
+from .coordination.scheduling import task_meaning
 from .coordination.watches import Watches
 from .coordination.workflows import Workflows
 from .desktop import AdapterClient, Delegation
-from .logging import get_logger
+from .logging import get_logger, json_default
 from .navigation import Navigator, Target, TargetKind
 from .runtime import RandomSource
 from .sessions.processes import ProcessTracker
@@ -287,10 +290,15 @@ class Daemon:
             return
         responsibility = self.coordination_store.responsibility(task.responsibility_id)
         if responsibility is not None:
+            revision = hashlib.sha256(
+                json.dumps(
+                    asdict(task_meaning(task)), default=json_default, sort_keys=True
+                ).encode()
+            ).hexdigest()
             self.coordinator.queue(
                 "Assess the next bounded step for the owned task.",
                 responsibility.scope,
-                CandidateCause("task", task.id, str(task.revision), self.wall_clock()),
+                CandidateCause("task", task.id, revision, self.wall_clock()),
                 responsibility_id=responsibility.id,
                 project_id=responsibility.project_id,
                 priority=responsibility.priority,

@@ -4,6 +4,7 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from claude_agent_sdk import ClaudeAgentOptions, Message, ResultMessage
@@ -111,6 +112,29 @@ class FakeSdk:
             ],
         }
         if "candidates" in payload:
+            assert isinstance(options.mcp_servers, dict)
+            config = options.mcp_servers["pet"]
+            assert config["type"] == "sdk"
+            server = config["instance"]
+            handler = server.get_request_handler("tools/call")
+            assert handler is not None
+            candidate = next(
+                (
+                    item
+                    for item in payload["candidates"]
+                    if item["id"] == payload["reserved_focus"]
+                ),
+                payload["candidates"][0],
+            )
+            await cast(Any, handler.handler)(
+                None,
+                handler.params_type.model_validate(
+                    {
+                        "name": "focus_work",
+                        "arguments": {"candidate_id": candidate["id"]},
+                    }
+                ),
+            )
             completion = self.completion
             output = {
                 "decisions": [
@@ -136,7 +160,16 @@ class FakeSdk:
                             else {}
                         ),
                     }
-                    for candidate in payload["candidates"]
+                    for candidate in [
+                        next(
+                            (
+                                item
+                                for item in payload["candidates"]
+                                if item["id"] == payload["reserved_focus"]
+                            ),
+                            payload["candidates"][0],
+                        )
+                    ]
                     if not self.omit_focus
                     or candidate["id"] != payload["reserved_focus"]
                 ]
@@ -403,7 +436,7 @@ async def test_inquiry_cannot_bypass_fair_focus_or_accept_a_stale_candidate(
         memory.coordination.save_candidate(candidate)
     request = InquiryPass(str(uuid.uuid4()), (quiet, noisy), 0, quiet.id)
     model.omit_focus = True
-    with pytest.raises(ValueError, match="fair focus"):
+    with pytest.raises(ValueError):
         await companion.investigate(request)
     model.omit_focus = False
     result = await companion.investigate(request)

@@ -265,6 +265,21 @@ candidate's first-queued time and last meaningful service time when more events
 arrive. Repeated or noisy events neither reset waiting age nor multiply priority.
 Source volume does not establish urgency.
 
+Every accepted hook updates runtime activity and retained work evidence. Generic
+inquiry wakeups follow accepted intent, material reports, human questions or
+permission prompts, results, session lifecycle changes, initial discovery, changed
+work location, and proven failures. Successful ongoing tool calls, automatic
+permission checks, blank progress, and repeated report text remain activity
+observations without creating another inquiry. Prepared briefs and retrieval
+continue to read the current retained evidence.
+
+Owned-task inquiry causes use meaningful task state. Observation timestamps,
+storage revisions, and opaque transport-token refreshes do not create new
+reasoning work. Raw task observations and control tokens remain stored. User input,
+readiness, status, scope, evidence, and authority changes still invalidate relevant
+reasoning. Action validation retains the captured native control token and current
+task revision checks described in [SDK workflows](sdk-workflows.md).
+
 Code evaluates eligibility against awake and pause state, due conditions, evidence
 freshness, scope, current operations, available time, concurrency, and budget. Perform
 exact checks in code where possible, including watch conditions and operation

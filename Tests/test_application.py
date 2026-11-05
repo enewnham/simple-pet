@@ -28,7 +28,15 @@ from pet_daemon.companion.sdk import SdkCompanion
 from pet_daemon.companion.tools import ToolAuthority
 from pet_daemon.config import Config
 from pet_daemon.conversation import DEFAULT_CONVERSATION_ID, Conversations
-from pet_daemon.coordination.models import Candidate, ChatMessage, ChatRole
+from pet_daemon.coordination.models import (
+    Candidate,
+    CandidateDecision,
+    ChatMessage,
+    ChatRole,
+    Disposition,
+    InquiryPass,
+    InquiryResult,
+)
 from pet_daemon.coordination.runtime import Coordinator
 from pet_daemon.coordination.watches import Watches
 from pet_daemon.coordination.workflows import Workflows
@@ -58,6 +66,7 @@ from pet_daemon.runtime import (
     OverlayPacket,
     ProcessIdentity,
     SessionTrigger,
+    WaitingKind,
 )
 from pet_daemon.sessions.processes import ProcessTracker
 from pet_daemon.sessions.reactions import SessionReactions
@@ -66,6 +75,7 @@ from pet_daemon.sources import RepositoryTracker
 from pet_daemon.sources.checks import ChecksObservation, ChecksStatus
 from pet_daemon.sources.hooks import normalize_hook
 from pet_daemon.storage import Memory
+from pet_daemon.storage.coordination import RevisionConflict
 from pet_daemon.types import JSONObject
 from pet_daemon.work import WorkStory
 from pet_daemon.work.evidence import ReportedProgress, WorkAssociation
@@ -105,6 +115,26 @@ class FixtureProvider:
 
     async def close(self) -> None:
         pass
+
+
+class HeldInquiry:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def __call__(self, request: InquiryPass) -> InquiryResult:
+        self.entered.set()
+        await self.release.wait()
+        return InquiryResult(
+            request.id,
+            (
+                CandidateDecision(
+                    request.focus_id or request.candidates[0].id,
+                    Disposition.NO_FINDING,
+                    "No further inquiry is needed.",
+                ),
+            ),
+        )
 
 
 class FixtureModel:
@@ -409,6 +439,283 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 event=HookEventKind.PROGRESS,
                 progress=text,
             )
+        )
+
+    def native_hook(
+        self, event: str, *, source: str = "codex", **fields: object
+    ) -> HookEvent:
+        hook = require(
+            update(
+                source,
+                event,
+                {"session_id": "parser", "cwd": "/fixture/parser", **fields},
+            )
+        )
+        hook.capture_at = self.now
+        return require(normalize_hook(hook.packet()))
+
+    async def test_tool_progress_preserves_an_inflight_inquiry_and_current_work(
+        self,
+    ) -> None:
+        inquiry = HeldInquiry()
+        store = self.memory.coordination
+        coordinator = Coordinator(
+            store, self.config.coordinator.scheduling, self.clock, inquiry
+        )
+        self.app.coordinator = coordinator
+        self.provider.publish(
+            self.native_hook("UserPromptSubmit", prompt="Review the parser result")
+        )
+        candidate = store.candidates()[0]
+        pending = asyncio.create_task(coordinator.run_pass())
+        await inquiry.entered.wait()
+        identity = SessionIdentity(source=SessionSource.CODEX, native_id="parser")
+        self.provider.publish(
+            self.native_hook("PreToolUse", tool_use_id="read", tool_name="Read")
+        )
+        self.assertEqual(tuple(self.app.sessions.by_id[identity].calls), ("read",))
+        self.assertTrue(self.app.sessions.by_id[identity].active)
+        self.assertEqual(store.candidate(candidate.id), candidate)
+        self.provider.publish(
+            self.native_hook(
+                "PostToolUse",
+                tool_use_id="read",
+                tool_name="Read",
+                tool_response={"exit_code": 0},
+                last_assistant_message="The parser source was read.",
+            )
+        )
+        self.assertEqual(self.app.sessions.by_id[identity].calls, {})
+        latest = self.memory.recent_work_reports(1)[0].payload
+        self.assertIsInstance(latest, ProgressEvidence)
+        assert isinstance(latest, ProgressEvidence)
+        self.assertEqual(latest.text, "The parser source was read.")
+        self.assertEqual(
+            self.memory.work_facts().sessions[identity].location, "/fixture/parser"
+        )
+        self.assertEqual(store.candidate(candidate.id), candidate)
+        self.provider.publish(
+            self.native_hook("PreToolUse", tool_use_id="unknown", tool_name="Read")
+        )
+        unknown = self.native_hook("PostToolUse", tool_use_id="unknown")
+        unknown.outcome = None
+        self.provider.publish(require(normalize_hook(unknown.packet())))
+        self.assertIsNone(self.app.sessions.by_id[identity].failure)
+        self.assertEqual(store.candidate(candidate.id), candidate)
+        inquiry.release.set()
+        self.assertIsNotNone(await pending)
+        self.assertIsNotNone(require(store.candidate(candidate.id)).last_serviced_at)
+        self.assertEqual(len(store.considerations(candidate.id)), 1)
+
+    async def test_meaningful_native_changes_supersede_the_relevant_inquiry(
+        self,
+    ) -> None:
+        store = self.memory.coordination
+        coordinator = Coordinator(
+            store, self.config.coordinator.scheduling, self.clock, HeldInquiry()
+        )
+        self.app.coordinator = coordinator
+        cases = (
+            ("codex", "UserPromptSubmit", {"prompt": "Follow the changed parser goal"}),
+            (
+                "codex",
+                "PostToolUse",
+                {"tool_use_id": "check", "tool_response": {"exit_code": 1}},
+            ),
+            ("codex", "Stop", {"last_assistant_message": "The parser checks passed."}),
+            (
+                "codex",
+                "PreToolUse",
+                {
+                    "tool_use_id": "question",
+                    "tool_name": "request_user_input",
+                    "tool_input": {
+                        "questions": [{"question": "Which checkout should I use?"}]
+                    },
+                },
+            ),
+            (
+                "claude",
+                "Notification",
+                {"notification_type": "permission_prompt", "tool_name": "Bash"},
+            ),
+            ("codex", "Interrupt", {}),
+            ("codex", "SessionEnd", {}),
+            ("codex", "SessionStart", {}),
+        )
+        for source, event, fields in cases:
+            with self.subTest(source=source, event=event):
+                self.now += 1
+                self.provider.publish(
+                    self.native_hook(
+                        "UserPromptSubmit", source=source, prompt="Inspect the parser"
+                    )
+                )
+                self.provider.publish(
+                    self.native_hook(
+                        "PreToolUse",
+                        source=source,
+                        tool_use_id="check",
+                        tool_name="Bash",
+                    )
+                )
+                if event == "SessionStart":
+                    self.provider.publish(self.native_hook("SessionEnd", source=source))
+                candidate = store.candidates()[0]
+                inquiry = HeldInquiry()
+                coordinator.reason = inquiry
+                pending = asyncio.create_task(coordinator.run_pass())
+                await inquiry.entered.wait()
+                self.provider.publish(self.native_hook(event, source=source, **fields))
+                changed = require(store.candidate(candidate.id))
+                self.assertGreater(changed.revision, candidate.revision)
+                self.assertEqual(changed.first_queued_at, candidate.first_queued_at)
+                if event == "Notification":
+                    identity = SessionIdentity(
+                        source=SessionSource.CLAUDE, native_id="parser"
+                    )
+                    self.assertEqual(
+                        self.app.sessions.by_id[identity].waiting_kind,
+                        WaitingKind.PERMISSION,
+                    )
+                inquiry.release.set()
+                with self.assertRaises(RevisionConflict):
+                    await pending
+        self.assertEqual(store.considerations(), ())
+
+    async def test_automatic_permission_checks_and_repeated_reports_do_not_wake_inquiries(
+        self,
+    ) -> None:
+        store = self.memory.coordination
+        self.app.coordinator = Coordinator(
+            store, self.config.coordinator.scheduling, self.clock, HeldInquiry()
+        )
+        self.provider.publish(
+            self.native_hook("UserPromptSubmit", prompt="Review parser behavior")
+        )
+        candidate = store.candidates()[0]
+        self.provider.publish(
+            self.native_hook("PreToolUse", tool_use_id="check", tool_name="Bash")
+        )
+        self.provider.publish(
+            self.native_hook("PermissionRequest", tool_use_id="check", tool_name="Bash")
+        )
+        identity = SessionIdentity(source=SessionSource.CODEX, native_id="parser")
+        self.assertEqual(
+            self.app.sessions.by_id[identity].waiting_kind, WaitingKind.PERMISSION_CHECK
+        )
+        self.assertFalse(self.app.sessions.by_id[identity].is_waiting_for_input)
+        self.assertEqual(store.candidate(candidate.id), candidate)
+        self.provider.publish(
+            self.native_hook(
+                "PostToolUse", tool_use_id="check", tool_response={"exit_code": 0}
+            )
+        )
+        self.assertFalse(self.app.sessions.by_id[identity].waiting)
+        self.assertEqual(store.candidate(candidate.id), candidate)
+        self.provider.publish(
+            self.native_hook(
+                "PreToolUse",
+                tool_use_id="answer",
+                tool_name="request_user_input",
+                tool_input={"questions": [{"question": "Which parser behavior?"}]},
+            )
+        )
+        waiting = require(store.candidate(candidate.id))
+        self.assertTrue(self.app.sessions.by_id[identity].is_waiting_for_input)
+        self.provider.publish(self.native_hook("PostToolUse", tool_use_id="answer"))
+        self.assertFalse(self.app.sessions.by_id[identity].waiting)
+        self.assertGreater(
+            require(store.candidate(candidate.id)).revision, waiting.revision
+        )
+        self.provider.publish(
+            self.native_hook(
+                "beforeSubmitPrompt", source="cursor", prompt="Trace parser behavior"
+            )
+        )
+        baseline = store.candidates()[0]
+        self.provider.publish(
+            self.native_hook("afterAgentThought", source="cursor", text="")
+        )
+        self.assertEqual(store.candidate(baseline.id), baseline)
+        self.provider.publish(
+            self.native_hook(
+                "afterAgentResponse",
+                source="cursor",
+                text="The parser checks confirm the selected behavior.",
+            )
+        )
+        material = require(store.candidate(baseline.id))
+        self.assertGreater(material.revision, baseline.revision)
+        self.now += 1
+        self.provider.publish(
+            self.native_hook(
+                "afterAgentResponse",
+                source="cursor",
+                text="The parser checks confirm the selected behavior.",
+            )
+        )
+        self.assertEqual(store.candidate(material.id), material)
+
+    async def test_discovery_location_and_observed_completion_wake_inquiries(
+        self,
+    ) -> None:
+        store = self.memory.coordination
+        self.app.coordinator = Coordinator(
+            store, self.config.coordinator.scheduling, self.clock, HeldInquiry()
+        )
+        self.provider.publish(
+            self.native_hook(
+                "PreToolUse",
+                session_id="discovered",
+                cwd="",
+                tool_use_id="read",
+                tool_name="Read",
+            )
+        )
+        self.assertEqual(len(store.candidates()), 1)
+        self.provider.publish(
+            self.native_hook(
+                "PostToolUse",
+                session_id="discovered",
+                cwd="",
+                tool_use_id="read",
+                tool_response={"exit_code": 0},
+            )
+        )
+        self.provider.publish(
+            self.native_hook(
+                "PreToolUse",
+                session_id="discovered",
+                tool_use_id="changed",
+                cwd="/fixture/other",
+                tool_name="Read",
+            )
+        )
+        identity = SessionIdentity(source=SessionSource.CODEX, native_id="discovered")
+        self.assertEqual(
+            self.memory.work_facts().sessions[identity].location, "/fixture/other"
+        )
+        self.assertEqual(
+            {candidate.scope for candidate in store.candidates()},
+            {"", "/fixture/other"},
+        )
+        before = next(
+            candidate
+            for candidate in store.candidates()
+            if candidate.scope == "/fixture/other"
+        )
+        completed = self.native_hook(
+            "PostToolUse",
+            session_id="discovered",
+            cwd="/fixture/other",
+            tool_use_id="changed",
+        )
+        completed.manual = True
+        self.provider.publish(require(normalize_hook(completed.packet())))
+        self.assertTrue(self.app.sessions.by_id[identity].finished)
+        self.assertGreater(
+            require(store.candidate(before.id)).revision, before.revision
         )
 
     async def test_renderer_chat_uses_existing_work_and_records_one_sdk_reply(

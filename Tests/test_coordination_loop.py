@@ -316,7 +316,7 @@ class CoordinationLoopTests(unittest.IsolatedAsyncioTestCase):
             tuple(record.id for record in self.requests[-1].candidates), (other.id,)
         )
 
-    async def test_pause_after_first_external_effect_prevents_later_effects(
+    async def test_pause_after_external_effect_prevents_recording_service(
         self,
     ) -> None:
         store = self.memory.coordination
@@ -354,7 +354,7 @@ class CoordinationLoopTests(unittest.IsolatedAsyncioTestCase):
                             repository=candidate.scope,
                         ),
                     )
-                    for candidate in request.candidates
+                    for candidate in request.candidates[:1]
                 ),
             )
 

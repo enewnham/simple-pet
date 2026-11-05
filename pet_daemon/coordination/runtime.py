@@ -26,7 +26,12 @@ from .models import (
     SourceReference,
     TaskAction,
 )
-from .scheduling import eligible_candidates, select
+from .scheduling import (
+    eligible_candidates,
+    related_responsibilities,
+    select,
+    task_meaning,
+)
 
 log = get_logger("pet-daemon")
 
@@ -194,6 +199,9 @@ class Coordinator:
         selection = select(eligible, now, self.config, history)
         if not selection.candidates:
             return None
+        responsibilities = related_responsibilities(
+            selection.candidates, self.store.responsibilities()
+        )
         request = InquiryPass(
             str(uuid.uuid4()),
             selection.candidates,
@@ -205,17 +213,12 @@ class Coordinator:
                 if record.candidate_id
                 in {candidate.id for candidate in selection.candidates}
             ),
-            tuple(
-                record
-                for record in self.store.responsibilities()
-                if record.id
-                in {candidate.responsibility_id for candidate in selection.candidates}
-            ),
+            responsibilities,
             tuple(
                 record
                 for record in self.store.tasks()
                 if record.responsibility_id
-                in {candidate.responsibility_id for candidate in selection.candidates}
+                in {record.id for record in responsibilities}
             ),
             available_coding_slots=self.available_coding_slots()
             if self.available_coding_slots is not None
@@ -268,7 +271,7 @@ class Coordinator:
         decisions = {decision.candidate_id: decision for decision in result.decisions}
         if (
             result.pass_id != request.id
-            or len(decisions) != len(result.decisions)
+            or len(result.decisions) != 1
             or not decisions.keys() <= offered.keys()
             or request.focus_id is not None
             and request.focus_id not in decisions
@@ -280,10 +283,6 @@ class Coordinator:
             raise RevisionConflict("Coordination paused during consideration")
         if self.store.state().instruction_revision != request.instruction_revision:
             raise RevisionConflict("Instructions changed during consideration")
-        for identifier in decisions:
-            current = self.store.candidate(identifier)
-            if current != offered[identifier]:
-                raise RevisionConflict("Evidence changed during consideration")
         for identifier, decision in decisions.items():
             candidate = offered[identifier]
             self._validate_candidate(request, candidate)
@@ -355,19 +354,23 @@ class Coordinator:
                     ),
                     None,
                 )
+                latest = self.store.task(task.id) if task is not None else None
                 if decision.action.task_id and (
-                    task is None or self.store.task(task.id) != task
+                    task is None
+                    or latest is None
+                    or task_meaning(latest) != task_meaning(task)
+                    or latest.adapter_revision != task.adapter_revision
                 ):
                     raise RevisionConflict("The task changed during consideration")
                 action = replace(
                     decision.action,
                     expected_instruction_revision=request.instruction_revision,
                     expected_responsibility_revision=responsibility.revision,
-                    expected_task_revision=task.revision if task else None,
-                    expected_user_revision=task.user_revision if task else None,
+                    expected_task_revision=latest.revision if latest else None,
+                    expected_user_revision=latest.user_revision if latest else None,
                 )
                 await self.effect(action)
-                self._validate_candidate(request, candidate)
+                self._validate_candidate(request, candidate, check_work=False)
             self._record_decision(
                 request,
                 candidate,
@@ -431,7 +434,9 @@ class Coordinator:
             if completed is not None and self.completed is not None:
                 self.completed(completed)
 
-    def _validate_candidate(self, request: InquiryPass, candidate: Candidate) -> None:
+    def _validate_candidate(
+        self, request: InquiryPass, candidate: Candidate, *, check_work: bool = True
+    ) -> None:
         state = self.store.state()
         if (
             self.suspended
@@ -443,6 +448,29 @@ class Coordinator:
             )
         if self.store.candidate(candidate.id) != candidate:
             raise RevisionConflict("Candidate evidence changed before an effect")
+        if not check_work:
+            return
+        responsibilities = related_responsibilities(
+            (candidate,), request.responsibilities
+        )
+        for responsibility in responsibilities:
+            if self.store.responsibility(responsibility.id) != responsibility:
+                raise RevisionConflict(
+                    "Related responsibility changed before an effect"
+                )
+        identifiers = {record.id for record in responsibilities}
+        captured = {
+            task.id: task_meaning(task)
+            for task in request.tasks
+            if task.responsibility_id in identifiers
+        }
+        current = {
+            task.id: task_meaning(task)
+            for task in self.store.tasks()
+            if task.responsibility_id in identifiers
+        }
+        if current != captured:
+            raise RevisionConflict("Related delegated tasks changed before an effect")
 
     def _complete(
         self,

@@ -53,6 +53,8 @@ def main() -> None:
         )
     if mode == "unknown" and operation == "inspect":
         result["readiness"] = "unknown"
+    if mode == "busy" and operation == "inspect":
+        result.update(status="running", readiness="busy")
     if mode == "no_token":
         result["interaction_revision"] = None
     if operation == "continue" and request["expected_interaction_revision"] != token:

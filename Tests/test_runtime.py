@@ -4,6 +4,7 @@ import json
 import os
 import random
 import socket
+import sys
 import tempfile
 import time
 import unittest
@@ -22,7 +23,19 @@ from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.companion.config import CoordinatorConfig
 from pet_daemon.config import Config
 from pet_daemon.conversation import DEFAULT_CONVERSATION_ID
+from pet_daemon.coordination.models import (
+    InquiryPass,
+    InquiryResult,
+    Instruction,
+    OperationKind,
+    Responsibility,
+    TaskAction,
+    TaskReadiness,
+    TaskStatus,
+)
+from pet_daemon.coordination.runtime import Coordinator
 from pet_daemon.daemon import Daemon, bind_socket
+from pet_daemon.desktop import AdapterClient, Delegation, DesktopConfig
 from pet_daemon.domain import CareKind, SessionSource, SpeechReason
 from pet_daemon.identity import SessionIdentity
 from pet_daemon.runtime import (
@@ -227,6 +240,123 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     def send(self, packet: Mapping[str, object]) -> None:
         self.hook.sendto(json.dumps(packet).encode(), self.config.daemon_socket)
+
+    async def test_owned_task_progress_refreshes_control_without_requeuing_inquiry(
+        self,
+    ) -> None:
+        store = self.daemon.coordination_store
+
+        async def unused_reason(_request: InquiryPass) -> InquiryResult:
+            raise AssertionError("This observation test does not request a model")
+
+        coordinator = Coordinator(
+            store, self.config.coordinator.scheduling, self.wall_clock, unused_reason
+        )
+        coordinator.suspended = True
+        self.daemon.coordinator = coordinator
+        self.daemon.application.coordinator = coordinator
+        root = Path(self.temp.name)
+        observed_at = 1000.0
+        adapter = AdapterClient(
+            DesktopConfig(
+                name="fixture",
+                argv=(
+                    sys.executable,
+                    str(Path(__file__).parent / "fixtures/desktop/adapter.py"),
+                    str(root),
+                ),
+                capabilities=tuple(OperationKind),
+            )
+        )
+        desktop = Delegation(
+            store, adapter, clock=lambda: observed_at, changed=self.daemon.task_changed
+        )
+        self.daemon.desktop = desktop
+        self.daemon.application.desktop = desktop
+        store.save_instruction(
+            Instruction("adopt", "Inspect parser checks", str(root), observed_at)
+        )
+        store.save_responsibility(
+            Responsibility(
+                "review",
+                "Parser checks are understood",
+                str(root),
+                "adopt",
+                observed_at,
+                permissions=("launch", "continue"),
+            )
+        )
+        launch = await desktop.dispatch(
+            TaskAction(
+                "launch-owned",
+                OperationKind.LAUNCH,
+                "review",
+                objective="Inspect parser checks",
+                expected_result="A cited check result",
+                repository=str(root),
+            )
+        )
+        task = require(store.task(launch.task_id))
+        native = require(task.session).session
+
+        def native_hook(event: str, **fields: object) -> None:
+            hook = require(
+                update(
+                    "codex",
+                    event,
+                    {"session_id": native, "cwd": str(root), **fields},
+                    delegation_id=task.id,
+                    delegation_command_id=launch.id,
+                )
+            )
+            self.send(hook.packet())
+
+        native_hook("UserPromptSubmit", prompt="Inspect the parser checks")
+        await self.wait_for(lambda: require(store.task(task.id)).user_revision == 1)
+        (root / "mode").write_text("busy")
+        inspected = await desktop.inspect(task.id)
+        self.assertEqual(inspected.status, TaskStatus.RUNNING)
+        self.assertEqual(inspected.readiness, TaskReadiness.BUSY)
+        self.assertIsNotNone(inspected.adapter_revision)
+        candidate = next(
+            candidate
+            for candidate in store.candidates()
+            if any(
+                cause.kind == "task" and cause.source_id == task.id
+                for cause in candidate.causes
+            )
+        )
+        observed_at += 1
+        native_hook("PreToolUse", tool_use_id="read", tool_name="Read")
+        await self.wait_for(
+            lambda: require(store.task(task.id)).revision > inspected.revision
+        )
+        started = require(store.task(task.id))
+        self.assertIsNone(started.adapter_revision)
+        self.assertEqual(started.observed_at, observed_at)
+        self.assertEqual(store.candidate(candidate.id), candidate)
+        observed_at += 1
+        native_hook("PostToolUse", tool_use_id="read", tool_response={"exit_code": 0})
+        await self.wait_for(
+            lambda: require(store.task(task.id)).revision > started.revision
+        )
+        self.assertEqual(store.candidate(candidate.id), candidate)
+        identity = SessionIdentity(source=SessionSource.CODEX, native_id=native)
+        self.assertEqual(self.daemon.application.sessions.by_id[identity].calls, {})
+        native_hook("Stop", last_assistant_message="The parser checks were inspected.")
+        await self.wait_for(
+            lambda: require(store.task(task.id)).status == TaskStatus.ENDED
+        )
+        ended = require(store.candidate(candidate.id))
+        self.assertGreater(ended.revision, candidate.revision)
+        instruction_revision = store.state().instruction_revision
+        native_hook("UserPromptSubmit", prompt="Follow the revised parser direction")
+        await self.wait_for(lambda: require(store.task(task.id)).user_revision == 2)
+        self.assertGreater(
+            require(store.candidate(candidate.id)).revision, ended.revision
+        )
+        self.assertEqual(store.state().instruction_revision, instruction_revision)
+        self.assertEqual(store.attempts(), ())
 
     async def test_enabled_coordinator_handles_renderer_chat_and_awake_lifecycle(
         self,

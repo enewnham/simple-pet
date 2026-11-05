@@ -1,5 +1,5 @@
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .config import ScheduleConfig
 from .models import (
@@ -18,6 +18,27 @@ class Selection:
     candidates: tuple[Candidate, ...]
     focus_id: str | None = None
     override: str | None = None
+
+
+def task_meaning(task: DelegatedTask) -> DelegatedTask:
+    return replace(task, revision=1, observed_at=None, adapter_revision=None)
+
+
+def related_responsibilities(
+    candidates: tuple[Candidate, ...], records: tuple[Responsibility, ...]
+) -> tuple[Responsibility, ...]:
+    identifiers = {item.responsibility_id for item in candidates}
+    pending = list(identifiers)
+    by_id = {record.id: record for record in records}
+    while pending:
+        record = by_id.get(pending.pop() or "")
+        if record is None:
+            continue
+        for dependency in record.dependencies:
+            if dependency not in identifiers:
+                identifiers.add(dependency)
+                pending.append(dependency)
+    return tuple(record for record in records if record.id in identifiers)
 
 
 def review_due(candidate: Candidate, config: ScheduleConfig) -> float:

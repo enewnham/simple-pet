@@ -1,7 +1,7 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, Protocol
 
 from claude_agent_sdk import (
@@ -10,8 +10,10 @@ from claude_agent_sdk import (
     Message,
     PermissionResultDeny,
     ResultMessage,
+    SdkMcpTool,
     ToolPermissionContext,
     create_sdk_mcp_server,
+    tool,
 )
 from claude_agent_sdk import (
     query as sdk_query,
@@ -34,9 +36,10 @@ from ..coordination.models import (
     SourceReference,
     TaskAction,
 )
+from ..coordination.scheduling import related_responsibilities, task_meaning
 from ..storage.memory import Memory
 from .config import CoordinatorConfig
-from .context import WorkContext
+from .context import WorkBrief, WorkContext
 from .history import NativeHistory
 from .index import SourceChange, SourceIndex
 from .mcp import McpGateway, McpSource
@@ -106,10 +109,13 @@ class CompletionOutput(BaseModel):
     source_ids: tuple[str, ...] = ()
 
 
+DISPOSITION_GUIDANCE = "Use investigate to report a supported read-only finding, including a finished source inquiry. Complete is reserved for an adopted finite responsibility whose exact recorded condition is met, with a matching completion assessment. Finishing an investigation alone does not complete a responsibility."
+
+
 class DecisionOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     candidate_id: str
-    disposition: Disposition
+    disposition: Disposition = Field(description=DISPOSITION_GUIDANCE)
     reason: str = Field(min_length=1)
     source_ids: tuple[str, ...] = ()
     action: ActionOutput | None = None
@@ -120,7 +126,12 @@ class DecisionOutput(BaseModel):
 
 class InquiryOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    decisions: tuple[DecisionOutput, ...]
+    decisions: tuple[DecisionOutput, ...] = Field(min_length=1, max_length=1)
+
+
+class FocusInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    candidate_id: str
 
 
 class SdkQuery(Protocol):
@@ -354,7 +365,7 @@ class SdkCompanion:
         )
         result = await self._request(
             prompt,
-            tools,
+            tools.definitions(),
             ReplyOutput.model_json_schema(),
             self.sessions.get(conversation_id),
         )
@@ -393,59 +404,84 @@ class SdkCompanion:
                 "An inquiry requires eligible candidates and reserved fair focus"
             )
         instruction_revision = request.instruction_revision
-        responsibilities = request.responsibilities
+        selected: Candidate | None = None
+        tools: CompanionTools | None = None
 
         def guard() -> None:
-            state = self.memory.coordination.state()
-            if (
-                self.suspended
-                or self.epoch != epoch
-                or state.paused
-                or state.instruction_revision != instruction_revision
-            ):
-                raise ValueError("The inquiry instructions changed")
-            for candidate in candidates:
-                current = self.memory.coordination.candidate(candidate.id)
-                if current is None or current.revision != candidate.revision:
-                    raise ValueError("The inquiry candidate changed")
-            for responsibility in responsibilities:
-                current = self.memory.coordination.responsibility(responsibility.id)
-                if current is None or current.revision != responsibility.revision:
-                    raise ValueError("The inquiry responsibility changed")
-            for task in request.tasks:
-                current = self.memory.coordination.task(task.id)
-                if current is None or current.revision != task.revision:
-                    raise ValueError("The inquiry delegated task changed")
-            for candidate in candidates:
-                for cause in candidate.causes:
-                    current = self.index.document(cause.source_id)
-                    if (
-                        current is not None
-                        and current.source.revision != cause.source_revision
-                    ):
-                        raise ValueError("The inquiry source changed")
+            self._guard_inquiry(request, selected, epoch)
 
         guard()
         await self.refresh()
         guard()
-        question = "\n".join(candidate.question for candidate in candidates)
-        scope = (
-            candidates[0].scope
-            if all(candidate.scope == candidates[0].scope for candidate in candidates)
-            else ""
+
+        def focus(identifier: str) -> CompanionTools:
+            nonlocal selected, tools
+            guard()
+            if identifier not in identifiers or (
+                request.focus_id is not None and identifier != request.focus_id
+            ):
+                raise ValueError(
+                    "Choose offered work and honor the reserved fair focus"
+                )
+            if selected is not None and selected.id != identifier:
+                raise ValueError("An inquiry cannot switch its selected work")
+            selected = next(item for item in candidates if item.id == identifier)
+            guard()
+            if tools is None:
+                brief = self._focused_brief(request, selected)
+                authority = ToolAuthority(
+                    instruction_revision,
+                    pass_id=request.id,
+                    candidates=((selected.id, selected.revision),),
+                    responsibilities=tuple(
+                        (item.id, item.revision) for item in brief.responsibilities
+                    ),
+                )
+                tools = CompanionTools(
+                    self.memory,
+                    self.context,
+                    self.retrieval,
+                    brief,
+                    self.context.search_context(brief),
+                    self.clock,
+                    guard,
+                    self.gateway.tools(),
+                    authority,
+                )
+            return tools
+
+        async def dispatch(name: str, arguments: dict[str, object]) -> object:
+            guard()
+            if name == "focus_work":
+                candidate_id = FocusInput.model_validate(arguments).candidate_id
+                brief = focus(candidate_id).brief
+                return {
+                    **json.loads(encoded(brief)),
+                    "allowed_dispositions": tuple(
+                        item.value
+                        for item in Disposition
+                        if item != Disposition.COMPLETE
+                        or self._completion_targets(request, candidate_id)
+                    ),
+                    "disposition_guidance": DISPOSITION_GUIDANCE,
+                }
+            if tools is None:
+                raise ValueError(
+                    "Select one eligible thread with focus_work before investigating or writing notes"
+                )
+            return await tools.dispatch(name, arguments)
+
+        brief = self.context.brief("Choose one eligible thread")
+        brief = replace(
+            brief,
+            responsibilities=(),
+            tasks=(),
+            operations=(),
+            considerations=(),
+            changes=(),
+            human_questions=(),
         )
-        brief = self.context.brief(question, scope)
-        authority = ToolAuthority(
-            instruction_revision,
-            pass_id=request.id,
-            candidates=tuple(
-                (candidate.id, candidate.revision) for candidate in candidates
-            ),
-            responsibilities=tuple(
-                (item.id, item.revision) for item in responsibilities
-            ),
-        )
-        tools = CompanionTools(
+        template = CompanionTools(
             self.memory,
             self.context,
             self.retrieval,
@@ -454,46 +490,57 @@ class SdkCompanion:
             self.clock,
             guard,
             self.gateway.tools(),
-            authority,
         )
+        definitions = template.definitions(dispatch)
+
+        async def select_work(arguments: dict[str, object]) -> dict[str, object]:
+            try:
+                value = await dispatch("focus_work", arguments)
+                return {"content": [{"type": "text", "text": encoded(value)}]}
+            except ValueError as error:
+                return {
+                    "is_error": True,
+                    "content": [{"type": "text", "text": str(error)}],
+                }
+
+        definitions.append(
+            tool(
+                "focus_work",
+                "Choose exactly one offered thread and obtain its scoped context. Honor reserved focus; selection locks for this request. Select before retrieval or notes.",
+                FocusInput.model_json_schema(),
+            )(select_work)
+        )
+        if request.focus_id is not None:
+            brief = focus(request.focus_id).brief
         prompt = encoded(
             {
-                "purpose": "Consider the reserved fair focus and return a supported disposition for each considered candidate. Respect the application's eligibility and priority. Choose bounded investigation, authorized continuation, human question, wait, completion assessment, no finding, or explicit deferral. Suggested wake conditions and review times are validated by the application. Do not force speech.",
+                "purpose": "Choose one eligible thread with focus_work before heavy investigation, then return exactly its one supported disposition. Reserved focus is already selected and cannot be bypassed. For a lightweight wait or no-finding without tools, returning its candidate ID selects it. Respect human constraints, eligibility and priority. Choose bounded investigation, authorized continuation, human question, wait, completion assessment, no finding, or deferral. Review times are suggestions validated by the application. Do not force speech.",
                 "pass_id": request.id,
                 "reserved_focus": request.focus_id,
                 "available_coding_slots": request.available_coding_slots,
                 "candidates": candidates,
-                "prior_considerations": request.prior,
-                "responsibilities": request.responsibilities,
-                "tasks": request.tasks,
-                "completion_targets": tuple(
-                    {
-                        "responsibility_id": item.id,
-                        "revision": item.revision,
-                        "condition": item.completion_condition,
-                    }
-                    for item in request.responsibilities
-                    if item.kind == ResponsibilityKind.FINITE
-                    and item.completion_condition.strip()
-                    and item.completion_condition != "pull_request_checks_pass"
-                ),
+                "work_orientation": self._inquiry_orientation(request),
+                "completion_targets": self._completion_targets(request),
+                "disposition_guidance": DISPOSITION_GUIDANCE,
                 "completion_guidance": "Assess a finite recorded condition when relevant evidence is available. Use complete with an observed assessment only when independent current source observations support that exact condition. Put reported context in decision sources, not completion verification sources. Reported or inferred assessments remain unresolved and can lead to wait or a question. Human confirmation comes only through the foreground user workflow. Checks watches are resolved by application code.",
                 "brief": brief,
             }
         )
-        result = await self._request(prompt, tools, InquiryOutput.model_json_schema())
+        result = await self._request(prompt, definitions, self._inquiry_schema(request))
         guard()
         output = InquiryOutput.model_validate(result.structured_output)
-        considered = [decision.candidate_id for decision in output.decisions]
-        if (
-            len(set(considered)) != len(considered)
-            or not set(considered) <= identifiers
+        if selected is None and output.decisions[0].disposition not in (
+            Disposition.WAIT,
+            Disposition.NO_FINDING,
         ):
-            raise ValueError("An inquiry returned unknown or duplicate candidates")
-        if request.focus_id is not None and request.focus_id not in considered:
-            raise ValueError("An inquiry cannot bypass reserved fair focus")
+            raise ValueError(
+                "Select work before proposing an investigation, action, or completion"
+            )
+        tools = focus(output.decisions[0].candidate_id)
         decisions = []
         for decision in output.decisions:
+            if not tools.unchanged_references(decision.source_ids):
+                raise ValueError("The inquiry's supporting evidence changed")
             action = None
             candidate = next(
                 item for item in candidates if item.id == decision.candidate_id
@@ -536,6 +583,130 @@ class SdkCompanion:
                 )
             )
         return InquiryResult(request.id, tuple(decisions))
+
+    def _completion_targets(
+        self, request: InquiryPass, candidate_id: str | None = None
+    ) -> tuple[dict[str, object], ...]:
+        offered = {
+            candidate.responsibility_id
+            for candidate in request.candidates
+            if candidate_id is None or candidate.id == candidate_id
+        }
+        return tuple(
+            {
+                "responsibility_id": item.id,
+                "revision": item.revision,
+                "condition": item.completion_condition,
+            }
+            for item in request.responsibilities
+            if item.id in offered
+            and item.kind == ResponsibilityKind.FINITE
+            and item.completion_condition.strip()
+            and item.completion_condition != "pull_request_checks_pass"
+        )
+
+    def _inquiry_schema(self, request: InquiryPass) -> dict[str, object]:
+        schema = InquiryOutput.model_json_schema()
+        if not self._completion_targets(request):
+            schema["$defs"]["Disposition"]["enum"].remove(Disposition.COMPLETE.value)
+        return schema
+
+    def _inquiry_orientation(
+        self, request: InquiryPass
+    ) -> tuple[dict[str, object], ...]:
+        return tuple(
+            {
+                "candidate_id": candidate.id,
+                "responsibility": next(
+                    (
+                        item
+                        for item in request.responsibilities
+                        if item.id == candidate.responsibility_id
+                    ),
+                    None,
+                ),
+                "owned_work": tuple(
+                    {
+                        "id": task.id,
+                        "objective": task.objective,
+                        "status": task.status,
+                        "readiness": task.readiness,
+                        "native_reported_input": task.observed_input,
+                    }
+                    for task in request.tasks
+                    if task.responsibility_id == candidate.responsibility_id
+                ),
+                "prior_considerations": tuple(
+                    item for item in request.prior if item.candidate_id == candidate.id
+                ),
+            }
+            for candidate in request.candidates
+        )
+
+    def _guard_inquiry(
+        self, request: InquiryPass, selected: Candidate | None, epoch: int
+    ) -> None:
+        store = self.memory.coordination
+        state = store.state()
+        if (
+            self.suspended
+            or self.epoch != epoch
+            or state.paused
+            or state.instruction_revision != request.instruction_revision
+        ):
+            raise ValueError("The inquiry instructions changed")
+        if selected is None:
+            return
+        if store.candidate(selected.id) != selected:
+            raise ValueError("The inquiry candidate changed")
+        responsibilities = related_responsibilities(
+            (selected,), request.responsibilities
+        )
+        for responsibility in responsibilities:
+            if store.responsibility(responsibility.id) != responsibility:
+                raise ValueError("The inquiry responsibility changed")
+        identifiers = {item.id for item in responsibilities}
+        captured = {
+            task.id: task_meaning(task)
+            for task in request.tasks
+            if task.responsibility_id in identifiers
+        }
+        current = {
+            task.id: task_meaning(task)
+            for task in store.tasks()
+            if task.responsibility_id in identifiers
+        }
+        if current != captured:
+            raise ValueError("The inquiry delegated tasks changed")
+        for cause in selected.causes:
+            current = self.index.document(cause.source_id)
+            if current is not None and current.source.revision != cause.source_revision:
+                raise ValueError("The inquiry source changed")
+
+    def _focused_brief(self, request: InquiryPass, candidate: Candidate) -> WorkBrief:
+        brief = self.context.brief(candidate.question, candidate.scope)
+        responsibilities = related_responsibilities(
+            (candidate,), request.responsibilities
+        )
+        identifiers = {item.id for item in responsibilities}
+        tasks = tuple(
+            item for item in request.tasks if item.responsibility_id in identifiers
+        )
+        task_ids = {item.id for item in tasks}
+        return replace(
+            brief,
+            responsibilities=responsibilities,
+            tasks=tasks,
+            operations=tuple(
+                item for item in brief.operations if item.task_id in task_ids
+            ),
+            considerations=tuple(
+                item for item in request.prior if item.candidate_id == candidate.id
+            ),
+            human_questions=(candidate.question,)
+            if candidate.waiting_on == "human"
+            else (),
+        )
 
     def _completion_assessment(
         self,
@@ -611,11 +782,11 @@ class SdkCompanion:
     async def _request(
         self,
         prompt: str,
-        tools: CompanionTools,
+        tools: list[SdkMcpTool[dict[str, object]]],
         output_schema: dict[str, object],
         session_id: str | None = None,
     ) -> ResultMessage:
-        definitions = tools.definitions()
+        definitions = tools
         names = {f"mcp__pet__{definition.name}" for definition in definitions}
 
         async def permission(

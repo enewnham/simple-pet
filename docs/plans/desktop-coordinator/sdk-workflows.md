@@ -59,12 +59,29 @@ focus when overdue fair service or explicit user ordering requires it. Otherwise
 it offers eligible routine peers for the model to choose among. Follow the canonical
 [ongoing coordination loop](responsibilities-and-evidence.md#ongoing-coordination-loop).
 
-Pass eligible bounded candidate briefs, source changes, prior considerations,
-current revisions, available coding capacity, and any reserved focus to the agent. Haiku judges meaning,
-selects among offered routine candidates when no focus is reserved, and chooses a
-bounded investigation, eligible continuation, human question, wait, or no finding.
-It returns dispositions for considered candidates and must address any reserved
-focus. It can suggest a
+Pass a bounded menu with recent intent, status, change excerpts, prior considerations,
+actual human constraints, source map, revisions, coding capacity, and any reserved
+focus. In one SDK request, Haiku selects one eligible thread with `focus_work`.
+That pass-local selection returns its scoped brief and locks retrieval and note
+tools to its authority. A reserved focus is selected before the request. Otherwise
+the model chooses among offered peers. A lightweight wait or no-finding can select
+through its final candidate ID when the prepared context is sufficient.
+
+Return exactly one disposition for that selected thread: bounded investigation,
+eligible continuation, human question, wait, completion, no finding, or deferral.
+Unselected peers remain unconsidered. Unrelated peer updates cannot invalidate
+the selected inquiry. Instructions, pause/reset, the selected candidate, its
+responsibility and explicit dependencies, meaningful owned-task changes, and
+actual supporting evidence remain guarded. Local observation timestamps and opaque
+adapter tokens do not change read-only task meaning. Before an action, validate
+the captured native control token and all meaningful task fields, then bind the
+latest exact storage revision for the desktop adapter's final checks. Every actual
+SDK attempt consumes the configured budget, including rejected results.
+Read-only dispositions may cite retained historical evidence or a source already
+known to be unavailable. Their exposed identity, revision, binding, and provider
+availability must remain unchanged during consideration. This does not grant the
+freshness or availability required for a note finding, task action, or completion.
+The model can suggest a
 wake condition or review time. The application validates and bounds actual
 timing. Model output cannot invent operational states or urgency, override
 explicit user ordering or fairness, or bypass a required reserved focus.
@@ -76,6 +93,10 @@ cannot supply independent verification. Reported or inferred assessments retain
 their uncertainty. Exact machine watches remain application-owned. Explicit human
 confirmation uses a foreground tool tied to the accepted user event, with a separate
 human-confirmed basis.
+The request schema omits `complete` when no offered candidate owns an eligible
+finite condition. A dependency's goal alone cannot enable it. The focus response
+lists the selected thread's allowed dispositions. A finished read-only finding
+uses `investigate`; it does not imply completion of a responsibility.
 
 The application records considered and serviced separately. Budget-blocked work
 remains unconsidered. Persist waits, wake conditions, and no-finding results so

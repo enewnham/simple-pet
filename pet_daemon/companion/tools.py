@@ -126,6 +126,45 @@ class CompanionTools:
             for source in record.sources:
                 self.sources[source.id] = source
                 self.source_kinds[source.id] = self.source_kind(source)
+        self.bindings = {
+            identifier: self.source_binding(source)
+            for identifier, source in self.sources.items()
+        }
+
+    def source_binding(self, source: SourceReference) -> tuple[object, ...]:
+        document = self.retrieval.index.document(source.id.split("#L", 1)[0])
+        status = next(
+            (
+                item
+                for item in self.retrieval.index.statuses()
+                if item.provider == source.provider
+            ),
+            None,
+        )
+        return (
+            (
+                document.source.id,
+                document.source.provider,
+                document.source.revision,
+                document.source.uri,
+                document.source.scope,
+                document.source.available,
+                document.superseded,
+            )
+            if document is not None
+            else None,
+            status.availability if status is not None else None,
+        )
+
+    def unchanged_references(self, identifiers: tuple[str, ...]) -> bool:
+        self.references(identifiers)
+        return all(
+            self.is_current(self.sources[identifier])
+            if self.sources[identifier].provider == "user"
+            else self.source_binding(self.sources[identifier])
+            == self.bindings[identifier]
+            for identifier in identifiers
+        )
 
     def source_kind(self, source: SourceReference) -> str:
         if source.provider == "user":
@@ -154,6 +193,15 @@ class CompanionTools:
                 self.sources[passage.document_id] = source
                 self.source_kinds[passage.source.id] = "user_instruction"
                 self.source_kinds[passage.document_id] = "user_instruction"
+        for identifier in {
+            passage.source.id,
+            passage.document_id,
+            *(source.id for source in passage.leaf_sources),
+        }:
+            if identifier in self.sources:
+                self.bindings[identifier] = self.source_binding(
+                    self.sources[identifier]
+                )
 
     def is_current(self, source: SourceReference) -> bool:
         if source.provider == "user":
@@ -188,6 +236,8 @@ class CompanionTools:
         match name:
             case "current_work_context":
                 ToolInput.model_validate(arguments)
+                if self.authority.pass_id is not None:
+                    return self.brief
                 return self.context.brief(
                     self.brief.purpose, self.brief.scope, self.brief.checkpoint
                 )
@@ -225,9 +275,11 @@ class CompanionTools:
             for document in result.documents:
                 self.sources[document.source.id] = document.source
                 self.source_kinds[document.source.id] = document.kind
+                self.bindings[document.source.id] = self.source_binding(document.source)
         return result
 
     def _record(self, request: RecordNoteInput) -> Note:
+        self._check_note_scope(request.scope or self.brief.scope)
         references = self.leaf_references(self.references(request.source_ids))
         if request.kind == "synthesis" and not references:
             raise ValueError("A synthesis requires underlying leaf evidence")
@@ -242,6 +294,7 @@ class CompanionTools:
                 raise ValueError(
                     "Only an existing agent note can be superseded by the agent"
                 )
+            self._check_note_scope(previous.scope)
         note = Note(
             id=str(uuid.uuid4()),
             origin=NoteOrigin.AGENT,
@@ -262,6 +315,7 @@ class CompanionTools:
         previous = self.memory.coordination.note(request.id)
         if previous is None or previous.origin != NoteOrigin.AGENT:
             raise ValueError("The agent can revise only its own derived notes")
+        self._check_note_scope(previous.scope)
         if previous.revision != request.expected_revision:
             raise ValueError("The note changed during consideration")
         references = self.leaf_references(
@@ -302,7 +356,20 @@ class CompanionTools:
         self.memory.coordination.save_note(updated, expected_revision=previous.revision)
         return updated
 
-    def definitions(self) -> list[SdkMcpTool[dict[str, object]]]:
+    def _check_note_scope(self, scope: str) -> None:
+        if self.authority.pass_id is not None and scope not in {
+            self.brief.scope,
+            *(item.scope for item in self.brief.responsibilities),
+        }:
+            raise ValueError(
+                "Keep scheduled notes within the selected work or its dependencies"
+            )
+
+    def definitions(
+        self,
+        dispatch: Callable[[str, dict[str, object]], Awaitable[object]] | None = None,
+    ) -> list[SdkMcpTool[dict[str, object]]]:
+        handler = dispatch or self.dispatch
         specifications: list[tuple[str, str, type[BaseModel] | dict[str, object]]] = [
             (
                 "current_work_context",
@@ -345,11 +412,11 @@ class CompanionTools:
                 arguments: dict[str, object], selected: str = name
             ) -> dict[str, object]:
                 try:
-                    value = await self.dispatch(selected, arguments)
+                    value = await handler(selected, arguments)
                     return {"content": [{"type": "text", "text": encoded(value)}]}
                 except (ValueError, OSError, RuntimeError, TimeoutError) as error:
                     return {
-                        "isError": True,
+                        "is_error": True,
                         "content": [{"type": "text", "text": str(error)}],
                     }
 
