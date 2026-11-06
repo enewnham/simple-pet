@@ -10,6 +10,8 @@ from pet_daemon.coordination.models import (
     Candidate,
     CandidateCause,
     CandidateDecision,
+    ChatMessage,
+    ChatRole,
     DelegatedTask,
     Disposition,
     InquiryAttempt,
@@ -349,7 +351,7 @@ class CoordinationLoopTests(unittest.IsolatedAsyncioTestCase):
         candidate = self.coordinator.queue(
             "Inspect checkout",
             "parser",
-            CandidateCause("source", "checkout", "one", self.now),
+            CandidateCause("source", "checkout", "one", self.now - 120),
         )
         store = self.memory.coordination
         store.save_instruction(
@@ -375,6 +377,89 @@ class CoordinationLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.memory.db.execute("PRAGMA user_version").fetchone()[0], 27
         )
+
+    async def test_legacy_higher_evidence_revisions_stay_contained_until_a_later_cause(
+        self,
+    ) -> None:
+        for evidence_revision in (3, 26):
+            with self.subTest(evidence_revision=evidence_revision):
+                source = f"checkout-{evidence_revision}"
+                candidate = Candidate(
+                    source,
+                    "Inspect checkout",
+                    source,
+                    self.now - 120,
+                    evidence_revision=evidence_revision,
+                    serviced_evidence_revision=1,
+                    causes=(CandidateCause("source", source, "one", self.now - 120),),
+                )
+                store = self.memory.coordination
+                store.save_candidate(candidate)
+                for index in range(3):
+                    store.save_attempt(
+                        InquiryAttempt(
+                            f"legacy-{source}-{index}",
+                            self.now - 30 + index,
+                            (candidate.id,),
+                            completed_at=self.now - 20 + index,
+                            error="Legacy citation validation failure",
+                        )
+                    )
+                self.assertIsNone(await self.coordinator.run_pass())
+                await self.coordinator.close()
+                self.memory.close()
+                self.memory = Memory(
+                    Path(self.temporary.name) / "memory.sqlite3",
+                    "fixture",
+                    clock=lambda: self.now,
+                )
+                self.coordinator = Coordinator(
+                    self.memory.coordination,
+                    self.config,
+                    lambda: self.now,
+                    self.coordinator.reason,
+                )
+                self.now += 8 * 3600
+                self.assertIsNone(await self.coordinator.run_pass())
+                previous = len(self.requests)
+                self.coordinator.queue(
+                    candidate.question,
+                    candidate.scope,
+                    CandidateCause("source", source, "two", self.now),
+                )
+                await self.coordinator.run_pass()
+                self.assertEqual(len(self.requests), previous + 1)
+                self.now += 3600
+                self.assertIsNone(await self.coordinator.run_pass())
+
+    async def test_retained_sdk_billing_error_blocks_new_sources_until_accepted_user_input(
+        self,
+    ) -> None:
+        store = self.memory.coordination
+        store.save_attempt(
+            InquiryAttempt(
+                "legacy-billing",
+                self.now - 60,
+                ("old-question",),
+                completed_at=self.now - 50,
+                error="Companion model failed: billing_error",
+            )
+        )
+        self.coordinator.queue(
+            "Inspect new work", "new", CandidateCause("source", "new", "one", self.now)
+        )
+        self.assertIsNone(await self.coordinator.run_pass())
+        store.begin_turn(
+            ChatMessage(
+                "human-retry",
+                "chat",
+                ChatRole.USER,
+                "Billing is fixed. Please try again.",
+                self.now,
+            )
+        )
+        await self.coordinator.run_pass()
+        self.assertEqual(len(self.requests), 1)
 
     async def test_selected_failure_does_not_exhaust_unselected_work_or_advance_its_checkpoint(
         self,

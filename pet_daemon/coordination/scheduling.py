@@ -111,7 +111,11 @@ def can_attempt(
             continue
         evidence = dict(attempt.evidence_revisions).get(candidate.id)
         if evidence is None:
-            if candidate.evidence_revision != 1:
+            latest_cause = max(
+                (cause.observed_at for cause in candidate.causes),
+                default=candidate.first_queued_at,
+            )
+            if latest_cause > attempt.created_at:
                 continue
         elif evidence != candidate.evidence_revision:
             continue
@@ -131,13 +135,18 @@ def can_attempt(
 def provider_failed(
     attempts: tuple[InquiryAttempt, ...], last_instruction_at: float | None
 ) -> bool:
+    kinds = (
+        "billing_error",
+        "authentication_failed",
+        "authentication_error",
+        "invalid_api_key",
+    )
+    retained_errors = {f"Companion model failed: {kind}" for kind in kinds}
     return any(
-        attempt.error_kind
-        in (
-            "billing_error",
-            "authentication_failed",
-            "authentication_error",
-            "invalid_api_key",
+        (
+            attempt.error_kind in kinds
+            or attempt.error_kind is None
+            and attempt.error in retained_errors
         )
         and (last_instruction_at is None or last_instruction_at <= attempt.created_at)
         for attempt in attempts

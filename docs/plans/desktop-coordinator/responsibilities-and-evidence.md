@@ -353,6 +353,12 @@ epoch for other failures. Direct chat remains independently available. Persist a
 without clearing history or changing the hourly cap. Optional JSON record fields
 preserve schema-27 storage and existing data.
 
+For retained attempts without captured evidence revisions, compare the latest
+cause's observation time with the failure time. A higher evidence counter alone
+does not establish a later cause. Recognize the SDK's exact retained billing and
+authentication diagnostics when structured error kinds are absent. Apply these
+rules while reading history, preserving the stored records.
+
 Unchanged watch observations do not cause another model investigation. A due
 followup can refresh the source, and exact checks can update the watch without
 model interpretation. New meaningful evidence or an authoritative due request can reopen a
