@@ -14,7 +14,7 @@ from .attention import Attention, AttentionSelection
 from .behavior.controller import Behavior
 from .commentary import Cognition, SpeechConditions
 from .commentary.cognition import CannotRespond, CommentaryResult
-from .commentary.usage import collect_usage
+from .commentary.usage import UsageTokens, collect_usage
 from .config import Config
 from .conversation import Conversations
 from .coordination.models import CandidateCause
@@ -718,7 +718,9 @@ class Application:
                         "I couldn't get the work context. Try again in a moment."
                     )
             finally:
-                tokens = usage.get(reason)
+                tokens = UsageTokens()
+                for item in usage.values():
+                    tokens += item
                 log.info(
                     "observation.finished",
                     reason=reason,
@@ -726,12 +728,20 @@ class Application:
                     session=focus_session,
                     outcome=outcome,
                     duration_seconds=round(self.clock() - started, 3),
-                    **(tokens.model_dump() if tokens is not None else {}),
+                    **tokens.model_dump(),
                 )
 
     def is_selection_valid(
         self, conditions: SpeechConditions, trigger: Trigger | None
     ) -> bool:
+        if conditions.selection.reason == SpeechReason.CARE and (
+            self.suspended
+            or self.memory.coordination.state().paused
+            or self.interactions.is_interacting
+            or self.conversations is not None
+            and self.conversations.is_interacting
+        ):
+            return False
         if isinstance(trigger, ReactionTrigger) and not self.reactions.is_relevant(
             trigger.reaction, self.sessions
         ):

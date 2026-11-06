@@ -340,6 +340,8 @@ class Consideration:
     action_id: str | None = None
     next_review_at: float | None = None
     wake_condition: str | None = None
+    source_checkpoint: int = 0
+    evidence_revision: int | None = None
 
 
 @dataclass(frozen=True)
@@ -370,6 +372,7 @@ class InquiryPass:
     responsibilities: tuple[Responsibility, ...] = ()
     tasks: tuple[DelegatedTask, ...] = ()
     available_coding_slots: int = 0
+    source_checkpoint: int = 0
 
 
 @dataclass(frozen=True)
@@ -417,6 +420,10 @@ class InquiryAttempt:
     completed_at: float | None = None
     error: str | None = None
     revision: int = 1
+    evidence_revisions: tuple[tuple[str, int], ...] = ()
+    instruction_revision: int = 0
+    error_kind: str | None = None
+    selected_candidate_id: str | None = None
 
 
 @dataclass(frozen=True)

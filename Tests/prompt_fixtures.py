@@ -50,6 +50,19 @@ class RecordingPromptBuilder(PromptBuilder):
         self.actions[content] = tuple(actions)
         return prepared
 
+    def prepare_care(
+        self,
+        snapshot: PetContext,
+        selection: AttentionSelection,
+        make_request: RequestFactory,
+        recent: Sequence[str],
+    ) -> CommentaryRequest:
+        prepared = super().prepare_care(snapshot, selection, make_request, recent)
+        content = prepared.request["messages"][0]["content"]
+        self.requests[content] = prepared
+        self.actions[content] = ()
+        return prepared
+
     def prepared(self, request: Mapping[str, Any]) -> CommentaryRequest:
         return self.requests[request["messages"][0]["content"]]
 

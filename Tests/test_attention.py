@@ -190,6 +190,20 @@ class AttentionTests(unittest.TestCase):
         )
         snapshot = self.update_snapshot(session, updates=(update,))
         self.now = 1000
+        self.assertFalse(self.attention.is_routine_eligible(snapshot.work[0], snapshot))
+        running = session.model_copy(
+            update={
+                "active_tools": (
+                    ActiveTool(
+                        call="build",
+                        tool="Bash",
+                        activity=Activity.COMMAND,
+                        duration_seconds=1000,
+                    ),
+                )
+            }
+        )
+        snapshot = self.update_snapshot(running, updates=(update,))
         self.assertTrue(self.attention.is_routine_eligible(snapshot.work[0], snapshot))
         snapshot = snapshot.model_copy(
             update={
@@ -901,30 +915,15 @@ class AttentionTests(unittest.TestCase):
             require(self.attention.request(idle, care=CareKind.EXERCISE)).reason, "care"
         )
 
-    def test_quiet_conversation_reflects_after_five_minutes_and_every_fifteen_minutes(
+    def test_quiet_work_does_not_schedule_recurring_reflections(
         self,
     ) -> None:
         root = SessionIdentity(source=SessionSource.COMMAND, native_id="parser")
         snapshot = self.snapshot(session_snapshot(id=root, last_hook_at=0))
         self.attention.next_observation = 10_000
 
-        self.now = 299
-        self.assertIsNone(self.attention.request(snapshot))
-        self.now = 300
-        request = require(self.attention.request(snapshot))
-        self.assertEqual(request.reason, SpeechReason.CHECK_IN)
-        self.assertTrue(request.reflection)
-        selected = self.attention.select(snapshot, request.reason, reflection=True)
-        self.assertEqual(require(selected.subject).id, root)
-        self.assertTrue(self.attention.is_selection_eligible(selected, snapshot))
-
-        self.now = 1199
-        self.assertIsNone(self.attention.request(snapshot))
-        self.now = 1200
-        self.assertTrue(require(self.attention.request(snapshot)).reflection)
-
-        changed = self.snapshot(session_snapshot(id=root, last_hook_at=1200))
-        self.assertFalse(selected.is_valid(changed))
+        for self.now in range(300, 8 * 3600, 30):
+            self.assertIsNone(self.attention.request(snapshot))
 
     def test_active_tool_with_unknown_presence_blocks_idle_reflection_at_five_minutes(
         self,
@@ -949,9 +948,7 @@ class AttentionTests(unittest.TestCase):
         self.now = 300
 
         self.assertFalse(self.attention.is_quiet(snapshot))
-        check_in = require(self.attention.request(snapshot, check_in=(root,)))
-        self.assertEqual(check_in.reason, SpeechReason.CHECK_IN)
-        self.assertFalse(check_in.reflection)
+        self.assertIsNone(self.attention.request(snapshot, check_in=(root,)))
         self.assertIsNone(self.attention.request(snapshot))
         reflection = self.attention.select(
             snapshot, SpeechReason.CHECK_IN, reflection=True

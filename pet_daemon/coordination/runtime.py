@@ -27,7 +27,10 @@ from .models import (
     TaskAction,
 )
 from .scheduling import (
+    can_attempt,
     eligible_candidates,
+    latest_consideration,
+    provider_failed,
     related_responsibilities,
     select,
     task_meaning,
@@ -52,6 +55,8 @@ class Coordinator:
         | None = None,
         completed: Callable[[Responsibility], None] | None = None,
         available_coding_slots: Callable[[], int] | None = None,
+        source_checkpoint: Callable[[], int] | None = None,
+        finished: Callable[[str, str, str | None], None] | None = None,
     ) -> None:
         self.store = store
         self.config = config
@@ -64,6 +69,8 @@ class Coordinator:
         self.completion_sources_valid = completion_sources_valid
         self.completed = completed
         self.available_coding_slots = available_coding_slots
+        self.source_checkpoint = source_checkpoint
+        self.finished = finished
         self.task: asyncio.Task[None] | None = None
         self.suspended = False
         self.next_tick = 0.0
@@ -188,6 +195,15 @@ class Coordinator:
         if len(recent) >= self.config.max_passes_per_hour:
             return None
         history = self.store.candidates()
+        considerations = self.store.considerations()
+        last_instruction_at = max(
+            (record.created_at for record in self.store.instructions()), default=None
+        )
+        if provider_failed(attempts, last_instruction_at):
+            return None
+        responsibilities_by_id = {
+            record.id: record for record in self.store.responsibilities()
+        }
         eligible = eligible_candidates(
             history,
             self.store.responsibilities(),
@@ -195,6 +211,21 @@ class Coordinator:
             self.store.operations(),
             now,
             self.config,
+            considerations,
+        )
+        eligible = tuple(
+            candidate
+            for candidate in eligible
+            if can_attempt(
+                candidate,
+                responsibilities_by_id.get(candidate.responsibility_id or ""),
+                latest_consideration(candidate, considerations),
+                attempts,
+                self.store.state().instruction_revision,
+                now,
+                self.config,
+                last_instruction_at,
+            )
         )
         selection = select(eligible, now, self.config, history)
         if not selection.candidates:
@@ -209,7 +240,7 @@ class Coordinator:
             selection.focus_id,
             tuple(
                 record
-                for record in self.store.considerations()
+                for record in considerations
                 if record.candidate_id
                 in {candidate.id for candidate in selection.candidates}
             ),
@@ -223,9 +254,17 @@ class Coordinator:
             available_coding_slots=self.available_coding_slots()
             if self.available_coding_slots is not None
             else 0,
+            source_checkpoint=self.source_checkpoint() if self.source_checkpoint else 0,
         )
         attempt = InquiryAttempt(
-            request.id, now, tuple(candidate.id for candidate in request.candidates)
+            request.id,
+            now,
+            tuple(candidate.id for candidate in request.candidates),
+            evidence_revisions=tuple(
+                (candidate.id, candidate.evidence_revision)
+                for candidate in request.candidates
+            ),
+            instruction_revision=request.instruction_revision,
         )
         self.store.save_attempt(attempt)
         if selection.override is not None:
@@ -239,12 +278,16 @@ class Coordinator:
                     detail="Overdue work retains its waiting age and remains due for review.",
                 )
             )
+        result = None
         try:
             result = await self.reason(request)
             if epoch != self.epoch:
                 raise RevisionConflict("The coordination history was cleared")
             await self._apply(request, result)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as error:
+            selected = getattr(error, "candidate_id", None)
+            if selected is None and result is not None and len(result.decisions) == 1:
+                selected = result.decisions[0].candidate_id
             if self.store.attempt(attempt.id) is not None:
                 self.store.save_attempt(
                     replace(
@@ -252,18 +295,47 @@ class Coordinator:
                         revision=2,
                         completed_at=self.clock(),
                         error="Interrupted",
+                        error_kind="interrupted",
+                        selected_candidate_id=selected or request.focus_id,
                     )
                 )
+            if self.finished is not None:
+                self.finished(request.id, "cancelled", "interrupted")
             raise
         except (OSError, ValueError, RuntimeError) as error:
+            error_kind = getattr(
+                error,
+                "kind",
+                "validation" if isinstance(error, ValueError) else "runtime",
+            )
+            selected = getattr(error, "candidate_id", None)
+            if selected is None and result is not None and len(result.decisions) == 1:
+                selected = result.decisions[0].candidate_id
+            selected = selected or request.focus_id
             if self.store.attempt(attempt.id) is not None:
                 self.store.save_attempt(
                     replace(
-                        attempt, revision=2, completed_at=self.clock(), error=str(error)
+                        attempt,
+                        revision=2,
+                        completed_at=self.clock(),
+                        error=str(error),
+                        error_kind=error_kind,
+                        selected_candidate_id=selected,
                     )
                 )
+            if self.finished is not None:
+                self.finished(request.id, "failed", error_kind)
             raise
-        self.store.save_attempt(replace(attempt, revision=2, completed_at=self.clock()))
+        self.store.save_attempt(
+            replace(
+                attempt,
+                revision=2,
+                completed_at=self.clock(),
+                selected_candidate_id=result.decisions[0].candidate_id,
+            )
+        )
+        if self.finished is not None:
+            self.finished(request.id, "accepted", None)
         return result
 
     async def _apply(self, request: InquiryPass, result: InquiryResult) -> None:
@@ -288,22 +360,9 @@ class Coordinator:
             self._validate_candidate(request, candidate)
             now = self.clock()
             serviced = decision.disposition != Disposition.DEFER
-            origin = (
-                now
-                if serviced
-                else (
-                    candidate.last_serviced_at
-                    if candidate.last_serviced_at is not None
-                    else candidate.first_queued_at
-                )
-            )
-            next_review = min(
-                decision.next_review_at
-                if decision.next_review_at is not None
-                else now + self.config.review_seconds,
-                origin + self.config.max_deferral_seconds,
-            )
-            next_review = max(now, next_review)
+            next_review = decision.next_review_at
+            if next_review is not None and next_review <= now:
+                next_review = None
             if decision.completion is not None:
                 if (
                     decision.action is not None
@@ -376,7 +435,7 @@ class Coordinator:
                 candidate,
                 decision,
                 self.clock(),
-                max(self.clock(), next_review),
+                next_review,
                 serviced,
             )
 
@@ -386,7 +445,7 @@ class Coordinator:
         candidate: Candidate,
         decision: CandidateDecision,
         now: float,
-        next_review: float,
+        next_review: float | None,
         serviced: bool,
     ) -> None:
         with transaction(self.store.db):
@@ -416,7 +475,19 @@ class Coordinator:
                 next_review_at=next_review,
                 wake_condition="human"
                 if decision.disposition == Disposition.ASK
-                else decision.wake_condition,
+                else decision.wake_condition or "evidence",
+                source_checkpoint=request.source_checkpoint
+                if serviced
+                else max(
+                    (
+                        record.source_checkpoint
+                        for record in request.prior
+                        if record.candidate_id == candidate.id
+                        and record.serviced_at is not None
+                    ),
+                    default=0,
+                ),
+                evidence_revision=candidate.evidence_revision,
             )
             self.store.record_consideration(record)
             self.store.record_activity(

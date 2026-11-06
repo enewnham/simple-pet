@@ -1,5 +1,6 @@
 import asyncio
 import json
+import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, replace
 from typing import Literal, Protocol
@@ -11,6 +12,8 @@ from claude_agent_sdk import (
     PermissionResultDeny,
     ResultMessage,
     SdkMcpTool,
+    StreamEvent,
+    SystemMessage,
     ToolPermissionContext,
     create_sdk_mcp_server,
     tool,
@@ -57,6 +60,7 @@ from .tools import (
     WorkflowTool,
     encoded,
 )
+from .usage import SdkFailure, SdkUsage, active_usage, collect_usage, log
 
 
 @dataclass(frozen=True)
@@ -298,6 +302,22 @@ class SdkCompanion:
         messages: tuple[ChatMessage, ...],
         user_message_id: str,
     ) -> CompanionReply:
+        with collect_usage(
+            SdkUsage(
+                str(uuid.uuid4()),
+                "conversation",
+                self.config.model,
+                conversation_id=conversation_id,
+            )
+        ):
+            return await self._reply(conversation_id, messages, user_message_id)
+
+    async def _reply(
+        self,
+        conversation_id: str,
+        messages: tuple[ChatMessage, ...],
+        user_message_id: str,
+    ) -> CompanionReply:
         if self.suspended or not self.config.enabled:
             raise RuntimeError("Companion reasoning is paused")
         epoch = self.epoch
@@ -350,6 +370,7 @@ class SdkCompanion:
                 "user_message_id": user_message_id,
                 "citation_sources": tuple(
                     {
+                        "id": identifier,
                         "reference": reference,
                         "permitted_bases_when_used_alone": (
                             "observed",
@@ -388,7 +409,31 @@ class SdkCompanion:
             output.text, references, output.suggestions, (), result.session_id
         )
 
-    async def investigate(
+    async def investigate(self, request: InquiryPass) -> InquiryResult:
+        with collect_usage(
+            SdkUsage(
+                request.id,
+                "inquiry",
+                self.config.model,
+                tuple(item.id for item in request.candidates),
+                request.focus_id,
+            )
+        ):
+            return await self._investigate(request)
+
+    def record_inquiry_outcome(
+        self, pass_id: str, outcome: str, error_kind: str | None = None
+    ) -> None:
+        log.info(
+            "companion.outcome",
+            request_id=pass_id,
+            purpose="inquiry",
+            outcome=outcome,
+            error_kind=error_kind,
+            model=self.config.model,
+        )
+
+    async def _investigate(
         self,
         request: InquiryPass,
     ) -> InquiryResult:
@@ -426,6 +471,9 @@ class SdkCompanion:
             if selected is not None and selected.id != identifier:
                 raise ValueError("An inquiry cannot switch its selected work")
             selected = next(item for item in candidates if item.id == identifier)
+            usage = active_usage.get()
+            assert usage is not None
+            usage.focus_id = selected.id
             guard()
             if tools is None:
                 brief = self._focused_brief(request, selected)
@@ -457,6 +505,7 @@ class SdkCompanion:
                 brief = focus(candidate_id).brief
                 return {
                     **json.loads(encoded(brief)),
+                    "citation_sources": focus(candidate_id).citations(),
                     "allowed_dispositions": tuple(
                         item.value
                         for item in Disposition
@@ -471,7 +520,12 @@ class SdkCompanion:
                 )
             return await tools.dispatch(name, arguments)
 
-        brief = self.context.brief("Choose one eligible thread")
+        brief = self.context.brief(
+            "Choose one eligible thread",
+            checkpoint=self.index.checkpoint(),
+            references=tuple(candidate.scope for candidate in candidates),
+            orientation=True,
+        )
         brief = replace(
             brief,
             responsibilities=(),
@@ -518,12 +572,27 @@ class SdkCompanion:
                 "pass_id": request.id,
                 "reserved_focus": request.focus_id,
                 "available_coding_slots": request.available_coding_slots,
-                "candidates": candidates,
+                "candidates": tuple(
+                    {
+                        "id": item.id,
+                        "question": item.question,
+                        "scope": item.scope,
+                        "responsibility_id": item.responsibility_id,
+                        "project_id": item.project_id,
+                        "priority": item.priority,
+                        "due_at": item.due_at,
+                        "revision": item.revision,
+                        "waiting_on": item.waiting_on,
+                        "evidence_revision": item.evidence_revision,
+                    }
+                    for item in candidates
+                ),
                 "work_orientation": self._inquiry_orientation(request),
                 "completion_targets": self._completion_targets(request),
                 "disposition_guidance": DISPOSITION_GUIDANCE,
                 "completion_guidance": "Assess a finite recorded condition when relevant evidence is available. Use complete with an observed assessment only when independent current source observations support that exact condition. Put reported context in decision sources, not completion verification sources. Reported or inferred assessments remain unresolved and can lead to wait or a question. Human confirmation comes only through the foreground user workflow. Checks watches are resolved by application code.",
                 "brief": brief,
+                "citation_sources": tools.citations() if tools is not None else (),
             }
         )
         result = await self._request(prompt, definitions, self._inquiry_schema(request))
@@ -617,6 +686,10 @@ class SdkCompanion:
         return tuple(
             {
                 "candidate_id": candidate.id,
+                "work": self.context.orientation(
+                    candidate.scope,
+                    tuple(cause.source_id for cause in candidate.causes),
+                ),
                 "responsibility": next(
                     (
                         item
@@ -631,16 +704,43 @@ class SdkCompanion:
                         "objective": task.objective,
                         "status": task.status,
                         "readiness": task.readiness,
-                        "native_reported_input": task.observed_input,
                     }
                     for task in request.tasks
                     if task.responsibility_id == candidate.responsibility_id
                 ),
                 "prior_considerations": tuple(
-                    item for item in request.prior if item.candidate_id == candidate.id
+                    {
+                        "id": item.id,
+                        "disposition": item.disposition,
+                        "considered_at": item.considered_at,
+                        "reason_excerpt": item.reason[
+                            : self.config.retrieval.passage_characters
+                        ],
+                        "reason_truncated": len(item.reason)
+                        > self.config.retrieval.passage_characters,
+                        "source_ids": tuple(
+                            source.id
+                            for source in item.sources[: self.config.retrieval.results]
+                        ),
+                        "history_tool": "current_work_context(consideration_id)",
+                    }
+                    for item in sorted(
+                        (
+                            item
+                            for item in request.prior
+                            if item.candidate_id == candidate.id
+                        ),
+                        key=lambda item: item.candidate_revision,
+                    )[-1:]
+                ),
+                "prior_considerations_omitted": max(
+                    0,
+                    sum(item.candidate_id == candidate.id for item in request.prior)
+                    - 1,
                 ),
             }
             for candidate in request.candidates
+            if request.focus_id is None or candidate.id == request.focus_id
         )
 
     def _guard_inquiry(
@@ -684,7 +784,22 @@ class SdkCompanion:
                 raise ValueError("The inquiry source changed")
 
     def _focused_brief(self, request: InquiryPass, candidate: Candidate) -> WorkBrief:
-        brief = self.context.brief(candidate.question, candidate.scope)
+        prior = tuple(
+            sorted(
+                (item for item in request.prior if item.candidate_id == candidate.id),
+                key=lambda item: item.candidate_revision,
+            )
+        )
+        checkpoint = max(
+            (item.source_checkpoint for item in prior if item.serviced_at is not None),
+            default=0,
+        )
+        references = tuple(
+            dict.fromkeys((*tuple(cause.source_id for cause in candidate.causes),))
+        )
+        brief = self.context.brief(
+            candidate.question, candidate.scope, checkpoint, references=references
+        )
         responsibilities = related_responsibilities(
             (candidate,), request.responsibilities
         )
@@ -701,7 +816,16 @@ class SdkCompanion:
                 item for item in brief.operations if item.task_id in task_ids
             ),
             considerations=tuple(
-                item for item in request.prior if item.candidate_id == candidate.id
+                replace(
+                    item, reason=item.reason[: self.config.retrieval.passage_characters]
+                )
+                for item in prior[-self.config.retrieval.results :]
+            ),
+            considerations_omitted=max(0, len(prior) - self.config.retrieval.results),
+            consideration_excerpt_ids=tuple(
+                item.id
+                for item in prior[-self.config.retrieval.results :]
+                if len(item.reason) > self.config.retrieval.passage_characters
             ),
             human_questions=(candidate.question,)
             if candidate.waiting_on == "human"
@@ -816,9 +940,36 @@ class SdkCompanion:
             cwd=directory,
             resume=session_id,
             max_turns=self.config.max_turns,
+            include_partial_messages=True,
             max_budget_usd=self.config.max_budget_usd,
             output_format={"type": "json_schema", "schema": output_schema},
             env={"CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(self.config.max_response_tokens)},
+        )
+        usage = active_usage.get()
+        assert usage is not None
+        usage.user_bytes = len(prompt.encode("utf-8"))
+        usage.system_bytes = len(str(options.system_prompt).encode("utf-8"))
+        usage.schema_bytes = len(encoded(output_schema).encode("utf-8"))
+        usage.tool_schema_bytes = len(
+            encoded(
+                tuple(
+                    {
+                        "name": definition.name,
+                        "description": definition.description,
+                        "schema": definition.input_schema,
+                    }
+                    for definition in definitions
+                )
+            ).encode("utf-8")
+        )
+        log.info(
+            "companion.request",
+            **usage.fields(),
+            user_bytes=usage.user_bytes,
+            system_bytes=usage.system_bytes,
+            schema_bytes=usage.schema_bytes,
+            tool_schema_bytes=usage.tool_schema_bytes,
+            resumed=session_id is not None,
         )
 
         async def input_messages() -> AsyncIterator[dict[str, object]]:
@@ -833,8 +984,13 @@ class SdkCompanion:
                 async for message in self.query(
                     prompt=input_messages(), options=options
                 ):
+                    if isinstance(
+                        message,
+                        (AssistantMessage, ResultMessage, SystemMessage, StreamEvent),
+                    ):
+                        usage.receive(message)
                     if isinstance(message, AssistantMessage) and message.error:
-                        raise RuntimeError(f"Companion model failed: {message.error}")
+                        raise SdkFailure(message.error)
                     if isinstance(message, ResultMessage):
                         terminal = message
         finally:
@@ -843,7 +999,7 @@ class SdkCompanion:
         if terminal is None:
             raise RuntimeError("The SDK ended without a terminal result")
         if terminal.is_error or terminal.structured_output is None:
-            raise RuntimeError("; ".join(terminal.errors or [terminal.subtype]))
+            raise SdkFailure(terminal.subtype, status=terminal.api_error_status)
         return terminal
 
     async def suspend(self) -> None:

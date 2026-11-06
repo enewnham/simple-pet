@@ -15,7 +15,7 @@ from ..runtime import PetContext
 from ..storage import Memory
 from ..types import JSONObject
 from ..work.narrative import SelectedMemory, WorkNarrative, semantic_revision
-from . import conversation, story
+from . import care, conversation, story
 from .contracts import ActionOffer, ModelRequest
 from .conversation import Exchange
 from .correction import CorrectableOutput
@@ -24,6 +24,7 @@ from .prompt import Response, select_prompt
 from .repetition import RepeatMatch, repeat_match
 from .request import CommentaryRequest, PromptBuilder, SpeechConditions
 from .templates import render
+from .usage import correction_attempt
 
 log = get_logger("pet-daemon")
 
@@ -93,8 +94,15 @@ class Cognition:
         response_type: type[BaseModel],
         validate: Callable[[dict[str, object]], T],
         corrections_left: int = 1,
+        attempt: int = 0,
     ) -> T:
-        draft = await self.client.complete(request, reason, response_type=response_type)
+        token = correction_attempt.set(attempt)
+        try:
+            draft = await self.client.complete(
+                request, reason, response_type=response_type
+            )
+        finally:
+            correction_attempt.reset(token)
         try:
             return validate(draft)
         except CorrectableOutput as error:
@@ -131,6 +139,7 @@ class Cognition:
                 response_type=response_type,
                 validate=validate,
                 corrections_left=corrections_left - 1,
+                attempt=attempt + 1,
             )
 
     async def update_work_narrative(
@@ -211,6 +220,30 @@ class Cognition:
         snapshot = refresh() if refresh else snapshot
         if eligible and not eligible(selection, snapshot):
             raise CannotRespond("Work is no longer eligible")
+        if selection.reason == SpeechReason.CARE:
+            if snapshot.sleeping or any(
+                session.turn_active and not session.activity_uncertain
+                for session in snapshot.sessions
+            ):
+                raise CannotRespond("Care chatter waits for an awake quiet moment")
+            request = self.prompts.prepare_care(
+                snapshot,
+                selection,
+                self.request,
+                tuple(
+                    row.text
+                    for row in self.memory.speech(limit=3)
+                    if row.reason == SpeechReason.CARE
+                ),
+            )
+            draft = await self.client.complete(
+                request.request, SpeechReason.CARE, response_type=care.Response
+            )
+            response = care.Response.model_validate(draft)
+            speech = response.speak
+            if await self.find_repetition(speech):
+                speech = None
+            return CommentaryResult(speak=speech, request=request)
         reason = selection.reason
         manual = selection.context is not None or reason in (
             SpeechReason.CLICK,

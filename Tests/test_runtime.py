@@ -62,6 +62,8 @@ PNG = base64.b64decode(
 
 def request_reason(body: ModelRequest) -> str:
     content = body["messages"][0]["content"]
+    if content.startswith("{") and "care" in json.loads(content):
+        return "care"
     if "The developer requested this recollection with a click." in content:
         return "click"
     for phrase, reason in (
@@ -2565,7 +2567,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(lambda: len(self.daemon.application.sessions.by_id) == 2)
         await asyncio.wait_for(self.entered.wait(), 10)
 
-        self.now += 300
+        self.now += 30
         self.event(
             "progress", session="two", source="cursor", progress="Building modules"
         )

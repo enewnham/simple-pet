@@ -108,19 +108,25 @@ class FocusSdk:
             assert isinstance(content, TextContent)
             self.focused = json.loads(content.text)
             other = next(
-                item for item in payload["candidates"] if item["id"] != candidate["id"]
+                (
+                    item
+                    for item in payload["candidates"]
+                    if item["id"] != candidate["id"]
+                ),
+                None,
             )
-            switched = await call("focus_work", {"candidate_id": other["id"]})
-            self.switch_rejected = switched.is_error
-            note = await call(
-                "record_note",
-                {
-                    "kind": "hypothesis",
-                    "text": "Unrelated possibility",
-                    "scope": other["scope"],
-                },
-            )
-            self.unrelated_note_rejected = note.is_error
+            if other is not None:
+                switched = await call("focus_work", {"candidate_id": other["id"]})
+                self.switch_rejected = switched.is_error
+                note = await call(
+                    "record_note",
+                    {
+                        "kind": "hypothesis",
+                        "text": "Unrelated possibility",
+                        "scope": other["scope"],
+                    },
+                )
+                self.unrelated_note_rejected = note.is_error
         self.started.set()
         await self.release.wait()
         decision = {
@@ -262,6 +268,51 @@ async def test_model_selected_quiet_peer_survives_busy_work_in_one_charged_attem
     assert unserviced.last_serviced_at is None
     assert len(store.attempts()) == len(model.inputs) == 1
     assert await coordinator.run_pass() is None
+    await companion.close()
+    memory.close()
+
+
+@pytest.mark.anyio
+async def test_cancelled_selected_work_does_not_exhaust_unselected_peers(
+    tmp_path: Path,
+) -> None:
+    model = FocusSdk()
+    memory, companion, coordinator, (a, b) = setup(tmp_path, model)
+    now = [100.0]
+    coordinator.clock = lambda: now[0]
+    companion.clock = lambda: now[0]
+    coordinator.config = ScheduleConfig(
+        max_passes_per_hour=100, failure_retry_seconds=1
+    )
+    outcomes = []
+    coordinator.finished = lambda identifier, outcome, error: outcomes.append(outcome)
+    for _ in range(2):
+        model.started.clear()
+        model.release.clear()
+        task = asyncio.create_task(coordinator.run_pass())
+        await asyncio.wait_for(model.started.wait(), 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        now[0] += 2
+    assert [item.selected_candidate_id for item in memory.coordination.attempts()] == [
+        b.id,
+        b.id,
+    ]
+    assert all(
+        item.error_kind == "interrupted" for item in memory.coordination.attempts()
+    )
+    model.scope = "a"
+    model.release.set()
+    result = await coordinator.run_pass()
+    assert result is not None and result.decisions[0].candidate_id == a.id
+    assert [item["id"] for item in model.inputs[-1]["candidates"]] == [a.id]
+    assert len(model.inputs) == len(memory.coordination.attempts()) == 3
+    assert outcomes == ["cancelled", "cancelled", "accepted"]
+    current_a = memory.coordination.candidate(a.id)
+    current_b = memory.coordination.candidate(b.id)
+    assert current_a is not None and current_a.last_serviced_at == now[0]
+    assert current_b is not None and current_b.last_serviced_at is None
     await companion.close()
     memory.close()
 

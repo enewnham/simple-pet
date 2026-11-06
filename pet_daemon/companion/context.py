@@ -1,6 +1,7 @@
+import json
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ..coordination.models import (
     ChatRole,
@@ -19,11 +20,12 @@ from ..coordination.models import (
 from ..storage.memory import Memory
 from ..work.history import report_prose, report_source_key
 from ..work.models import IntentEvidence
-from ..work.observations import CheckoutObservation
+from ..work.observations import BranchObservation, CheckoutObservation
 from .config import RetrievalConfig
 from .index import SourceChange, SourceIndex
 from .providers import Document, SourceStatus, revision
 from .retrieval import SearchContext
+from .selection import WorkSelection, branch_location, select_work
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,10 @@ class WorkBrief:
     human_questions: tuple[str, ...]
     unknowns: tuple[str, ...]
     checkpoint: int
+    changes_omitted: int = 0
+    history_since: int = 0
+    considerations_omitted: int = 0
+    consideration_excerpt_ids: tuple[str, ...] = ()
 
 
 def applies(scope: str, selected: str) -> bool:
@@ -153,14 +159,28 @@ class WorkContext:
             ),
         )
 
-    def history(self) -> tuple[Document, ...]:
+    def history(
+        self, selection: WorkSelection | None = None, *, compact: bool = False
+    ) -> tuple[Document, ...]:
         reports = self.memory.recent_work_reports(self.config.bootstrap_reports)
         documents = []
         for report in reports:
+            context = report.context
+            links = tuple(reference.ref for reference in context.references)
+            if context.pull_request:
+                links = (*links, context.pull_request)
+            if context.repository is not None:
+                links = (*links, branch_location(context.repository, context.branch))
+            if (
+                selection is not None
+                and selection.scopes
+                and not selection.includes_report(context)
+            ):
+                continue
             text = report_prose(report)
             if not text:
                 continue
-            references = tuple(reference.ref for reference in report.context.references)
+            references = links
             if report.context.pull_request:
                 references = tuple(
                     dict.fromkeys((*references, report.context.pull_request))
@@ -180,7 +200,11 @@ class WorkContext:
                     "User request reported by harness"
                     if isinstance(report.payload, IntentEvidence)
                     else "Harness work report",
-                    text[: self.config.source_characters],
+                    text[
+                        : self.config.passage_characters
+                        if compact
+                        else self.config.source_characters
+                    ],
                     kind="reported_intent"
                     if isinstance(report.payload, IntentEvidence)
                     else "harness_report",
@@ -189,12 +213,29 @@ class WorkContext:
                 )
             )
         facts = self.memory.work_facts()
-        for observation in (*facts.checkouts.values(), *facts.pull_requests.values()):
-            text = observation.model_dump_json()
-            identifier = (
-                observation.worktree
-                if isinstance(observation, CheckoutObservation)
-                else observation.ref
+        for observation in (
+            *facts.checkouts.values(),
+            *facts.branches.values(),
+            *facts.pull_requests.values(),
+        ):
+            if isinstance(observation, CheckoutObservation):
+                identifier = observation.worktree
+            elif isinstance(observation, BranchObservation):
+                identifier = branch_location(observation.repository, observation.branch)
+            else:
+                identifier = observation.ref
+            if selection is not None and not selection.includes(identifier):
+                continue
+            text = (
+                json.dumps(
+                    observation.model_dump(
+                        mode="json",
+                        exclude={"pr": {"body", "related_links"}, "resolutions": True},
+                    ),
+                    ensure_ascii=False,
+                )
+                if compact
+                else observation.model_dump_json()
             )
             documents.append(
                 Document(
@@ -208,7 +249,7 @@ class WorkContext:
                         ),
                         observed_at=observation.checked_at,
                         uri=identifier,
-                        scope=getattr(observation, "worktree", ""),
+                        scope=identifier,
                         available=not bool(observation.error),
                     ),
                     "Repository observation",
@@ -220,12 +261,37 @@ class WorkContext:
             )
         return tuple(documents)
 
-    def brief(self, purpose: str, scope: str = "", checkpoint: int = 0) -> WorkBrief:
+    def brief(
+        self,
+        purpose: str,
+        scope: str = "",
+        checkpoint: int = 0,
+        *,
+        references: tuple[str, ...] = (),
+        orientation: bool = False,
+    ) -> WorkBrief:
         store = self.memory.coordination
+        if not scope and not references and not orientation:
+            references = tuple(
+                dict.fromkeys(
+                    report.context.checkout
+                    for report in self.memory.recent_work_reports(self.config.results)
+                    if report.context.checkout
+                )
+            )
+        selection = select_work(scope, references, self.memory.work_facts())
+
+        def in_scope(value: str) -> bool:
+            return (
+                not value
+                or (not scope and not orientation)
+                or selection.includes(value)
+            )
+
         notes = tuple(
             note
             for note in store.notes()
-            if applies(note.scope, scope)
+            if in_scope(note.scope)
             and note.status in (NoteStatus.ACTIVE, NoteStatus.NEEDS_RECHECK)
         )
         corrections = tuple(
@@ -243,10 +309,10 @@ class WorkContext:
             reverse=True,
         )
         projects = tuple(
-            project for project in store.projects() if applies(project.scope, scope)
+            project for project in store.projects() if in_scope(project.scope)
         )
         responsibilities = tuple(
-            item for item in store.responsibilities() if applies(item.scope, scope)
+            item for item in store.responsibilities() if in_scope(item.scope)
         )
         responsibility_ids = {item.id for item in responsibilities}
         tasks = tuple(
@@ -258,14 +324,20 @@ class WorkContext:
         recent = tuple(
             document
             for document in (
-                *self.history(),
+                *(() if orientation else self.history(selection, compact=True)),
                 *(
                     document
-                    for document in self.index.documents()
-                    if document.source.provider.startswith("history:")
+                    for document in (
+                        ()
+                        if orientation
+                        else self.index.documents(provider_prefix="history:")
+                    )
                 ),
             )
-            if applies(document.source.scope, scope)
+            if not scope
+            or selection.includes(
+                document.source.scope, document.source.id, document.links
+            )
         )
         recent = tuple(
             sorted(
@@ -283,22 +355,27 @@ class WorkContext:
             for status in statuses
             if status.availability.value != "available"
         )
-        if not recent:
+        if not recent and not orientation:
             unknowns = (
                 *unknowns,
                 "No configured historical work reports are available.",
             )
+        changes, omitted = (
+            ((), 0) if orientation else self.changes(selection, checkpoint)
+        )
         return WorkBrief(
             purpose=purpose,
             scope=scope,
             instruction_revision=store.state().instruction_revision,
-            recent_user_inputs=self.recent_user_inputs(scope),
+            recent_user_inputs=tuple(
+                item for item in self.recent_user_inputs("") if in_scope(item.scope)
+            ),
             instructions=tuple(
                 instruction
                 for instruction in store.instructions()
                 if instruction.active
                 and not instruction.context_only
-                and applies(instruction.scope, scope)
+                and in_scope(instruction.scope)
             ),
             notes=(*corrections, *ordered_notes[: self.config.results]),
             projects=projects,
@@ -309,7 +386,9 @@ class WorkContext:
                 for operation in store.operations()
                 if operation.task_id in task_ids
             ),
-            considerations=tuple(
+            considerations=()
+            if orientation
+            else tuple(
                 record
                 for record in store.considerations()
                 if any(
@@ -318,8 +397,13 @@ class WorkContext:
                     for candidate in store.candidates()
                 )
             )[-self.config.results :],
-            recent_work=recent[: self.config.bootstrap_reports],
-            changes=self.index.changes(checkpoint),
+            recent_work=()
+            if orientation
+            else tuple(
+                replace(document, text=document.text[: self.config.passage_characters])
+                for document in recent[: self.config.results]
+            ),
+            changes=changes,
             sources=statuses,
             aliases=tuple(
                 dict.fromkeys(
@@ -344,7 +428,69 @@ class WorkContext:
             ),
             unknowns=unknowns,
             checkpoint=self.index.checkpoint(),
+            changes_omitted=omitted,
+            history_since=checkpoint,
         )
+
+    def changes(
+        self, selection: WorkSelection, checkpoint: int
+    ) -> tuple[tuple[SourceChange, ...], int]:
+        result: dict[str, SourceChange] = {}
+        count = 0
+        for change in self.index.changes(checkpoint):
+            document = self.index.document(change.source_id, change.revision)
+            scope = document.source.scope if document is not None else ""
+            links = document.links if document is not None else ()
+            if selection.includes(scope, change.source_id, links):
+                result[change.source_id] = change
+                count += 1
+        recent = tuple(
+            sorted(result.values(), key=lambda change: change.id)[
+                -self.config.results :
+            ]
+        )
+        return recent, count - len(recent)
+
+    def orientation(self, scope: str, references: tuple[str, ...]) -> dict[str, object]:
+        facts = self.memory.work_facts()
+        selection = select_work(scope, references, facts)
+        reports = self.memory.recent_work_reports(self.config.bootstrap_reports)
+        report = next(
+            (
+                report
+                for report in reversed(reports)
+                if selection.includes_report(report.context)
+            ),
+            None,
+        )
+        return {
+            "locations": selection.scopes,
+            "reported_work": report_prose(report)[: self.config.passage_characters]
+            if report is not None
+            else None,
+            "reported_at": report.capture_at if report is not None else None,
+            "checkouts": tuple(
+                {
+                    "path": item.worktree,
+                    "branch": item.local.branch if item.local else None,
+                    "head": item.local.head if item.local else None,
+                    "error": item.error,
+                    "checked_at": item.checked_at,
+                }
+                for item in facts.checkouts.values()
+                if selection.includes(item.worktree)
+            ),
+            "pull_requests": tuple(
+                {
+                    "ref": item.ref,
+                    "title": item.pr.title if item.pr else None,
+                    "state": item.pr.state if item.pr else None,
+                    "error": item.error,
+                }
+                for item in facts.pull_requests.values()
+                if selection.includes(item.ref)
+            ),
+        }
 
     def search_context(self, brief: WorkBrief) -> SearchContext:
         references = tuple(

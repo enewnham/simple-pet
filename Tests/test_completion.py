@@ -150,6 +150,7 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
         self.assessment = replace(
             self.assessment, responsibility_id="another", responsibility_revision=1
         )
+        self.now += self.coordinator.config.failure_retry_seconds
         with self.assertRaises(RevisionConflict):
             await self.coordinator.run_pass()
         self.assertEqual(self.memory.coordination.completions(), ())
@@ -204,6 +205,7 @@ class CompletionTests(unittest.IsolatedAsyncioTestCase):
             responsibility_revision=2,
             condition=changed.completion_condition,
         )
+        self.now += self.coordinator.config.failure_retry_seconds
         with self.assertRaises(ValueError):
             await self.coordinator.run_pass()
         self.assertEqual(store.completions(), ())

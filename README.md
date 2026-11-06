@@ -58,6 +58,10 @@ coordinator has separate model, timeout, turn, response, and cost settings under
 retains its own model settings. Desktop implementation uses a configured external
 adapter, described in [Desktop adapters](docs/desktop-adapter.md).
 
+When work goes quiet, the pet can nap without recurring work recaps. Optional care
+remarks use a small, separate request every 45–90 minutes by default and can choose
+silence. Small visual care animations have their own, more frequent cadence.
+
 The pet starts with stored work reports. To include existing harness history and
 local meeting exports, merge this into your configuration:
 

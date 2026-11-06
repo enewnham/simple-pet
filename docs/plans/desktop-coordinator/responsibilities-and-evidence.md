@@ -1,7 +1,7 @@
 # Responsibilities and evidence
 
 - Status: Implemented
-- Date: 2026-11-05
+- Date: 2026-11-06
 - Scope: Prepared context, working notes, coordination, responsibilities, and authority
 
 ## Context
@@ -257,8 +257,8 @@ and accepted scope across restarts.
 ## Ongoing coordination loop
 
 The application gathers wake and restart reconciliation, changed source revisions,
-owned-session results and readiness, user changes, due followups, and quiet-review
-times. Each cause identifies the affected responsibility and question, or a recent
+owned-session results and readiness, user changes, and due adopted followups.
+Each cause identifies the affected responsibility and question, or a recent
 work thread and question before adoption. The coordinator coalesces causes under
 that identity, retaining the latest relevant revision per source. Preserve the
 candidate's first-queued time and last meaningful service time when more events
@@ -292,19 +292,21 @@ READY session remains reusable and releases active execution capacity. Launch an
 continue share the same effect-boundary capacity check. Fair selection does not
 preempt a running harness.
 
-Quiet eligible work receives a configurable review due time and maximum deferral
-from its last meaningful consideration, or initial queue time before its first
-service. Meaningful consideration is a completed assessment with a disposition.
-Its service timestamp supplies the origin for the next review and deferral bound.
-Polling, eligibility inspection, or inclusion in a model's candidate list alone
-does not count. Overdue quiet work receives fair service ahead of ordinary
-change-only work. An explicit do-this-next or exclusive user direction, or an
-evidenced time-critical obligation, can override that ordering with a recorded
-reason and revisit condition. Standing relative priority orders routine peers and
-cannot repeatedly override overdue quiet review. Preserve visible overdue state
-during an override. This service bound applies when work is eligible
-and resources permit, without an absolute wall-clock promise while paused or out
-of budget.
+An inquiry needs meaningful relevant evidence or an unconsumed adopted deadline,
+followup, or explicit user deferral such as Later. A standing responsibility alone
+does not authorize timed inquiry. Accepted no-finding and wait outcomes leave the
+source question dormant until that eligibility changes. Model-proposed review dates,
+expired dates, unchanged polls, and timestamp-only refreshes cannot reopen it.
+Consumed due times remain consumed across restart. Exact watches may refresh in
+code without invoking the model.
+
+Among eligible questions, configurable review and maximum-deferral bounds protect
+quiet work's waiting age. Polling and inclusion in a candidate list do not count as
+service. Overdue eligible work receives fair service ahead of ordinary change-only
+work. Explicit do-this-next directions and evidenced deadlines can override that
+ordering with a recorded reason. Standing relative priority cannot repeatedly
+override overdue work. The service bound applies while awake, eligible, and within
+budget.
 
 For routine peers, rotate projects by least recent meaningful service. Within a
 project, respect explicit priorities and due urgency, then oldest waiting time and
@@ -337,10 +339,23 @@ consideration or service record. A candidate awaiting a human decision waits for
 the reply unless changed scope or evidence warrants revisiting the question.
 An explicit scheduling deferral can update considered time but cannot reset service
 age. A reasoned wait answering the selected question counts as meaningful service.
+Capture the source-history checkpoint before reasoning and advance it only for the
+selected accepted service. Failure and deferral retain the prior serviced checkpoint,
+so a rejected result cannot consume unseen evidence or another question's history.
+
+Allow at most two attempts for an unchanged relevant evidence and instruction epoch,
+using the configured failure backoff between them. A structured billing or
+authentication failure blocks automatic coordinator inquiries across source changes
+and new questions until a newer accepted user instruction. A failure after focus belongs
+to the selected question, leaving unassessed peers available. A meaningful new cause,
+new accepted user direction, or newly due adopted followup can open another bounded
+epoch for other failures. Direct chat remains independently available. Persist attempts and outcomes
+without clearing history or changing the hourly cap. Optional JSON record fields
+preserve schema-27 storage and existing data.
 
 Unchanged watch observations do not cause another model investigation. A due
 followup can refresh the source, and exact checks can update the watch without
-model interpretation. New meaningful evidence or a due review can reopen a
+model interpretation. New meaningful evidence or an authoritative due request can reopen a
 checkpointed question. Failed refresh records unavailability and cannot establish
 completion. On wake or restart, reconcile and coalesce queued causes before
 selection, preserving history and deduplication identifiers rather than producing
@@ -490,3 +505,12 @@ retrieval quality, grounding, and authority during delivery.
     decision record, preserves unknown discussion date or proposal status, and
     investigates a possible conflict. It does not infer a newer decision or changed
     requirement from import time alone.
+24. **Idle evidence:** Eight hours of unchanged sources and an open agent process
+    produce no coordinator inquiry or work recap after the last assessment. The pet
+    can nap and offer infrequent care remarks without loading work history.
+25. **Bounded failure:** Unchanged evidence receives at most two attempts, with the
+    configured backoff. Billing or authentication failure stops automatic retry
+    immediately. Restart retains that history, and explicit chat remains available.
+26. **One-shot followup:** A genuinely due adopted followup or user-selected Later
+    receives one assessment. An expired model review date cannot repeat it. Accepted
+    service advances only the selected question's captured source checkpoint.

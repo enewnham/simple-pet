@@ -131,14 +131,14 @@ class ModelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.requests), 1)
 
     async def test_refused_and_truncated_responses_have_distinct_failures(self) -> None:
-        for stop, diagnostic in (("refusal", "refused"), ("max_tokens", "token limit")):
+        for stop in ("refusal", "max_tokens"):
             with self.subTest(stop=stop):
                 self.requests.clear()
                 self.responses = [
                     self.message(stop=stop),
                     self.message(),
                 ]
-                with self.assertRaisesRegex(ValueError, diagnostic):
+                with self.assertRaisesRegex(ValueError, f"ended with {stop}"):
                     await self.model.complete(
                         self.request(),
                         SpeechReason.CLICK,

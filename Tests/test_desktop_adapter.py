@@ -3,6 +3,7 @@ import json
 import os
 import socket
 import sys
+import tempfile
 import uuid
 from dataclasses import replace
 from pathlib import Path
@@ -309,7 +310,8 @@ async def test_native_hook_process_preserves_explicit_delegation_identity(
     task = require(desktop.store.task(result.task_id))
     session = require(task.session)
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-    socket_path = str(tmp_path / "hooks.sock")
+    socket_directory = tempfile.TemporaryDirectory(prefix="pet-hook-", dir="/tmp")
+    socket_path = str(Path(socket_directory.name) / "hooks.sock")
     listener.bind(socket_path)
     listener.setblocking(False)
     try:
@@ -343,6 +345,7 @@ async def test_native_hook_process_preserves_explicit_delegation_identity(
         assert require(desktop.store.task(task.id)).native_session == hook.subject
     finally:
         listener.close()
+        socket_directory.cleanup()
         desktop.memory.close()
 
 

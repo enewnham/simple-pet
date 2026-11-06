@@ -901,7 +901,7 @@ class BehaviorTests(unittest.TestCase):
         self.advance(behavior, 119)
         self.assertFalse(behavior.is_sleeping)
 
-    def test_verified_calls_and_waiting_turns_keep_pet_awake(self) -> None:
+    def test_verified_live_tool_stays_awake_but_old_input_wait_can_nap(self) -> None:
         for event in ("tool_start", "waiting"):
             with self.subTest(event=event):
                 self.sessions = Sessions(self.clock, wall_clock=self.clock)
@@ -919,7 +919,14 @@ class BehaviorTests(unittest.TestCase):
                 self.sessions.apply_process_status({owner: ProcessStatus.ALIVE})
                 behavior = self.make_behavior(naps=True, nap_interval=(1, 1))
                 self.advance(behavior, 600)
-                self.assertFalse(behavior.is_sleeping)
+                if event == "tool_start":
+                    self.assertFalse(behavior.is_sleeping)
+                    self.assertTrue(self.sessions.is_engaged)
+                else:
+                    self.assertFalse(self.sessions.is_engaged)
+                    self.assertTrue(
+                        any(packet.get("sleeping") for packet in self.output)
+                    )
 
     def test_quiet_live_turn_settles_and_naps_after_activity_becomes_uncertain(
         self,

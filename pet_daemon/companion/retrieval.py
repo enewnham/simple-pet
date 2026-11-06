@@ -211,8 +211,6 @@ class ContextRetrieval:
     ) -> tuple[Passage, ...]:
         document_id = reference.id.split("#L", 1)[0]
         document = self.index.document(document_id, reference.revision)
-        if document is None:
-            return ()
         provider = self.providers.get(reference.provider)
         status = None
         if provider is not None:
@@ -223,6 +221,7 @@ class ContextRetrieval:
                 if (
                     not result.documents
                     and result.status.availability == Availability.AVAILABLE
+                    and document is not None
                 ):
                     self.index.mark_removed(document.source, result.status.checked_at)
             except (OSError, RuntimeError, ValueError, TimeoutError) as error:
@@ -231,6 +230,8 @@ class ContextRetrieval:
                 )
                 self.index.capture(SourceResult((), status))
         document = self.index.document(document_id, reference.revision) or document
+        if document is None:
+            return ()
         current = self.index.document(document_id)
         is_current = (
             current is not None and current.source.revision == reference.revision

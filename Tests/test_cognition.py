@@ -732,9 +732,10 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(require(context.moment).progress)
         self.assertIn(render("system/rules.jinja"), body["system"][0]["text"])
 
-    async def test_care_conversation_matches_the_moment_and_can_choose_silence(
+    async def test_care_remark_matches_the_moment_and_can_choose_silence(
         self,
     ) -> None:
+        self.handle({"source": "claude", "session": "worker", "event": "turn_done"})
         directions = {
             CareKind.EXERCISE: "stretch break",
             CareKind.ATTENTION: "casual greeting",
@@ -757,7 +758,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
                     self.requests[-1][1]["messages"][0]["content"],
                 )
                 schema = body["output_config"]["format"]["schema"]["properties"]
-                self.assertIn("headline", schema)
+                self.assertNotIn("headline", schema)
                 self.assertNotIn("memory", schema)
                 self.assertNotIn("ongoing", schema)
                 self.responses.append(({"speak": None}, "end_turn"))
@@ -1922,6 +1923,8 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.story_requests), 2)
         self.assertEqual(usage["story"].input_tokens, 200)
         self.assertEqual(usage["story"].output_tokens, 40)
+        self.assertEqual(usage["story"].model_calls, 2)
+        self.assertEqual(usage["story"].retries, 1)
         self.assertEqual(result.speak, "I am following the cancellation path.")
         saved = self.memory.load_narrative(identity)
         assert saved is not None

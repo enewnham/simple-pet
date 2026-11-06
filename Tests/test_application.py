@@ -24,6 +24,7 @@ from pet_daemon.commentary.context import (
 from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.commentary.observations import event_text
 from pet_daemon.commentary.request import SpeechConditions
+from pet_daemon.commentary.usage import UsageTokens, request_usage
 from pet_daemon.companion.sdk import SdkCompanion
 from pet_daemon.companion.tools import ToolAuthority
 from pet_daemon.config import Config
@@ -48,6 +49,7 @@ from pet_daemon.delivery import (
 )
 from pet_daemon.domain import (
     ArtifactKind,
+    CareKind,
     DeliveryStatus,
     EvidenceSource,
     ExecutionOutcome,
@@ -61,6 +63,7 @@ from pet_daemon.domain import (
 from pet_daemon.identity import SessionIdentity
 from pet_daemon.repository_identity import RemoteRepository
 from pet_daemon.runtime import (
+    CareTrigger,
     HookEvent,
     HookEventKind,
     OverlayPacket,
@@ -441,6 +444,101 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_care_survives_repository_drift_without_work_generation(self) -> None:
+        self.now += self.config.activity_fresh_seconds + 1
+        session = self.app.sessions.by_id[
+            SessionIdentity(source=SessionSource.CODEX, native_id="parser")
+        ]
+        session.presence = ProcessStatus.ALIVE
+        self.app.context()
+        self.model.text = "A little stretch, then a quiet moment."
+
+        def change_repository(reason: SpeechReason | ModelPurpose) -> None:
+            if reason == SpeechReason.CARE:
+                self.provider.publish(
+                    self.checkout.model_copy(
+                        update={
+                            "local": require(self.checkout.local).model_copy(
+                                update={"head": "head-two"}
+                            )
+                        }
+                    )
+                )
+
+        self.model.before_response = change_repository
+        await self.app.comment(
+            SpeechReason.CARE, trigger=CareTrigger(care=CareKind.EXERCISE)
+        )
+        self.assertEqual(self.model.story_requests, [])
+        self.assertEqual(len(self.model.requests), 1)
+        self.assertTrue(
+            any(packet.get("text") == self.model.text for packet in self.packets)
+        )
+
+    async def test_care_rejects_fresh_activity_pause_and_memory_reset(self) -> None:
+        for intervention in ("activity", "pause", "reset"):
+            with self.subTest(intervention=intervention):
+                self.memory.coordination.set_paused(False)
+                self.now += self.config.activity_fresh_seconds + 1
+                self.app.context()
+                self.packets.clear()
+                self.model.requests.clear()
+                self.model.text = "A little stretch, then a quiet moment."
+
+                def intervene(
+                    reason: SpeechReason | ModelPurpose,
+                    intervention: str = intervention,
+                ) -> None:
+                    if reason != SpeechReason.CARE:
+                        return
+                    if intervention == "activity":
+                        self.report("Checking a fresh parser case")
+                    elif intervention == "pause":
+                        self.memory.coordination.set_paused(True)
+                    else:
+                        self.app.clear_memory()
+
+                self.model.before_response = intervene
+                await self.app.comment(
+                    SpeechReason.CARE, trigger=CareTrigger(care=CareKind.EXERCISE)
+                )
+                self.assertEqual(len(self.model.requests), 1)
+                self.assertFalse(
+                    any(
+                        packet.get("text") == self.model.text for packet in self.packets
+                    )
+                )
+
+    async def test_discarded_commentary_logs_usage_from_every_model_purpose(
+        self,
+    ) -> None:
+        def record_usage(reason: SpeechReason | ModelPurpose) -> None:
+            usage = require(request_usage.get())
+            usage[str(reason)] = UsageTokens(
+                input_tokens=10 if reason == ModelPurpose.STORY else 20,
+                output_tokens=2,
+                model_calls=1,
+                request_bytes=100 if reason == ModelPurpose.STORY else 200,
+            )
+            if reason == SpeechReason.ROUTINE:
+                self.app.preempt()
+
+        self.model.before_response = record_usage
+        with self.assertLogs("pet-daemon", level="INFO") as captured:
+            await self.app.comment(SpeechReason.ROUTINE)
+        finished = [
+            record.msg
+            for record in captured.records
+            if isinstance(record.msg, dict)
+            and record.msg.get("event") == "observation.finished"
+        ]
+        self.assertEqual(len(finished), 1)
+        self.assertEqual(finished[0]["outcome"], "discarded")
+        self.assertEqual(finished[0]["input_tokens"], 30)
+        self.assertEqual(finished[0]["output_tokens"], 4)
+        self.assertEqual(finished[0]["model_calls"], 2)
+        self.assertEqual(finished[0]["request_bytes"], 300)
+
     def native_hook(
         self, event: str, *, source: str = "codex", **fields: object
     ) -> HookEvent:
@@ -453,6 +551,15 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         hook.capture_at = self.now
         return require(normalize_hook(hook.packet()))
+
+    async def recall_work(self) -> None:
+        snapshot = self.app.context()
+        selection = self.attention.select(
+            snapshot, SpeechReason.CHECK_IN, reflection=True
+        )
+        await self.app.comment(
+            SpeechReason.CHECK_IN, snapshot=snapshot, selection=selection
+        )
 
     async def test_tool_progress_preserves_an_inflight_inquiry_and_current_work(
         self,
@@ -1514,22 +1621,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.app.cognition.prompts = self.prompts
         self.model.text = None
+        previous_requests = len(self.model.requests)
         await self.app.comment(SpeechReason.CHECK_IN)
-        request, reason = self.model.requests[-1]
-        self.assertEqual(reason, SpeechReason.CHECK_IN)
-        quiet = self.prompts.prepared(request).context
-        text = self.prompts.text(request)
-        self.assertIsNone(quiet.work)
-        self.assertIsNotNone(require(quiet.moment).elapsed)
-        self.assertIsNone(require(quiet.moment).state)
-        self.assertIsNone(require(quiet.moment).progress)
-        self.assertEqual(quiet.earlier, ())
-        self.assertNotIn("overlays", text)
-        content = request["messages"][0]["content"]
-        self.assertNotIn("Improve quoted-field parsing", content)
-        self.assertNotIn("overlays", content)
-        self.assertEqual(self.prompts.requests[content].citations.sources, ())
-        self.assertNotRegex(content, r"\[s\d+\]")
+        self.assertEqual(len(self.model.requests), previous_requests)
 
         self.now += 1
         updated = "The editor refresh clears the annotations."
@@ -1880,8 +1974,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 capture_at=self.now,
                 source=SessionSource.CODEX,
                 session="parser",
-                event=HookEventKind.PROGRESS,
-                progress="Checking parser cases",
+                event=HookEventKind.TOOL_START,
+                call="parser-checks",
+                tool="pytest",
                 owner=owner,
             )
         )
@@ -2635,7 +2730,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.app.delivery.has_pending())
         self.assertIsNone(self.memory.message_outcome(emitted["delivery_id"]))
 
-    async def test_idle_reflection_records_the_selected_report_and_silence(
+    async def test_requested_recollection_records_the_selected_report_and_silence(
         self,
     ) -> None:
         self.config.behavior.naps = False
@@ -2672,8 +2767,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.app.tick()
         self.assertIsNone(self.app.task)
         self.now += 1
-        self.app.tick()
-        await require(self.app.task)
+        await self.recall_work()
         emitted = next(
             packet for packet in reversed(self.packets) if "delivery_id" in packet
         )
@@ -2696,8 +2790,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.app.tick()
         self.assertEqual(len(selected), 1)
         self.now += 1
-        self.app.tick()
-        await require(self.app.task)
+        await self.recall_work()
         self.assertEqual(len(selected), 2)
         self.assertEqual(len(self.memory.speech()), 1)
         recorded = require(self.memory.load_source_attention().get(source))
@@ -2709,7 +2802,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.attention.restore_sources(self.memory.load_source_attention())
         self.assertEqual(self.attention.sources[source], recorded)
 
-    async def test_idle_reflection_uses_older_work_when_preferred_has_no_memory(
+    async def test_requested_recollection_uses_older_work_when_preferred_has_no_memory(
         self,
     ) -> None:
         self.config.behavior.naps = False
@@ -2774,8 +2867,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             }
 
         self.model.response = respond
-        self.app.tick()
-        await require(self.app.task)
+        await self.recall_work()
         requests = [
             self.prompts.prepared(request).context for request, _ in self.model.requests
         ]
@@ -2800,14 +2892,13 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(self.memory.load_source_attention()), {source})
 
         self.now += 900
-        self.app.tick()
-        await require(self.app.task)
+        await self.recall_work()
         self.assertEqual(len(self.model.requests), 4)
         self.assertNotIn(remaining, older_candidates[-1])
         self.assertEqual(len(self.memory.speech()), 1)
         self.assertEqual(self.memory.load_source_attention()[source], considered)
 
-    async def test_new_activity_during_idle_generation_discards_the_reflection(
+    async def test_new_activity_during_requested_recollection_discards_the_result(
         self,
     ) -> None:
         report = "The quoted-field parser still needs a multiline escape check."
@@ -2823,8 +2914,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
 
         self.model.before_response = publish_progress
         self.model.response = lambda request, reason: {"speak": None}
-        self.app.tick()
-        await require(self.app.task)
+        await self.recall_work()
         self.assertFalse(any("delivery_id" in packet for packet in self.packets))
         self.assertEqual(self.memory.load_source_attention(), {})
 
@@ -2882,8 +2972,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.model.narrative_response = corrected_story
         self.model.response = cite_old
         self.now += 300
-        self.app.tick()
-        await require(self.app.task)
+        await self.recall_work()
 
         self.assertEqual(len(older_source), 2)
         self.assertEqual(older_source[0], older_source[1])
@@ -2958,44 +3047,30 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
 
         self.now += 900
         self.app.tick()
-        await require(self.app.task)
-        self.assertEqual(len(automatic_candidates), 1)
-        self.assertNotIn(report, [item.text for item in automatic_candidates[0]])
+        self.assertIsNone(self.app.task)
+        self.assertEqual(automatic_candidates, [])
         self.assertEqual(len(self.memory.speech()), 1)
         self.assertEqual(self.memory.load_source_attention()[source], mentioned)
 
-    async def test_silent_reflection_keeps_its_interval_after_restart(self) -> None:
+    async def test_idle_work_does_not_rearm_reflections_after_restart(self) -> None:
         self.config.behavior.naps = False
         self.config.behavior.care = False
         self.report("The quoted-field parser check passed.")
         self.complete_turn()
         self.attention.pending = None
-        self.attention.next_observation = self.now + 10_000
-        self.model.response = lambda request, reason: {"speak": None, "memory": None}
-
-        self.now += 300
+        self.attention.next_observation = self.now + 100_000
+        self.now += 3600
         self.app.tick()
-        await require(self.app.task)
-        self.assertEqual(self.model.requests[-1][1], SpeechReason.CHECK_IN)
-        self.assertEqual(len(self.model.requests), 1)
-        self.assertEqual(self.memory.load_source_attention(), {})
-        parser = SessionIdentity(source=SessionSource.CODEX, native_id="parser")
-        history = require(self.memory.load_attention_history().get(parser))
-        self.assertEqual(history.last_reflection_at, self.now)
-
+        self.assertIsNone(self.app.task)
+        self.assertEqual(self.model.requests, [])
         self.restart_attention_and_sessions()
-        self.attention.next_observation = self.now + 10_000
-        self.now += 899
+        self.attention.next_observation = self.now + 100_000
+        self.now += 3600
         self.app.tick()
-        self.assertEqual(len(self.model.requests), 1)
-        self.now += 1
-        self.app.tick()
-        await require(self.app.task)
-        self.assertEqual(len(self.model.requests), 2)
-        self.assertEqual(self.model.requests[-1][1], SpeechReason.CHECK_IN)
-        self.assertEqual(self.memory.load_source_attention(), {})
+        self.assertIsNone(self.app.task)
+        self.assertEqual(self.model.requests, [])
 
-    async def test_failed_idle_delivery_keeps_the_selected_report_retryable(
+    async def test_failed_requested_recollection_keeps_the_report_retryable(
         self,
     ) -> None:
         self.config.behavior.naps = False
@@ -3027,8 +3102,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
 
         self.model.response = recall
         self.now += 300
-        self.app.tick()
-        await require(self.app.task)
+        await self.recall_work()
         first = next(
             packet for packet in reversed(self.packets) if "delivery_id" in packet
         )
@@ -3043,8 +3117,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.memory.load_source_attention(), {})
 
         self.now += 896
-        self.app.tick()
-        await require(self.app.task)
+        await self.recall_work()
         second = next(
             packet for packet in reversed(self.packets) if "delivery_id" in packet
         )

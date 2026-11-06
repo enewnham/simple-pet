@@ -18,6 +18,7 @@ from ..storage.memory import Memory
 from .context import WorkBrief, WorkContext
 from .providers import Passage, SourceResult
 from .retrieval import ContextRetrieval, SearchContext
+from .selection import select_work
 
 DIRECT_SOURCE_KINDS = {
     "observation",
@@ -52,6 +53,13 @@ class ToolInput(BaseModel):
 
 class SearchInput(ToolInput):
     question: str = Field(min_length=1)
+
+
+class ContextInput(ToolInput):
+    consideration_id: str | None = Field(
+        default=None,
+        description="Expand the full stored consideration behind an excerpt, by its exact ID. Scheduled inquiries can read only their selected thread's records.",
+    )
 
 
 class PassageInput(ToolInput):
@@ -126,10 +134,38 @@ class CompanionTools:
             for source in record.sources:
                 self.sources[source.id] = source
                 self.source_kinds[source.id] = self.source_kind(source)
+        for consideration in brief.considerations:
+            for source in consideration.sources:
+                self.supply_reference(source, self.source_kind(source))
+        for change in brief.changes:
+            document = retrieval.index.document(change.source_id, change.revision)
+            if document is not None:
+                self.supply_reference(document.source, document.kind)
         self.bindings = {
             identifier: self.source_binding(source)
             for identifier, source in self.sources.items()
         }
+
+    def supply_reference(self, source: SourceReference, kind: str) -> str:
+        existing = self.sources.get(source.id)
+        identifier = (
+            f"{source.id}@{source.revision}"
+            if existing is not None and existing.revision != source.revision
+            else source.id
+        )
+        self.sources[identifier] = source
+        self.source_kinds[identifier] = kind
+        return identifier
+
+    def citations(self) -> tuple[dict[str, object], ...]:
+        return tuple(
+            {
+                "id": identifier,
+                "reference": source,
+                "kind": self.source_kinds[identifier],
+            }
+            for identifier, source in self.sources.items()
+        )
 
     def source_binding(self, source: SourceReference) -> tuple[object, ...]:
         document = self.retrieval.index.document(source.id.split("#L", 1)[0])
@@ -235,7 +271,38 @@ class CompanionTools:
         self.guard()
         match name:
             case "current_work_context":
-                ToolInput.model_validate(arguments)
+                request = ContextInput.model_validate(arguments)
+                if request.consideration_id is not None:
+                    record = next(
+                        (
+                            item
+                            for item in self.memory.coordination.considerations()
+                            if item.id == request.consideration_id
+                        ),
+                        None,
+                    )
+                    if (
+                        record is None
+                        or self.authority.pass_id is not None
+                        and record.candidate_id
+                        not in {
+                            identifier for identifier, _ in self.authority.candidates
+                        }
+                    ):
+                        raise ValueError(
+                            "The consideration does not belong to the selected work"
+                        )
+                    citations = []
+                    for source in record.sources:
+                        identifier = self.supply_reference(
+                            source, self.source_kind(source)
+                        )
+                        self.bindings[identifier] = self.source_binding(source)
+                        citations.append({"id": identifier, "reference": source})
+                    return {
+                        "consideration": record,
+                        "citation_sources": tuple(citations),
+                    }
                 if self.authority.pass_id is not None:
                     return self.brief
                 return self.context.brief(
@@ -260,7 +327,36 @@ class CompanionTools:
                 return result
             case "relevant_changes":
                 request = ChangesInput.model_validate(arguments)
-                return self.retrieval.changes(request.checkpoint)
+                selection = select_work(
+                    self.brief.scope,
+                    self.search_context.references,
+                    self.memory.work_facts(),
+                )
+                changes, omitted = self.context.changes(selection, request.checkpoint)
+                citations = []
+                for change in changes:
+                    document = self.retrieval.index.document(
+                        change.source_id, change.revision
+                    )
+                    if document is not None:
+                        identifier = self.supply_reference(
+                            document.source, document.kind
+                        )
+                        self.bindings[identifier] = self.source_binding(document.source)
+                        citations.append(
+                            {
+                                "id": identifier,
+                                "reference": document.source,
+                                "kind": document.kind,
+                            }
+                        )
+                return {
+                    "changes": changes,
+                    "changes_omitted": omitted,
+                    "history_since": request.checkpoint,
+                    "checkpoint": self.retrieval.index.checkpoint(),
+                    "citation_sources": tuple(citations),
+                }
             case "record_note":
                 return self._record(RecordNoteInput.model_validate(arguments))
             case "revise_note":
@@ -374,7 +470,7 @@ class CompanionTools:
             (
                 "current_work_context",
                 "Read the current work brief, scoped instructions, corrections, active and deferred work, source map, freshness, and unknowns.",
-                ToolInput,
+                ContextInput,
             ),
             (
                 "context_search",

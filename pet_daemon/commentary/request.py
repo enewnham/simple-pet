@@ -32,6 +32,7 @@ from ..work.narrative import (
     semantic_revision,
 )
 from ..work.stories import SessionContribution, WorkStory
+from . import care
 from .citations import Citations
 from .context import (
     CommentaryContext,
@@ -643,7 +644,8 @@ class SpeechConditions(BaseModel):
         if self.selection.situation in CARE_SITUATIONS:
             sleeping = self.context.moment.sleeping if self.context.moment else False
             return snapshot.sleeping == sleeping and not any(
-                session.turn_active for session in snapshot.sessions
+                session.turn_active and not session.activity_uncertain
+                for session in snapshot.sessions
             )
         if self.selection.situation == SpeechSituation.CLICK_IDLE:
             return not any(
@@ -1093,6 +1095,43 @@ class PromptBuilder:
                 if narrative is not None and selection.subject is not None
                 else None,
             ),
+        )
+
+    def prepare_care(
+        self,
+        snapshot: PetContext,
+        selection: AttentionSelection,
+        make_request: RequestFactory,
+        recent: Sequence[str],
+    ) -> CommentaryRequest:
+        context = commentary_facts(snapshot, selection, self.clock())
+        system: list[TextBlockParam] = [
+            {
+                "type": "text",
+                "text": render("system/care.jinja", persona=self.config.persona),
+            }
+        ]
+        directions = {
+            SpeechSituation.CARE_EXERCISE: "a little stretch break",
+            SpeechSituation.CARE_ATTENTION: "a casual greeting",
+            SpeechSituation.CARE_CONSTERNATION: "a small reaction to a quiet stretch",
+        }
+        request = make_request(
+            {
+                "care": directions[selection.situation],
+                "sleeping": snapshot.sleeping,
+                "recent_pet_remarks": tuple(text[:160] for text in recent[-2:]),
+            },
+            system,
+            response=care.Response,
+        )
+        request["max_tokens"] = min(request["max_tokens"], 128)
+        return CommentaryRequest(
+            selection=selection,
+            context=context,
+            request=request,
+            citations=context.citations,
+            conditions=SpeechConditions(selection=selection, context=context),
         )
 
     def payload(

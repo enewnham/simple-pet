@@ -4,7 +4,9 @@ from dataclasses import dataclass, replace
 from .config import ScheduleConfig
 from .models import (
     Candidate,
+    Consideration,
     DelegatedTask,
+    InquiryAttempt,
     Operation,
     OperationKind,
     OperationOutcome,
@@ -58,6 +60,90 @@ def has_new_evidence(candidate: Candidate) -> bool:
     return candidate.evidence_revision != candidate.serviced_evidence_revision
 
 
+def latest_consideration(
+    candidate: Candidate, records: tuple[Consideration, ...]
+) -> Consideration | None:
+    matching = [record for record in records if record.candidate_id == candidate.id]
+    return (
+        max(matching, key=lambda record: record.candidate_revision)
+        if matching
+        else None
+    )
+
+
+def due_request(
+    candidate: Candidate, responsibility: Responsibility | None, now: float
+) -> float | None:
+    requested = [candidate.deferred_until]
+    if responsibility is not None:
+        requested.extend((responsibility.due_at, responsibility.followup_at))
+    return max(
+        (value for value in requested if value is not None and value <= now),
+        default=None,
+    )
+
+
+def can_attempt(
+    candidate: Candidate,
+    responsibility: Responsibility | None,
+    prior: Consideration | None,
+    attempts: tuple[InquiryAttempt, ...],
+    instruction_revision: int,
+    now: float,
+    config: ScheduleConfig,
+    last_instruction_at: float | None = None,
+) -> bool:
+    due = due_request(candidate, responsibility, now)
+    failures = []
+    for attempt in attempts:
+        if not attempt.error or candidate.id not in attempt.candidate_ids:
+            continue
+        if attempt.selected_candidate_id not in (None, candidate.id):
+            continue
+        legacy = not attempt.evidence_revisions
+        if (
+            legacy
+            and last_instruction_at is not None
+            and last_instruction_at > attempt.created_at
+        ):
+            continue
+        if not legacy and attempt.instruction_revision != instruction_revision:
+            continue
+        evidence = dict(attempt.evidence_revisions).get(candidate.id)
+        if evidence is None:
+            if candidate.evidence_revision != 1:
+                continue
+        elif evidence != candidate.evidence_revision:
+            continue
+        if prior is not None and attempt.created_at <= prior.considered_at:
+            continue
+        if due is not None and attempt.created_at < due:
+            continue
+        failures.append(attempt)
+    if not failures:
+        return True
+    if len(failures) >= 2:
+        return False
+    last = max(attempt.completed_at or attempt.created_at for attempt in failures)
+    return now >= last + config.failure_retry_seconds
+
+
+def provider_failed(
+    attempts: tuple[InquiryAttempt, ...], last_instruction_at: float | None
+) -> bool:
+    return any(
+        attempt.error_kind
+        in (
+            "billing_error",
+            "authentication_failed",
+            "authentication_error",
+            "invalid_api_key",
+        )
+        and (last_instruction_at is None or last_instruction_at <= attempt.created_at)
+        for attempt in attempts
+    )
+
+
 def eligible_candidates(
     candidates: tuple[Candidate, ...],
     responsibilities: tuple[Responsibility, ...],
@@ -65,6 +151,7 @@ def eligible_candidates(
     operations: tuple[Operation, ...],
     now: float,
     config: ScheduleConfig,
+    considerations: tuple[Consideration, ...] = (),
 ) -> tuple[Candidate, ...]:
     responsibility_by_id = {record.id: record for record in responsibilities}
     task_by_id = {task.id: task for task in tasks}
@@ -86,14 +173,23 @@ def eligible_candidates(
             continue
         if candidate.responsibility_id in blocked:
             continue
-        changed = has_new_evidence(candidate)
+        prior = latest_consideration(candidate, considerations)
+        considered = prior.evidence_revision if prior is not None else None
+        changed = (
+            candidate.evidence_revision != considered
+            if considered is not None
+            else has_new_evidence(candidate)
+        )
         if candidate.waiting_on in ("human", "handled", "not_relevant") and not changed:
             continue
         if candidate.deferred_until is not None and now < candidate.deferred_until:
             continue
-        if now < review_due(candidate, config) and not changed:
-            continue
-        if changed or now >= review_due(candidate, config):
+        due = due_request(candidate, responsibility, now)
+        considered_at = (
+            prior.considered_at if prior is not None else candidate.last_serviced_at
+        )
+        timed = due is not None and (considered_at is None or considered_at < due)
+        if changed or timed:
             eligible.append(candidate)
     return tuple(eligible)
 

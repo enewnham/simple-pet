@@ -991,8 +991,8 @@ class Sessions:
         for session in self.by_id.values():
             session.activity_uncertain = bool(
                 session.active
-                and session.presence != ProcessStatus.ALIVE
                 and now - session.last_hook_at >= self.quiet_seconds
+                and not (session.presence == ProcessStatus.ALIVE and session.calls)
             )
 
     def process_owners(self) -> set[ProcessIdentity]:

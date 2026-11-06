@@ -4,6 +4,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
+from pet_daemon.companion.usage import SdkFailure
 from pet_daemon.coordination.config import ScheduleConfig
 from pet_daemon.coordination.models import (
     Candidate,
@@ -11,6 +12,7 @@ from pet_daemon.coordination.models import (
     CandidateDecision,
     DelegatedTask,
     Disposition,
+    InquiryAttempt,
     InquiryPass,
     InquiryResult,
     Instruction,
@@ -65,12 +67,26 @@ class CoordinationLoopTests(unittest.IsolatedAsyncioTestCase):
         self.temporary.cleanup()
 
     def quiet(self, project: str = "quiet") -> Candidate:
+        self.memory.coordination.save_instruction(
+            Instruction("quiet-adoption", "Review the decision when due", project, 900)
+        )
+        self.memory.coordination.save_responsibility(
+            Responsibility(
+                "quiet-obligation",
+                "Review the decision",
+                project,
+                "quiet-adoption",
+                900,
+                followup_at=980,
+            )
+        )
         candidate = Candidate(
             "quiet-question",
             "Does the earlier decision still apply?",
             project,
             900,
             project_id=project,
+            responsibility_id="quiet-obligation",
             last_serviced_at=970,
             next_review_at=980,
             serviced_evidence_revision=1,
@@ -133,6 +149,429 @@ class CoordinationLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(latest.first_queued_at, queued.first_queued_at)
         await self.coordinator.run_pass()
         self.assertEqual(len(self.requests), 2)
+
+    async def test_source_no_finding_ignores_expired_dates_and_unchanged_polls_for_eight_hours(
+        self,
+    ) -> None:
+        cause = CandidateCause("source", "checkout", "one", self.now)
+        candidate = self.coordinator.queue(
+            "Did the checkout change anything?", "parser", cause
+        )
+
+        async def reason(request: InquiryPass) -> InquiryResult:
+            self.requests.append(request)
+            return InquiryResult(
+                request.id,
+                (
+                    CandidateDecision(
+                        candidate.id,
+                        Disposition.NO_FINDING,
+                        "No new finding",
+                        next_review_at=self.now - 100,
+                    ),
+                ),
+            )
+
+        self.coordinator.reason = reason
+        self.coordinator.source_checkpoint = lambda: 42
+        await self.coordinator.run_pass()
+        for _ in range(960):
+            self.now += 30
+            self.coordinator.queue(
+                candidate.question,
+                candidate.scope,
+                replace(cause, observed_at=self.now),
+            )
+            self.assertIsNone(await self.coordinator.run_pass())
+        self.assertEqual(len(self.requests), 1)
+        current = self.memory.coordination.candidate(candidate.id)
+        assert current is not None
+        self.assertIsNone(current.next_review_at)
+        self.assertEqual(
+            self.memory.coordination.considerations(candidate.id)[0].source_checkpoint,
+            42,
+        )
+        self.coordinator.queue(
+            candidate.question,
+            candidate.scope,
+            replace(cause, source_revision="two", observed_at=self.now),
+        )
+        await self.coordinator.run_pass()
+        self.assertEqual(len(self.requests), 2)
+
+    async def test_failure_retries_are_bounded_for_evidence_across_restart(
+        self,
+    ) -> None:
+        cause = CandidateCause("source", "checkout", "one", self.now)
+        candidate = self.coordinator.queue("Inspect checkout", "parser", cause)
+
+        async def fail(request: InquiryPass) -> InquiryResult:
+            self.requests.append(request)
+            raise ValueError("A source reference must come from supplied evidence")
+
+        self.coordinator.reason = fail
+        with self.assertRaises(ValueError):
+            await self.coordinator.run_pass()
+        self.now += self.config.failure_retry_seconds - 1
+        self.assertIsNone(await self.coordinator.run_pass())
+        self.now += 1
+        with self.assertRaises(ValueError):
+            await self.coordinator.run_pass()
+        await self.coordinator.close()
+        self.memory.close()
+        self.memory = Memory(
+            Path(self.temporary.name) / "memory.sqlite3",
+            "fixture",
+            clock=lambda: self.now,
+        )
+        self.coordinator = Coordinator(
+            self.memory.coordination, self.config, lambda: self.now, fail
+        )
+        for _ in range(960):
+            self.now += 30
+            self.assertIsNone(await self.coordinator.run_pass())
+        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(self.memory.coordination.considerations(), ())
+        self.coordinator.queue(
+            candidate.question,
+            candidate.scope,
+            replace(cause, source_revision="two", observed_at=self.now),
+        )
+        with self.assertRaises(ValueError):
+            await self.coordinator.run_pass()
+        self.assertEqual(len(self.requests), 3)
+
+    async def test_billing_failure_has_no_automatic_retry_and_new_user_direction_can_retry(
+        self,
+    ) -> None:
+        self.coordinator.queue(
+            "Inspect checkout",
+            "parser",
+            CandidateCause("source", "checkout", "one", self.now),
+        )
+
+        async def fail(request: InquiryPass) -> InquiryResult:
+            self.requests.append(request)
+            raise SdkFailure("billing_error", candidate_id=request.candidates[0].id)
+
+        self.coordinator.reason = fail
+        with self.assertRaises(SdkFailure):
+            await self.coordinator.run_pass()
+        self.now += 8 * 3600
+        self.assertIsNone(await self.coordinator.run_pass())
+        self.coordinator.queue(
+            "Inspect checkout",
+            "parser",
+            CandidateCause("source", "checkout", "two", self.now),
+        )
+        self.coordinator.queue(
+            "Inspect another project",
+            "other",
+            CandidateCause("source", "other-checkout", "one", self.now),
+        )
+        self.assertIsNone(await self.coordinator.run_pass())
+        self.memory.coordination.save_instruction(
+            Instruction(
+                "human-retry", "Please try the investigation again", "parser", self.now
+            )
+        )
+        with self.assertRaises(SdkFailure):
+            await self.coordinator.run_pass()
+        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(
+            self.memory.coordination.attempts()[0].error_kind, "billing_error"
+        )
+
+    async def test_adopted_due_and_explicit_later_are_consumed_once_despite_expired_model_dates(
+        self,
+    ) -> None:
+        store = self.memory.coordination
+        store.save_instruction(
+            Instruction("adopt", "Review on the agreed date", "parser", self.now)
+        )
+        store.save_responsibility(
+            Responsibility(
+                "goal",
+                "Review parser",
+                "parser",
+                "adopt",
+                self.now,
+                followup_at=self.now + 10,
+            )
+        )
+        candidate = Candidate(
+            "due-goal",
+            "Review parser",
+            "parser",
+            self.now - 100,
+            responsibility_id="goal",
+            last_serviced_at=self.now - 50,
+            serviced_evidence_revision=1,
+            next_review_at=self.now - 10,
+        )
+        store.save_candidate(candidate)
+        self.assertIsNone(await self.coordinator.run_pass())
+        self.now += 10
+        await self.coordinator.run_pass()
+        self.now += 8 * 3600
+        self.assertIsNone(await self.coordinator.run_pass())
+        self.assertEqual(len(self.requests), 1)
+        await self.coordinator.close()
+        self.memory.close()
+        self.memory = Memory(
+            Path(self.temporary.name) / "memory.sqlite3",
+            "fixture",
+            clock=lambda: self.now,
+        )
+        self.coordinator = Coordinator(
+            self.memory.coordination,
+            self.config,
+            lambda: self.now,
+            self.coordinator.reason,
+        )
+        store = self.memory.coordination
+        self.assertIsNone(await self.coordinator.run_pass())
+        current = store.candidate(candidate.id)
+        assert current is not None
+        store.save_candidate(
+            replace(current, revision=current.revision + 1, deferred_until=self.now + 5)
+        )
+        self.assertIsNone(await self.coordinator.run_pass())
+        self.now += 5
+        await self.coordinator.run_pass()
+        self.now += 3600
+        self.assertIsNone(await self.coordinator.run_pass())
+        self.assertEqual(len(self.requests), 2)
+
+    async def test_legacy_unchanged_failures_stop_without_schema_reset_or_false_service(
+        self,
+    ) -> None:
+        candidate = self.coordinator.queue(
+            "Inspect checkout",
+            "parser",
+            CandidateCause("source", "checkout", "one", self.now),
+        )
+        store = self.memory.coordination
+        store.save_instruction(
+            Instruction(
+                "existing-direction", "Inspect this checkout", "parser", self.now - 60
+            )
+        )
+        for index in range(3):
+            store.save_attempt(
+                InquiryAttempt(
+                    f"legacy-{index}",
+                    self.now - 30 + index,
+                    (candidate.id,),
+                    completed_at=self.now - 20 + index,
+                    error="Legacy citation validation failure",
+                )
+            )
+        self.now += 3600
+        self.assertIsNone(await self.coordinator.run_pass())
+        self.assertEqual(self.requests, [])
+        self.assertEqual(len(store.attempts()), 3)
+        self.assertEqual(store.considerations(), ())
+        self.assertEqual(
+            self.memory.db.execute("PRAGMA user_version").fetchone()[0], 27
+        )
+
+    async def test_selected_failure_does_not_exhaust_unselected_work_or_advance_its_checkpoint(
+        self,
+    ) -> None:
+        a = self.coordinator.queue(
+            "Inspect A", "a", CandidateCause("source", "a", "one", self.now)
+        )
+        b = self.coordinator.queue(
+            "Inspect B", "b", CandidateCause("source", "b", "one", self.now)
+        )
+        outcomes = []
+        self.coordinator.finished = lambda identifier, outcome, error: outcomes.append(
+            (identifier, outcome, error)
+        )
+        self.coordinator.source_checkpoint = lambda: 42
+
+        async def reason(request: InquiryPass) -> InquiryResult:
+            self.requests.append(request)
+            if any(candidate.id == a.id for candidate in request.candidates):
+                raise SdkFailure("validation", candidate_id=a.id)
+            return InquiryResult(
+                request.id,
+                (
+                    CandidateDecision(
+                        b.id, Disposition.NO_FINDING, "B has no new finding"
+                    ),
+                ),
+            )
+
+        self.coordinator.reason = reason
+        with self.assertRaises(SdkFailure):
+            await self.coordinator.run_pass()
+        await self.coordinator.run_pass()
+        self.assertEqual(
+            tuple(candidate.id for candidate in self.requests[-1].candidates), (b.id,)
+        )
+        self.assertEqual(self.memory.coordination.considerations(a.id), ())
+        self.assertEqual(
+            self.memory.coordination.considerations(b.id)[0].source_checkpoint, 42
+        )
+        self.assertEqual(
+            [outcome for _, outcome, _ in outcomes], ["failed", "accepted"]
+        )
+
+    async def test_selected_cancellation_preserves_unassessed_peers_retry_budget(
+        self,
+    ) -> None:
+        self.coordinator.config = self.config.model_copy(
+            update={"review_seconds": 100_000, "max_deferral_seconds": 200_000}
+        )
+        a = self.coordinator.queue(
+            "Inspect A", "a", CandidateCause("source", "a", "one", self.now)
+        )
+        b = self.coordinator.queue(
+            "Inspect B", "b", CandidateCause("source", "b", "one", self.now)
+        )
+
+        async def cancel(request: InquiryPass) -> InquiryResult:
+            self.requests.append(request)
+            if all(candidate.id != b.id for candidate in request.candidates):
+                return InquiryResult(
+                    request.id,
+                    (
+                        CandidateDecision(
+                            a.id, Disposition.NO_FINDING, "A is assessed independently"
+                        ),
+                    ),
+                )
+            interrupted = asyncio.CancelledError()
+            interrupted.__dict__["candidate_id"] = b.id
+            raise interrupted
+
+        self.coordinator.reason = cancel
+        for _ in range(2):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.coordinator.run_pass()
+            self.now += self.config.failure_retry_seconds
+        self.assertEqual(
+            {
+                attempt.selected_candidate_id
+                for attempt in self.memory.coordination.attempts()
+            },
+            {b.id},
+        )
+        await self.coordinator.run_pass()
+        self.assertEqual(
+            tuple(candidate.id for candidate in self.requests[-1].candidates), (a.id,)
+        )
+
+    async def test_cancelled_effect_retains_the_returned_selection_without_servicing_peers(
+        self,
+    ) -> None:
+        self.coordinator.config = self.config.model_copy(
+            update={"review_seconds": 100_000, "max_deferral_seconds": 200_000}
+        )
+        store = self.memory.coordination
+        store.save_instruction(Instruction("adopt", "Review B", "b", self.now))
+        store.save_responsibility(
+            Responsibility(
+                "b-work", "Review B", "b", "adopt", self.now, permissions=("launch",)
+            )
+        )
+        a = self.coordinator.queue(
+            "Inspect A", "a", CandidateCause("source", "a", "one", self.now)
+        )
+        b = self.coordinator.queue(
+            "Inspect B",
+            "b",
+            CandidateCause("source", "b", "one", self.now),
+            responsibility_id="b-work",
+        )
+        entered = asyncio.Event()
+
+        async def reason(request: InquiryPass) -> InquiryResult:
+            selected = (
+                b
+                if any(candidate.id == b.id for candidate in request.candidates)
+                else a
+            )
+            action = (
+                TaskAction(
+                    "launch-b",
+                    OperationKind.LAUNCH,
+                    "b-work",
+                    objective="Review B",
+                    expected_result="Review evidence",
+                    repository="b",
+                )
+                if selected == b
+                else None
+            )
+            return InquiryResult(
+                request.id,
+                (
+                    CandidateDecision(
+                        selected.id,
+                        Disposition.INVESTIGATE,
+                        "Review selected work",
+                        action=action,
+                    ),
+                ),
+            )
+
+        async def effect(action: TaskAction) -> Operation:
+            entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("The held effect must be cancelled")
+
+        self.coordinator.reason = reason
+        self.coordinator.effect = effect
+        for _ in range(2):
+            entered.clear()
+            task = asyncio.create_task(self.coordinator.run_pass())
+            await entered.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.now += self.config.failure_retry_seconds
+        self.assertEqual(
+            {attempt.selected_candidate_id for attempt in store.attempts()}, {b.id}
+        )
+        self.assertEqual(store.considerations(), ())
+        await self.coordinator.run_pass()
+        self.assertEqual(
+            tuple(record.candidate_id for record in store.considerations()), (a.id,)
+        )
+
+    async def test_deferred_model_output_waits_for_evidence_without_claiming_service(
+        self,
+    ) -> None:
+        candidate = self.coordinator.queue(
+            "Inspect checkout",
+            "parser",
+            CandidateCause("source", "checkout", "one", self.now),
+        )
+
+        async def reason(request: InquiryPass) -> InquiryResult:
+            return InquiryResult(
+                request.id,
+                (
+                    CandidateDecision(
+                        candidate.id,
+                        Disposition.DEFER,
+                        "No useful step",
+                        next_review_at=self.now - 100,
+                    ),
+                ),
+            )
+
+        self.coordinator.reason = reason
+        await self.coordinator.run_pass()
+        self.now += 8 * 3600
+        self.assertIsNone(await self.coordinator.run_pass())
+        current = self.memory.coordination.candidate(candidate.id)
+        assert current is not None
+        self.assertIsNone(current.last_serviced_at)
+        self.assertEqual(len(self.memory.coordination.considerations()), 1)
 
     async def test_direct_priority_override_leaves_overdue_work_unserviced_and_visible(
         self,
@@ -239,6 +678,14 @@ class CoordinationLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(current.last_serviced_at)
 
     async def test_far_future_review_cannot_bypass_maximum_deferral(self) -> None:
+        self.memory.coordination.save_instruction(
+            Instruction("due-adoption", "Review due work", "a", 900)
+        )
+        self.memory.coordination.save_responsibility(
+            Responsibility(
+                "due-work", "Review due work", "a", "due-adoption", 900, followup_at=980
+            )
+        )
         candidate = Candidate(
             "old",
             "Review quiet work",
@@ -247,6 +694,7 @@ class CoordinationLoopTests(unittest.IsolatedAsyncioTestCase):
             last_serviced_at=970,
             next_review_at=5000,
             serviced_evidence_revision=1,
+            responsibility_id="due-work",
         )
         self.memory.coordination.save_candidate(candidate)
         await self.coordinator.run_pass()
@@ -392,6 +840,7 @@ class CoordinationLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.memory.coordination.attempts()[0].error, "Interrupted")
         started.clear()
         await self.coordinator.resume()
+        self.now += self.config.failure_retry_seconds
         self.coordinator.tick()
         await started.wait()
         self.assertEqual(len(self.memory.coordination.attempts()), 2)

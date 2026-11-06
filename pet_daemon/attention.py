@@ -35,7 +35,6 @@ log = get_logger("pet-daemon")
 
 COMPLETION_GRACE_SECONDS = 300
 IDLE_REFLECTION_DELAY_SECONDS = 300
-IDLE_REFLECTION_INTERVAL_SECONDS = 900
 COMPLETION_REFLECTION_SECONDS = 900
 
 
@@ -284,7 +283,9 @@ class Attention:
             if session.last_hook_at is not None
             else session.quiet_seconds < self.config.activity_fresh_seconds
         )
-        return session.presence == ProcessStatus.ALIVE or has_recent_activity
+        return has_recent_activity or (
+            session.presence == ProcessStatus.ALIVE and bool(session.active_tools)
+        )
 
     def is_update_eligible(
         self, update: WorkUpdate, snapshot: PetContext, *, check_in: bool = False
@@ -748,12 +749,10 @@ class Attention:
                 trigger.reaction
             ):
                 return AttentionRequest(reason=reason, trigger=trigger)
-        live_check_in = any(
-            session.id in check_in
-            and (session.waiting_for_input or session.active_tools)
+        if any(
+            session.id in check_in and self.is_working(session)
             for session in snapshot.sessions
-        )
-        if live_check_in or check_in and not self.is_quiet(snapshot):
+        ):
             return AttentionRequest(
                 reason=SpeechReason.CHECK_IN, eligible=frozenset(check_in)
             )
@@ -765,20 +764,8 @@ class Attention:
                 self.is_routine_eligible(subject, snapshot) for subject in snapshot.work
             ):
                 return AttentionRequest(reason=SpeechReason.ROUTINE)
-        if (
-            self.is_quiet(snapshot)
-            and _conversation(snapshot) is not None
-            and self.wall_clock() - self.last_reflection_at
-            >= IDLE_REFLECTION_INTERVAL_SECONDS
-        ):
-            self.last_reflection_at = self.wall_clock()
-            conversation = _conversation(snapshot)
-            assert conversation is not None
-            history = self.histories.setdefault(conversation.id, AttentionHistory())
-            history.last_reflection_at = self.last_reflection_at
-            return AttentionRequest(reason=SpeechReason.CHECK_IN, reflection=True)
         if care is not None and not any(
-            session.turn_active for session in snapshot.sessions
+            self.is_working(session) for session in snapshot.sessions
         ):
             return AttentionRequest(
                 reason=SpeechReason.CARE, trigger=CareTrigger(care=care)

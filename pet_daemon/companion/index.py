@@ -30,11 +30,17 @@ class SourceIndex:
         self.pet = pet
         self.changed = changed
 
-    def documents(self, *, history: bool = False) -> tuple[Document, ...]:
+    def documents(
+        self, *, history: bool = False, provider_prefix: str | None = None
+    ) -> tuple[Document, ...]:
         predicate = "" if history else " AND active=1"
+        parameters = (self.pet,)
+        if provider_prefix is not None:
+            predicate += " AND provider LIKE ?"
+            parameters = (self.pet, provider_prefix + "%")
         rows = self.db.execute(
             f"SELECT payload,active FROM companion_documents WHERE pet=?{predicate}",
-            (self.pet,),
+            parameters,
         )
         adapter = TypeAdapter(Document)
         result = []
@@ -187,13 +193,24 @@ class SourceIndex:
         return row["checkpoint"] or 0
 
     def document(self, source_id: str, revision: str | None = None) -> Document | None:
-        matches = [
+        predicate = " AND revision=?" if revision is not None else " AND active=1"
+        parameters = (
+            (self.pet, source_id, revision)
+            if revision is not None
+            else (self.pet, source_id)
+        )
+        row = self.db.execute(
+            f"SELECT payload,active FROM companion_documents WHERE pet=? AND source_id=?{predicate}",
+            parameters,
+        ).fetchone()
+        if row is None:
+            return None
+        document = TypeAdapter(Document).validate_json(row["payload"])
+        return (
             document
-            for document in self.documents(history=revision is not None)
-            if document.source.id == source_id
-            and (revision is None or document.source.revision == revision)
-        ]
-        return matches[0] if matches else None
+            if row["active"]
+            else replace(document, source=replace(document.source, available=False))
+        )
 
     def current(
         self,

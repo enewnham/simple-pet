@@ -266,6 +266,8 @@ class Daemon:
                 available_coding_slots=self.desktop.available_coding_slots
                 if self.desktop is not None
                 else None,
+                source_checkpoint=self.companion.index.checkpoint,
+                finished=self.companion.record_inquiry_outcome,
             )
             if self.companion is not None
             else None
