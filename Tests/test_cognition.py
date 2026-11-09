@@ -464,8 +464,8 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
     async def test_sends_only_the_instruction_for_the_current_reason(self) -> None:
         directions = {
             SpeechReason.PROMPT: "Reply directly to the developer about our work.",
-            SpeechReason.ROUTINE: "React briefly to one supplied activity detail",
-            SpeechReason.COMPLETION: "React briefly to the reported execution outcome above.",
+            SpeechReason.ROUTINE: "The developer can already read the work in the agent conversation",
+            SpeechReason.COMPLETION: "The developer can already read the outcome in the agent conversation.",
             SpeechReason.FAILURE: "React briefly to the observed failed call.",
             SpeechReason.EXPLICIT: "Give a brief reaction to the supplied context above.",
         }
@@ -781,7 +781,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
             ),
             (
                 "waiting",
-                "The question or approval request above remains open.",
+                "The open question or approval request is available in the agent conversation.",
             ),
         ]
         for state, direction in cases:
