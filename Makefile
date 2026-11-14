@@ -1,4 +1,4 @@
-.PHONY: setup build importer run demo install-agent uninstall-agent restart-agent status-agent test test-python test-swift check lint lint-python lint-swift complexity complexity-python complexity-swift format assets clean
+.PHONY: setup build importer run demo install-agent uninstall-agent restart-agent status-agent install-mcp-agent uninstall-mcp-agent restart-mcp-agent status-mcp-agent install-tunnel-agent uninstall-tunnel-agent restart-tunnel-agent status-tunnel-agent test test-python test-swift check lint lint-python lint-swift complexity complexity-python complexity-swift format assets clean
 
 SWIFT_FLAGS ?= --disable-sandbox
 PYTHON_TEST_WORKERS ?= 4
@@ -40,6 +40,30 @@ restart-agent:
 
 status-agent:
 	.venv/bin/python scripts/pet-agent.py status
+
+install-mcp-agent: setup
+	.venv/bin/python scripts/pet-mcp-agent.py install $(ARGS)
+
+uninstall-mcp-agent:
+	.venv/bin/python scripts/pet-mcp-agent.py uninstall
+
+restart-mcp-agent:
+	.venv/bin/python scripts/pet-mcp-agent.py restart
+
+status-mcp-agent:
+	.venv/bin/python scripts/pet-mcp-agent.py status
+
+install-tunnel-agent: setup
+	.venv/bin/python -m scripts.pet-tunnel-agent install $(ARGS)
+
+uninstall-tunnel-agent:
+	.venv/bin/python -m scripts.pet-tunnel-agent uninstall
+
+restart-tunnel-agent:
+	.venv/bin/python -m scripts.pet-tunnel-agent restart
+
+status-tunnel-agent:
+	.venv/bin/python -m scripts.pet-tunnel-agent status
 
 ifneq ($(strip $(ARGS)),)
 test:
@@ -97,6 +121,7 @@ check: lint test
 	bash -n scripts/fetch-assets.sh
 	bash -n examples/pet-run
 	bash -n bin/pet-daemon
+	bash -n bin/pet-mcp
 	bash -n bin/pet-demo
 	bash -n bin/pet-notify
 	bash -n scripts/pet-hook

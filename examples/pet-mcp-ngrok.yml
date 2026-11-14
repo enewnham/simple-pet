@@ -1,0 +1,20 @@
+on_http_request:
+  - expressions:
+      - >-
+        !('x-pet-tunnel-key' in req.headers) || req.headers['x-pet-tunnel-key'] != [__PET_TUNNEL_KEY__]
+    actions:
+      - type: deny
+        config:
+          status_code: 403
+  # __PET_TUNNEL_ROUTES__
+  - expressions:
+      - "req.url.path != '/mcp' || !(req.method in ['POST', 'GET', 'DELETE'])"
+    actions:
+      - type: deny
+        config:
+          status_code: 403
+  - actions:
+      - type: add-headers
+        config:
+          headers:
+            host: "127.0.0.1:18765"

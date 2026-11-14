@@ -19,6 +19,7 @@ from .behavior.sprites import Pack
 from .commentary import AnthropicModelClient, Cognition
 from .config import Config
 from .logging import get_logger
+from .mcp_sessions import SessionPublisher
 from .runtime import RandomSource
 from .sessions.processes import ProcessTracker
 from .sessions.reactions import SessionReactions
@@ -152,6 +153,9 @@ class Daemon:
                 memory.collection_targets()
             ),
         )
+        self.session_publisher = SessionPublisher(
+            config.memory_file, self.pack.pet, clock, wall_clock
+        )
         self.application.reconcile_targets()
         self.transport: asyncio.DatagramTransport | None = None
         self.identity: tuple[int, int] | None = None
@@ -233,7 +237,19 @@ class Daemon:
     async def loop(self) -> None:
         while True:
             self.application.tick()
+            self.publish_sessions()
             await asyncio.sleep(0.05)
+
+    def publish_sessions(self) -> None:
+        if not self.session_publisher.is_due():
+            return
+        try:
+            self.session_publisher.publish(
+                self.application.sessions.activity().sessions,
+                suspended=self.application.suspended,
+            )
+        except OSError as error:
+            log.exception("mcp.sessions_publish_failed", error=str(error))
 
     async def close(self) -> None:
         log.info(
@@ -262,6 +278,7 @@ class Daemon:
         if self.identity:
             unlink_owned(self.config.daemon_socket, self.identity)
             self.identity = None
+        self.session_publisher.close()
         self.application.memory.close()
 
     async def run(self) -> None:

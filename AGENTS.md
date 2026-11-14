@@ -80,6 +80,16 @@ through summarization.
   [Speech repetition checks](pet_daemon/commentary/repetition.py) use Apple's sentence embeddings through PyObjC.
 - **Renderer:** [Sources/PetCore/](Sources/PetCore/) defines events and socket
   handling. [Sources/PetOverlay/](Sources/PetOverlay/) contains the AppKit app and view.
+- **MCP:** [pet_daemon/mcp.py](pet_daemon/mcp.py) exposes bounded work context,
+  report search, passage reads, and source changes to external agents. Its only writes
+  are attributed workstream marks, which [pet_daemon/workstream_marks.py](pet_daemon/workstream_marks.py)
+  stores as append-only events beside captured evidence.
+  [bin/pet-mcp](bin/pet-mcp) starts the stdio server against local stored evidence.
+  [pet_daemon/mcp_http.py](pet_daemon/mcp_http.py) supplies authenticated loopback
+  HTTP transport and private token files. [scripts/pet-mcp-agent.py](scripts/pet-mcp-agent.py)
+  manages its user LaunchAgent.
+  [pet_daemon/tunnel.py](pet_daemon/tunnel.py) renders the private ngrok header policy.
+  [scripts/pet-tunnel-agent.py](scripts/pet-tunnel-agent.py) manages the persistent tunnel.
 - **Configuration and sprites:** [pet_daemon/config.py](pet_daemon/config.py) and
   [pet_daemon/behavior/sprites.py](pet_daemon/behavior/sprites.py) load settings and packs.
   [pet.config.example.json](pet.config.example.json) lists settings.
