@@ -2674,6 +2674,131 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("The failed operation was command execution.", snapshot)
         self.assertNotIn("Exit code", snapshot)
 
+    async def test_notification_hook_delivers_from_daemon_socket(self) -> None:
+        from pet_daemon.notifications import NotifyConfig
+
+        await self.daemon.close()
+        output = Path(self.temp.name) / "notification.json"
+        self.config.notify = NotifyConfig(
+            command=("/bin/sh", "-c", 'cat > "$1"', "notify", str(output))
+        )
+        self.daemon = Daemon(self.config, self.client)
+        await self.daemon.start()
+        self.send(
+            {
+                "kind": "event",
+                "source": "codex",
+                "session": "notify-session",
+                "event": "turn_done",
+                "progress": "Build completed",
+                "zmx_session": "work",
+                "tab_title": "Build",
+                "repo": self.temp.name,
+            }
+        )
+        for _ in range(100):
+            if output.exists() and output.stat().st_size:
+                break
+            await asyncio.sleep(0.01)
+        payload = json.loads(output.read_text())
+        self.assertEqual(payload["event"], "turn_done")
+        self.assertEqual(payload["last_assistant_message"], "Build completed")
+        self.assertEqual(payload["zmx_session"], "work")
+
+    async def test_permission_notifications_confirm_the_daemons_pending_request(
+        self,
+    ) -> None:
+        from pet_daemon.notifications import NotifyConfig
+
+        await self.daemon.close()
+        output = Path(self.temp.name) / "permission.json"
+        self.config.notify = NotifyConfig(
+            command=("/bin/sh", "-c", 'cat > "$1"', "notify", str(output)),
+            events=("permission_pending",),
+        )
+        self.daemon = Daemon(
+            self.config, self.client, clock=self.clock, wall_clock=self.wall_clock
+        )
+        await self.daemon.start()
+        self.use_clock()
+        self.event("intent", session="permission", source="codex", goal="Check work")
+        self.event(
+            "tool_start", session="permission", source="codex", call="auto", tool="Read"
+        )
+        self.event(
+            "waiting",
+            session="permission",
+            source="codex",
+            call="auto",
+            waiting_kind="permission_check",
+        )
+        key = SessionIdentity(source=SessionSource.CODEX, native_id="permission")
+        await self.wait_for(
+            lambda: (
+                key in self.daemon.application.sessions.by_id
+                and self.daemon.application.sessions.by_id[key].waiting
+            )
+        )
+        self.now += 2
+        self.event("tool_done", session="permission", source="codex", call="auto")
+        await self.wait_for(
+            lambda: not self.daemon.application.sessions.by_id[key].waiting
+        )
+        self.now += 6
+        await asyncio.sleep(0.1)
+        self.assertFalse(output.exists())
+        self.event(
+            "tool_start",
+            session="permission",
+            source="codex",
+            call="human",
+            tool="Bash",
+        )
+        self.event(
+            "waiting",
+            session="permission",
+            source="codex",
+            call="human",
+            waiting_kind="permission",
+        )
+        await self.wait_for(
+            lambda: self.daemon.application.sessions.by_id[key].waiting_call == "human"
+        )
+        self.now += 6
+        await self.wait_for(lambda: output.exists() and output.stat().st_size > 0)
+        payload = json.loads(output.read_text())
+        self.assertTrue(payload["needs_human"])
+        self.assertGreaterEqual(payload["elapsed_seconds"], 6)
+
+    async def test_notification_rules_resolve_marks_from_remembered_checkout(
+        self,
+    ) -> None:
+        from pet_daemon.notifications import NotifyConfig
+        from pet_daemon.workstream_marks import MarkPatch, thread_id
+
+        await self.daemon.close()
+        output = Path(self.temp.name) / "marked-notification.json"
+        self.config.notify = NotifyConfig(
+            command=("/bin/sh", "-c", 'cat > "$1"', "notify", str(output)),
+            rules=({"marks": {"status": "blocked"}},),
+        )
+        self.daemon = Daemon(self.config, self.client)
+        await self.daemon.start()
+        self.daemon.workstream_marks.append(
+            thread_id(str(Path(self.temp.name).resolve())),
+            MarkPatch(status="blocked"),
+            "companion",
+            "Needs help",
+        )
+        self.event(
+            "session_start", session="marked", source="codex", repo=self.temp.name
+        )
+        self.event("turn_done", session="marked", source="codex", progress="Needs help")
+        await self.wait_for(lambda: output.exists() and output.stat().st_size > 0)
+        payload = json.loads(output.read_text())
+        self.assertEqual(payload["workstream_marks"]["status"], "blocked")
+        self.assertEqual(payload["cwd"], str(Path(self.temp.name).resolve()))
+
     async def test_live_listener_is_preserved_and_owned_socket_cleans_up(self) -> None:
         path = self.config.daemon_socket
         with self.assertRaisesRegex(ValueError, "already listening"):

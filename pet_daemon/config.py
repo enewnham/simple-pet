@@ -13,6 +13,8 @@ from pydantic import (
     model_validator,
 )
 
+from .notifications import NotifyConfig
+
 DEFAULT_PERSONA = """
 You're a small, perceptive companion: curious, warm, quietly mischievous,
 and invested in the work.
@@ -151,6 +153,7 @@ class Config(BaseModel):
     completed_retention_seconds: Positive = 7200
     max_tokens: PositiveInt = 512
     behavior: BehaviorConfig = Field(default_factory=BehaviorConfig)
+    notify: NotifyConfig | None = None
     navigation: NavigationConfig = Field(default_factory=NavigationConfig)
 
     @classmethod

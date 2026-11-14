@@ -82,6 +82,9 @@ not an individual identity. Stdio calls record a local principal. No token is
 stored in mark history. Any authorized caller can change another caller's marks,
 and history retains both actions.
 
+Notification rules can filter on effective marks as described in
+[command notifications](notifications.md).
+
 ## Catch up
 
 Call `since(ts)` with a Unix timestamp. It returns retained sources changed strictly

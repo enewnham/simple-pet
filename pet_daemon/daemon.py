@@ -8,7 +8,7 @@ import socket
 import stat
 import time
 from collections.abc import Callable, Mapping
-from typing import Never
+from typing import Never, cast
 
 from anthropic import AsyncAnthropic
 
@@ -20,7 +20,8 @@ from .commentary import AnthropicModelClient, Cognition
 from .config import Config
 from .logging import get_logger
 from .mcp_sessions import SessionPublisher
-from .runtime import RandomSource
+from .notifications import Notifications
+from .runtime import HookEvent, RandomSource, WaitingKind
 from .sessions.processes import ProcessTracker
 from .sessions.reactions import SessionReactions
 from .sessions.tracking import Sessions
@@ -28,6 +29,7 @@ from .sources import RepositoryTracker
 from .sources.hooks import normalize_hook
 from .storage import Memory
 from .transport import MAX_DATAGRAM_BYTES, SOCKET_BUFFER_BYTES
+from .workstream_marks import MarkStore, thread_id
 
 log = get_logger("pet-daemon")
 
@@ -99,11 +101,23 @@ class Daemon:
         rng: RandomSource | None = None,
         wall_clock: Callable[[], float] = time.time,
     ) -> None:
+        self.notifications = (
+            Notifications(
+                config.notify,
+                config.memory_file.with_name("pet-notify.sqlite3"),
+                wall_clock,
+                mark_lookup=self.notification_marks,
+                permission_pending=self.is_permission_pending,
+            )
+            if config.notify is not None
+            else None
+        )
         self.config = config
         self.clock = clock
         self.wall_clock = wall_clock
         self.rng = rng or random.Random()
         self.pack = Pack(config.pet_dir)
+        self.workstream_marks = MarkStore(config.memory_file, self.pack.pet, wall_clock)
         sessions = Sessions(
             clock,
             config.stale_seconds,
@@ -231,6 +245,8 @@ class Daemon:
             hook = normalize_hook(packet)
             if hook is not None:
                 self.application.ingest(hook)
+                if self.notifications is not None:
+                    self.notifications.ingest(hook)
         else:
             self.application.receive(packet)
 
@@ -238,7 +254,38 @@ class Daemon:
         while True:
             self.application.tick()
             self.publish_sessions()
+            if self.notifications is not None:
+                self.notifications.tick()
             await asyncio.sleep(0.05)
+
+    def notification_marks(self, hook: HookEvent) -> dict[str, object]:
+        checkout = (
+            self.application.memory._work_repository.get_checkout(
+                hook.repo, enclosing=True
+            )
+            if hook.repo
+            else None
+        )
+        key = checkout.worktree if checkout else hook.repo
+        if not key:
+            identity = self.application.sessions.aliases.get(hook.subject, hook.subject)
+            key = json.dumps(identity.model_dump(mode="json"), sort_keys=True)
+        mark = self.workstream_marks.effective(thread_id(key))
+        return cast(dict[str, object], mark.get("values", {}))
+
+    def is_permission_pending(self, hook: HookEvent) -> bool:
+        sessions = self.application.sessions
+        identity = sessions.aliases.get(hook.subject, hook.subject)
+        session = sessions.by_id.get(identity)
+        return bool(
+            session is not None
+            and not session.finished
+            and session.waiting
+            and session.waiting_kind
+            in (WaitingKind.PERMISSION, WaitingKind.PERMISSION_CHECK)
+            and session.waiting_call == hook.call
+            and (hook.turn is None or session.turn == hook.turn)
+        )
 
     def publish_sessions(self) -> None:
         if not self.session_publisher.is_due():
@@ -259,6 +306,8 @@ class Daemon:
         )
         if self.loop_task:
             self.loop_task.cancel()
+        if self.notifications is not None:
+            await self.notifications.close()
         await self.application.close()
         if self.loop_task:
             await asyncio.gather(self.loop_task, return_exceptions=True)

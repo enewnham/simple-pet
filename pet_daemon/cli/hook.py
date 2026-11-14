@@ -297,6 +297,10 @@ def update(
             )
         progress = reported or None
     return HookEvent(
+        zmx_session=string(payload.get("zmx_session"), os.environ.get("ZMX_SESSION"))
+        or None,
+        tab_title=string(payload.get("tab_title")) or None,
+        labels={str(k): str(v) for k, v in object_value(payload.get("labels")).items()},
         source=source_kind,
         runtime_session=launch_session
         if source == "cursor" and launch_session

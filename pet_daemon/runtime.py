@@ -188,6 +188,9 @@ class HookEvent(BaseModel):
     repository: str | None = None
     branch: str | None = None
     pull_request: str | None = None
+    zmx_session: str | None = None
+    tab_title: str | None = None
+    labels: dict[str, str] = Field(default_factory=dict)
     waiting_kind: WaitingKind | None = None
 
     @property
@@ -198,6 +201,8 @@ class HookEvent(BaseModel):
         packet = self.model_dump(mode="json", exclude_none=True)
         if not self.aliases:
             packet.pop("aliases")
+        if not self.labels:
+            packet.pop("labels")
         return cast(HookPacket, packet)
 
 

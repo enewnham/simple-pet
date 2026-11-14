@@ -97,8 +97,8 @@ See [MCP tools and evidence](docs/mcp.md) for grouping, freshness, limits, atten
 rules, and compatibility tools. `current_work_context` and `relevant_changes` remain
 available for clients using flat source lists.
 
-Restart the daemon with `make restart-agent` after code
-changes. Restart the HTTP MCP server with `make restart-mcp-agent` after MCP
+Restart the daemon with `make restart-agent` after notification configuration or
+code changes. Restart the HTTP MCP server with `make restart-mcp-agent` after MCP
 code changes. For stdio MCP, reconnect the client to start a fresh server process.
 
 Your external agent owns conversation, investigation, and execution. Connect that
@@ -234,6 +234,39 @@ For commands outside a coding tool, use the wrapper:
 ```sh
 examples/pet-run pytest
 ```
+
+## Command notifications
+
+Notifications are disabled by default. Add `notify` to `pet.config.json` to run a
+local command for selected agent events:
+
+```json
+{
+  "notify": {
+    "command": ["/absolute/path/to/notify-command"],
+    "events": ["turn_done", "session_end", "permission_pending"],
+    "filter": {"cwd": "/Users/me/sc/*", "needs_attention": true}
+  }
+}
+```
+
+The command receives a JSON event on stdin with session metadata and the last
+assistant message, capped at about 2 KB with common secrets redacted. For example,
+save this curl wrapper as an executable at the command path above:
+
+```sh
+#!/bin/sh
+cat | /usr/bin/curl --fail --silent --show-error --max-time 8 \
+  --config /absolute/path/to/private-curl.conf \
+  --header 'Content-Type: application/json' \
+  --data-binary @- https://receiver.example.invalid/events
+```
+
+Choose your receiver URL and keep credentials in the private curl config with
+mode `0600`. Keep secrets out of command arguments and environment variables.
+Use `notify.rules` for OR between filters. Each rule requires all its fields to
+match. See [notification configuration and delivery](docs/notifications.md) for filters,
+the event contract, retry settings, and delivery guarantees.
 
 ## License and attribution
 

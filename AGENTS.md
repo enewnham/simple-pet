@@ -90,6 +90,9 @@ through summarization.
   manages its user LaunchAgent.
   [pet_daemon/tunnel.py](pet_daemon/tunnel.py) renders the private ngrok header policy.
   [scripts/pet-tunnel-agent.py](scripts/pet-tunnel-agent.py) manages the persistent tunnel.
+- **Notifications:** [pet_daemon/notifications.py](pet_daemon/notifications.py) runs a
+  configured command for selected hook events through a durable, bounded outbox.
+  See [docs/notifications.md](docs/notifications.md).
 - **Configuration and sprites:** [pet_daemon/config.py](pet_daemon/config.py) and
   [pet_daemon/behavior/sprites.py](pet_daemon/behavior/sprites.py) load settings and packs.
   [pet.config.example.json](pet.config.example.json) lists settings.
