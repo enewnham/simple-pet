@@ -189,10 +189,6 @@ class HookEvent(BaseModel):
     branch: str | None = None
     pull_request: str | None = None
     waiting_kind: WaitingKind | None = None
-    delegation_id: str | None = Field(default=None, min_length=1, max_length=128)
-    delegation_command_id: str | None = Field(
-        default=None, min_length=1, max_length=128
-    )
 
     @property
     def subject(self) -> SessionIdentity:

@@ -12,6 +12,7 @@ struct ConversationTests {
 
     @Test(arguments: [
         ["id": "invalid"], ["revision": -1], ["ttl": -1], ["mode": "unknown"],
+        ["mode": "chat"], ["mode": "activity"],
         ["actions": [["id": "open", "label": "Repeated", "kind": "navigate"]]],
         ["actions": [["id": "", "label": "Open", "kind": "navigate"]]],
         ["actions": [["id": "close", "label": " ", "kind": "dismiss"]]]

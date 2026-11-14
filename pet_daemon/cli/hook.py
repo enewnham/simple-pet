@@ -195,8 +195,6 @@ def update(
     payload: Mapping[str, object],
     *,
     launch_session: str = "",
-    delegation_id: str = "",
-    delegation_command_id: str = "",
 ) -> HookEvent | None:
     if source == "claude" and payload.get("cursor_version"):
         return None
@@ -321,8 +319,6 @@ def update(
         progress=progress,
         waiting_kind=waiting_kind,
         outcome=outcome,
-        delegation_id=delegation_id or None,
-        delegation_command_id=delegation_command_id or None,
     )
 
 
@@ -344,8 +340,6 @@ def main() -> None:
         args.event,
         payload,
         launch_session=os.environ.get("PET_CURSOR_SESSION_ID", ""),
-        delegation_id=os.environ.get("SIMPLE_PET_TASK_ID", ""),
-        delegation_command_id=os.environ.get("SIMPLE_PET_COMMAND_ID", ""),
     )
     if hook is not None:
         owner = discover_owner(hook.source)

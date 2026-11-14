@@ -1,14 +1,11 @@
 import Foundation
 
 public enum ConversationMode: String, Decodable {
-    case thread, context, rounds, loading, empty, chat, activity
+    case thread, context, rounds, loading, empty
 }
 
 public enum ConversationActionKind: String, Decodable {
     case navigate, context, tomorrow, handled, more, rounds, back, dismiss, thread
-    case continuation, retry, activity, chat, later, notRelevant = "not_relevant"
-    case pause, resume, stop, evidence
-    case history, activityPage = "activity_page"
 }
 
 public struct ConversationAction: Decodable, Equatable {
@@ -36,26 +33,7 @@ public struct Conversation: Decodable, Equatable {
     public let items: [ConversationItem]
     public let actions: [ConversationAction]
     public let error: String?
-    public let conversationID: String?
-    public let messages: [ChatMessage]?
-    public let pendingMessageID: String?
-    public let failedMessageID: String?
-    public let activity: [ActivityEntry]?
-    public let rejectedMessageID: String?
-    public let acknowledgedCommandID: String?
-    public let lastUserMessageID: String?
-
-    private enum CodingKeys: String, CodingKey {
-        case id, revision, mode, persistent, ttl, text, headline, items, actions, error, messages, activity
-        case conversationID = "conversation_id"
-        case pendingMessageID = "pending_message_id"
-        case failedMessageID = "failed_message_id"
-        case rejectedMessageID = "rejected_message_id"
-        case acknowledgedCommandID = "acknowledged_command_id"
-        case lastUserMessageID = "last_user_message_id"
-    }
-
-    public var allActions: [ConversationAction] { actions + items.flatMap(\.actions) + (activity ?? []).flatMap(\.actions) }
+    public var allActions: [ConversationAction] { actions + items.flatMap(\.actions) }
 
     func validate() throws {
         guard UUID(uuidString: id) != nil, revision >= 0, ttl.isFinite, ttl >= 0 else {
@@ -70,23 +48,9 @@ public struct Conversation: Decodable, Equatable {
               allActions.allSatisfy({ !$0.id.isEmpty && !$0.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
             throw ConversationError.invalid
         }
-        try validateChat()
     }
 
     private enum ConversationError: Error { case invalid }
-
-    private func validateChat() throws {
-        if let conversationID = conversationID, UUID(uuidString: conversationID) == nil { throw ConversationError.invalid }
-        if mode == .chat || mode == .activity {
-            guard conversationID != nil, persistent else { throw ConversationError.invalid }
-        }
-        let messages = messages ?? []
-        let ids = messages.map(\.id)
-        guard ids.allSatisfy({ !$0.isEmpty }), Set(ids).count == ids.count else { throw ConversationError.invalid }
-        for identifier in [pendingMessageID, failedMessageID].compactMap({ $0 }) {
-            guard !identifier.isEmpty, messages.allSatisfy({ $0.id != identifier || $0.role == .user }) else { throw ConversationError.invalid }
-        }
-    }
 }
 
 public final class ConversationSession {

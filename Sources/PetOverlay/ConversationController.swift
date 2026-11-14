@@ -3,7 +3,6 @@ import PetCore
 
 final class ConversationController {
     let session = ConversationSession()
-    let composer = ConversationComposer()
     let panel: ConversationPanel
     let content = ConversationContent()
     private let anchor: () -> NSRect
@@ -14,8 +13,6 @@ final class ConversationController {
     private var observers: [NSObjectProtocol] = []
     private var wantsFocus = false
     private var roundsOrigin = NSPoint.zero
-    private var lastSubmissionAt: TimeInterval = 0
-    private var lastSyncAt: TimeInterval = 0
     private var pendingPacket: [String: Any]?
     private var lastActionAt: TimeInterval = 0
     var onVisibilityChange: (() -> Void)?
@@ -31,8 +28,6 @@ final class ConversationController {
         configurePanel()
         content.onAction = { [weak self] in self?.performAction($0) }
         content.onDismiss = { [weak self] in self?.dismiss() }
-        content.onDraftChange = { [weak self] in self?.composer.draft = $0 }
-        content.onSubmit = { [weak self] in self?.submitMessage() }
         panel.onDismiss = { [weak self] in self?.dismiss() }
         installMonitoring()
     }
@@ -55,9 +50,6 @@ final class ConversationController {
 
     @discardableResult
     func receive(_ event: PetEvent) -> Bool {
-        if session.current?.conversationID != nil && event.conversation?.conversationID == nil && event.dismissConversation != true {
-            return event.text == nil && event.conversation == nil
-        }
         if event.dismissConversation == true || event.conversation == nil && event.text != nil {
             dismiss(notify: false)
         }
@@ -65,14 +57,12 @@ final class ConversationController {
         let prior = session.current
         guard session.receive(conversation, at: clock()) else { return false }
         pendingPacket = nil
-        composer.receive(conversation)
         if prior?.mode == .rounds { roundsOrigin = content.scroll.contentView.bounds.origin }
         if prior?.id != conversation.id { roundsOrigin = .zero }
         if let prior = prior, prior.id != conversation.id {
             send(["kind": "renderer", "event": "interaction_state", "interaction_id": prior.id, "engaged": false])
         }
-        content.render(conversation, pending: composer.submission != nil && conversation.failedMessageID == nil)
-        if content.composer.stringValue != composer.draft { content.composer.stringValue = composer.draft }
+        content.render(conversation, pending: false)
         position()
         let origin = conversation.mode == .rounds ? roundsOrigin : .zero
         content.scroll.contentView.scroll(to: origin)
@@ -80,7 +70,7 @@ final class ConversationController {
         panel.orderFrontRegardless()
         if wantsFocus && conversation.persistent {
             panel.makeKeyAndOrderFront(nil)
-            if conversation.mode == .chat { panel.makeFirstResponder(content.composer) } else { panel.selectNextKeyView(nil) }
+            panel.selectNextKeyView(nil)
             wantsFocus = false
         }
         onVisibilityChange?()
@@ -89,13 +79,6 @@ final class ConversationController {
 
     func pulse() {
         guard let conversation = session.current else { return }
-        if conversation.conversationID != nil && clock() - lastSyncAt >= 2 {
-            lastSyncAt = clock()
-            send(["kind": "renderer", "event": "conversation_sync", "interaction_id": conversation.id])
-        }
-        if let submission = composer.submission, !composer.isAccepted, clock() - lastSubmissionAt >= 1 {
-            sendSubmission(submission, conversation: conversation)
-        }
         if let packet = pendingPacket, clock() - lastActionAt >= 1 {
             lastActionAt = clock()
             send(packet)
@@ -125,11 +108,6 @@ final class ConversationController {
 
     func performAction(_ id: String) {
         guard let conversation = session.current, let action = session.beginAction(id) else { return }
-        if action.kind == .retry, let messageID = composer.retry(conversation) {
-            content.setPending(true)
-            if let submission = composer.submission, submission.id == messageID { sendSubmission(submission, conversation: conversation) }
-            return
-        }
         content.setPending(true)
         position()
         let packet: [String: Any] = ["kind": "renderer", "event": "interaction_action", "interaction_id": conversation.id,
@@ -138,30 +116,6 @@ final class ConversationController {
         lastActionAt = clock()
         send(packet)
         if action.kind == .dismiss { dismiss(notify: false) }
-    }
-
-    func submitMessage() {
-        guard let conversation = session.current else { return }
-        guard let submission = composer.submit(to: conversation) else {
-            if let error = composer.validationError { content.showInputError(error); position() }
-            return
-        }
-        content.setPending(true)
-        position()
-        sendSubmission(submission, conversation: conversation)
-    }
-
-    private func sendSubmission(_ submission: ConversationSubmission, conversation: Conversation) {
-        lastSubmissionAt = clock()
-        var packet: [String: Any] = ["kind": "renderer", "event": "conversation_message", "interaction_id": conversation.id,
-              "revision": conversation.revision, "conversation_id": submission.conversationID,
-              "message_id": submission.id, "text": submission.text]
-        if let commandID = composer.retryCommandID {
-            packet["event"] = "conversation_retry"
-            packet["command_id"] = commandID
-            packet.removeValue(forKey: "text")
-        }
-        send(packet)
     }
 
     private func position() {

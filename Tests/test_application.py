@@ -25,22 +25,7 @@ from pet_daemon.commentary.contracts import ModelRequest
 from pet_daemon.commentary.observations import event_text
 from pet_daemon.commentary.request import SpeechConditions
 from pet_daemon.commentary.usage import UsageTokens, request_usage
-from pet_daemon.companion.sdk import SdkCompanion
-from pet_daemon.companion.tools import ToolAuthority
 from pet_daemon.config import Config
-from pet_daemon.conversation import DEFAULT_CONVERSATION_ID, Conversations
-from pet_daemon.coordination.models import (
-    Candidate,
-    CandidateDecision,
-    ChatMessage,
-    ChatRole,
-    Disposition,
-    InquiryPass,
-    InquiryResult,
-)
-from pet_daemon.coordination.runtime import Coordinator
-from pet_daemon.coordination.watches import Watches
-from pet_daemon.coordination.workflows import Workflows
 from pet_daemon.delivery import (
     DeliveryConditions,
     DeliveryOutcome,
@@ -69,16 +54,13 @@ from pet_daemon.runtime import (
     OverlayPacket,
     ProcessIdentity,
     SessionTrigger,
-    WaitingKind,
 )
 from pet_daemon.sessions.processes import ProcessTracker
 from pet_daemon.sessions.reactions import SessionReactions
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources import RepositoryTracker
-from pet_daemon.sources.checks import ChecksObservation, ChecksStatus
 from pet_daemon.sources.hooks import normalize_hook
 from pet_daemon.storage import Memory
-from pet_daemon.storage.coordination import RevisionConflict
 from pet_daemon.types import JSONObject
 from pet_daemon.work import WorkStory
 from pet_daemon.work.evidence import ReportedProgress, WorkAssociation
@@ -92,7 +74,6 @@ from pet_daemon.work.observations import (
 )
 from Tests.fixtures import require, story_response
 from Tests.prompt_fixtures import RecordingPromptBuilder
-from Tests.test_companion import FakeSdk
 
 
 class FixtureProvider:
@@ -118,26 +99,6 @@ class FixtureProvider:
 
     async def close(self) -> None:
         pass
-
-
-class HeldInquiry:
-    def __init__(self) -> None:
-        self.entered = asyncio.Event()
-        self.release = asyncio.Event()
-
-    async def __call__(self, request: InquiryPass) -> InquiryResult:
-        self.entered.set()
-        await self.release.wait()
-        return InquiryResult(
-            request.id,
-            (
-                CandidateDecision(
-                    request.focus_id or request.candidates[0].id,
-                    Disposition.NO_FINDING,
-                    "No further inquiry is needed.",
-                ),
-            ),
-        )
 
 
 class FixtureModel:
@@ -367,72 +328,6 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.provider.emit = self.app.ingest
 
-    async def test_watch_report_survives_restart_and_acknowledges_without_an_active_session(
-        self,
-    ) -> None:
-        message = ChatMessage(
-            str(uuid.uuid4()),
-            "watch-chat",
-            ChatRole.USER,
-            "Watch this PR until checks pass",
-            self.now,
-        )
-        store = self.memory.coordination
-        store.begin_turn(message)
-        authority = ToolAuthority(
-            store.state().instruction_revision, message.conversation_id, message.id
-        )
-        workflows = Workflows(store, self.clock)
-        tool = next(
-            tool
-            for tool in workflows.tools(message.conversation_id, message.id)
-            if tool.name == "adopt_responsibility"
-        )
-        ref = "https://github.com/team/parser/pull/23"
-        await tool.handler(
-            {"purpose": "Watch parser checks", "scope": "/parser", "pull_request": ref},
-            authority,
-        )
-
-        async def observe(target: str) -> ChecksObservation:
-            return ChecksObservation(
-                target,
-                self.now,
-                ChecksStatus.PASSED,
-                "checked-head",
-                "checked-revision",
-            )
-
-        await Watches(
-            store, self.config.coordinator.scheduling, self.clock, observe
-        ).refresh()
-        notice = store.notices()[0]
-        await self.restart_without_sessions()
-        self.packets.clear()
-        self.assertEqual(self.app.sessions.by_id, {})
-        self.assertIsNone(
-            require(self.memory.coordination.notice(notice.id)).delivered_at
-        )
-        self.app.tick()
-        delivered = next(
-            packet for packet in self.packets if packet.get("delivery_id") == notice.id
-        )
-        self.assertEqual(delivered["text"], notice.text)
-        self.assertNotIn("conversation", delivered)
-        self.app.receive_renderer(
-            {"event": "speech_accepted", "delivery_id": notice.id}
-        )
-        self.assertIsNotNone(
-            require(self.memory.coordination.notice(notice.id)).delivered_at
-        )
-        await self.restart_without_sessions()
-        self.packets.clear()
-        self.app.tick()
-        self.assertFalse(
-            any(packet.get("delivery_id") == notice.id for packet in self.packets)
-        )
-        self.assertEqual(len(self.memory.coordination.notices()), 1)
-
     def report(self, text: str, *, session: str = "parser") -> None:
         self.provider.publish(
             HookEvent(
@@ -475,10 +370,9 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
             any(packet.get("text") == self.model.text for packet in self.packets)
         )
 
-    async def test_care_rejects_fresh_activity_pause_and_memory_reset(self) -> None:
-        for intervention in ("activity", "pause", "reset"):
+    async def test_care_rejects_fresh_activity_and_memory_reset(self) -> None:
+        for intervention in ("activity", "reset"):
             with self.subTest(intervention=intervention):
-                self.memory.coordination.set_paused(False)
                 self.now += self.config.activity_fresh_seconds + 1
                 self.app.context()
                 self.packets.clear()
@@ -493,8 +387,6 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
                         return
                     if intervention == "activity":
                         self.report("Checking a fresh parser case")
-                    elif intervention == "pause":
-                        self.memory.coordination.set_paused(True)
                     else:
                         self.app.clear_memory()
 
@@ -560,383 +452,6 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         await self.app.comment(
             SpeechReason.CHECK_IN, snapshot=snapshot, selection=selection
         )
-
-    async def test_tool_progress_preserves_an_inflight_inquiry_and_current_work(
-        self,
-    ) -> None:
-        inquiry = HeldInquiry()
-        store = self.memory.coordination
-        coordinator = Coordinator(
-            store, self.config.coordinator.scheduling, self.clock, inquiry
-        )
-        self.app.coordinator = coordinator
-        self.provider.publish(
-            self.native_hook("UserPromptSubmit", prompt="Review the parser result")
-        )
-        candidate = store.candidates()[0]
-        pending = asyncio.create_task(coordinator.run_pass())
-        await inquiry.entered.wait()
-        identity = SessionIdentity(source=SessionSource.CODEX, native_id="parser")
-        self.provider.publish(
-            self.native_hook("PreToolUse", tool_use_id="read", tool_name="Read")
-        )
-        self.assertEqual(tuple(self.app.sessions.by_id[identity].calls), ("read",))
-        self.assertTrue(self.app.sessions.by_id[identity].active)
-        self.assertEqual(store.candidate(candidate.id), candidate)
-        self.provider.publish(
-            self.native_hook(
-                "PostToolUse",
-                tool_use_id="read",
-                tool_name="Read",
-                tool_response={"exit_code": 0},
-                last_assistant_message="The parser source was read.",
-            )
-        )
-        self.assertEqual(self.app.sessions.by_id[identity].calls, {})
-        latest = self.memory.recent_work_reports(1)[0].payload
-        self.assertIsInstance(latest, ProgressEvidence)
-        assert isinstance(latest, ProgressEvidence)
-        self.assertEqual(latest.text, "The parser source was read.")
-        self.assertEqual(
-            self.memory.work_facts().sessions[identity].location, "/fixture/parser"
-        )
-        self.assertEqual(store.candidate(candidate.id), candidate)
-        self.provider.publish(
-            self.native_hook("PreToolUse", tool_use_id="unknown", tool_name="Read")
-        )
-        unknown = self.native_hook("PostToolUse", tool_use_id="unknown")
-        unknown.outcome = None
-        self.provider.publish(require(normalize_hook(unknown.packet())))
-        self.assertIsNone(self.app.sessions.by_id[identity].failure)
-        self.assertEqual(store.candidate(candidate.id), candidate)
-        inquiry.release.set()
-        self.assertIsNotNone(await pending)
-        self.assertIsNotNone(require(store.candidate(candidate.id)).last_serviced_at)
-        self.assertEqual(len(store.considerations(candidate.id)), 1)
-
-    async def test_meaningful_native_changes_supersede_the_relevant_inquiry(
-        self,
-    ) -> None:
-        store = self.memory.coordination
-        coordinator = Coordinator(
-            store, self.config.coordinator.scheduling, self.clock, HeldInquiry()
-        )
-        self.app.coordinator = coordinator
-        cases = (
-            ("codex", "UserPromptSubmit", {"prompt": "Follow the changed parser goal"}),
-            (
-                "codex",
-                "PostToolUse",
-                {"tool_use_id": "check", "tool_response": {"exit_code": 1}},
-            ),
-            ("codex", "Stop", {"last_assistant_message": "The parser checks passed."}),
-            (
-                "codex",
-                "PreToolUse",
-                {
-                    "tool_use_id": "question",
-                    "tool_name": "request_user_input",
-                    "tool_input": {
-                        "questions": [{"question": "Which checkout should I use?"}]
-                    },
-                },
-            ),
-            (
-                "claude",
-                "Notification",
-                {"notification_type": "permission_prompt", "tool_name": "Bash"},
-            ),
-            ("codex", "Interrupt", {}),
-            ("codex", "SessionEnd", {}),
-            ("codex", "SessionStart", {}),
-        )
-        for source, event, fields in cases:
-            with self.subTest(source=source, event=event):
-                self.now += 1
-                self.provider.publish(
-                    self.native_hook(
-                        "UserPromptSubmit", source=source, prompt="Inspect the parser"
-                    )
-                )
-                self.provider.publish(
-                    self.native_hook(
-                        "PreToolUse",
-                        source=source,
-                        tool_use_id="check",
-                        tool_name="Bash",
-                    )
-                )
-                if event == "SessionStart":
-                    self.provider.publish(self.native_hook("SessionEnd", source=source))
-                candidate = store.candidates()[0]
-                inquiry = HeldInquiry()
-                coordinator.reason = inquiry
-                pending = asyncio.create_task(coordinator.run_pass())
-                await inquiry.entered.wait()
-                self.provider.publish(self.native_hook(event, source=source, **fields))
-                changed = require(store.candidate(candidate.id))
-                self.assertGreater(changed.revision, candidate.revision)
-                self.assertEqual(changed.first_queued_at, candidate.first_queued_at)
-                if event == "Notification":
-                    identity = SessionIdentity(
-                        source=SessionSource.CLAUDE, native_id="parser"
-                    )
-                    self.assertEqual(
-                        self.app.sessions.by_id[identity].waiting_kind,
-                        WaitingKind.PERMISSION,
-                    )
-                inquiry.release.set()
-                with self.assertRaises(RevisionConflict):
-                    await pending
-        self.assertEqual(store.considerations(), ())
-
-    async def test_automatic_permission_checks_and_repeated_reports_do_not_wake_inquiries(
-        self,
-    ) -> None:
-        store = self.memory.coordination
-        self.app.coordinator = Coordinator(
-            store, self.config.coordinator.scheduling, self.clock, HeldInquiry()
-        )
-        self.provider.publish(
-            self.native_hook("UserPromptSubmit", prompt="Review parser behavior")
-        )
-        candidate = store.candidates()[0]
-        self.provider.publish(
-            self.native_hook("PreToolUse", tool_use_id="check", tool_name="Bash")
-        )
-        self.provider.publish(
-            self.native_hook("PermissionRequest", tool_use_id="check", tool_name="Bash")
-        )
-        identity = SessionIdentity(source=SessionSource.CODEX, native_id="parser")
-        self.assertEqual(
-            self.app.sessions.by_id[identity].waiting_kind, WaitingKind.PERMISSION_CHECK
-        )
-        self.assertFalse(self.app.sessions.by_id[identity].is_waiting_for_input)
-        self.assertEqual(store.candidate(candidate.id), candidate)
-        self.provider.publish(
-            self.native_hook(
-                "PostToolUse", tool_use_id="check", tool_response={"exit_code": 0}
-            )
-        )
-        self.assertFalse(self.app.sessions.by_id[identity].waiting)
-        self.assertEqual(store.candidate(candidate.id), candidate)
-        self.provider.publish(
-            self.native_hook(
-                "PreToolUse",
-                tool_use_id="answer",
-                tool_name="request_user_input",
-                tool_input={"questions": [{"question": "Which parser behavior?"}]},
-            )
-        )
-        waiting = require(store.candidate(candidate.id))
-        self.assertTrue(self.app.sessions.by_id[identity].is_waiting_for_input)
-        self.provider.publish(self.native_hook("PostToolUse", tool_use_id="answer"))
-        self.assertFalse(self.app.sessions.by_id[identity].waiting)
-        self.assertGreater(
-            require(store.candidate(candidate.id)).revision, waiting.revision
-        )
-        self.provider.publish(
-            self.native_hook(
-                "beforeSubmitPrompt", source="cursor", prompt="Trace parser behavior"
-            )
-        )
-        baseline = store.candidates()[0]
-        self.provider.publish(
-            self.native_hook("afterAgentThought", source="cursor", text="")
-        )
-        self.assertEqual(store.candidate(baseline.id), baseline)
-        self.provider.publish(
-            self.native_hook(
-                "afterAgentResponse",
-                source="cursor",
-                text="The parser checks confirm the selected behavior.",
-            )
-        )
-        material = require(store.candidate(baseline.id))
-        self.assertGreater(material.revision, baseline.revision)
-        self.now += 1
-        self.provider.publish(
-            self.native_hook(
-                "afterAgentResponse",
-                source="cursor",
-                text="The parser checks confirm the selected behavior.",
-            )
-        )
-        self.assertEqual(store.candidate(material.id), material)
-
-    async def test_discovery_location_and_observed_completion_wake_inquiries(
-        self,
-    ) -> None:
-        store = self.memory.coordination
-        self.app.coordinator = Coordinator(
-            store, self.config.coordinator.scheduling, self.clock, HeldInquiry()
-        )
-        self.provider.publish(
-            self.native_hook(
-                "PreToolUse",
-                session_id="discovered",
-                cwd="",
-                tool_use_id="read",
-                tool_name="Read",
-            )
-        )
-        self.assertEqual(len(store.candidates()), 1)
-        self.provider.publish(
-            self.native_hook(
-                "PostToolUse",
-                session_id="discovered",
-                cwd="",
-                tool_use_id="read",
-                tool_response={"exit_code": 0},
-            )
-        )
-        self.provider.publish(
-            self.native_hook(
-                "PreToolUse",
-                session_id="discovered",
-                tool_use_id="changed",
-                cwd="/fixture/other",
-                tool_name="Read",
-            )
-        )
-        identity = SessionIdentity(source=SessionSource.CODEX, native_id="discovered")
-        self.assertEqual(
-            self.memory.work_facts().sessions[identity].location, "/fixture/other"
-        )
-        self.assertEqual(
-            {candidate.scope for candidate in store.candidates()},
-            {"", "/fixture/other"},
-        )
-        before = next(
-            candidate
-            for candidate in store.candidates()
-            if candidate.scope == "/fixture/other"
-        )
-        completed = self.native_hook(
-            "PostToolUse",
-            session_id="discovered",
-            cwd="/fixture/other",
-            tool_use_id="changed",
-        )
-        completed.manual = True
-        self.provider.publish(require(normalize_hook(completed.packet())))
-        self.assertTrue(self.app.sessions.by_id[identity].finished)
-        self.assertGreater(
-            require(store.candidate(before.id)).revision, before.revision
-        )
-
-    async def test_renderer_chat_uses_existing_work_and_records_one_sdk_reply(
-        self,
-    ) -> None:
-        model = FakeSdk()
-        companion = SdkCompanion(
-            self.config.coordinator.model_copy(
-                update={"working_directory": Path(self.temporary.name) / "sdk"}
-            ),
-            self.memory,
-            self.clock,
-            query=model,
-        )
-        packets: list[JSONObject] = []
-        conversations = Conversations(
-            self.memory.coordination, companion.reply, packets.append, clock=self.clock
-        )
-        self.app.companion = companion
-        self.app.conversations = conversations
-        coordinator = Coordinator(
-            self.memory.coordination,
-            self.config.coordinator.scheduling,
-            self.clock,
-            companion.investigate,
-        )
-        self.app.coordinator = coordinator
-        waiting = Candidate(
-            "waiting-parser-question",
-            "Which parser scope should I follow?",
-            "parser",
-            self.now - 100,
-            last_serviced_at=self.now - 20,
-            waiting_on="human",
-            serviced_evidence_revision=1,
-        )
-        self.memory.coordination.save_candidate(waiting)
-        self.app.receive({"kind": "renderer", "event": "click"})
-        packet = {
-            "kind": "renderer",
-            "event": "conversation_message",
-            "interaction_id": conversations.identifier,
-            "revision": conversations.revision,
-            "conversation_id": DEFAULT_CONVERSATION_ID,
-            "message_id": str(uuid.uuid4()),
-            "text": "What is happening with the parser?",
-        }
-        self.app.receive(packet)
-        awakened = require(self.memory.coordination.candidate(waiting.id))
-        self.assertEqual(awakened.first_queued_at, waiting.first_queued_at)
-        self.assertEqual(awakened.last_serviced_at, waiting.last_serviced_at)
-        self.assertEqual(awakened.scope, "parser")
-        self.assertEqual(awakened.causes[-1].source_id, f"user:{packet['message_id']}")
-        self.assertGreater(
-            awakened.evidence_revision, require(awakened.serviced_evidence_revision)
-        )
-        await require(conversations.task)
-        self.app.receive(packet)
-        self.assertEqual(self.memory.coordination.candidate(waiting.id), awakened)
-        self.assertEqual(len(model.inputs), 1)
-        self.assertIn("Improve quoted-field parsing", str(model.inputs[0]["brief"]))
-        messages = self.memory.coordination.messages(DEFAULT_CONVERSATION_ID)
-        self.assertEqual(len(messages), 2)
-        self.assertEqual(messages[-1].reply_to, packet["message_id"])
-        self.assertEqual(messages[-1].sources[0].provider, "work")
-        self.app.tick()
-        self.assertIsNone(self.app.task)
-        self.assertFalse(self.app.clicked)
-
-    async def test_application_sleep_interrupts_sdk_reply_and_preserves_explicit_retry(
-        self,
-    ) -> None:
-        model = FakeSdk()
-        model.release.clear()
-        companion = SdkCompanion(
-            self.config.coordinator.model_copy(
-                update={"working_directory": Path(self.temporary.name) / "sdk"}
-            ),
-            self.memory,
-            self.clock,
-            query=model,
-        )
-        packets: list[JSONObject] = []
-        conversations = Conversations(
-            self.memory.coordination, companion.reply, packets.append, clock=self.clock
-        )
-        self.app.companion = companion
-        self.app.conversations = conversations
-        self.app.click()
-        self.app.receive_renderer(
-            {
-                "event": "conversation_message",
-                "interaction_id": conversations.identifier,
-                "revision": conversations.revision,
-                "conversation_id": DEFAULT_CONVERSATION_ID,
-                "message_id": str(uuid.uuid4()),
-                "text": "Catch me up",
-            }
-        )
-        await model.started.wait()
-        self.app.system_sleep_changed(True)
-        await asyncio.gather(*tuple(self.app.companion_tasks))
-        conversation = self.memory.coordination.ensure_conversation(
-            DEFAULT_CONVERSATION_ID
-        )
-        self.assertIsNone(conversation.pending_message_id)
-        self.assertIn("interrupted", require(conversation.error))
-        self.assertEqual(
-            len(self.memory.coordination.messages(DEFAULT_CONVERSATION_ID)), 1
-        )
-        self.app.system_sleep_changed(False)
-        await asyncio.gather(*tuple(self.app.companion_tasks))
-        self.assertFalse(companion.suspended)
-        self.assertEqual(len(model.inputs), 1)
 
     def test_notifications_retain_evidence_without_replacing_or_counting_requests(
         self,

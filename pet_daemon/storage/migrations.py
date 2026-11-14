@@ -2,7 +2,7 @@ import sqlite3
 
 from .transactions import transaction
 
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 
 
 MEMORY_SCHEMA = """
@@ -87,29 +87,6 @@ NARRATIVE_SCHEMA = """
         updated_at REAL NOT NULL, PRIMARY KEY(pet,subject_source,subject_session));
 """
 
-COORDINATION_SCHEMA = """
-    CREATE TABLE coordination_records (
-        pet TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL,
-        revision INTEGER NOT NULL, data TEXT NOT NULL,
-        PRIMARY KEY(pet,kind,id));
-    CREATE TABLE coordination_history (
-        pet TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL,
-        revision INTEGER NOT NULL, data TEXT NOT NULL, recorded_at REAL NOT NULL,
-        PRIMARY KEY(pet,kind,id,revision));
-    CREATE TABLE companion_documents (
-        pet TEXT NOT NULL, provider TEXT NOT NULL, source_id TEXT NOT NULL,
-        revision TEXT NOT NULL, payload TEXT NOT NULL, active INTEGER NOT NULL,
-        observed_at REAL NOT NULL, PRIMARY KEY(pet,provider,source_id,revision));
-    CREATE INDEX companion_documents_current ON companion_documents(pet,provider,active);
-    CREATE TABLE companion_source_status (
-        pet TEXT NOT NULL, provider TEXT NOT NULL, payload TEXT NOT NULL,
-        PRIMARY KEY(pet,provider));
-    CREATE TABLE companion_source_changes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, pet TEXT NOT NULL, provider TEXT NOT NULL,
-        source_id TEXT NOT NULL, revision TEXT NOT NULL, kind TEXT NOT NULL,
-        observed_at REAL NOT NULL);
-"""
-
 
 def execute_schema(db: sqlite3.Connection, script: str) -> None:
     statement = ""
@@ -169,5 +146,4 @@ def migrate(db: sqlite3.Connection) -> None:
         execute_schema(db, WORK_SCHEMA)
         execute_schema(db, DELIVERY_SCHEMA)
         execute_schema(db, NARRATIVE_SCHEMA)
-        execute_schema(db, COORDINATION_SCHEMA)
         db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

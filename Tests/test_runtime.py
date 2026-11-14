@@ -4,11 +4,9 @@ import json
 import os
 import random
 import socket
-import sys
 import tempfile
 import time
 import unittest
-import uuid
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Unpack
@@ -20,22 +18,8 @@ from pet_daemon.behavior.sprites import Pack
 from pet_daemon.cli.hook import update
 from pet_daemon.cli.notify import encode
 from pet_daemon.commentary.contracts import ModelRequest
-from pet_daemon.companion.config import CoordinatorConfig
 from pet_daemon.config import Config
-from pet_daemon.conversation import DEFAULT_CONVERSATION_ID
-from pet_daemon.coordination.models import (
-    InquiryPass,
-    InquiryResult,
-    Instruction,
-    OperationKind,
-    Responsibility,
-    TaskAction,
-    TaskReadiness,
-    TaskStatus,
-)
-from pet_daemon.coordination.runtime import Coordinator
 from pet_daemon.daemon import Daemon, bind_socket
-from pet_daemon.desktop import AdapterClient, Delegation, DesktopConfig
 from pet_daemon.domain import CareKind, SessionSource, SpeechReason
 from pet_daemon.identity import SessionIdentity
 from pet_daemon.runtime import (
@@ -53,7 +37,6 @@ from pet_daemon.transport import MAX_DATAGRAM_BYTES, SOCKET_BUFFER_BYTES
 from pet_daemon.work.models import IntentEvidence
 from pet_daemon.work.observations import BranchObservation, PullRequestObservation
 from Tests.fixtures import require, story_response
-from Tests.test_companion import FakeSdk
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII="
@@ -66,14 +49,18 @@ def request_reason(body: ModelRequest) -> str:
         return "care"
     if "The developer requested this recollection with a click." in content:
         return "click"
+    instruction = " ".join(content.split())
     for phrase, reason in (
         ("Reply directly to the developer about our work.", "prompt"),
         ("React briefly to one detail in the report", "routine"),
         ("React briefly to one supplied activity detail", "routine"),
+        ("Give a short, personal reaction in one sentence when you can.", "routine"),
         ("React briefly to the reported execution outcome above.", "completion"),
+        ("personal reaction to the reported execution outcome above.", "completion"),
         ("React briefly to the observed failed call.", "failure"),
         ("Give a brief reaction to the supplied context above.", "explicit"),
         ("The question or approval request above remains open.", "check_in"),
+        ("The open question or approval request is available", "check_in"),
         (
             "Give a brief remark about the tool call that is still running above",
             "check_in",
@@ -85,7 +72,7 @@ def request_reason(body: ModelRequest) -> str:
         ("Give a brief spoken aside about taking a stretch break", "care"),
         ("Give a brief companionable aside about this quiet stretch", "care"),
     ):
-        if phrase in content:
+        if phrase in instruction:
             return reason
     raise AssertionError(f"Unrecognized instruction: {content}")
 
@@ -138,7 +125,6 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             observation_seconds=(3600, 3600),
             request_timeout=10,
             memory_file=root / "memory.sqlite3",
-            coordinator=CoordinatorConfig(enabled=False),
         )
         self.config.behavior.automatic_speech_cooldown_seconds = 0
         self.entered = asyncio.Event()
@@ -242,185 +228,6 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     def send(self, packet: Mapping[str, object]) -> None:
         self.hook.sendto(json.dumps(packet).encode(), self.config.daemon_socket)
-
-    async def test_owned_task_progress_refreshes_control_without_requeuing_inquiry(
-        self,
-    ) -> None:
-        store = self.daemon.coordination_store
-
-        async def unused_reason(_request: InquiryPass) -> InquiryResult:
-            raise AssertionError("This observation test does not request a model")
-
-        coordinator = Coordinator(
-            store, self.config.coordinator.scheduling, self.wall_clock, unused_reason
-        )
-        coordinator.suspended = True
-        self.daemon.coordinator = coordinator
-        self.daemon.application.coordinator = coordinator
-        root = Path(self.temp.name)
-        observed_at = 1000.0
-        adapter = AdapterClient(
-            DesktopConfig(
-                name="fixture",
-                argv=(
-                    sys.executable,
-                    str(Path(__file__).parent / "fixtures/desktop/adapter.py"),
-                    str(root),
-                ),
-                capabilities=tuple(OperationKind),
-            )
-        )
-        desktop = Delegation(
-            store, adapter, clock=lambda: observed_at, changed=self.daemon.task_changed
-        )
-        self.daemon.desktop = desktop
-        self.daemon.application.desktop = desktop
-        store.save_instruction(
-            Instruction("adopt", "Inspect parser checks", str(root), observed_at)
-        )
-        store.save_responsibility(
-            Responsibility(
-                "review",
-                "Parser checks are understood",
-                str(root),
-                "adopt",
-                observed_at,
-                permissions=("launch", "continue"),
-            )
-        )
-        launch = await desktop.dispatch(
-            TaskAction(
-                "launch-owned",
-                OperationKind.LAUNCH,
-                "review",
-                objective="Inspect parser checks",
-                expected_result="A cited check result",
-                repository=str(root),
-            )
-        )
-        task = require(store.task(launch.task_id))
-        native = require(task.session).session
-
-        def native_hook(event: str, **fields: object) -> None:
-            hook = require(
-                update(
-                    "codex",
-                    event,
-                    {"session_id": native, "cwd": str(root), **fields},
-                    delegation_id=task.id,
-                    delegation_command_id=launch.id,
-                )
-            )
-            self.send(hook.packet())
-
-        native_hook("UserPromptSubmit", prompt="Inspect the parser checks")
-        await self.wait_for(lambda: require(store.task(task.id)).user_revision == 1)
-        (root / "mode").write_text("busy")
-        inspected = await desktop.inspect(task.id)
-        self.assertEqual(inspected.status, TaskStatus.RUNNING)
-        self.assertEqual(inspected.readiness, TaskReadiness.BUSY)
-        self.assertIsNotNone(inspected.adapter_revision)
-        candidate = next(
-            candidate
-            for candidate in store.candidates()
-            if any(
-                cause.kind == "task" and cause.source_id == task.id
-                for cause in candidate.causes
-            )
-        )
-        observed_at += 1
-        native_hook("PreToolUse", tool_use_id="read", tool_name="Read")
-        await self.wait_for(
-            lambda: require(store.task(task.id)).revision > inspected.revision
-        )
-        started = require(store.task(task.id))
-        self.assertIsNone(started.adapter_revision)
-        self.assertEqual(started.observed_at, observed_at)
-        self.assertEqual(store.candidate(candidate.id), candidate)
-        observed_at += 1
-        native_hook("PostToolUse", tool_use_id="read", tool_response={"exit_code": 0})
-        await self.wait_for(
-            lambda: require(store.task(task.id)).revision > started.revision
-        )
-        self.assertEqual(store.candidate(candidate.id), candidate)
-        identity = SessionIdentity(source=SessionSource.CODEX, native_id=native)
-        self.assertEqual(self.daemon.application.sessions.by_id[identity].calls, {})
-        native_hook("Stop", last_assistant_message="The parser checks were inspected.")
-        await self.wait_for(
-            lambda: require(store.task(task.id)).status == TaskStatus.ENDED
-        )
-        ended = require(store.candidate(candidate.id))
-        self.assertGreater(ended.revision, candidate.revision)
-        instruction_revision = store.state().instruction_revision
-        native_hook("UserPromptSubmit", prompt="Follow the revised parser direction")
-        await self.wait_for(lambda: require(store.task(task.id)).user_revision == 2)
-        self.assertGreater(
-            require(store.candidate(candidate.id)).revision, ended.revision
-        )
-        self.assertEqual(store.state().instruction_revision, instruction_revision)
-        self.assertEqual(store.attempts(), ())
-
-    async def test_enabled_coordinator_handles_renderer_chat_and_awake_lifecycle(
-        self,
-    ) -> None:
-        await self.daemon.close()
-        model = FakeSdk()
-        self.config.coordinator = CoordinatorConfig(
-            working_directory=Path(self.temp.name) / "sdk"
-        )
-        self.daemon = Daemon(
-            self.config,
-            self.client,
-            clock=self.clock,
-            wall_clock=self.wall_clock,
-            rng=random.Random(7),
-            companion_query=model,
-        )
-        self.daemon.application.memory.coordination.set_paused(True)
-        await self.daemon.start()
-        self.send_status()
-        self.event("intent", goal="Inspect parser review", repo="/fixture/parser")
-        await self.wait_for(
-            lambda: bool(self.daemon.application.memory.recent_work_reports(1))
-        )
-        self.send({"kind": "renderer", "event": "click"})
-        packet = await self.packet(lambda item: bool(item.get("conversation")))
-        snapshot = packet["conversation"]
-        assert isinstance(snapshot, dict)
-        self.send(
-            {
-                "kind": "renderer",
-                "event": "conversation_message",
-                "interaction_id": snapshot["id"],
-                "revision": snapshot["revision"],
-                "conversation_id": DEFAULT_CONVERSATION_ID,
-                "message_id": str(uuid.uuid4()),
-                "text": "What is waiting for review?",
-            }
-        )
-        await model.started.wait()
-        await self.wait_for(
-            lambda: (
-                len(
-                    self.daemon.application.memory.coordination.messages(
-                        DEFAULT_CONVERSATION_ID
-                    )
-                )
-                == 2
-            )
-        )
-        self.assertEqual(len(model.inputs), 1)
-        self.assertTrue(self.daemon.application.memory.coordination.state().paused)
-        self.assertEqual(
-            self.daemon.application.memory.coordination.considerations(), ()
-        )
-        self.send({"kind": "renderer", "event": "system_sleep"})
-        await self.wait_for(lambda: self.daemon.application.suspended)
-        await self.wait_for(lambda: require(self.daemon.companion).suspended)
-        self.send({"kind": "renderer", "event": "system_wake"})
-        await self.wait_for(lambda: not self.daemon.application.suspended)
-        await self.wait_for(lambda: not require(self.daemon.companion).suspended)
-        self.assertEqual(len(model.inputs), 1)
 
     def event(
         self, event: str, session: str = "one", source: str = "cli", **extra: object
@@ -3004,13 +2811,6 @@ class ConfigurationTests(unittest.TestCase):
                         "log_file": "analysis/pet.jsonl",
                         "memory_file": "state/companion.sqlite3",
                         "behavior": {"walk_seconds": [2, 4], "roaming": False},
-                        "coordinator": {
-                            "working_directory": "state/reasoning",
-                            "meetings": {"folders": ["notes"]},
-                            "history": [
-                                {"name": "codex", "path": "sessions", "format": "codex"}
-                            ],
-                        },
                     }
                 )
             )
@@ -3031,18 +2831,6 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(config.memory_max_events, 500)
             self.assertFalse(config.behavior.roaming)
             self.assertEqual(config.behavior.walk_seconds, (2, 4))
-            self.assertEqual(
-                config.coordinator.working_directory,
-                Path(directory).resolve() / "state/reasoning",
-            )
-            self.assertEqual(
-                config.coordinator.meetings.folders,
-                (Path(directory).resolve() / "notes",),
-            )
-            self.assertEqual(
-                config.coordinator.history[0].path,
-                Path(directory).resolve() / "sessions",
-            )
 
     def test_rejects_nonpositive_or_nonfinite_idle_message_intervals(self) -> None:
         for seconds in (0, -1, True, "300", None, float("nan"), float("inf")):

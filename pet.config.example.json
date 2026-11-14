@@ -7,53 +7,6 @@
   "daemon_socket": "/tmp/pet-daemon.sock",
   "overlay_socket": "/tmp/pet.sock",
   "model": "claude-haiku-5-5",
-  "coordinator": {
-    "enabled": true,
-    "model": "claude-haiku-5-5",
-    "thinking": "adaptive",
-    "effort": "medium",
-    "working_directory": "state/companion",
-    "timeout_seconds": 120,
-    "max_turns": 12,
-    "max_response_tokens": 8192,
-    "max_budget_usd": null,
-    "retrieval": {
-      "results": 12,
-      "queries": 4,
-      "bootstrap_reports": 40,
-      "user_inputs": 12,
-      "passage_characters": 2400,
-      "neighboring_passages": 1,
-      "source_characters": 100000
-    },
-    "scheduling": {
-      "review_seconds": 900,
-      "max_deferral_seconds": 3600,
-      "minimum_interval_seconds": 30,
-      "max_candidates": 6,
-      "coding_slots": 1,
-      "max_passes_per_hour": 12,
-      "source_fresh_seconds": 300,
-      "watch_seconds": 180,
-      "failure_retry_seconds": 120
-    },
-    "history": [],
-    "meetings": {
-      "folders": [],
-      "extensions": [".md", ".txt"],
-      "maximum_file_bytes": 1000000
-    },
-    "linear": {
-      "enabled": false,
-      "authorization_env": "LINEAR_API_KEY",
-      "team_ids": [],
-      "assignee_ids": [],
-      "followed_ids": [],
-      "linked_ids": []
-    },
-    "mcp": []
-  },
-  "desktop": null,
   "observation_seconds": [
     20,
     40
@@ -67,7 +20,10 @@
   "max_tokens": 512,
   "behavior": {
     "roaming": true,
-    "roaming_size": [320, 160],
+    "roaming_size": [
+      320,
+      160
+    ],
     "automatic_speech_cooldown_seconds": 90,
     "naps": true,
     "nap_interval": [

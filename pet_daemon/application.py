@@ -1,10 +1,8 @@
 import asyncio
-import hashlib
 import math
 import sqlite3
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import replace
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Protocol
 
@@ -16,36 +14,28 @@ from .commentary import Cognition, SpeechConditions
 from .commentary.cognition import CannotRespond, CommentaryResult
 from .commentary.usage import UsageTokens, collect_usage
 from .config import Config
-from .conversation import Conversations
-from .coordination.models import CandidateCause
-from .coordination.runtime import Coordinator
 from .delivery import (
     DeliveryConditions,
     DeliveryOutcome,
     SpeechDelivery,
     SpeechMessage,
-    SpeechPacket,
 )
-from .desktop import Delegation
 from .domain import DeliveryStatus, SpeechReason, SpeechSituation
 from .identity import SessionIdentity
 from .interactions import Interactions
 from .logging import get_logger
-from .repository_identity import repository_columns
 from .runtime import (
     HookEvent,
-    HookEventKind,
     OverlayPacket,
     PetContext,
     RandomSource,
     ReactionTrigger,
     Trigger,
-    WaitingKind,
 )
 from .sessions.coordinator import ActivityCoordinator
 from .sessions.processes import ProcessTracker
 from .sessions.reactions import SessionReactions
-from .sessions.tracking import Sessions, SessionUpdate
+from .sessions.tracking import Sessions
 from .storage import Memory
 from .work.history import (
     SessionContext,
@@ -54,33 +44,9 @@ from .work.history import (
     report_source_key,
 )
 from .work.models import ExecutionEvidence, ProgressEvidence
-from .work.observations import (
-    CheckoutObservation,
-    PullRequestObservation,
-    RepositoryObservation,
-)
+from .work.observations import RepositoryObservation
 
 log = get_logger("pet-daemon")
-
-
-def needs_session_followup(
-    hook: HookEvent,
-    result: SessionUpdate,
-    recorded: bool,
-    location_changed: bool,
-) -> bool:
-    return (
-        recorded
-        or result.failure
-        or location_changed
-        or hook.event == HookEventKind.WAITING
-        and hook.waiting_kind != WaitingKind.PERMISSION_CHECK
-        or any(
-            isinstance(report, ExecutionEvidence)
-            and report.event in {"turn_start", "resumed", "turn_done"}
-            for report in result.observation.reports
-        )
-    )
 
 
 class ObservationProvider(Protocol):
@@ -88,13 +54,6 @@ class ObservationProvider(Protocol):
     def pause(self) -> None: ...
     def resume(self) -> None: ...
     def clear(self) -> None: ...
-    async def close(self) -> None: ...
-
-
-class CompanionLifecycle(Protocol):
-    def reset(self) -> None: ...
-    async def suspend(self) -> None: ...
-    async def resume(self) -> None: ...
     async def close(self) -> None: ...
 
 
@@ -116,10 +75,6 @@ class Application:
         rng: RandomSource,
         checkout_target: Callable[[str, bool], None] | None = None,
         reconcile_work: Callable[[], None] | None = None,
-        conversations: Conversations | None = None,
-        companion: CompanionLifecycle | None = None,
-        coordinator: Coordinator | None = None,
-        desktop: Delegation | None = None,
     ) -> None:
         self.config = config
         self.sessions = sessions
@@ -130,21 +85,6 @@ class Application:
         self.providers = tuple(providers)
         self.processes = processes
         self.memory = memory
-        self.conversations = conversations
-        self.companion = companion
-        self.coordinator = coordinator
-        self.desktop = desktop
-        self.companion_tasks: set[asyncio.Task[None]] = set()
-        self.companion_lock = asyncio.Lock()
-        if conversations is not None:
-            for conversation in memory.coordination.conversations():
-                if conversation.pending_message_id is not None:
-                    memory.coordination.fail_turn(
-                        conversation.id,
-                        conversation.pending_message_id,
-                        "The reply was interrupted by a restart. You can retry it.",
-                        expected_revision=conversation.revision,
-                    )
         self.sessions.aliases.update(memory.session_aliases())
         self.emit = emit
         self.clock = clock
@@ -190,12 +130,6 @@ class Application:
             on_outcome=self.delivery_outcome,
             valid=self.is_delivery_valid,
         )
-        self.notice_delivery = SpeechDelivery(
-            self.emit_notice,
-            clock=clock,
-            on_outcome=self.notice_outcome,
-            valid=self.is_notice_valid,
-        )
         self.interactions = Interactions(
             config,
             memory=memory,
@@ -215,21 +149,12 @@ class Application:
         self.attention.last_attempt = self.clock()
 
     def clear_memory(self) -> None:
-        if self.conversations is not None:
-            if self.conversations.task is not None:
-                self.conversations.task.cancel()
-            self.conversations.dismiss()
         try:
             self.memory.clear()
         except sqlite3.Error as error:
             log.exception("memory.clear_failed", error=str(error))
             return
-        if self.companion is not None:
-            self.companion.reset()
-        if self.coordinator is not None:
-            self.coordinator.reset()
         self.preempt()
-        self.notice_delivery.clear()
         self.interactions.clear()
         self.history_epoch += 1
         self.sessions = Sessions(
@@ -259,15 +184,6 @@ class Application:
         self.suspended = sleeping
         log.info("system.sleep" if sleeping else "system.wake")
         if sleeping:
-            if self.desktop is not None:
-                self.desktop.suspended = True
-            if self.coordinator is not None:
-                self._companion_task(self.coordinator.suspend)
-            self.notice_delivery.cancel_pending()
-            if self.conversations is not None:
-                self._companion_task(self.conversations.suspend)
-            if self.companion is not None:
-                self._companion_task(self.companion.suspend)
             self.behavior.suspend("system_sleep")
             self.preempt()
             self.interactions.clear()
@@ -276,12 +192,6 @@ class Application:
             if self.process_task:
                 self.process_task.cancel()
         else:
-            if self.companion is not None:
-                self._companion_task(self.companion.resume)
-            if self.desktop is not None:
-                self.desktop.suspended = False
-            if self.coordinator is not None:
-                self._companion_task(self.coordinator.resume)
             self.behavior.resume()
             self.sessions.prune()
             for provider in self.providers:
@@ -292,18 +202,6 @@ class Application:
             self.attention.next_observation = self.clock() + self.rng.uniform(
                 *self.config.observation_seconds
             )
-
-    def _companion_task(self, operation: Callable[[], Awaitable[None]]) -> None:
-        async def run() -> None:
-            try:
-                async with self.companion_lock:
-                    await operation()
-            except Exception:
-                log.exception("companion.lifecycle_failed")
-
-        task = asyncio.create_task(run())
-        self.companion_tasks.add(task)
-        task.add_done_callback(self.companion_tasks.discard)
 
     def speak(self, context: str, ttl: float | None = None) -> None:
         self.behavior.wake("speech_request")
@@ -352,24 +250,6 @@ class Application:
             return
         try:
             self.memory.work.observe(observation)
-            if self.coordinator is not None:
-                if isinstance(observation, CheckoutObservation):
-                    scope = observation.worktree
-                elif isinstance(observation, PullRequestObservation):
-                    scope = observation.ref
-                else:
-                    _, repository = repository_columns(observation.repository)
-                    scope = f"{repository}:{observation.branch}"
-                revision = hashlib.sha256(
-                    observation.model_dump_json(
-                        exclude={"checked_at", "last_success_at"}
-                    ).encode()
-                ).hexdigest()
-                self.coordinator.queue(
-                    "Do these repository changes affect recent work?",
-                    scope,
-                    CandidateCause("repository", scope, revision, self.memory.clock()),
-                )
             self.reconcile_targets()
         except (sqlite3.Error, ValueError) as error:
             log.exception("work.ingest_failed", error=str(error))
@@ -381,17 +261,11 @@ class Application:
         if not result:
             return
         try:
-            location_changed = bool(
-                self.coordinator is not None
-                and hook.repo
-                and hook.repo
-                != self.memory.work.repository.session_location(result.session)
-            )
             with self.memory.transaction():
                 self.memory.work.record_session(result.observation)
                 self.memory.observe_session_context(result.observation)
                 session = self.sessions.by_id[result.session]
-                recorded = self.memory.record_event(
+                self.memory.record_event(
                     build_session_entry(
                         hook,
                         SessionContext(
@@ -408,22 +282,6 @@ class Application:
                 self.checkout_target(
                     hook.repo,
                     hook.event in ("intent", "subagent_start"),
-                )
-            if self.desktop is not None:
-                self.desktop.observe_hook(hook, result.session)
-            if self.coordinator is not None and needs_session_followup(
-                hook, result, recorded is not None, location_changed
-            ):
-                scope = hook.repo or self.sessions.by_id[result.session].repo
-                revision = hashlib.sha256(
-                    hook.model_dump_json(exclude={"capture_at", "timestamp"}).encode()
-                ).hexdigest()
-                self.coordinator.queue(
-                    "Does this recent session need follow-up?",
-                    scope,
-                    CandidateCause(
-                        "session", str(result.session), revision, self.memory.clock()
-                    ),
                 )
             self.reconcile_targets()
         except (sqlite3.Error, ValueError) as error:
@@ -458,32 +316,11 @@ class Application:
                 self.speak(context, ttl)
 
     def receive_renderer(self, packet: Mapping[str, object]) -> None:
-        instruction_revision = (
-            self.memory.coordination.state().instruction_revision
-            if self.coordinator is not None
-            and packet.get("event") == "conversation_message"
-            else None
-        )
-        if self.conversations is not None and self.conversations.receive(packet):
-            if (
-                self.coordinator is not None
-                and instruction_revision is not None
-                and self.memory.coordination.state().instruction_revision
-                != instruction_revision
-            ):
-                instruction = self.memory.coordination.instruction(
-                    f"user:{packet.get('message_id')}"
-                )
-                if instruction is not None:
-                    self.coordinator.user_input(instruction)
-            return
         if self.interactions.receive(packet):
             return
         feedback = packet.get("event")
         if feedback == "speech_accepted":
             try:
-                if self.notice_delivery.acknowledge(packet):
-                    return
                 self.delivery.acknowledge(packet)
             except sqlite3.Error as error:
                 log.exception("renderer.acceptance_failed", error=str(error))
@@ -530,12 +367,6 @@ class Application:
         self.behavior.defer_care()
         self.behavior.wake("click")
         self.behavior.react("click", self.sessions)
-        if self.conversations is not None and not more:
-            self.preempt()
-            self.interactions.clear()
-            self.clicked = False
-            self.conversations.open()
-            return
         if self.task and self.reason == SpeechReason.CLICK and not self.task.done():
             return
         self.preempt()
@@ -735,11 +566,7 @@ class Application:
         self, conditions: SpeechConditions, trigger: Trigger | None
     ) -> bool:
         if conditions.selection.reason == SpeechReason.CARE and (
-            self.suspended
-            or self.memory.coordination.state().paused
-            or self.interactions.is_interacting
-            or self.conversations is not None
-            and self.conversations.is_interacting
+            self.suspended or self.interactions.is_interacting
         ):
             return False
         if isinstance(trigger, ReactionTrigger) and not self.reactions.is_relevant(
@@ -814,79 +641,6 @@ class Application:
             and conditions.request_epoch == self.revision
             and self.is_selection_valid(conditions.commentary, conditions.trigger)
         )
-
-    def emit_notice(self, packet: SpeechPacket) -> None:
-        self.emit(
-            {
-                "text": packet["text"],
-                "ttl": packet["ttl"],
-                "delivery_id": packet["delivery_id"],
-            }
-        )
-
-    def is_notice_valid(self, message: SpeechMessage) -> bool:
-        notice = self.memory.coordination.notice(message.message_id)
-        return (
-            not self.suspended
-            and not self.memory.coordination.state().paused
-            and not self.interactions.is_interacting
-            and not (
-                self.conversations is not None and self.conversations.is_interacting
-            )
-            and notice is not None
-            and notice.delivered_at is None
-            and notice.text == message.text
-        )
-
-    def notice_outcome(self, outcome: DeliveryOutcome) -> None:
-        if outcome.status != DeliveryStatus.ACCEPTED:
-            return
-        notice = self.memory.coordination.notice(outcome.message.message_id)
-        if notice is None or notice.delivered_at is not None:
-            return
-        with self.memory.transaction():
-            self.memory.coordination.save_notice(
-                replace(
-                    notice,
-                    revision=notice.revision + 1,
-                    delivered_at=self.memory.clock(),
-                )
-            )
-            self.memory.record_acceptance(
-                notice.id, notice.text, SpeechReason.COMPLETION
-            )
-        self.last_speech = (notice.text, self.clock())
-        self.attention.last_attempt = self.clock()
-
-    def deliver_notice(self) -> bool:
-        if self.memory.coordination.state().paused or self.delivery.has_pending():
-            return False
-        if self.notice_delivery.has_pending():
-            return True
-        notice = next(
-            (
-                record
-                for record in self.memory.coordination.notices()
-                if record.delivered_at is None
-            ),
-            None,
-        )
-        if notice is None or not self.attention.can_speak(
-            SpeechReason.COMPLETION, None
-        ):
-            return False
-        self.behavior.stop_movement()
-        self.notice_delivery.submit(
-            SpeechMessage(
-                text=notice.text,
-                ttl=self.speech_duration(notice.text),
-                reason=SpeechReason.COMPLETION,
-                selection_id=notice.id,
-                message_id=notice.id,
-                history_epoch=self.history_epoch,
-            )
-        )
-        return True
 
     def delivery_outcome(self, outcome: DeliveryOutcome) -> None:
         message = outcome.message
@@ -967,8 +721,6 @@ class Application:
     def tick(self) -> None:
         now = self.clock()
         if not self.suspended:
-            if self.coordinator is not None:
-                self.coordinator.tick()
             for provider in self.providers:
                 provider.tick()
             if self.process_task is None or self.process_task.done():
@@ -976,7 +728,6 @@ class Application:
                     self.process_task.result()
                 self.process_task = asyncio.create_task(self.probe_processes())
             self.delivery.tick()
-            self.notice_delivery.tick()
             self.interactions.delivery.tick()
         if now >= self.next_prune:
             self.sessions.prune()
@@ -994,24 +745,10 @@ class Application:
 
     def _request_commentary(self, now: float) -> None:
         if (
-            self.memory.coordination.state().paused
-            and self.manual is None
-            and not self.clicked
-        ):
-            return
-        if (
-            self.conversations is not None
-            and self.conversations.is_interacting
-            and self.manual is None
-        ):
-            return
-        if (
             self.interactions.is_interacting
             and not self.clicked
             and self.manual is None
         ):
-            return
-        if self.manual is None and not self.clicked and self.deliver_notice():
             return
         snapshot = self.context()
         check_in = tuple(
@@ -1075,16 +812,6 @@ class Application:
         )
 
     async def close(self) -> None:
-        if self.coordinator is not None:
-            await self.coordinator.close()
-        self.notice_delivery.close()
-        if self.conversations is not None:
-            await self.conversations.close()
-        for task in self.companion_tasks:
-            task.cancel()
-        await asyncio.gather(*self.companion_tasks, return_exceptions=True)
-        if self.companion is not None:
-            await self.companion.close()
         self.delivery.close()
         await self.interactions.close()
         tasks = [task for task in (self.task, self.process_task) if task]

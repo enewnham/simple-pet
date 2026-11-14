@@ -1,8 +1,0 @@
-{
-  "desktop": {
-    "name": "my-desktop",
-    "argv": ["/path/to/desktop-adapter"],
-    "capabilities": ["launch", "inspect", "continue", "open", "stop"],
-    "timeout_seconds": 30
-  }
-}

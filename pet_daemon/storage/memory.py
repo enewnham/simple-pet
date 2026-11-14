@@ -38,7 +38,6 @@ from ..work.observations import (
 )
 from ..work.shared_work import WorkSubject, related_reports, shared_work
 from ..work.stories import collection_targets, revision_key
-from .coordination import SQLiteCoordinationRepository
 from .identities import (
     optional_session_from_row,
     optional_session_values,
@@ -139,7 +138,6 @@ class Memory:
             raise
         path.chmod(0o600)
         self._work_repository = SQLiteWorkRepository(self.db, pet)
-        self.coordination = SQLiteCoordinationRepository(self.db, pet, clock)
         self.work = WorkIngestion(
             self._work_repository,
             clock,
@@ -871,7 +869,6 @@ class Memory:
 
     def clear(self) -> None:
         with self.transaction():
-            self.coordination.clear()
             self.work.clear()
             for table in (
                 "events",
@@ -882,9 +879,6 @@ class Memory:
                 "attention_sources",
                 "message_outcomes",
                 "work_narratives",
-                "companion_documents",
-                "companion_source_status",
-                "companion_source_changes",
             ):
                 self.db.execute(f"DELETE FROM {table} WHERE pet=?", (self.pet,))
 

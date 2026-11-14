@@ -119,8 +119,8 @@ class PromptTemplateTests(unittest.TestCase):
         text = self.builder.payload(context, prompt, (), None)
         self.assertIn("The developer asked today [s1]:", text)
         self.assertIn("Report recorded today [s2]:", text)
-        self.assertIn("React briefly to one detail in the report above", text)
-        self.assertIn("Use past tense for its work facts", text)
+        self.assertIn("personal reaction in one sentence", text)
+        self.assertIn("Use past tense for reported work facts", text)
         self.assertEqual(text.count("Fix the flaky parser checks."), 1)
         self.assertEqual(text.count("Parser checks passed locally. CI is running."), 1)
         self.assertNotIn("current_moment", text)
@@ -129,7 +129,7 @@ class PromptTemplateTests(unittest.TestCase):
     def test_event_templates_distinguish_waits_results_and_companionship(self) -> None:
         cases = (
             (SpeechSituation.PROMPT, "Reply directly to the developer"),
-            (SpeechSituation.ROUTINE, "supplied activity detail"),
+            (SpeechSituation.ROUTINE, "personal reaction in one sentence"),
             (SpeechSituation.COMPLETION, "reported execution outcome"),
             (SpeechSituation.FAILURE, "observed failed call"),
             (SpeechSituation.EXPLICIT, "supplied context above"),
@@ -231,7 +231,7 @@ class PromptTemplateTests(unittest.TestCase):
                 text = self.builder.payload(context, prompt, (), None)
                 self.assertIn(label + " [s1]:", text)
                 self.assertIn(timing_subject + " has been open for 5 minutes.", text)
-                self.assertIn("patient, companionable aside", text)
+                self.assertIn("brief, patient aside", text)
                 self.assertNotIn("Input needed", text)
                 self.assertNotIn("waiting on you", text)
 
