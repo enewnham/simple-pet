@@ -235,6 +235,12 @@ For commands outside a coding tool, use the wrapper:
 examples/pet-run pytest
 ```
 
+## Session naming
+
+Session naming is optional and runs locally. Add a `naming` command callback to
+receive short names derived from workstream titles, goals, or first prompts. See
+[session naming](docs/session-naming.md) for configuration and the zmx title example.
+
 ## Command notifications
 
 Notifications are disabled by default. Add `notify` to `pet.config.json` to run a
