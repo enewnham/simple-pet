@@ -20,6 +20,7 @@ from .commentary import AnthropicModelClient, Cognition
 from .config import Config
 from .logging import get_logger
 from .mcp_sessions import SessionPublisher
+from .naming import SessionNaming
 from .notifications import Notifications
 from .runtime import HookEvent, RandomSource, WaitingKind
 from .sessions.processes import ProcessTracker
@@ -110,6 +111,11 @@ class Daemon:
                 permission_pending=self.is_permission_pending,
             )
             if config.notify is not None
+            else None
+        )
+        self.naming = (
+            SessionNaming(config.naming, self.notification_marks, clock)
+            if config.naming is not None
             else None
         )
         self.config = config
@@ -245,6 +251,8 @@ class Daemon:
             hook = normalize_hook(packet)
             if hook is not None:
                 self.application.ingest(hook)
+                if self.naming is not None:
+                    self.naming.ingest(hook)
                 if self.notifications is not None:
                     self.notifications.ingest(hook)
         else:
@@ -254,6 +262,8 @@ class Daemon:
         while True:
             self.application.tick()
             self.publish_sessions()
+            if self.naming is not None:
+                self.naming.tick()
             if self.notifications is not None:
                 self.notifications.tick()
             await asyncio.sleep(0.05)
@@ -308,6 +318,8 @@ class Daemon:
             self.loop_task.cancel()
         if self.notifications is not None:
             await self.notifications.close()
+        if self.naming is not None:
+            await self.naming.close()
         await self.application.close()
         if self.loop_task:
             await asyncio.gather(self.loop_task, return_exceptions=True)

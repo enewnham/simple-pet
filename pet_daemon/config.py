@@ -13,6 +13,7 @@ from pydantic import (
     model_validator,
 )
 
+from .naming import NamingConfig
 from .notifications import NotifyConfig
 
 DEFAULT_PERSONA = """
@@ -154,6 +155,7 @@ class Config(BaseModel):
     max_tokens: PositiveInt = 512
     behavior: BehaviorConfig = Field(default_factory=BehaviorConfig)
     notify: NotifyConfig | None = None
+    naming: NamingConfig | None = None
     navigation: NavigationConfig = Field(default_factory=NavigationConfig)
 
     @classmethod

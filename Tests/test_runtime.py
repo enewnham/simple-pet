@@ -2674,6 +2674,43 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("The failed operation was command execution.", snapshot)
         self.assertNotIn("Exit code", snapshot)
 
+    async def test_naming_hook_delivers_and_observes_workstream_titles(self) -> None:
+        from pet_daemon.naming import NamingConfig
+        from pet_daemon.workstream_marks import MarkPatch, thread_id
+
+        await self.daemon.close()
+        output = Path(self.temp.name) / "name.json"
+        self.config.naming = NamingConfig(
+            command=("/bin/sh", "-c", 'cat > "$1"', "name", str(output)),
+            debounce_seconds=0,
+        )
+        self.daemon = Daemon(self.config, self.client)
+        await self.daemon.start()
+        self.send(
+            {
+                "kind": "event",
+                "source": "codex",
+                "session": "named-session",
+                "event": "intent",
+                "goal": "Fix socket timeout",
+                "repo": self.temp.name,
+                "zmx_session": "work",
+            }
+        )
+        await self.wait_for(lambda: output.exists() and output.stat().st_size > 0)
+        payload = json.loads(output.read_text())
+        self.assertEqual(payload["name"], "Fix socket timeout")
+        self.assertEqual(payload["zmx_session"], "work")
+        output.unlink()
+        self.daemon.workstream_marks.append(
+            thread_id(payload["cwd"]),
+            MarkPatch(title="Test socket retries"),
+            author="test",
+            reason="Refine the task",
+        )
+        await self.wait_for(lambda: output.exists() and output.stat().st_size > 0)
+        self.assertEqual(json.loads(output.read_text())["name"], "Test socket retries")
+
     async def test_notification_hook_delivers_from_daemon_socket(self) -> None:
         from pet_daemon.notifications import NotifyConfig
 
