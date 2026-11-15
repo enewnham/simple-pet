@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from ..domain import ExecutionOutcome, SessionSource
 from ..runtime import HookEvent, HookEventKind, WaitingKind
 from ..sessions.processes import discover_owner
+from ..sessions.terminals import kitty_windows, thread_zmx_session
 from .notify import send
 
 COMMON_EVENTS = {
@@ -348,6 +349,14 @@ def main() -> None:
     if hook is not None:
         owner = discover_owner(hook.source)
         hook.owner = owner
+        if hook.source == SessionSource.CODEX and owner is None:
+            # Skip the daemon's inherited env; its ZMX_SESSION names whichever session launched it.
+            thread = string(payload.get("session_id"))
+            hook.zmx_session = (
+                string(payload.get("zmx_session"))
+                or thread_zmx_session(thread, kitty_windows())
+                or None
+            )
         send(hook.packet())
     response: dict[str, object] = {}
     if args.source == "cursor":

@@ -79,7 +79,11 @@ status, priority, and up to 32 redacted tags. Free-form mark notes, goals, and t
 stay in MCP results.
 
 The hook input accepts optional `zmx_session`, `tab_title`, and `labels` fields.
-The hook adapter also reads `ZMX_SESSION` for the zmx name. Missing metadata stays
+The hook adapter also reads `ZMX_SESSION` for the zmx name. A Codex hook run by the shared
+app-server daemon ignores `ZMX_SESSION`, because the daemon inherits it from
+whichever session launched it. It takes the zmx name from the Kitty window whose
+title shows the hook's thread ID, which needs `thread-id` in Codex's
+`tui.terminal_title`. Missing metadata stays
 empty unless an earlier hook supplied it for that harness and session. Labels are
 a string-to-string object, such as `{"owner":"me"}`. Metadata and assistant text
 are retained for at most 1,000 recent sessions. A new intent clears retained
