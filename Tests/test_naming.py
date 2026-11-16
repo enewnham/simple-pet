@@ -47,7 +47,14 @@ def test_naming_configuration_and_name_schema(tmp_path: Path) -> None:
             NamingConfig(command=command)
     with pytest.raises(ValidationError):
         NamingConfig.model_validate({"command": ["callback"], "debounce_seconds": 0})
-    for name in ("sockets", "fix sockets", "wm-730"):
+    for name in (
+        "sockets",
+        "fix sockets",
+        "wm-730",
+        "explain-rc",
+        "agent-rc",
+        "a1-b2 c3-d4",
+    ):
         assert SessionName(name=name).name == name
     for name in (
         "",
@@ -55,6 +62,9 @@ def test_naming_configuration_and_name_schema(tmp_path: Path) -> None:
         "three short words",
         "abcdefghijklm",
         "fix  sockets",
+        "-agent",
+        "agent-",
+        "agent--rc",
     ):
         with pytest.raises(ValidationError):
             SessionName(name=name)
@@ -133,6 +143,12 @@ class NamingTests(unittest.IsolatedAsyncioTestCase):
                 "name": "fix sockets",
             }
         ]
+
+    async def test_hyphenated_name_is_delivered_unchanged(self) -> None:
+        self.model.response = {"name": "explain-rc"}
+        self.naming.ingest(self.hook)
+        await self.finish_naming()
+        assert [payload["name"] for payload in self.payloads] == ["explain-rc"]
 
     async def test_subagents_and_sessions_without_zmx_are_ignored(self) -> None:
         for changes in (
