@@ -20,6 +20,13 @@ def unload(service: str) -> None:
         launchctl("bootout", service)
 
 
+def restart_mcp(domain: str) -> None:
+    label = "dev.simple-pet.mcp"
+    plist = Path.home() / "Library/LaunchAgents" / f"{label}.plist"
+    if plist.is_file():
+        launchctl("kickstart", "-k", f"{domain}/{label}")
+
+
 def install(domain: str, service: str, plist: Path) -> None:
     for relative in (
         ".env",
@@ -52,6 +59,7 @@ def install(domain: str, service: str, plist: Path) -> None:
     plist.write_bytes(payload)
     launchctl("enable", service)
     launchctl("bootstrap", domain, str(plist))
+    restart_mcp(domain)
     print(f"Installed {plist}")
     print(f"Startup logs: {logs}")
 
@@ -73,6 +81,7 @@ def main() -> None:
             print(f"Uninstalled {plist}")
         case "restart":
             launchctl("kickstart", "-k", service)
+            restart_mcp(domain)
         case "status":
             launchctl("print", service)
 
