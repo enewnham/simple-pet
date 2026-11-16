@@ -263,6 +263,21 @@ class Memory:
                 ),
             )
 
+    def attempt_session_name(self, session: SessionIdentity) -> bool:
+        with self.transaction():
+            result = self.db.execute(
+                "INSERT OR IGNORE INTO session_names(source,session) VALUES (?,?)",
+                session_values(session),
+            )
+        return result.rowcount == 1
+
+    def save_session_name(self, session: SessionIdentity, name: str) -> None:
+        with self.transaction():
+            self.db.execute(
+                "UPDATE session_names SET name=? WHERE source=? AND session=?",
+                (name, *session_values(session)),
+            )
+
     def narrative_reports(
         self, sessions: Sequence[SessionIdentity]
     ) -> tuple[SessionReport, ...]:

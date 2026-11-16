@@ -1,4 +1,4 @@
-# Session naming callback
+# Session naming
 
 Naming is disabled by default. Enable it with a `naming` block in
 `pet.config.json`, then restart the daemon with `make restart-agent`:
@@ -7,25 +7,28 @@ Naming is disabled by default. Enable it with a `naming` block in
 {
   "naming": {
     "command": ["/absolute/path/to/naming-command"],
-    "debounce_seconds": 10,
     "timeout_seconds": 10
   }
 }
 ```
 
-Simple Pet derives names locally without a model API call. It uses the effective
-workstream `title`, then `goal`, then the session's first observed intent prompt.
-It removes embedded instructions and code blocks, takes the first nonempty prose
-line, strips common request prefixes, and limits the result to eight words and
-64 characters. Harness and terminal identifiers never supply name text. This is
-text shortening rather than semantic summarization. A workstream title gives
-more precise names when a prompt begins with general setup prose.
+At the first `intent` of a top-level session with a `zmx_session`, Simple Pet
+immediately asks its configured Anthropic model to name the work. Sessions with
+a parent and sessions without a zmx identifier are ignored. Later prompts and
+workstream mark changes do not trigger naming.
 
-The daemon checks workstream marks once per second for up to 1,000 observed
-sessions. Each changed proposed name waits for `debounce_seconds` without another
-name change before delivery. Further prompts preserve the first prompt. A mark
-can rename a session without another hook arriving. Removing a title or goal
-returns to the next available source.
+The model receives the first prompt through `report_prose`, bounded to 4,000
+characters, plus the checkout repository path, branch, pull request, and workstream
+mark title and goal when set. The existing notification redactor processes all
+input before the request. The model uses the configured model and request timeout.
+Its response schema requires one or two lowercase words within 12 characters,
+including spaces. Ticket identifiers such as `wm-730` are allowed. Names are
+delivered exactly as validated.
+
+The `session_names` table records the attempt before the model request and stores
+a valid name before delivery. A restart preserves the attempt. A model error,
+timeout, or invalid output logs `naming.failed` and leaves the session unnamed.
+Each session gets one attempt, with no retries or renames.
 
 The command receives one JSON object on stdin:
 
@@ -36,38 +39,16 @@ The command receives one JSON object on stdin:
   "thread_id": "native-session-id",
   "zmx_session": "terminal-session",
   "cwd": "/path/to/checkout",
-  "name": "Fix socket timeout"
+  "name": "socket fix"
 }
 ```
 
 `thread_id` is the harness's native session identifier, also exposed as `session`.
-Missing zmx and cwd values are `null`. Metadata supplied by later hooks updates
-the remembered session. Names use the notification text redactor before shortening.
+A missing cwd is `null`. Simple Pet supplies this contract without depending on
+an agent management tool.
 
 The argv command executes directly with the fixed system `PATH` used by
-[notifications](notifications.md). Stdout and stderr are discarded. Timeout and
-shutdown kill the command's process group. A failed command is logged without the
-payload and is not retried. The same proposed name does not trigger another
-callback. Naming state lives in memory, so a daemon restart can deliver a name
-again after observing a session. Removing the `naming` block disables naming.
-
-## zmx example
-
-The installed zmx CLI documents `zmx set <session> k=v ...` for session labels.
-[examples/name-zmx-session.py](../examples/name-zmx-session.py) sets the `title`
-label. Supply absolute paths to Python, the example, and your zmx executable:
-
-```json
-{
-  "naming": {
-    "command": [
-      "/usr/bin/python3",
-      "/absolute/path/to/simple-pet/examples/name-zmx-session.py",
-      "/opt/homebrew/bin/zmx"
-    ]
-  }
-}
-```
-
-The example skips sessions without a zmx identifier and passes the name as one
-argument. It needs no dotfiles, agent session database, or agent management tool.
+[notifications](notifications.md). Stdout and stderr are discarded. The callback
+uses `timeout_seconds`. Timeout and shutdown kill the command's process group.
+A failed callback is logged and is not retried. Removing the `naming` block
+disables naming.

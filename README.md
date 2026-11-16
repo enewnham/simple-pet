@@ -237,9 +237,11 @@ examples/pet-run pytest
 
 ## Session naming
 
-Session naming is optional and runs locally. Add a `naming` command callback to
-receive short names derived from workstream titles, goals, or first prompts. See
-[session naming](docs/session-naming.md) for configuration and the zmx title example.
+Session naming is optional. At a top-level session’s first prompt, the configured
+model generates a name of one or two lowercase words within 12 characters. A local
+`naming` callback receives the name and session identifiers. Each session gets one
+attempt, persisted across restarts. See [session naming](docs/session-naming.md)
+for configuration and the callback contract.
 
 ## Command notifications
 

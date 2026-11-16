@@ -124,6 +124,7 @@ class RepeatMethod(StrEnum):
 
 class ModelPurpose(StrEnum):
     STORY = "story"
+    NAME = "name"
 
 
 class ArtifactKind(StrEnum):

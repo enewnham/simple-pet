@@ -137,6 +137,7 @@ class FixtureModel:
             if self.narrative_response:
                 return self.narrative_response(request)
             return story_response(request)
+        assert isinstance(reason, SpeechReason)
         self.requests.append((request, reason))
         if self.before_response:
             self.before_response(reason)

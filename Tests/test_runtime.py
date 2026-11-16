@@ -166,6 +166,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 )
             if story:
                 return reply(result=story_response(body))
+            if body["output_config"]["format"]["schema"]["required"] == ["name"]:
+                return reply(result={"name": "fix sockets"})
             reason = request_reason(body)
             if (
                 self.speech == self.fixture_speech
@@ -2674,42 +2676,45 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("The failed operation was command execution.", snapshot)
         self.assertNotIn("Exit code", snapshot)
 
-    async def test_naming_hook_delivers_and_observes_workstream_titles(self) -> None:
+    async def test_naming_hook_delivers_once_across_daemon_restart(self) -> None:
         from pet_daemon.naming import NamingConfig
-        from pet_daemon.workstream_marks import MarkPatch, thread_id
 
         await self.daemon.close()
         output = Path(self.temp.name) / "name.json"
         self.config.naming = NamingConfig(
             command=("/bin/sh", "-c", 'cat > "$1"', "name", str(output)),
-            debounce_seconds=0,
         )
         self.daemon = Daemon(self.config, self.client)
         await self.daemon.start()
-        self.send(
-            {
-                "kind": "event",
-                "source": "codex",
-                "session": "named-session",
-                "event": "intent",
-                "goal": "Fix socket timeout",
-                "repo": self.temp.name,
-                "zmx_session": "work",
-            }
-        )
+        hook = {
+            "kind": "event",
+            "source": "codex",
+            "session": "named-session",
+            "event": "intent",
+            "goal": "Fix socket timeout",
+            "repo": self.temp.name,
+            "zmx_session": "work",
+        }
+        self.send(hook)
         await self.wait_for(lambda: output.exists() and output.stat().st_size > 0)
         payload = json.loads(output.read_text())
-        self.assertEqual(payload["name"], "Fix socket timeout")
+        self.assertEqual(payload["name"], "fix sockets")
         self.assertEqual(payload["zmx_session"], "work")
+        naming = require(self.daemon.naming)
+        await asyncio.gather(*tuple(naming.tasks))
+        await self.daemon.close()
         output.unlink()
-        self.daemon.workstream_marks.append(
-            thread_id(payload["cwd"]),
-            MarkPatch(title="Test socket retries"),
-            author="test",
-            reason="Refine the task",
-        )
-        await self.wait_for(lambda: output.exists() and output.stat().st_size > 0)
-        self.assertEqual(json.loads(output.read_text())["name"], "Test socket retries")
+        self.daemon = Daemon(self.config, self.client)
+        await self.daemon.start()
+        self.daemon.receive(json.dumps(hook).encode())
+        self.assertFalse(require(self.daemon.naming).tasks)
+        self.assertFalse(output.exists())
+        naming_requests = [
+            request
+            for request in self.requests
+            if request["output_config"]["format"]["schema"]["required"] == ["name"]
+        ]
+        self.assertEqual(len(naming_requests), 1)
 
     async def test_notification_hook_delivers_from_daemon_socket(self) -> None:
         from pet_daemon.notifications import NotifyConfig

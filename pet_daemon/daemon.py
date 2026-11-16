@@ -113,11 +113,6 @@ class Daemon:
             if config.notify is not None
             else None
         )
-        self.naming = (
-            SessionNaming(config.naming, self.notification_marks, clock)
-            if config.naming is not None
-            else None
-        )
         self.config = config
         self.clock = clock
         self.wall_clock = wall_clock
@@ -145,6 +140,17 @@ class Daemon:
         )
         cognition = Cognition(
             AnthropicModelClient(client), config, memory=memory, clock=wall_clock
+        )
+        self.naming = (
+            SessionNaming(
+                config.naming,
+                self.notification_marks,
+                memory,
+                cognition.client,
+                cognition.request,
+            )
+            if config.naming is not None
+            else None
         )
         repositories = RepositoryTracker(
             lambda observation: self.application.ingest(observation),
@@ -262,8 +268,6 @@ class Daemon:
         while True:
             self.application.tick()
             self.publish_sessions()
-            if self.naming is not None:
-                self.naming.tick()
             if self.notifications is not None:
                 self.notifications.tick()
             await asyncio.sleep(0.05)

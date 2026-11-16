@@ -2,11 +2,14 @@ import sqlite3
 
 from .transactions import transaction
 
-SCHEMA_VERSION = 28
+SCHEMA_VERSION = 29
 
 
 MEMORY_SCHEMA = """
             PRAGMA auto_vacuum = INCREMENTAL;
+            CREATE TABLE session_names (
+                source TEXT NOT NULL, session TEXT NOT NULL, name TEXT,
+                PRIMARY KEY(source, session));
             CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY, pet TEXT NOT NULL, source TEXT NOT NULL, session TEXT NOT NULL,
                 working_directory TEXT NOT NULL, repository_kind TEXT, repository_value TEXT,
@@ -98,6 +101,7 @@ def execute_schema(db: sqlite3.Connection, script: str) -> None:
 
 
 DROP_SCHEMA = """
+    DROP TABLE IF EXISTS session_names;
     DROP TABLE IF EXISTS coordination_records;
     DROP TABLE IF EXISTS coordination_history;
     DROP TABLE IF EXISTS companion_documents;
