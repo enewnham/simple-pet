@@ -50,21 +50,21 @@ def test_naming_configuration_and_name_schema(tmp_path: Path) -> None:
     for name in (
         "sockets",
         "fix sockets",
-        "wm-730",
-        "explain-rc",
-        "agent-rc",
-        "a1-b2 c3-d4",
+        "wm 730",
+        "naming design",
+        "wm 730 adr",
+        "raycast reset",
+        "explain tabbar",
     ):
         assert SessionName(name=name).name == name
     for name in (
         "",
         "Fix sockets",
-        "three short words",
-        "abcdefghijklm",
+        "four plain lowercase words",
         "fix  sockets",
+        "agent-rc",
         "-agent",
         "agent-",
-        "agent--rc",
     ):
         with pytest.raises(ValidationError):
             SessionName(name=name)
@@ -144,11 +144,17 @@ class NamingTests(unittest.IsolatedAsyncioTestCase):
             }
         ]
 
-    async def test_hyphenated_name_is_delivered_unchanged(self) -> None:
-        self.model.response = {"name": "explain-rc"}
+    async def test_three_word_name_is_delivered_unchanged(self) -> None:
+        self.model.response = {"name": "wm 730 adr"}
         self.naming.ingest(self.hook)
         await self.finish_naming()
-        assert [payload["name"] for payload in self.payloads] == ["explain-rc"]
+        assert [payload["name"] for payload in self.payloads] == ["wm 730 adr"]
+
+    async def test_name_over_twelve_characters_is_delivered_unchanged(self) -> None:
+        self.model.response = {"name": "explain tabbar"}
+        self.naming.ingest(self.hook)
+        await self.finish_naming()
+        assert [payload["name"] for payload in self.payloads] == ["explain tabbar"]
 
     async def test_subagents_and_sessions_without_zmx_are_ignored(self) -> None:
         for changes in (
@@ -167,12 +173,14 @@ class NamingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_names_deliver_nothing_and_are_never_retried(self) -> None:
         for index, name in enumerate(
-            ("", "Fix sockets", "abcdefghijklm", "too many words")
+            ("", "Fix sockets", "agent-rc", "four plain lowercase words")
         ):
             self.model.response = {"name": name}
             hook = self.hook.model_copy(update={"session": f"invalid-{index}"})
-            self.naming.ingest(hook)
-            await self.finish_naming()
+            with self.assertLogs("pet-daemon", level="WARNING") as logged:
+                self.naming.ingest(hook)
+                await self.finish_naming()
+            assert any("naming.failed" in entry for entry in logged.output)
             self.naming.ingest(hook)
         assert len(self.model.calls) == 4
         assert self.payloads == []

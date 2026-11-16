@@ -238,10 +238,10 @@ examples/pet-run pytest
 ## Session naming
 
 Session naming is optional. At a top-level session’s first prompt, the configured
-model generates a name of one or two lowercase words within 12 characters. A local
-`naming` callback receives the name and session identifiers. Each session gets one
-attempt, persisted across restarts. See [session naming](docs/session-naming.md)
-for configuration and the callback contract.
+model generates a name of one to three lowercase words, targeting about 12
+characters. A local `naming` callback receives the name and session identifiers.
+Each session gets one attempt, persisted across restarts. See
+[session naming](docs/session-naming.md) for configuration and the callback contract.
 
 ## Command notifications
 

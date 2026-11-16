@@ -21,9 +21,11 @@ The model receives the first prompt through `report_prose`, bounded to 4,000
 characters, plus the checkout repository path, branch, pull request, and workstream
 mark title and goal when set. The existing notification redactor processes all
 input before the request. The model uses the configured model and request timeout.
-Its response schema requires one or two lowercase words within 12 characters,
-including spaces. Ticket identifiers such as `wm-730` are allowed. Names are
-delivered exactly as validated.
+The prompt asks for a short name of about 12 characters. The response schema
+requires one to three plain words containing lowercase letters and digits,
+separated by single spaces. Examples include `naming design`, `wm 730 adr`, and
+`raycast reset`. Hyphens are rejected. Length is a target, with no enforced limit.
+Names are delivered exactly as validated.
 
 The `session_names` table records the attempt before the model request and stores
 a valid name before delivery. A restart preserves the attempt. A model error,
