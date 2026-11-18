@@ -26,7 +26,7 @@ class OutputFormat(TypedDict):
 
 
 class OutputConfig(TypedDict):
-    effort: Literal["low"]
+    effort: Literal["low", "medium"]
     format: OutputFormat
 
 

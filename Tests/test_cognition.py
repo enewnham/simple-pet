@@ -38,6 +38,7 @@ from pet_daemon.domain import (
     SpeechSituation,
 )
 from pet_daemon.identity import SessionIdentity
+from pet_daemon.occasion import Occasion
 from pet_daemon.runtime import CareTrigger, HookEventKind, PetContext, SessionTrigger
 from pet_daemon.sessions.tracking import Sessions
 from pet_daemon.sources.hooks import HookEvent
@@ -255,6 +256,96 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         return await self.cognition.generate_commentary(
             snapshot, selection, refresh=refresh
         )
+
+    async def test_structured_occasion_supplies_only_the_selected_fact(self) -> None:
+        snapshot = self.snapshot()
+        selection = self.attention.select(snapshot, SpeechReason.ROUTINE)
+        character = "Scout, a friendly rival"
+        selection = selection.model_copy(update={"character": character})
+        self.responses.append(({"speak": "I was starting to worry."}, "end_turn"))
+        occasion = Occasion(
+            fingerprint="recovery",
+            fact="The operation recovered after failing twice.",
+            situation=SpeechSituation.RECOVERY,
+            expires_at=self.clock() + 10,
+        )
+
+        result = await self.cognition.generate_commentary(
+            snapshot, selection, occasion=occasion, feeling="sad"
+        )
+
+        self.assertEqual(self.call_kinds, ["commentary"])
+        self.assertEqual(result.speak, "I was starting to worry.")
+        body = self.requests[-1][1]
+        self.assertIn("You are feeling relieved.", body["system"][1]["text"])
+        self.assertNotIn("Refactor batch inserts", str(body))
+        self.assertEqual(body["output_config"]["effort"], "medium")
+        payload = json.loads(body["messages"][0]["content"])
+        self.assertEqual(payload["fact"], occasion.fact)
+        self.assertEqual(payload["character"], character)
+
+    async def test_prose_occasion_uses_one_cited_statement_from_the_story(self) -> None:
+        report_text = (
+            "Removed a redundant retry. This paragraph describes several other things."
+        )
+        fact = "The agent reported removing a redundant retry."
+        self.clock.advance(1)
+        self.handle(
+            {
+                "source": "claude",
+                "session": "worker",
+                "event": "turn_done",
+                "progress": report_text,
+            }
+        )
+        identity = SessionIdentity(source=SessionSource.CLAUDE, native_id="worker")
+        source = next(
+            report_source_key(report)
+            for report in self.memory.narrative_reports((identity,))
+            if getattr(report.payload, "progress", None) == report_text
+        )
+
+        def story_answer() -> dict[str, object]:
+            payload = json.loads(self.story_requests[-1][1]["messages"][0]["content"])
+            evidence = payload["current_moment"]["evidence"]
+            label = next(
+                item["id"] for item in evidence if item.get("text") == report_text
+            )
+            return {
+                "intent": {
+                    "text": "Refactor batch inserts.",
+                    "sources": [payload["current_work"]["latest_request_source"]],
+                },
+                "decisions": [],
+                "progress": [{"text": fact, "sources": [label]}],
+            }
+
+        self.story_response = story_answer
+        self.responses.append(
+            ({"speak": "One fewer retry to babysit.", "mentions": ["s1"]}, "end_turn")
+        )
+        snapshot = self.snapshot()
+        selection = self.attention.select(snapshot, SpeechReason.COMPLETION)
+        occasion = Occasion(
+            fingerprint="completion",
+            fact=None,
+            situation=SpeechSituation.COMPLETION,
+            expires_at=self.clock() + 10,
+            sources=(source,),
+        )
+
+        result = await self.cognition.generate_commentary(
+            snapshot, selection, occasion=occasion, feeling="curious"
+        )
+
+        self.assertEqual(self.call_kinds, ["story", "commentary"])
+        self.assertEqual(result.mentions, (source,))
+        body = self.requests[-1][1]
+        self.assertIn("You are feeling curious.", body["system"][1]["text"])
+        payload = json.loads(body["messages"][0]["content"])
+        self.assertEqual(payload["fact"], fact)
+        self.assertNotIn(report_text, str(payload))
+        self.assertNotIn("Refactor batch inserts", str(payload))
 
     async def test_custom_persona_keeps_shared_work_identity(self) -> None:
         persona = "You are a gentle, curious woodland companion."
@@ -737,7 +828,7 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         self.handle({"source": "claude", "session": "worker", "event": "turn_done"})
         directions = {
-            CareKind.EXERCISE: "stretch break",
+            CareKind.EXERCISE: "a brief break for the developer",
             CareKind.ATTENTION: "casual greeting",
             CareKind.CONSTERNATION: "quiet stretch",
         }

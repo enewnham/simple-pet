@@ -20,7 +20,13 @@ def unload(service: str) -> None:
         launchctl("bootout", service)
 
 
-def install(domain: str, service: str, plist: Path, port: int = 18765) -> None:
+def install(
+    domain: str,
+    service: str,
+    plist: Path,
+    port: int = 18765,
+    write_token_file: Path | None = None,
+) -> None:
     for relative in ("pet.config.json", ".venv/bin/python"):
         path = ROOT / relative
         if not path.is_file():
@@ -30,19 +36,24 @@ def install(domain: str, service: str, plist: Path, port: int = 18765) -> None:
     logs = Path.home() / "Library/Logs/Simple Pet"
     logs.mkdir(parents=True, exist_ok=True)
     plist.parent.mkdir(parents=True, exist_ok=True)
+    arguments = [
+        str(ROOT / ".venv/bin/python"),
+        "-m",
+        "pet_daemon.mcp",
+        "--http",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+    ]
+    if write_token_file is not None:
+        arguments.extend(
+            ("--write-token-file", str(write_token_file.expanduser().absolute()))
+        )
     payload = plistlib.dumps(
         {
             "Label": LABEL,
-            "ProgramArguments": [
-                str(ROOT / ".venv/bin/python"),
-                "-m",
-                "pet_daemon.mcp",
-                "--http",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(port),
-            ],
+            "ProgramArguments": arguments,
             "WorkingDirectory": str(ROOT),
             "RunAtLoad": True,
             "KeepAlive": {"SuccessfulExit": False},
@@ -74,6 +85,7 @@ def main() -> None:
     )
     parser.add_argument("action", choices=("install", "uninstall", "restart", "status"))
     parser.add_argument("--port", type=port_number, default=18765)
+    parser.add_argument("--write-token-file", type=Path)
     args = parser.parse_args()
     domain = f"gui/{os.getuid()}"
     service = f"{domain}/{LABEL}"
@@ -81,7 +93,7 @@ def main() -> None:
 
     match args.action:
         case "install":
-            install(domain, service, plist, args.port)
+            install(domain, service, plist, args.port, args.write_token_file)
         case "uninstall":
             unload(service)
             plist.unlink(missing_ok=True)

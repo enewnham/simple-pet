@@ -7,7 +7,7 @@ from ..domain import (
     WorkSubjectKind,
 )
 from ..identity import SessionIdentity
-from ..runtime import AgentSessionStatus, SwarmActivity
+from ..runtime import AgentSessionStatus, SessionActivity
 from .association import TERMINAL_EVENTS
 from .evidence import ExecutionStatus, ReportedProgress
 from .history import report_prose
@@ -266,7 +266,7 @@ def _related_story(
     return story.model_copy(update={"sessions": selected})
 
 
-def shared_work(state: WorkFacts, activity: SwarmActivity) -> tuple[WorkSubject, ...]:
+def shared_work(state: WorkFacts, activity: SessionActivity) -> tuple[WorkSubject, ...]:
     runtime = {session.id: session for session in activity.sessions}
     stories = {
         identifier: session_work(state, agent)
@@ -328,5 +328,5 @@ _runtime_types = {
     "WorkStory": WorkStory,
     "WorkSubject": WorkSubject,
 }
-for _runtime_model in (AgentSessionStatus, SwarmActivity, PetContext):
+for _runtime_model in (AgentSessionStatus, SessionActivity, PetContext):
     _runtime_model.model_rebuild(_types_namespace=_runtime_types)

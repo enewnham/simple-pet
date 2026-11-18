@@ -9,8 +9,9 @@ from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Annotated, NotRequired, TypedDict
 
+from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import TokenVerifier
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver import MCPServer
@@ -24,7 +25,23 @@ from .domain import PullRequestState
 from .storage.migrations import SCHEMA_VERSION
 from .work.history import report_prose
 from .work.models import ExecutionEvidence, SessionReport
-from .workstream_marks import MarkField, MarkPatch, MarkPriority, MarkStatus, MarkStore
+from .workstream_marks import (
+    NOTE_LIMIT,
+    Identifier,
+    MarkField,
+    MarkPatch,
+    MarkPriority,
+    MarkStatus,
+    MarkStore,
+    PresenceStatus,
+    SessionRef,
+    WorkstreamNote,
+)
+
+if TYPE_CHECKING:
+    from .mcp_marks import WorkstreamMarks
+
+WRITE_PERMISSION = "write"
 
 COVERAGE = (
     "Retained coding-agent reports and latest repository observations captured by "
@@ -402,6 +419,112 @@ class WorkContext:
         return source.passage(offset, length)
 
 
+def register_mark_tools(
+    server: MCPServer, marks: WorkstreamMarks, *, remote: bool
+) -> None:
+    annotations = ToolAnnotations(read_only_hint=True, destructive_hint=False)
+
+    def write_principal() -> str:
+        if not remote:
+            return "local-stdio"
+        token = get_access_token()
+        if token is None or WRITE_PERMISSION not in token.scopes:
+            raise ToolError("This MCP credential cannot write")
+        return f"bearer:{token.client_id}"
+
+    writes = ToolAnnotations(
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=False,
+    )
+
+    @server.tool(annotations=writes)
+    def mark_workstream(
+        id: Annotated[str, Field(min_length=1, max_length=128)],
+        author: Annotated[str, Field(min_length=1, max_length=128)],
+        reason: Annotated[str, Field(min_length=1, max_length=2000)],
+        status: MarkStatus | None = None,
+        priority: MarkPriority | None = None,
+        tags: list[str] | None = None,
+        note: str | None = None,
+        goal: str | None = None,
+        title: str | None = None,
+        blocked_on: str | None = None,
+        snooze_until: Annotated[float, Field(ge=0, allow_inf_nan=False)] | None = None,
+        notes: Annotated[list[WorkstreamNote], Field(max_length=NOTE_LIMIT)]
+        | None = None,
+    ) -> dict[str, object]:
+        """Append attributed information about a workstream. Captured evidence stays separate.
+
+        Omitted fields stay unchanged. Tags replace the shared list. Typed notes
+        replace the calling principal's list.
+        """
+        write_principal()
+        try:
+            patch = MarkPatch(
+                status=status,
+                priority=priority,
+                tags=tags,
+                note=note,
+                goal=goal,
+                title=title,
+                blocked_on=blocked_on,
+                snooze_until=snooze_until,
+                notes=notes,
+            )
+            return marks.mark(id, patch, author, reason)
+        except ValueError as error:
+            raise ToolError(str(error)) from error
+
+    @server.tool(annotations=writes)
+    def unmark_workstream(
+        id: Annotated[str, Field(min_length=1, max_length=128)],
+        author: Annotated[str, Field(min_length=1, max_length=128)],
+        reason: Annotated[str, Field(min_length=1, max_length=2000)],
+        fields: list[MarkField] | None = None,
+    ) -> dict[str, object]:
+        """Clear selected fields or all fields when omitted. Clears only the caller's typed notes."""
+        write_principal()
+        try:
+            return marks.unmark(id, fields, author, reason)
+        except ValueError as error:
+            raise ToolError(str(error)) from error
+
+    @server.tool(annotations=writes)
+    def record_presence(
+        status: PresenceStatus,
+        author: Annotated[str, Field(min_length=1, max_length=128)],
+        reason: Annotated[str, Field(min_length=1, max_length=2000)],
+        renderer_event_id: Identifier | None = None,
+        session: SessionRef | None = None,
+        turn: Identifier | None = None,
+    ) -> dict[str, object]:
+        """Record observed human presence. Supply the session and turn for an observed human prompt."""
+        principal = write_principal()
+        try:
+            return marks.store.record_presence(
+                status,
+                author,
+                reason,
+                principal,
+                renderer_event_id=renderer_event_id,
+                session=session,
+                turn=turn,
+            )
+        except ValueError as error:
+            raise ToolError(str(error)) from error
+
+    @server.tool(annotations=annotations)
+    def workstream_mark_history(
+        id: Annotated[str, Field(min_length=1, max_length=128)],
+        limit: ResultLimit = 20,
+        before: Annotated[int, Field(ge=1)] | None = None,
+    ) -> dict[str, object]:
+        """Read append-only mark history, newest first. Follow next_before to older events."""
+        return marks.history(id, limit, before)
+
+
 def create_server(
     context: WorkContext,
     *,
@@ -415,6 +538,7 @@ def create_server(
     work = CompanionContext(context)
     marks = WorkstreamMarks(context)
     live = CompanionSessions(context)
+
     server = MCPServer(
         "simple-pet",
         token_verifier=token_verifier,
@@ -429,74 +553,7 @@ def create_server(
     )
     annotations = ToolAnnotations(read_only_hint=True, destructive_hint=False)
 
-    @server.tool(
-        annotations=ToolAnnotations(
-            read_only_hint=False,
-            destructive_hint=False,
-            idempotent_hint=False,
-            open_world_hint=False,
-        )
-    )
-    def mark_workstream(
-        id: Annotated[str, Field(min_length=1, max_length=128)],
-        author: Annotated[str, Field(min_length=1, max_length=128)],
-        reason: Annotated[str, Field(min_length=1, max_length=2000)],
-        status: MarkStatus | None = None,
-        priority: MarkPriority | None = None,
-        tags: list[str] | None = None,
-        note: str | None = None,
-        goal: str | None = None,
-        title: str | None = None,
-        blocked_on: str | None = None,
-        snooze_until: Annotated[float, Field(ge=0, allow_inf_nan=False)] | None = None,
-    ) -> dict[str, object]:
-        """Append caller judgments without changing captured evidence. Supply your caller label and reason.
-
-        Omitted fields stay unchanged. Tags replace the whole tag list. Use unmark_workstream to clear fields.
-        """
-        try:
-            patch = MarkPatch(
-                status=status,
-                priority=priority,
-                tags=tags,
-                note=note,
-                goal=goal,
-                title=title,
-                blocked_on=blocked_on,
-                snooze_until=snooze_until,
-            )
-            return marks.mark(id, patch, author, reason)
-        except ValueError as error:
-            raise ToolError(str(error)) from error
-
-    @server.tool(
-        annotations=ToolAnnotations(
-            read_only_hint=False,
-            destructive_hint=False,
-            idempotent_hint=False,
-            open_world_hint=False,
-        )
-    )
-    def unmark_workstream(
-        id: Annotated[str, Field(min_length=1, max_length=128)],
-        author: Annotated[str, Field(min_length=1, max_length=128)],
-        reason: Annotated[str, Field(min_length=1, max_length=2000)],
-        fields: list[MarkField] | None = None,
-    ) -> dict[str, object]:
-        """Append a clear operation for selected mark fields, or all fields when omitted."""
-        try:
-            return marks.unmark(id, fields, author, reason)
-        except ValueError as error:
-            raise ToolError(str(error)) from error
-
-    @server.tool(annotations=annotations)
-    def workstream_mark_history(
-        id: Annotated[str, Field(min_length=1, max_length=128)],
-        limit: ResultLimit = 20,
-        before: Annotated[int, Field(ge=1)] | None = None,
-    ) -> dict[str, object]:
-        """Read append-only mark history, newest first. Follow next_before to older events."""
-        return marks.history(id, limit, before)
+    register_mark_tools(server, marks, remote=token_verifier is not None)
 
     @server.tool(annotations=annotations)
     def workstreams(limit: ResultLimit = 12) -> dict[str, object]:
@@ -520,7 +577,12 @@ def create_server(
 
         Latest observations overwrite older state. This is not a complete change log.
         """
-        return work.since(ts, limit)
+        changes = marks.store.changes(ts, limit + 1)
+        return {
+            **work.since(ts, limit),
+            "mark_changes": changes[:limit],
+            "mark_changes_truncated": len(changes) > limit,
+        }
 
     @server.tool(annotations=annotations)
     def sessions(limit: ResultLimit = 20) -> dict[str, object]:
@@ -528,7 +590,11 @@ def create_server(
 
         An unavailable daemon snapshot cannot establish whether sessions are live.
         """
-        return dict(live.sessions(limit))
+        presence = marks.store.latest_presence()
+        return {
+            **live.sessions(limit),
+            "reported_presence": presence,
+        }
 
     @server.tool(annotations=annotations)
     def attention(limit: ResultLimit = 20) -> dict[str, object]:
@@ -611,6 +677,9 @@ def main() -> None:
     parser.add_argument("--host", choices=LOOPBACK_HOSTS, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=18765)
     parser.add_argument("--token-file", type=Path, default=DEFAULT_TOKEN_FILE)
+    parser.add_argument(
+        "--write-token-file", type=Path, help="Separate bearer for HTTP writes"
+    )
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535")
@@ -625,7 +694,9 @@ def main() -> None:
     context = WorkContext(path, pet)
     if args.http:
         try:
-            run_http(context, args.token_file, args.host, args.port)
+            run_http(
+                context, args.token_file, args.host, args.port, args.write_token_file
+            )
         except (OSError, ValueError) as error:
             parser.exit(1, f"pet-mcp: {error}\n")
     else:

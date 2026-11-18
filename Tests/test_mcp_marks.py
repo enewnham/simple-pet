@@ -19,7 +19,12 @@ from pet_daemon.work.models import (
     ReportContext,
     SessionReport,
 )
-from pet_daemon.workstream_marks import MarkPatch, MarkStatus, marks_path, thread_id
+from pet_daemon.workstream_marks import (
+    MarkPatch,
+    MarkStatus,
+    marks_path,
+    thread_id,
+)
 
 
 class WorkstreamMarkToolTests(unittest.IsolatedAsyncioTestCase):
@@ -49,6 +54,66 @@ class WorkstreamMarkToolTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self) -> None:
         self.memory.close()
         self.temporary.cleanup()
+
+    async def test_typed_notes_keep_captured_evidence_and_mark_history(self) -> None:
+        server = create_server(self.context)
+        id = thread_id("/first")
+        evidence = self.context.select(50)["sources"]
+        note = {
+            "kind": "handoff",
+            "sender": {"name": "Reviewer"},
+            "to": {"name": "Editor", "description": "Reviews wording"},
+            "work": "the first draft",
+        }
+        request = {"id": id, "author": "coordinator", "reason": "Track ownership"}
+        marked = await server.call_tool(
+            "mark_workstream", {**request, "notes": [note], "status": "active"}
+        )
+        assert isinstance(marked, CallToolResult)
+        self.assertFalse(marked.is_error, marked.content)
+        work: dict[str, Any] = self.work.workstream(id)
+        notes = work["mark"]["fields"]["notes"]
+        self.assertEqual(notes["value"], [note])
+        entry = notes["entries"][0]
+        self.assertEqual(entry["value"], note)
+        self.assertEqual(entry["provenance"]["basis"], "marked")
+        self.assertEqual(entry["provenance"]["author"], "coordinator")
+        self.assertEqual(self.context.select(50)["sources"], evidence)
+
+        cleared = await server.call_tool(
+            "unmark_workstream", {**request, "fields": ["notes"]}
+        )
+        assert isinstance(cleared, CallToolResult)
+        self.assertFalse(cleared.is_error, cleared.content)
+        self.assertEqual(self.marks.store.effective(id)["values"], {"status": "active"})
+        history: dict[str, Any] = self.marks.history(id)
+        self.assertEqual(history["events"][1]["values"]["notes"], [note])
+
+    async def test_presence_is_attributed_and_kept_separate_from_live_sessions(
+        self,
+    ) -> None:
+        server = create_server(self.context)
+        marked = await server.call_tool(
+            "record_presence",
+            {
+                "status": "available",
+                "author": "desk sensor",
+                "reason": "A direct click",
+                "renderer_event_id": "click-id",
+            },
+        )
+        assert isinstance(marked, CallToolResult)
+        self.assertFalse(marked.is_error, marked.content)
+        result = await server.call_tool("sessions", {})
+        assert isinstance(result, CallToolResult)
+        data = result.structured_content
+        assert data is not None
+        presence = data["reported_presence"]
+        self.assertEqual(presence["values"]["observed_at"], self.now)
+        self.assertEqual(presence["values"]["renderer_event_id"], "click-id")
+        self.assertEqual(presence["provenance"]["principal"], "local-stdio")
+        self.assertFalse(data["live_available"])
+        self.assertEqual(self.marks.store.all_effective(), {})
 
     async def test_marked_title_and_goal_keep_field_authors_and_original_evidence(
         self,

@@ -2,17 +2,20 @@ import asyncio
 import base64
 import json
 import random
+import sqlite3
 import tempfile
 import unittest
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from unittest.mock import patch
 
 from pydantic import BaseModel
 
 from pet_daemon.application import Application
 from pet_daemon.attention import Attention, AttentionSelection
 from pet_daemon.behavior.controller import Behavior
+from pet_daemon.behavior.mood import MoodCue
 from pet_daemon.behavior.sprites import Pack
 from pet_daemon.cli.hook import update
 from pet_daemon.commentary import Cognition
@@ -22,7 +25,6 @@ from pet_daemon.commentary.context import (
     MemoryCandidate,
 )
 from pet_daemon.commentary.contracts import ModelRequest
-from pet_daemon.commentary.observations import event_text
 from pet_daemon.commentary.request import SpeechConditions
 from pet_daemon.commentary.usage import UsageTokens, request_usage
 from pet_daemon.config import Config
@@ -44,8 +46,10 @@ from pet_daemon.domain import (
     PullRequestState,
     SessionSource,
     SpeechReason,
+    SpeechSituation,
 )
 from pet_daemon.identity import SessionIdentity
+from pet_daemon.occasion import OCCASION_SECONDS
 from pet_daemon.repository_identity import RemoteRepository
 from pet_daemon.runtime import (
     CareTrigger,
@@ -72,6 +76,7 @@ from pet_daemon.work.observations import (
     PullRequest,
     RepositoryObservation,
 )
+from pet_daemon.workstream_marks import Actor, Handoff, MarkPatch, PresenceStatus
 from Tests.fixtures import require, story_response
 from Tests.prompt_fixtures import RecordingPromptBuilder
 
@@ -173,18 +178,20 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.now = 1000.0
         self.clock = lambda: self.now
+        self.wall_offset = 0
+        self.wall_clock = lambda: self.now + self.wall_offset
         self.config = Config(pet_dir=Path(self.temporary.name))
         self.config.behavior.sentiment_reactions = False
         self.memory = Memory(
             Path(self.temporary.name) / "memory.sqlite3",
             "fixture-pet",
-            clock=self.clock,
+            clock=self.wall_clock,
         )
         self.model = FixtureModel()
         self.provider = FixtureProvider()
         self.packets: list[OverlayPacket] = []
         self.attention = Attention(
-            self.config, self.clock, random.Random(0), wall_clock=self.clock
+            self.config, self.clock, random.Random(0), wall_clock=self.wall_clock
         )
         directory = Path(self.temporary.name)
         (directory / "pixel.png").write_bytes(
@@ -227,7 +234,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.app = Application(
             self.config,
-            sessions=Sessions(self.clock, wall_clock=self.clock),
+            sessions=Sessions(self.clock, wall_clock=self.wall_clock),
             reactions=SessionReactions(),
             attention=self.attention,
             behavior=behavior,
@@ -743,6 +750,296 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.model.requests, [])
         self.assertFalse(self.app.delivery.has_pending())
 
+    def record_presence(
+        self,
+        status: PresenceStatus = "available",
+        *,
+        renderer_event_id: str | None = None,
+    ) -> None:
+        self.app.session_notes.store.record_presence(
+            status,
+            "fixture",
+            "Observed the developer",
+            renderer_event_id=renderer_event_id,
+        )
+        self.app.refresh_notes()
+
+    def test_external_return_after_sleep_uses_wall_time(self) -> None:
+        before = self.app.clock()
+        self.app.system_sleep_changed(True)
+        self.wall_offset += 8 * 3600
+        self.app.system_sleep_changed(False)
+        self.assertEqual(self.app.clock(), before)
+        self.assertGreater(self.app.mood.engagement_age, 8 * 3600 - 1)
+
+        self.record_presence()
+        self.assertEqual(self.app.mood.engagement_age, 0)
+        self.assertEqual(
+            require(self.app.recent_occasion).situation, SpeechSituation.RETURNED
+        )
+        self.now += 2
+        self.record_presence("away")
+        self.assertEqual(self.app.mood.engagement_age, 2)
+        self.assertIsNone(self.app.recent_occasion)
+        restored_mood, _ = self.app.load_behavior()
+        self.assertEqual(restored_mood.engagement_age, 2)
+
+    def test_click_and_matching_presence_are_one_engagement(self) -> None:
+        self.now += 120
+        self.app.receive_renderer({"event": "click", "event_id": "same-click"})
+        original = self.app.mood.last_local_engagement_at
+        occasion = require(self.app.recent_occasion)
+        self.now += 3
+        self.record_presence(renderer_event_id="same-click")
+        self.assertEqual(self.app.mood.engagement_age, 3)
+        self.assertEqual(self.app.mood.last_local_engagement_at, original)
+        self.assertEqual(
+            require(self.app.recent_occasion).fingerprint, occasion.fingerprint
+        )
+
+    def test_presence_arriving_before_click_leaves_engagement_to_renderer(self) -> None:
+        self.now += 120
+        self.record_presence(renderer_event_id="same-click")
+        self.assertGreaterEqual(self.app.mood.engagement_age, 120)
+        self.assertIsNone(self.app.recent_occasion)
+
+        self.now += 3
+        self.app.receive_renderer({"event": "click", "event_id": "same-click"})
+        self.assertEqual(self.app.mood.engagement_age, 0)
+        self.assertEqual(
+            require(self.app.recent_occasion).situation, SpeechSituation.RETURNED
+        )
+
+    def test_click_wakes_and_requests_speech_after_wall_clock_moves_back(self) -> None:
+        self.now += 1
+        self.app.engage()
+        engagement_at = self.app.mood.last_local_engagement_at
+        self.app.behavior.nap_until = self.clock() + 10
+        self.wall_offset -= 60
+        click = {"event": "click", "event_id": "clock-step-click"}
+        self.app.receive_renderer(click)
+
+        self.assertEqual(self.app.mood.last_local_engagement_at, engagement_at)
+        self.assertIn({"sleeping": False}, self.packets)
+        self.assertTrue(self.app.clicked)
+        self.assertEqual(require(self.app.behavior.execution.action).name, "click")
+        revision = self.app.revision
+        self.app.receive_renderer(click)
+        self.assertEqual(self.app.revision, revision)
+
+    def test_rolled_back_hook_keeps_persisted_mood_and_timers(self) -> None:
+        saved = self.memory.load_behavior()
+        before = self.app.mood.snapshot().curiosity
+        with patch.object(
+            self.memory,
+            "record_event",
+            side_effect=sqlite3.OperationalError("rollback"),
+        ):
+            self.provider.publish(
+                HookEvent(
+                    source=SessionSource.CODEX,
+                    session="parser",
+                    event=HookEventKind.INTENT,
+                    turn="changed",
+                    goal="Actually, stop this and switch to another approach.",
+                )
+            )
+        self.assertEqual(self.memory.load_behavior(), saved)
+        self.assertEqual(self.app.mood.snapshot().curiosity, before)
+        self.assertIsNone(self.app.recent_occasion)
+
+    def test_failed_mood_observation_reloads_partially_changed_state(self) -> None:
+        saved = self.memory.load_behavior()
+        before = self.app.mood.snapshot()
+
+        def fail_during_observation(*_args: object) -> bool:
+            self.app.mood.observe(MoodCue.STRUGGLE, "uncommitted")
+            self.app.timers = self.app.timers.model_copy(
+                update={"unanswered_bid_at": self.wall_clock()}
+            )
+            self.app.notice_return(self.wall_clock() - 120, self.wall_clock())
+            self.assertGreater(self.app.mood.snapshot().agitation, before.agitation)
+            self.assertIsNotNone(self.app.recent_occasion)
+            raise ValueError("invalid observation")
+
+        with patch.object(
+            self.app, "observe_hook_mood", side_effect=fail_during_observation
+        ):
+            self.provider.publish(
+                HookEvent(
+                    source=SessionSource.CODEX,
+                    session="parser",
+                    event=HookEventKind.INTENT,
+                    turn="changed",
+                    goal="Improve quoted-field parsing",
+                )
+            )
+
+        self.assertEqual(self.memory.load_behavior(), saved)
+        self.assertEqual(self.app.mood.snapshot().agitation, before.agitation)
+        self.assertIsNone(self.app.recent_occasion)
+        self.assertIs(self.app.behavior.mood, self.app.mood)
+        self.assertIsNone(self.app.timers.unanswered_bid_at)
+
+    def test_a_tool_can_recover_after_failures_in_an_earlier_turn(
+        self,
+    ) -> None:
+        for index in range(3):
+            self.now += 1
+            for kind in (HookEventKind.TOOL_START, HookEventKind.TOOL_ERROR):
+                self.provider.publish(
+                    HookEvent(
+                        source=SessionSource.CODEX,
+                        session="parser",
+                        call=f"check-{index}",
+                        event=kind,
+                        tool="pytest",
+                    )
+                )
+        self.now += 1
+        self.provider.publish(
+            HookEvent(
+                source=SessionSource.CODEX,
+                session="parser",
+                event=HookEventKind.TURN_DONE,
+            )
+        )
+        self.now += 1
+        self.provider.publish(
+            HookEvent(
+                source=SessionSource.CODEX,
+                session="parser",
+                event=HookEventKind.INTENT,
+                turn="retry",
+                goal="Improve quoted-field parsing",
+            )
+        )
+        self.provider.publish(
+            HookEvent(
+                source=SessionSource.CODEX,
+                session="parser",
+                event=HookEventKind.TOOL_START,
+                turn="retry",
+                call="retry-check",
+                tool="pytest",
+            )
+        )
+        self.now += 1
+        self.provider.publish(
+            HookEvent(
+                source=SessionSource.CODEX,
+                session="parser",
+                event=HookEventKind.TOOL_DONE,
+                turn="retry",
+                call="retry-check",
+            )
+        )
+        occasion = require(self.app.recent_occasion)
+        self.assertEqual(occasion.situation, SpeechSituation.RECOVERY)
+        self.assertEqual(occasion.expires_at, self.wall_clock() + OCCASION_SECONDS)
+
+    def test_shared_result_with_two_agents_opens_one_occasion(self) -> None:
+        result = "The quoted-field cases all pass."
+        pull_request = "https://example.test/team/parser/pull/23"
+        for session, source in (
+            ("parser", SessionSource.CODEX),
+            ("review", SessionSource.CLAUDE),
+        ):
+            self.now += 1
+            self.provider.publish(
+                HookEvent(
+                    source=source,
+                    session=session,
+                    event=HookEventKind.INTENT,
+                    capture_at=self.wall_clock(),
+                    goal="Check quoted fields",
+                    pull_request=pull_request,
+                )
+            )
+            self.now += 1
+            self.provider.publish(
+                HookEvent(
+                    source=source,
+                    session=session,
+                    event=HookEventKind.TURN_DONE,
+                    capture_at=self.wall_clock(),
+                    progress=result,
+                    pull_request=pull_request,
+                )
+            )
+        occasion = require(self.app.recent_occasion)
+        self.assertEqual(occasion.situation, SpeechSituation.SHARED_SUCCESS)
+        self.assertEqual(len(occasion.sources), 2)
+
+    async def test_handoff_note_reaches_speech_without_a_report_recap(self) -> None:
+        self.attention.pending = None
+        self.attention.next_observation = self.now + 100
+        session = SessionIdentity(source=SessionSource.CODEX, native_id="parser")
+        self.app.session_notes.store.append(
+            self.app.occasions.session_thread(session, "/fixture/parser"),
+            MarkPatch(
+                notes=(
+                    Handoff(
+                        kind="handoff",
+                        sender=Actor(name="Builder"),
+                        to=Actor(name="Reviewer"),
+                        work="verification",
+                    ),
+                )
+            ),
+            "dispatcher",
+            "Pass verification to a reviewer",
+        )
+        self.model.text = "Ah, the ceremonial passing of the problem."
+        self.app.tick()
+        await require(self.app.task)
+
+        request = self.model.requests[-1][0]
+        payload = json.loads(request["messages"][0]["content"])
+        self.assertEqual(
+            payload["fact"],
+            "An outside tool reports: Builder passed verification to Reviewer.",
+        )
+        self.assertNotIn(
+            "Improve quoted-field parsing", request["messages"][0]["content"]
+        )
+        self.assertEqual(self.model.story_requests, [])
+        self.assertTrue(
+            any(packet.get("text") == self.model.text for packet in self.packets)
+        )
+
+    async def test_repeated_report_content_does_not_reopen_a_spoken_occasion(
+        self,
+    ) -> None:
+        def summarize(request: ModelRequest) -> dict[str, object]:
+            response = story_response(request)
+            progress = response["progress"]
+            assert isinstance(progress, list)
+            for statement in progress:
+                statement["text"] = "Escaped delimiters pass validation."
+            return response
+
+        self.model.narrative_response = summarize
+        self.attention.pending = None
+        self.report("Checks pass for escaped delimiters.")
+        self.attention.next_observation = self.now
+        self.app.tick()
+        await require(self.app.task)
+        delivery = next(
+            packet["delivery_id"] for packet in self.packets if "delivery_id" in packet
+        )
+        self.app.receive_renderer({"event": "speech_accepted", "delivery_id": delivery})
+
+        self.now += 100
+        self.report("Checks pass for escaped delimiters.")
+        self.attention.next_observation = self.now
+        self.app.tick()
+        if self.app.task:
+            await self.app.task
+        self.assertEqual(len(self.model.story_requests), 1)
+        self.assertEqual(len(self.model.requests), 1)
+        self.assertEqual(len(self.memory.speech()), 1)
+
     async def test_current_waits_receive_periodic_check_ins_until_liveness_expires(
         self,
     ) -> None:
@@ -883,16 +1180,12 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.app.tick()
         await require(self.app.task)
         self.assertEqual(self.model.requests[-1][1], SpeechReason.CHECK_IN)
-        payload = self.prompts.prepared(self.model.requests[-1][0]).context
-        self.assertEqual(
-            event_text(require(payload.moment).event), "The work is waiting for input."
-        )
-        self.assertEqual(
-            require(require(payload.moment).progress).text,
-            "Which quoted-field examples should I document?",
-        )
-        self.assertEqual(
-            require(require(payload.work).request).text, "Improve quoted-field parsing"
+        request = self.model.requests[-1][0]
+        payload = json.loads(request["messages"][0]["content"])
+        self.assertIn("waiting for input", payload["fact"])
+        self.assertIn("Which quoted-field examples", payload["fact"])
+        self.assertNotIn(
+            "Improve quoted-field parsing", request["messages"][0]["content"]
         )
 
     async def test_quiet_children_do_not_create_independent_timed_check_ins(
@@ -2006,7 +2299,7 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(self.memory.speech()), 1)
 
-    async def test_new_related_work_recalls_an_earlier_report_without_a_recall_request(
+    async def test_new_related_work_greets_the_start_without_recalling_an_earlier_report(
         self,
     ) -> None:
         earlier = "The quoted-field parser preserves escaped delimiters."
@@ -2029,13 +2322,13 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         await require(self.app.task)
 
         self.assertEqual(self.model.requests[-1][1], SpeechReason.PROMPT)
-        story_payload = json.loads(
-            self.model.story_requests[-1]["messages"][0]["content"]
+        self.assertEqual(len(self.model.story_requests), 1)
+        request = self.model.requests[-1][0]
+        self.assertEqual(
+            json.loads(request["messages"][0]["content"])["fact"],
+            "Verify escaped delimiters in quoted fields",
         )
-        evidence = story_payload["current_moment"]["evidence"]
-        self.assertTrue(any(item.get("text") == earlier for item in evidence))
-        text = self.prompts.text(self.model.requests[-1][0])
-        self.assertIn(earlier, text)
+        self.assertNotIn(earlier, self.prompts.text(request))
 
     async def test_new_request_in_another_conversation_preserves_queued_completion(
         self,

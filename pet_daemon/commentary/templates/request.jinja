@@ -99,6 +99,13 @@ Execution outcome: {{ observations.outcome(item.outcome) }}
 {% endif %}
 {% endfor %}
 </observations>
+{% if context.character %}
+
+<declared_character>
+Supplied description for the selected participant:
+{{ context.character|xmltext }}
+</declared_character>
+{% endif %}
 {% if actions %}
 
 <button_choices>

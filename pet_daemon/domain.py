@@ -96,6 +96,17 @@ class SpeechSituation(StrEnum):
     CHECK_IN_RUNNING = "check_in_running"
     CHECK_IN_QUIET = "check_in_quiet"
     IDLE_REFLECTION = "idle_reflection"
+    STRUGGLE = "struggle"
+    RECOVERY = "recovery"
+    INTERRUPTED = "interrupted"
+    COMPANY = "company"
+    RETURNED = "returned"
+    HANDOFF = "handoff"
+    CONTRIBUTOR = "contributor"
+    EXTERNAL_WAIT = "external_wait"
+    UNANSWERED = "unanswered"
+    SHARED_SUCCESS = "shared_success"
+    DIRECTION_CHANGE = "direction_change"
 
     @property
     def is_conversation(self) -> bool:

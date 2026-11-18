@@ -44,9 +44,10 @@ to its directory under `assets/pets/`.
 Drag the pet to move it. Click it for a brief remark about the work it observes.
 Context and navigation buttons provide bounded follow-ups about that remark.
 
-When work goes quiet, the pet can nap without recurring work recaps. Optional care
-remarks use a small, separate request every 45–90 minutes by default and can choose
-silence. Small visual care animations have their own, more frequent cadence.
+Automatic remarks react to one occasion in the configured persona's voice. Click
+for the work story and its supporting reports. When work goes quiet, the pet
+shifts toward occasional company, visual expression, and rest. Mood and idle
+timing can be tuned under `behavior.mood`. The selected pack supplies the poses.
 
 ## Read work through MCP
 
@@ -75,9 +76,10 @@ fresh activity. Each tool returns captured evidence with its observation time.
 | `sessions` | Read fresh harness sessions and their runtime state |
 | `attention` | Find pending permissions and follow-up candidates |
 | `decisions` | Find decision and correction excerpts with their sources |
-| `mark_workstream` | Record caller judgments, titles, goals, tags, and snoozes |
+| `mark_workstream` | Record caller judgments, titles, goals, and typed notes about who is doing the work |
 | `unmark_workstream` | Clear selected marks while preserving history |
 | `workstream_mark_history` | Read attributed mark and clear events |
+| `record_presence` | Let an authorized integration report human presence |
 | `context_search` | Search captured work and reports |
 | `read_passage` | Read a source with surrounding text and provenance |
 
@@ -119,7 +121,10 @@ an `Authorization: Bearer <token>` header. Missing or invalid credentials return
 
 HTTP startup creates `state/pet-mcp.token` with mode `600` if it is missing.
 Existing token files must belong to your user and have exactly those permissions.
-Use `--token-file /private/path/token` to select another file. The server never
+Use `--token-file /private/path/token` to select another file. The default HTTP
+credential grants reads. To enable writes, supply a separate private token file
+with `--write-token-file /private/path/write-token`. The write credential can read
+and write. The server never
 prints the token and disables HTTP access logs. Keep the token in your remote
 client's protected credential field, separate from its endpoint URL. To transfer
 it through the macOS clipboard without printing it:
@@ -133,6 +138,9 @@ To run the HTTP server at login and restart it after failures:
 ```sh
 make install-mcp-agent
 ```
+
+To enable HTTP writes for the LaunchAgent, pass
+`ARGS='--write-token-file /private/path/write-token'` when installing.
 
 The user LaunchAgent is `dev.simple-pet.mcp`. It defaults to `127.0.0.1:18765`.
 Its logs are `~/Library/Logs/Simple Pet/mcp-stdout.log` and `mcp-stderr.log`.

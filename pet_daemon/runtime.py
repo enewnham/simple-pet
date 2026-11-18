@@ -270,7 +270,7 @@ class AgentSessionStatus(BaseModel):
         return self.waiting_seconds
 
 
-class SwarmActivity(BaseModel):
+class SessionActivity(BaseModel):
     model_config = ConfigDict(defer_build=True)
     activity: PetState
     sessions: tuple[AgentSessionStatus, ...]

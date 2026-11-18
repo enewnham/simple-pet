@@ -16,8 +16,9 @@ from ..domain import (
 )
 from ..harness_text import clean_text
 from ..identity import SessionIdentity
+from ..occasion import OCCASION_TONE
 from ..prompts import request_excerpt
-from ..prose import prose_text, work_prose
+from ..prose import duration, prose_text, work_prose
 from ..runtime import PetContext, WaitingKind
 from ..work.evidence import (
     CommentaryEvidence,
@@ -32,17 +33,17 @@ from ..work.narrative import (
     semantic_revision,
 )
 from ..work.stories import SessionContribution, WorkStory
-from . import care
+from . import care, reaction
 from .citations import Citations
 from .context import (
     CommentaryContext,
     ContextFact,
     ContextItem,
+    CurrentObservation,
     Event,
     FactKind,
     Interpretation,
     MemoryCandidate,
-    Moment,
     SupportedText,
     WorkContext,
     WorkState,
@@ -64,22 +65,6 @@ CACHE_CONTROL: CacheControlEphemeralParam = {"type": "ephemeral", "ttl": "1h"}
 
 def encoded_size(value: object) -> int:
     return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
-
-
-def duration(seconds: float | None) -> str | None:
-    if seconds is None:
-        return None
-    seconds = max(0, round(seconds))
-    if seconds < 60:
-        return "less than a minute"
-    minutes = seconds // 60
-    if minutes < 60:
-        return f"{minutes} minute{'s' if minutes != 1 else ''}"
-    hours = minutes // 60
-    if hours < 24:
-        return f"{hours} hour{'s' if hours != 1 else ''}"
-    days = hours // 24
-    return f"{days} day{'s' if days != 1 else ''}"
 
 
 def evidence_age(
@@ -248,17 +233,19 @@ def _current_work(
     )
 
 
-def _current_moment(selection: AttentionSelection, excluded: Sequence[str]) -> Moment:
+def _current_moment(
+    selection: AttentionSelection, excluded: Sequence[str]
+) -> CurrentObservation:
     if selection.context:
-        return Moment(
+        return CurrentObservation(
             Event.EXPLICIT_CONTEXT,
             text=work_prose(selection.context, 2000, excluded),
         )
     if selection.situation == SpeechSituation.IDLE_REFLECTION:
-        return Moment(Event.RECOLLECTION)
+        return CurrentObservation(Event.RECOLLECTION)
     focus = selection.focus_session
     situation = selection.situation
-    moment = Moment(
+    moment = CurrentObservation(
         Event.PET_CLICKED
         if situation == SpeechSituation.CLICK_WORKING
         else Event.WORK_UPDATE
@@ -273,21 +260,21 @@ def _current_moment(selection: AttentionSelection, excluded: Sequence[str]) -> M
             if focus.waiting_kind == WaitingKind.QUESTION
             else Event.WAITING
         )
-        moment = Moment(
+        moment = CurrentObservation(
             event,
             tool=work_prose(focus.waiting_tool, 160, excluded) or None,
             elapsed=duration(focus.waiting_seconds),
         )
     elif situation == SpeechSituation.FAILURE:
         failure = focus.failure
-        moment = Moment(
+        moment = CurrentObservation(
             Event.FAILED_CALL,
             operation=failure.activity
             if failure and failure.current_turn and not failure.resolved
             else None,
         )
     elif situation == SpeechSituation.COMPLETION and focus.outcome:
-        moment = Moment(Event.TURN_ENDED, outcome=focus.outcome)
+        moment = CurrentObservation(Event.TURN_ENDED, outcome=focus.outcome)
     else:
         state = (
             WorkState.WORKING
@@ -305,7 +292,7 @@ def _current_moment(selection: AttentionSelection, excluded: Sequence[str]) -> M
             else None,
         )
     if situation == SpeechSituation.PROMPT:
-        moment = Moment(Event.REQUEST_RECEIVED)
+        moment = CurrentObservation(Event.REQUEST_RECEIVED)
     if situation == SpeechSituation.CHECK_IN_RUNNING and focus.active_tools:
         tool = max(focus.active_tools, key=lambda tool: tool.duration_seconds)
         moment = replace(
@@ -329,8 +316,8 @@ def _terminal_moment(
     origin: SessionIdentity,
     activity: tuple[CommentaryEvidence, ...],
     timestamp: float,
-    moment: Moment,
-) -> Moment:
+    moment: CurrentObservation,
+) -> CurrentObservation:
     update = selection.update
     focus = selection.focus_session
     if (
@@ -355,7 +342,7 @@ def _terminal_moment(
     if terminal is None:
         return moment
     age = evidence_age(timestamp, update.ended_at)
-    return Moment(
+    return CurrentObservation(
         Event.TURN_ENDED,
         outcome=_reported_outcome(terminal),
         age=age,
@@ -402,10 +389,10 @@ def _story_reports(
     timestamp: float,
     excluded: Sequence[str],
     earlier: list[ContextItem],
-    moment: Moment,
+    moment: CurrentObservation,
     root: SessionIdentity | None,
     sources: Sequence[NarrativeSource],
-) -> tuple[str, float | None, list[str], Moment]:
+) -> tuple[str, float | None, list[str], CurrentObservation]:
     current_report = ""
     current_observed_at: float | None = None
     current_ids: list[str] = []
@@ -514,7 +501,7 @@ def commentary_facts(
     situation = selection.situation
     if situation in CARE_SITUATIONS or situation == SpeechSituation.CLICK_IDLE:
         return CommentaryContext(
-            moment=Moment(
+            moment=CurrentObservation(
                 Event.PET_CLICKED_IDLE
                 if situation == SpeechSituation.CLICK_IDLE
                 else Event.QUIET_TIME,
@@ -776,7 +763,7 @@ def _current_report_sources(
     selection: AttentionSelection,
     root: SessionIdentity,
     sources: Sequence[NarrativeSource],
-    moment: Moment | None,
+    moment: CurrentObservation | None,
     excluded: Sequence[str],
 ) -> set[str]:
     if selection.subject is None or moment is None or moment.progress is None:
@@ -1014,6 +1001,7 @@ class PromptBuilder:
             excluded=excluded,
             memory_eligible=memory_eligible,
         )
+        context = replace(context, character=selection.character)
         if (
             context.work
             and context.work.request
@@ -1112,7 +1100,7 @@ class PromptBuilder:
             }
         ]
         directions = {
-            SpeechSituation.CARE_EXERCISE: "a little stretch break",
+            SpeechSituation.CARE_EXERCISE: "a brief break for the developer",
             SpeechSituation.CARE_ATTENTION: "a casual greeting",
             SpeechSituation.CARE_CONSTERNATION: "a small reaction to a quiet stretch",
         }
@@ -1131,6 +1119,54 @@ class PromptBuilder:
             context=context,
             request=request,
             citations=context.citations,
+            conditions=SpeechConditions(selection=selection, context=context),
+        )
+
+    def prepare_occasion(
+        self,
+        snapshot: PetContext,
+        selection: AttentionSelection,
+        situation: SpeechSituation,
+        fact: SupportedText | None,
+        make_request: RequestFactory,
+        recent: Sequence[str],
+        *,
+        feeling: str | None = None,
+    ) -> CommentaryRequest:
+        context = commentary_facts(snapshot, selection, self.clock())
+        citations = Citations.from_sources(fact.sources if fact else ())
+        tone = OCCASION_TONE.get(situation, OCCASION_TONE[SpeechSituation.ROUTINE])
+        system: list[TextBlockParam] = [
+            {
+                "type": "text",
+                "text": render("system/occasion.jinja", persona=self.config.persona),
+                "cache_control": CACHE_CONTROL,
+            },
+            {
+                "type": "text",
+                "text": render(
+                    "system/occasion_tone.jinja",
+                    feeling=tone.feeling or feeling,
+                    instruction=tone.instruction,
+                ),
+            },
+        ]
+        payload = {
+            "fact": fact.text if fact else None,
+            "source_ids": citations.labels(citations.sources),
+            "recent_pet_remarks": [remark[:160] for remark in recent],
+        }
+        if selection.character:
+            payload["character"] = selection.character
+        request = make_request(payload, system, response=reaction.Response)
+        request["max_tokens"] = min(request["max_tokens"], 160)
+        if tone.more_effort:
+            request["output_config"]["effort"] = "medium"
+        return CommentaryRequest(
+            selection=selection,
+            context=context,
+            request=request,
+            citations=citations,
             conditions=SpeechConditions(selection=selection, context=context),
         )
 

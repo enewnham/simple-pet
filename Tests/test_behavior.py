@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TypeVar, Unpack
 
 from pet_daemon.behavior.controller import Behavior
+from pet_daemon.behavior.mood import Mood
 from pet_daemon.behavior.sprites import Clip, Pack
 from pet_daemon.config import BehaviorConfig
 from pet_daemon.domain import PetState, ProcessStatus, SessionSource
@@ -254,6 +255,18 @@ class BehaviorTests(unittest.TestCase):
         self.assertIsNone(behavior.care_remark)
         self.advance(behavior, 9)
         self.assertEqual(len([a for a in self.animations() if a["id"] == "jumping"]), 2)
+
+    def test_social_appetite_prefers_the_packs_greeting_clip(self) -> None:
+        behavior = self.make_behavior(
+            [make_clip("hop", "celebrate"), make_clip("signal", "greeting")],
+            roaming=False,
+            care_interval=(900, 900),
+        )
+        behavior.mood = Mood(self.clock)
+        self.advance(behavior, 905)
+
+        expressions = [a["id"] for a in self.animations() if a["id"] != "quiet-pose"]
+        self.assertEqual(expressions, ["signal"])
 
     def test_work_suppresses_care_and_waiting_only_shows_consternation(self) -> None:
         behavior = self.make_behavior(

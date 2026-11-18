@@ -94,11 +94,11 @@ class StoryTests(unittest.TestCase):
         focus = session_snapshot(
             id=SessionIdentity(source=SessionSource.CODEX, native_id="root")
         )
-        swarm = sessions_snapshot(focus)
+        activity = sessions_snapshot(focus)
         subject = next(
-            item for item in self.memory.connected_work(swarm) if item.id == focus.id
+            item for item in self.memory.connected_work(activity) if item.id == focus.id
         )
-        snapshot = capture_snapshot(swarm, work=(subject,))
+        snapshot = capture_snapshot(activity, work=(subject,))
         selection = AttentionSelection(
             subject=subject,
             focus_session=focus,

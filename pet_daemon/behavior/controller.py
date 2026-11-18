@@ -12,6 +12,7 @@ from ..logging import get_logger
 from ..runtime import OverlayPacket, Point, RandomSource
 from ..sessions.tracking import Sessions
 from .execution import Action, Execution
+from .mood import IdlePhase, Mood, MoodState
 from .policy import ANIMATION_ROLES, REACTIONS, Candidate, Observation, Policy
 from .sprites import Clip, Pack
 
@@ -76,6 +77,7 @@ class Behavior:
         self.next_care_speech: float | None = None
         self.care_remark: CareKind | None = None
         self.care_choices: list[tuple[CareKind, str, str]] = []
+        self.mood: Mood | None = None
 
     def defer_care(self) -> None:
         self.next_care = self.clock() + self.rng.uniform(*self.config.care_interval)
@@ -114,7 +116,13 @@ class Behavior:
                     for item in available
                     for _ in range(1 if item[0] == CareKind.CONSTERNATION else 2)
                 ]
-            selected = self.rng.choice(self.care_choices)
+            choices = self.care_choices
+            if self.mood is not None:
+                preferred_kind = self._care_preference(self.mood.snapshot())
+                choices = [
+                    item for item in choices if item[0] == preferred_kind
+                ] or choices
+            selected = self.rng.choice(choices)
             self.care_choices.remove(selected)
             kind, role, preferred = selected
         clip = self._resolve_clip(role, preferred, "idle")
@@ -126,6 +134,16 @@ class Behavior:
             )
         log.info("behavior.care", activity=kind)
         return True
+
+    @staticmethod
+    def _care_preference(mood: MoodState) -> CareKind | None:
+        if mood.agitation > 0.38:
+            return CareKind.CONSTERNATION
+        if mood.social_appetite > 0.58:
+            return CareKind.ATTENTION
+        if mood.energy > 0.7:
+            return CareKind.EXERCISE
+        return None
 
     @property
     def pending(self) -> Action | None:
@@ -592,6 +610,8 @@ class Behavior:
             ),
             restlessness=min(1, (now - self.last_movement) / 300),
             rest_pressure=min(1, inactive_seconds / 240),
+            mood=self.mood.snapshot() if self.mood is not None else None,
+            settled=self.mood is not None and self.mood.idle_phase == IdlePhase.SETTLED,
         )
 
     def _track_pointer(

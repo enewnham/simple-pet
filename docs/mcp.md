@@ -51,10 +51,12 @@ label in `author` and a nonblank explanation in `reason`. Optional fields are:
 | `title` | A nonblank one-line title, up to 160 characters |
 | `blocked_on` | A description of the blocker, up to 512 characters |
 | `snooze_until` | A Unix timestamp |
+| `notes` | A replacement list of up to 16 typed work notes for the calling principal |
 
-Omitted or null fields stay unchanged. Empty tags clear the tag list. To clear
-other fields, call `unmark_workstream(id, author, reason, fields)`. Omitting `fields`
-clears all effective marks. Clearing is another history event, never a deletion.
+Omitted or null fields stay unchanged. An empty list clears shared tags or the
+calling principal's typed notes. To clear fields, call
+`unmark_workstream(id, author, reason, fields)`. Omitting `fields` clears the
+shared fields and the calling principal's notes. A clear appends a history event.
 `workstream_mark_history(id, limit, before)` reads events newest first. Follow
 `next_before` for older events. Each event records author, authenticated principal,
 timestamp, reason, operation, and changed fields. Field-level provenance retains
@@ -75,20 +77,51 @@ evidence change queries remain available for hidden threads.
 
 Marks have `basis: marked`, separately from `reported` and `observed` evidence.
 They live in `<memory filename>.marks.sqlite3`, with mode `0600` and append-only
-history. HTTP writes use the existing bearer credential. Both write tools advertise
-`read_only_hint: false`; other tools remain read-only. `author` is a caller-supplied
-label. The shared bearer principal proves possession of the shared credential,
-not an individual identity. Stdio calls record a local principal. No token is
-stored in mark history. Any authorized caller can change another caller's marks,
-and history retains both actions.
+history. Write tools advertise `read_only_hint: false`. Stdio writes use the
+local principal. HTTP uses the read bearer by default. Start the server with
+`--write-token-file /private/path/token` to grant reads and writes to a separate
+bearer. Its file has the same ownership and permission requirements as the read
+token. History records the authenticated principal and the supplied `author`.
+Any authorized writer can replace or clear shared fields. The earlier action
+stays in history.
 
-Notification rules can filter on effective marks as described in
-[command notifications](notifications.md).
+Notification rules can filter on effective marks. [Command notifications](notifications.md)
+
+### Add typed notes about the work
+
+Pass `notes` to `mark_workstream` with the ID from `workstreams`. Each entry has a
+`kind` and the fields below. Actor values have `name` and optional `description`.
+Session values have the harness `source` and `session_id`.
+
+| Kind | Fields |
+| --- | --- |
+| `assignment` | `session`, `actor`, optional `acting_for` |
+| `launch` | Child `session`, `by` |
+| `wait` | `actor`, `on`, `detail` |
+| `handoff` | `sender`, `to`, `work` |
+
+The notes list replaces the caller's list for that workstream. Calls using the
+same writer credential or local stdio share a principal. The supplied `author`
+label appears in provenance. Read `mark.fields.notes.entries` for all current notes
+with their individual provenance. Each entry has a `value` and a `provenance`
+record containing the principal and author. Notes can give the pet something to
+react to while the work is visible. Captured hooks and repository observations
+still determine session activity and work evidence.
+
+### Report human presence
+
+Call `record_presence(status, author, reason)` with `available` or `away` when an
+integration observes a change. Session and turn can identify an observed human
+prompt. Include `renderer_event_id` if the observation describes a click the app
+also reports. The renderer handles that click and updates the engagement clock
+once. An `away` observation leaves the last engagement time intact. The server
+records the time it receives the report.
 
 ## Catch up
 
 Call `since(ts)` with a Unix timestamp. It returns retained sources changed strictly
-after that time, grouped into the same threads. Reports use ingestion time when
+after that time, grouped into the same threads. Caller mark changes are returned
+separately. Reports use ingestion time when
 available. Repository observations use collection time. Grouping uses all retained
 context, including reports older than `ts`, while returned sources respect `ts`.
 
@@ -175,4 +208,3 @@ seven-day freshness ranking, and closed PR observations ranked last.
 Restart the daemon with `make restart-agent` to publish live session snapshots.
 Restart the HTTP MCP agent with `make restart-mcp-agent` to load tool changes.
 Reconnect a stdio client to launch a fresh MCP process. The tunnel needs no restart.
-No storage schema change is required.

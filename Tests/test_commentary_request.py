@@ -15,9 +15,9 @@ from pet_daemon.attention import Attention, AttentionSelection, SelectedWorkStat
 from pet_daemon.commentary import Cognition
 from pet_daemon.commentary.context import (
     ContextFact,
+    CurrentObservation,
     Event,
     FactKind,
-    Moment,
     SupportedText,
     WorkState,
 )
@@ -1156,7 +1156,9 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(context.earlier, ())
         self.assertEqual(
             context.moment,
-            Moment(Event.EXPLICIT_CONTEXT, text="Inspect the parser result"),
+            CurrentObservation(
+                Event.EXPLICIT_CONTEXT, text="Inspect the parser result"
+            ),
         )
         self.assertIn(
             "Inspect the parser result", prepared.request["messages"][0]["content"]
@@ -1550,7 +1552,7 @@ class ContextTests(unittest.TestCase):
             ),
         )
         moment = self.cognition.prompts.prompt(snapshot, selection).moment
-        self.assertEqual(moment, Moment(Event.FAILED_CALL))
+        self.assertEqual(moment, CurrentObservation(Event.FAILED_CALL))
 
     def test_selected_completion_preserves_outcome_without_runtime_after_restart(
         self,

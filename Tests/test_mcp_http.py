@@ -15,7 +15,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult
 
-from pet_daemon.mcp import WorkContext
+from pet_daemon.mcp import WorkContext, create_server
 from pet_daemon.mcp_http import http_application, load_token
 from pet_daemon.storage import Memory
 
@@ -33,11 +33,17 @@ class McpHttpTests(unittest.IsolatedAsyncioTestCase):
         self.temporary.cleanup()
 
     @asynccontextmanager
-    async def running_server(self, token: str) -> AsyncGenerator[str]:
+    async def running_server(
+        self,
+        token: str,
+        write_token: str | None = None,
+    ) -> AsyncGenerator[str]:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
             listener.bind(("127.0.0.1", 0))
             port = listener.getsockname()[1]
-            application = http_application(self.context, token, "127.0.0.1", port)
+            application = http_application(
+                self.context, token, "127.0.0.1", port, write_token
+            )
             config = uvicorn.Config(
                 application, access_log=False, log_level="warning", proxy_headers=False
             )
@@ -88,6 +94,7 @@ class McpHttpTests(unittest.IsolatedAsyncioTestCase):
                     "mark_workstream",
                     "unmark_workstream",
                     "workstream_mark_history",
+                    "record_presence",
                     "workstreams",
                     "workstream",
                     "since",
@@ -107,7 +114,34 @@ class McpHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.structured_content["pet"], "fixture")
             self.assertEqual(result.structured_content["sources"], [])
 
-    async def test_authenticated_client_marks_a_thread_and_records_shared_principal(
+    async def test_read_token_can_read_but_cannot_write(self) -> None:
+        read_token = load_token(self.token_file)
+        write_token = load_token(self.root / "writer.token")
+        async with (
+            self.running_server(read_token, write_token) as url,
+            httpx.AsyncClient(
+                headers={"Authorization": f"Bearer {read_token}"}
+            ) as http_client,
+            streamable_http_client(url, http_client=http_client) as streams,
+            ClientSession(streams[0], streams[1]) as client,
+        ):
+            await client.initialize()
+            self.assertFalse((await client.call_tool("sessions", {})).is_error)
+            calls = {
+                "record_presence": {"status": "available"},
+                "mark_workstream": {"id": "unknown", "status": "done"},
+                "unmark_workstream": {"id": "unknown"},
+            }
+            for tool, args in calls.items():
+                result = await client.call_tool(
+                    tool, {"author": "caller", "reason": "test", **args}
+                )
+                self.assertTrue(result.is_error)
+                self.assertIn("cannot write", str(result.content))
+        with self.assertRaisesRegex(ValueError, "must be distinct"):
+            http_application(self.context, read_token, "127.0.0.1", 8765, read_token)
+
+    async def test_write_token_marks_a_thread_and_records_its_principal(
         self,
     ) -> None:
         from pet_daemon.domain import SessionSource
@@ -128,8 +162,17 @@ class McpHttpTests(unittest.IsolatedAsyncioTestCase):
                     observed_at=100,
                 )
             )
-        token = load_token(self.token_file)
-        async with self.running_server(token) as url:
+        token = load_token(self.root / "writer.token")
+        id = thread_id("/editor")
+        args = {"id": id, "author": "same-label", "reason": "Track verification"}
+        local_note = {
+            "kind": "handoff",
+            "sender": {"name": "Builder"},
+            "to": {"name": "Reviewer"},
+            "work": "local verification",
+        }
+        remote_note = {**local_note, "work": "remote verification"}
+        async with self.running_server(load_token(self.token_file), token) as url:
             async with httpx.AsyncClient() as anonymous:
                 rejected = await anonymous.post(
                     url,
@@ -150,6 +193,12 @@ class McpHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(rejected.status_code, 401)
                 self.assertFalse(marks_path(self.context.path).exists())
+            local = create_server(self.context)
+            saved = await local.call_tool(
+                "mark_workstream", {**args, "notes": [local_note]}
+            )
+            assert isinstance(saved, CallToolResult)
+            self.assertFalse(saved.is_error, saved.content)
             async with (
                 httpx.AsyncClient(
                     headers={"Authorization": f"Bearer {token}"}
@@ -160,18 +209,55 @@ class McpHttpTests(unittest.IsolatedAsyncioTestCase):
                 await client.initialize()
                 result = await client.call_tool(
                     "mark_workstream",
-                    {
-                        "id": thread_id("/editor"),
-                        "author": "remote-companion",
-                        "reason": "Focus",
-                        "priority": "focus",
-                    },
+                    {**args, "priority": "focus", "notes": [remote_note]},
                 )
                 assert isinstance(result, CallToolResult)
                 self.assertFalse(result.is_error, result.content)
-        events = MarkStore(self.context.path, "fixture").history(thread_id("/editor"))
-        self.assertEqual(events[0]["principal"], "bearer:pet-mcp")
-        self.assertEqual(events[0]["author"], "remote-companion")
+                result = await client.call_tool(
+                    "record_presence",
+                    {
+                        "status": "available",
+                        "author": "remote-companion",
+                        "reason": "Saw a click",
+                    },
+                )
+                self.assertFalse(result.is_error, result.content)
+                self.assertFalse((await client.call_tool("sessions", {})).is_error)
+                replacement = {**remote_note, "work": "updated verification"}
+                operations = (
+                    ("mark_workstream", {"notes": [replacement]}, replacement),
+                    ("mark_workstream", {"notes": []}, None),
+                    ("mark_workstream", {"notes": [remote_note]}, remote_note),
+                    ("unmark_workstream", {"fields": ["notes"]}, None),
+                    ("mark_workstream", {"notes": [remote_note]}, remote_note),
+                    ("unmark_workstream", {}, None),
+                )
+                for tool, fields, remote in operations:
+                    with self.subTest(tool=tool, fields=fields):
+                        result = await client.call_tool(tool, {**args, **fields})
+                        self.assertFalse(result.is_error, result.content)
+                        read = await client.call_tool("workstream", {"id": id})
+                        assert read.structured_content is not None
+                        entries = read.structured_content["mark"]["fields"]["notes"][
+                            "entries"
+                        ]
+                        self.assertEqual(
+                            {
+                                entry["provenance"]["principal"]: entry["value"]
+                                for entry in entries
+                            },
+                            {"local-stdio": local_note}
+                            | ({"bearer:pet-mcp-writer": remote} if remote else {}),
+                        )
+                        self.assertTrue(
+                            all(
+                                entry["provenance"]["author"] == args["author"]
+                                for entry in entries
+                            )
+                        )
+        events = MarkStore(self.context.path, "fixture").history(id)
+        self.assertEqual(events[0]["principal"], "bearer:pet-mcp-writer")
+        self.assertEqual(events[0]["author"], args["author"])
 
     async def test_http_rejects_untrusted_host_and_origin(self) -> None:
         token = load_token(self.token_file)

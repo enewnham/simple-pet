@@ -9,9 +9,85 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+
+from .domain import SessionSource
+from .identity import SessionIdentity
 
 SCHEMA_VERSION = 1
+NOTE_LIMIT = 16
+SESSION_NOTE_LIMIT = 256
+
+type Identifier = Annotated[
+    str, StringConstraints(min_length=1, max_length=160, pattern=r"^\S+$")
+]
+type Line = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True, min_length=1, max_length=240, pattern=r"^[^\r\n]+$"
+    ),
+]
+
+
+class SessionRef(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    source: SessionSource
+    session_id: Identifier
+
+    def identity(self) -> SessionIdentity:
+        return SessionIdentity(source=self.source, native_id=self.session_id)
+
+
+class Actor(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    name: Line
+    description: Line | None = None
+
+
+class Assignment(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["assignment"]
+    session: SessionRef
+    actor: Actor
+    acting_for: Actor | None = None
+
+
+class Launch(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["launch"]
+    session: SessionRef
+    by: Actor
+
+
+class Wait(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["wait"]
+    actor: Actor
+    on: Actor
+    detail: Line
+
+
+class Handoff(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["handoff"]
+    sender: Actor
+    to: Actor
+    work: Line
+
+
+type WorkstreamNote = Annotated[
+    Assignment | Launch | Wait | Handoff, Field(discriminator="kind")
+]
+type PresenceStatus = Literal["available", "away"]
+
+
+class Presence(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    status: PresenceStatus
+    observed_at: Annotated[float, Field(ge=0, allow_inf_nan=False)]
+    renderer_event_id: Identifier | None = None
+    session: SessionRef | None = None
+    turn: Identifier | None = None
 
 
 class MarkStatus(StrEnum):
@@ -30,7 +106,15 @@ class MarkPriority(StrEnum):
 
 
 type MarkField = Literal[
-    "status", "priority", "tags", "note", "goal", "title", "blocked_on", "snooze_until"
+    "status",
+    "priority",
+    "tags",
+    "note",
+    "goal",
+    "title",
+    "blocked_on",
+    "snooze_until",
+    "notes",
 ]
 MARK_FIELDS: tuple[MarkField, ...] = (
     "status",
@@ -41,6 +125,7 @@ MARK_FIELDS: tuple[MarkField, ...] = (
     "title",
     "blocked_on",
     "snooze_until",
+    "notes",
 )
 
 
@@ -52,6 +137,9 @@ class MarkPatch(BaseModel):
         default=None, max_length=64
     )
     note: str | None = Field(default=None, max_length=2048)
+    notes: tuple[WorkstreamNote, ...] | None = Field(
+        default=None, max_length=NOTE_LIMIT
+    )
     goal: str | None = Field(default=None, min_length=1, max_length=240)
     title: str | None = Field(default=None, min_length=1, max_length=160)
     blocked_on: str | None = Field(default=None, max_length=512)
@@ -116,8 +204,10 @@ def event_record(row: sqlite3.Row) -> dict[str, object]:
 
 def effective_marks(events: list[dict[str, object]]) -> dict[str, dict[str, object]]:
     result: dict[str, dict[str, object]] = {}
+    notes: dict[str, dict[str, list[dict[str, object]]]] = {}
     for event in events:
         identifier = cast(str, event["workstream_id"])
+        principal = cast(str, event["principal"])
         mark = result.setdefault(
             identifier, {"workstream_id": identifier, "values": {}, "fields": {}}
         )
@@ -126,14 +216,31 @@ def effective_marks(events: list[dict[str, object]]) -> dict[str, dict[str, obje
         provenance = event["provenance"]
         if event["operation"] == "mark":
             for name, value in cast(dict[str, object], event["values"]).items():
+                if name == "notes":
+                    notes.setdefault(identifier, {})[principal] = [
+                        {"value": note, "provenance": provenance}
+                        for note in cast(list[object], value)
+                    ]
+                    continue
                 values[name] = value
                 fields[name] = {"value": value, "provenance": provenance}
         else:
             for name in cast(list[str], event["fields"]):
+                if name == "notes":
+                    notes.get(identifier, {}).pop(principal, None)
+                    continue
                 values.pop(name, None)
                 fields.pop(name, None)
         mark["updated_at"] = event["timestamp"]
         mark["provenance"] = provenance
+    for identifier, writers in notes.items():
+        entries = [entry for batch in writers.values() for entry in batch]
+        if entries:
+            mark = result[identifier]
+            values = cast(dict[str, object], mark["values"])
+            fields = cast(dict[str, object], mark["fields"])
+            values["notes"] = [entry["value"] for entry in entries]
+            fields["notes"] = {"value": values["notes"], "entries": entries}
     return {identifier: mark for identifier, mark in result.items() if mark["values"]}
 
 
@@ -193,6 +300,7 @@ class MarkStore:
             elif version != SCHEMA_VERSION:
                 raise ValueError("Workstream mark database schema is unsupported")
             if write:
+                self.ensure_indexes(db)
                 os.chmod(self.path, 0o600)
             yield db
             if write:
@@ -218,6 +326,100 @@ class MarkStore:
         db.execute("""CREATE TRIGGER marks_no_delete BEFORE DELETE ON mark_events
             BEGIN SELECT RAISE(ABORT, 'Workstream marks are append-only'); END""")
         db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+    @staticmethod
+    def ensure_indexes(db: sqlite3.Connection) -> None:
+        db.execute("""CREATE INDEX IF NOT EXISTS marks_notes
+            ON mark_events(pet,id) WHERE json_type("values",'$.notes') IS NOT NULL
+               OR (operation='unmark' AND instr(fields,'"notes"')>0)""")
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS marks_changed ON mark_events(pet,timestamp,id)"
+        )
+        db.execute("""CREATE INDEX IF NOT EXISTS marks_presence
+            ON mark_events(pet,id) WHERE operation='presence'""")
+
+    def record_presence(
+        self,
+        status: PresenceStatus,
+        author: str,
+        reason: str,
+        principal: str = "stdio",
+        *,
+        session: SessionRef | None = None,
+        turn: str | None = None,
+        renderer_event_id: str | None = None,
+    ) -> dict[str, object]:
+        if turn is not None and session is None:
+            raise ValueError("A prompt turn requires its session")
+        if status == "away" and (renderer_event_id is not None or session is not None):
+            raise ValueError("An away observation has no renderer event or session")
+        values = Presence(
+            status=status,
+            observed_at=self.clock(),
+            session=session,
+            turn=turn,
+            renderer_event_id=renderer_event_id,
+        ).model_dump(mode="json", exclude_none=True)
+        return self._append(
+            "",
+            "presence",
+            values,
+            [],
+            Attribution(author=author, reason=reason, principal=principal),
+        )
+
+    def latest_presence(self) -> dict[str, object] | None:
+        if not self.path.exists():
+            return None
+        with self.database() as db:
+            row = db.execute(
+                """SELECT * FROM mark_events WHERE pet=? AND operation='presence'
+                ORDER BY id DESC LIMIT 1""",
+                (self.pet,),
+            ).fetchone()
+        return event_record(row) if row else None
+
+    def changes(self, after: float, limit: int) -> list[dict[str, object]]:
+        if not self.path.exists():
+            return []
+        with self.database() as db:
+            rows = db.execute(
+                """SELECT * FROM mark_events WHERE pet=? AND timestamp>?
+                ORDER BY timestamp DESC,id DESC LIMIT ?""",
+                (self.pet, after, limit),
+            )
+            return [event_record(row) for row in rows]
+
+    def note_updates(self, after: int | None) -> list[dict[str, object]]:
+        if not self.path.exists():
+            return []
+        with self.database() as db:
+            if after is None:
+                rows = db.execute(
+                    """WITH note_events AS (
+                        SELECT id,workstream_id,principal FROM mark_events
+                        WHERE pet=? AND (json_type("values",'$.notes') IS NOT NULL
+                           OR (operation='unmark' AND instr(fields,'"notes"')>0))
+                    ), recent_workstreams AS (
+                        SELECT workstream_id FROM note_events
+                        GROUP BY workstream_id ORDER BY MAX(id) DESC LIMIT ?
+                    )
+                    SELECT * FROM mark_events WHERE id IN (
+                        SELECT MAX(id) FROM note_events
+                        WHERE workstream_id IN (SELECT workstream_id FROM recent_workstreams)
+                        GROUP BY workstream_id,principal
+                    ) ORDER BY id""",
+                    (self.pet, SESSION_NOTE_LIMIT),
+                )
+            else:
+                rows = db.execute(
+                    """SELECT * FROM mark_events WHERE pet=? AND id>?
+                        AND (json_type("values",'$.notes') IS NOT NULL
+                           OR (operation='unmark' AND instr(fields,'"notes"')>0))
+                    ORDER BY id LIMIT ?""",
+                    (self.pet, after, SESSION_NOTE_LIMIT),
+                )
+            return [event_record(row) for row in rows]
 
     def append(
         self,
@@ -265,27 +467,37 @@ class MarkStore:
         fields: list[str],
         attribution: Attribution,
     ) -> dict[str, object]:
-        now = self.clock()
         with self.database(write=True) as db:
-            cursor = db.execute(
-                'INSERT INTO mark_events(pet,workstream_id,operation,author,principal,timestamp,reason,"values",fields) VALUES (?,?,?,?,?,?,?,?,?)',
-                (
-                    self.pet,
-                    id,
-                    operation,
-                    attribution.author,
-                    attribution.principal,
-                    now,
-                    attribution.reason,
-                    json.dumps(values),
-                    json.dumps(fields),
-                ),
-            )
-            row = db.execute(
-                "SELECT * FROM mark_events WHERE id=?", (cursor.lastrowid,)
-            ).fetchone()
-            assert row is not None
-            return event_record(row)
+            return self.insert_mark(db, id, operation, values, fields, attribution)
+
+    def insert_mark(
+        self,
+        db: sqlite3.Connection,
+        id: str,
+        operation: str,
+        values: dict[str, object],
+        fields: list[str],
+        attribution: Attribution,
+    ) -> dict[str, object]:
+        cursor = db.execute(
+            'INSERT INTO mark_events(pet,workstream_id,operation,author,principal,timestamp,reason,"values",fields) VALUES (?,?,?,?,?,?,?,?,?)',
+            (
+                self.pet,
+                id,
+                operation,
+                attribution.author,
+                attribution.principal,
+                self.clock(),
+                attribution.reason,
+                json.dumps(values),
+                json.dumps(fields),
+            ),
+        )
+        row = db.execute(
+            "SELECT * FROM mark_events WHERE id=?", (cursor.lastrowid,)
+        ).fetchone()
+        assert row is not None
+        return event_record(row)
 
     def effective(self, id: str) -> dict[str, object]:
         if not self.path.exists():
@@ -303,7 +515,8 @@ class MarkStore:
             return {}
         with self.database() as db:
             rows = db.execute(
-                "SELECT * FROM mark_events WHERE pet=? ORDER BY id", (self.pet,)
+                "SELECT * FROM mark_events WHERE pet=? AND operation!='presence' ORDER BY id",
+                (self.pet,),
             )
             return effective_marks([event_record(row) for row in rows])
 

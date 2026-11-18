@@ -11,11 +11,14 @@ from ..attention import AttentionSelection
 from ..config import Config
 from ..domain import ModelPurpose, SpeechReason
 from ..logging import get_logger
+from ..occasion import Occasion
+from ..prose import work_prose
 from ..runtime import PetContext
 from ..storage import Memory
 from ..types import JSONObject
 from ..work.narrative import SelectedMemory, WorkNarrative, semantic_revision
-from . import care, conversation, story
+from . import care, conversation, reaction, story
+from .context import SupportedText
 from .contracts import ActionOffer, ModelRequest
 from .conversation import Exchange
 from .correction import CorrectableOutput
@@ -216,10 +219,17 @@ class Cognition:
         eligible: Callable[[AttentionSelection, PetContext], bool] | None = None,
         memory_eligible: Callable[[SelectedMemory], bool] | None = None,
         actions: Sequence[ActionOffer] = (),
+        *,
+        occasion: Occasion | None = None,
+        feeling: str | None = None,
     ) -> CommentaryResult:
         snapshot = refresh() if refresh else snapshot
         if eligible and not eligible(selection, snapshot):
             raise CannotRespond("Work is no longer eligible")
+        if occasion is not None:
+            return await self.generate_occasion(
+                snapshot, selection, occasion, refresh, eligible, feeling
+            )
         if selection.reason == SpeechReason.CARE:
             if snapshot.sleeping or any(
                 session.turn_active and not session.activity_uncertain
@@ -353,6 +363,83 @@ class Cognition:
             mentions=mentions,
             exchange=exchange,
         )
+
+    async def ground_occasion(
+        self,
+        snapshot: PetContext,
+        selection: AttentionSelection,
+        occasion: Occasion,
+        refresh: Callable[[], PetContext] | None,
+    ) -> SupportedText | None:
+        if occasion.fact is not None:
+            return SupportedText(occasion.fact, occasion.sources)
+        if not occasion.sources:
+            return None
+        narrative = await self.update_work_narrative(snapshot, selection, refresh)
+        if narrative is None:
+            return None
+        sources = set(occasion.sources)
+        statements = (
+            *reversed(narrative.progress),
+            *reversed(narrative.decisions),
+            narrative.intent,
+        )
+        for statement in statements:
+            if sources.intersection(statement.sources):
+                fact = work_prose(statement.text, 280)
+                if fact:
+                    return SupportedText(fact, statement.sources)
+        return None
+
+    async def generate_occasion(
+        self,
+        snapshot: PetContext,
+        selection: AttentionSelection,
+        occasion: Occasion,
+        refresh: Callable[[], PetContext] | None,
+        eligible: Callable[[AttentionSelection, PetContext], bool] | None,
+        feeling: str | None,
+    ) -> CommentaryResult:
+        fact = await self.ground_occasion(snapshot, selection, occasion, refresh)
+        current = refresh() if refresh else snapshot
+        if not selection.is_valid(current) or (
+            eligible and not eligible(selection, current)
+        ):
+            raise CannotRespond("The occasion is no longer eligible")
+        request = self.prompts.prepare_occasion(
+            current,
+            selection.refresh(current),
+            occasion.situation,
+            fact,
+            self.request,
+            tuple(item.text for item in self.memory.speech()),
+            feeling=feeling,
+        )
+        if fact is None:
+            return CommentaryResult(speak=None, request=request)
+        request.conditions.source_scope_revisions = self.memory.source_scope_revisions(
+            request.source_ids
+        )
+        try:
+            result = await self.respond(
+                request.request,
+                selection.reason,
+                response_type=reaction.Response,
+                validate=lambda draft: self.validate_commentary(
+                    draft,
+                    response_type=reaction.Response,
+                    commentary_request=request,
+                    narrative=None,
+                    actions=(),
+                ),
+            )
+        except CorrectableOutput as error:
+            raise CannotRespond("Reaction could not be corrected") from error
+        if not self.are_source_scopes_valid(result.request.conditions):
+            raise CannotRespond("Supporting work changed during speech generation")
+        if await self.find_repetition(result.speak):
+            return CommentaryResult(speak=None, request=request)
+        return result
 
     def validate_commentary(
         self,

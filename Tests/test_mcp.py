@@ -104,6 +104,7 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
                     "mark_workstream",
                     "unmark_workstream",
                     "workstream_mark_history",
+                    "record_presence",
                     "workstreams",
                     "workstream",
                     "since",
@@ -120,7 +121,14 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
                 all(
                     tool.annotations is not None
                     and tool.annotations.read_only_hint
-                    == (tool.name not in {"mark_workstream", "unmark_workstream"})
+                    == (
+                        tool.name
+                        not in {
+                            "mark_workstream",
+                            "unmark_workstream",
+                            "record_presence",
+                        }
+                    )
                     and tool.annotations.destructive_hint is False
                     for tool in catalog.tools
                 )

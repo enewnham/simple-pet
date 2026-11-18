@@ -19,7 +19,7 @@ from ..repository_identity import (
     repository_columns,
     repository_from_columns,
 )
-from ..runtime import SwarmActivity
+from ..runtime import SessionActivity
 from ..work import WorkIngestion
 from ..work.history import (
     HistoryDetails,
@@ -128,6 +128,7 @@ class Memory:
         self.max_events = max_events
         self.speech_history_seconds = speech_history_seconds
         path = Path(path)
+        self.path = path
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
@@ -157,6 +158,27 @@ class Memory:
         ).fetchall()
         return tuple(
             SessionReport.model_validate_json(row["data"]) for row in reversed(rows)
+        )
+
+    def first_session_report_at(self, session: SessionIdentity) -> float | None:
+        row = self.db.execute(
+            """SELECT coalesce(json_extract(data,'$.ingested_at'), observed_at) AS first_at
+            FROM work_reports WHERE pet=? AND source=? AND session=? ORDER BY id LIMIT 1""",
+            (self.pet, *session_values(session)),
+        ).fetchone()
+        return float(row["first_at"]) if row else None
+
+    def latest_session_reports(
+        self, session: SessionIdentity
+    ) -> tuple[SessionReport, ...]:
+        rows = self.db.execute(
+            """SELECT data FROM work_reports WHERE pet=? AND source=? AND session=?
+            ORDER BY id DESC LIMIT 8""",
+            (self.pet, *session_values(session)),
+        )
+        return tuple(
+            associated_report(SessionReport.model_validate_json(row["data"]))
+            for row in rows
         )
 
     def transaction(self) -> AbstractContextManager[None]:
@@ -281,6 +303,11 @@ class Memory:
     def narrative_reports(
         self, sessions: Sequence[SessionIdentity]
     ) -> tuple[SessionReport, ...]:
+        return tuple(report for _, report in self.narrative_report_entries(sessions))
+
+    def narrative_report_entries(
+        self, sessions: Sequence[SessionIdentity]
+    ) -> tuple[tuple[str, SessionReport], ...]:
         aliases = self.session_aliases()
         identities = {aliases.get(identifier, identifier) for identifier in sessions}
         identities.update(
@@ -290,11 +317,14 @@ class Memory:
             return ()
         placeholders, values = session_parameters(tuple(sorted(identities)))
         rows = self.db.execute(
-            f"SELECT data FROM work_reports WHERE pet=? AND (source,session) IN ({placeholders}) ORDER BY observed_at,id",
+            f"SELECT id,data FROM work_reports WHERE pet=? AND (source,session) IN ({placeholders}) ORDER BY observed_at,id",
             (self.pet, *values),
         )
         return tuple(
-            associated_report(SessionReport.model_validate_json(row["data"]))
+            (
+                f"report:{row['id']}",
+                associated_report(SessionReport.model_validate_json(row["data"])),
+            )
             for row in rows
         )
 
@@ -599,6 +629,10 @@ class Memory:
                 "DELETE FROM work_narratives WHERE pet=? AND updated_at < ?",
                 (self.pet, cutoff),
             )
+            self.db.execute(
+                "DELETE FROM said WHERE pet=? AND expires_at<=?",
+                (self.pet, now),
+            )
         self.db.execute("PRAGMA incremental_vacuum(64)")
 
     def record_event(self, record: SessionEntry | None) -> int | None:
@@ -857,7 +891,7 @@ class Memory:
             )
         self.prune()
 
-    def connected_work(self, activity: SwarmActivity) -> tuple[WorkSubject, ...]:
+    def connected_work(self, activity: SessionActivity) -> tuple[WorkSubject, ...]:
         return shared_work(self._work_repository.load(), activity)
 
     def collection_targets(self) -> tuple[RepositoryTarget, ...]:
@@ -878,6 +912,39 @@ class Memory:
         ).fetchall()
         return [SpeechRecord.model_validate(dict(row)) for row in reversed(rows)]
 
+    def load_behavior(self) -> tuple[str, str] | None:
+        row = self.db.execute(
+            "SELECT data, timers FROM pet_behavior WHERE pet=?", (self.pet,)
+        ).fetchone()
+        return (str(row["data"]), str(row["timers"])) if row else None
+
+    def save_behavior(self, data: str, timers: str) -> None:
+        with self.transaction():
+            self.db.execute(
+                """INSERT INTO pet_behavior(pet,data,timers) VALUES (?,?,?)
+                ON CONFLICT(pet) DO UPDATE SET data=excluded.data, timers=excluded.timers""",
+                (self.pet, data, timers),
+            )
+
+    def has_said(self, fingerprint: str) -> bool:
+        return (
+            self.db.execute(
+                """SELECT 1 FROM said
+                WHERE pet=? AND fingerprint=? AND expires_at>?""",
+                (self.pet, fingerprint, self.clock()),
+            ).fetchone()
+            is not None
+        )
+
+    def mark_said(self, fingerprint: str, expires_at: float) -> None:
+        with self.transaction():
+            self.db.execute(
+                """INSERT INTO said(pet,fingerprint,expires_at) VALUES (?,?,?)
+                ON CONFLICT(pet,fingerprint) DO UPDATE SET
+                    expires_at=MAX(said.expires_at,excluded.expires_at)""",
+                (self.pet, fingerprint, expires_at),
+            )
+
     def clear_speech(self) -> None:
         with self.transaction():
             self.db.execute("DELETE FROM speech WHERE pet=?", (self.pet,))
@@ -894,6 +961,8 @@ class Memory:
                 "attention_sources",
                 "message_outcomes",
                 "work_narratives",
+                "pet_behavior",
+                "said",
             ):
                 self.db.execute(f"DELETE FROM {table} WHERE pet=?", (self.pet,))
 

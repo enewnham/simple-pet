@@ -22,7 +22,7 @@ from ..runtime import (
     FailureSnapshot,
     HookEventKind,
     ProcessIdentity,
-    SwarmActivity,
+    SessionActivity,
     UserSentiment,
     WaitingKind,
 )
@@ -1125,7 +1125,7 @@ class Sessions:
 
     def activity(
         self, keys: Collection[SessionIdentity] | None = None
-    ) -> SwarmActivity:
+    ) -> SessionActivity:
         self._refresh_activity()
         now = self.clock()
         members = [
@@ -1133,7 +1133,7 @@ class Sessions:
             for key, session in sorted(self.by_id.items())
             if keys is None or key in keys
         ]
-        return SwarmActivity(
+        return SessionActivity(
             activity=PetState.WORKING
             if any(session.is_working for _, session in members)
             else PetState.IDLE,

@@ -15,6 +15,7 @@ from .domain import (
 )
 from .identity import SessionIdentity
 from .logging import get_logger
+from .occasion import Occasion
 from .runtime import (
     AgentSessionStatus,
     CareTrigger,
@@ -104,6 +105,8 @@ class AttentionSelection(BaseModel):
     selected_state: SelectedWorkState = SelectedWorkState()
     update: WorkUpdate | None = None
     memory: SelectedMemory | None = None
+    occasion: Occasion | None = None
+    character: str | None = None
     quiet_revision: tuple[tuple[SessionIdentity, float], ...] = ()
 
     @property

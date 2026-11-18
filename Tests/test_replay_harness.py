@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from pet_daemon.cli.hook import update as hook_update
-from pet_daemon.commentary.context import CommentaryContext, Moment
+from pet_daemon.commentary.context import CommentaryContext, CurrentObservation
 from pet_daemon.commentary.observations import event_text
 from pet_daemon.domain import (
     DeliveryStatus,
@@ -38,8 +38,27 @@ class ReplayHarness(ApplicationReplayHarness):
         assert isinstance(prompts, RecordingPromptBuilder)
         return prompts.prepared(request).context
 
+    def last_fact(self) -> str:
+        request = self.model.calls[-1]["request"]
+        value = json.loads(request["messages"][0]["content"])["fact"]
+        assert isinstance(value, str)
+        return value
 
-def require_moment(context: CommentaryContext) -> Moment:
+    def accept_speech(self) -> None:
+        packet = next(item for item in reversed(self.packets) if "delivery_id" in item)
+        identifier = packet["delivery_id"]
+        self.receive(
+            {
+                "kind": "renderer",
+                "event": "speech_accepted",
+                "delivery_id": identifier,
+            }
+        )
+        outcome = self.memory.message_outcome(identifier)
+        assert outcome is not None and outcome.outcome == DeliveryStatus.ACCEPTED
+
+
+def require_moment(context: CommentaryContext) -> CurrentObservation:
     assert context.moment is not None
     return context.moment
 
@@ -68,23 +87,15 @@ def test_scheduler_persists_only_renderer_accepted_speech() -> None:
                 "story",
                 "prompt",
             ]
-            payload = replay.speech_context(replay.model.calls[-1]["request"])
             assert (
-                event_text(require_moment(payload).event)
-                == "The developer sent a message about this work."
+                replay.last_fact() == "Check how the parser handles escaped delimiters."
             )
             assert any(
                 item.get("animation", {}).get("id") == "review"
                 for item in replay.packets
             )
 
-            replay.receive(
-                {
-                    "kind": "renderer",
-                    "event": "speech_accepted",
-                    "delivery_id": identifier,
-                }
-            )
+            replay.accept_speech()
             outcome = replay.memory.message_outcome(identifier)
             assert outcome is not None
             assert outcome.outcome == DeliveryStatus.ACCEPTED
@@ -261,7 +272,7 @@ def claude_hook() -> Callable[[str, Mapping[str, object]], HookEvent]:
             "PermissionRequest",
             {},
             WaitingKind.PERMISSION_CHECK,
-            "A tool call is still running. Its result is not known yet.",
+            "A testing operation is still running.",
         ),
         (
             "Notification",
@@ -318,6 +329,8 @@ def test_wait_kind_controls_scheduled_and_clicked_commentary(
             )
             await replay.advance(0)
             calls_before_wait = len(replay.model.calls)
+            assert replay.fixture_model is not None
+            replay.fixture_model.speech = "Time for a brief intermission."
             replay.ingest(
                 claude_hook(
                     event,
@@ -348,8 +361,11 @@ def test_wait_kind_controls_scheduled_and_clicked_commentary(
                 assert len(replay.model.calls) == calls_before_wait
             else:
                 assert replay.model.calls[-1]["purpose"] == "check_in"
-                payload = replay.speech_context(replay.model.calls[-1]["request"])
-                assert event_text(require_moment(payload).event) == moment_event
+                assert replay.last_fact().startswith(moment_event)
+                if waiting_kind == WaitingKind.QUESTION:
+                    assert "Which parser should I check?" in replay.last_fact()
+                replay.accept_speech()
+            replay.fixture_model.speech = None
             replay.receive({"kind": "renderer", "event": "click"})
             await replay.advance(0)
             assert replay.model.calls[-1]["purpose"] == "click"
@@ -360,6 +376,10 @@ def test_wait_kind_controls_scheduled_and_clicked_commentary(
                 else moment_event
             )
             assert event_text(require_moment(payload).event) == clicked_event
+            if waiting_kind == WaitingKind.QUESTION:
+                progress = require_moment(payload).progress
+                assert progress is not None
+                assert progress.text == "Which parser should I check?"
             conversation = next(
                 packet["conversation"]
                 for packet in reversed(replay.packets)
@@ -374,14 +394,20 @@ def test_wait_kind_controls_scheduled_and_clicked_commentary(
                     "revision": conversation["revision"],
                 }
             )
+            calls_after_click = len(replay.model.calls)
+            replay.fixture_model.speech = "The suspense is getting to me."
             await replay.advance(10, tick_seconds=1)
-            assert replay.model.calls[-1]["purpose"] == "check_in"
-            payload = replay.speech_context(replay.model.calls[-1]["request"])
-            assert event_text(require_moment(payload).event) == moment_event
-            if waiting_kind == WaitingKind.QUESTION:
-                progress = require_moment(payload).progress
-                assert progress is not None
-                assert progress.text == "Which parser should I check?"
+            if waiting_kind == WaitingKind.PERMISSION_CHECK:
+                assert replay.model.calls[-1]["purpose"] == "check_in"
+                assert replay.last_fact().startswith(moment_event)
+                assert "less than a minute" in replay.last_fact()
+                replay.accept_speech()
+            else:
+                assert len(replay.model.calls) == calls_after_click
+            calls_after_wait = len(replay.model.calls)
+            await replay.advance(10, tick_seconds=1)
+            assert len(replay.model.calls) == calls_after_wait
+            replay.fixture_model.speech = None
             activity = replay.app.context().work[0].story.activity
             assert any(
                 isinstance(item.details, ExecutionStatus)
@@ -425,14 +451,9 @@ def test_wait_kind_controls_scheduled_and_clicked_commentary(
             await replay.advance(1)
             assert session.outcome == ExecutionOutcome.SUCCESS
             assert replay.model.calls[-1]["purpose"] == "completion"
-            payload = replay.speech_context(replay.model.calls[-1]["request"])
             assert (
-                event_text(require_moment(payload).event)
-                == "An execution of this work ended. The reported outcome describes that execution, not whether the whole task is complete."
-            )
-            assert (
-                "The work segment ended without a reported execution error. This alone does not establish task completion."
-                in replay.model.calls[-1]["request"]["messages"][0]["content"]
+                replay.last_fact()
+                == "Checked parser behavior and confirmed escaped delimiters."
             )
             reports = replay.memory.narrative_reports(
                 (SessionIdentity(source=SessionSource.CLAUDE, native_id="parser"),)
@@ -468,6 +489,8 @@ def test_child_check_ins_follow_requests_for_input(
                 ).packet()
             )
             await replay.advance(0)
+            assert replay.fixture_model is not None
+            replay.fixture_model.speech = "I'm keeping watch while we wait."
             replay.ingest(
                 claude_hook(
                     "SubagentStart",
@@ -492,6 +515,12 @@ def test_child_check_ins_follow_requests_for_input(
             )
             await replay.advance(0)
             calls_after_wait = len(replay.model.calls)
+            if not internal_check:
+                assert replay.model.calls[-1]["purpose"] == "check_in"
+                assert replay.last_fact().startswith(
+                    "The work is waiting for the developer to approve an operation."
+                )
+                replay.accept_speech()
             await replay.advance(9, tick_seconds=1)
             replay.ingest(
                 claude_hook(
@@ -507,20 +536,9 @@ def test_child_check_ins_follow_requests_for_input(
             child = replay.app.sessions.by_id[
                 SessionIdentity(source=SessionSource.CLAUDE, native_id="examples")
             ]
+            assert len(replay.model.calls) == calls_after_wait
             if internal_check:
-                assert len(replay.model.calls) == calls_after_wait
                 assert child.last_check_in is None
-            else:
-                assert replay.model.calls[-1]["purpose"] == "check_in"
-                assert child.last_check_in == replay.clock()
-                payload = replay.speech_context(replay.model.calls[-1]["request"])
-                assert (
-                    event_text(require_moment(payload).event)
-                    == "The work is waiting for the developer to approve an operation."
-                )
-                assert payload.work is not None
-                assert payload.work.request is not None
-                assert payload.work.request.text == "Check escaped delimiters"
 
     asyncio.run(scenario())
 

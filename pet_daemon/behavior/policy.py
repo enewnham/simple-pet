@@ -3,6 +3,7 @@ from dataclasses import dataclass
 
 from ..domain import ActionKind
 from ..runtime import RandomSource
+from .mood import MoodState
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,8 @@ class Observation:
     can_nap: bool
     restlessness: float
     rest_pressure: float
+    mood: MoodState | None = None
+    settled: bool = False
 
 
 @dataclass(frozen=True)
@@ -99,7 +102,7 @@ class Policy:
         return [
             Candidate(
                 spec.name,
-                spec.utility(observation),
+                spec.utility(observation) * _mood_weight(spec.name, observation),
                 "attention"
                 if spec.name == "focus" and observation.investigating
                 else spec.role,
@@ -130,3 +133,17 @@ class Policy:
             if threshold <= 0:
                 return candidate
         return choices[-1]
+
+
+def _mood_weight(name: str, observation: Observation) -> float:
+    state = observation.mood
+    if state is None:
+        return 1
+    if name == "rest" or name == "nap":
+        return 1.3 - 0.5 * state.energy
+    if name == "focus" or name == "observe":
+        return 0.8 + 0.4 * state.curiosity
+    if name == "roam":
+        engagement = 0.4 * state.energy + 0.2 * state.social_appetite
+        return (0.75 + engagement) * (0.7 if observation.settled else 1)
+    return 1

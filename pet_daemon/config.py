@@ -40,6 +40,7 @@ marks, elaborate metaphors, and inventing trouble to entertain.
 type Positive = Annotated[float, Field(strict=True, gt=0, allow_inf_nan=False)]
 type Nonnegative = Annotated[float, Field(strict=True, ge=0, allow_inf_nan=False)]
 type PositiveInt = Annotated[int, Field(strict=True, gt=0)]
+type Unit = Annotated[float, Field(strict=True, ge=0, le=1, allow_inf_nan=False)]
 
 
 def ordered_interval(value: tuple[float, float]) -> tuple[float, float]:
@@ -56,6 +57,16 @@ class PersonaExamples(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     activity: str = ""
     conversation: str = ""
+
+
+class MoodConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    energy: Unit = 0.65
+    curiosity: Unit = 0.45
+    social_appetite: Unit = 0.25
+    agitation: Unit = 0.05
+    sensitivity: Unit = 1
+    idle_period: Interval = (90, 600)
 
 
 class BehaviorConfig(BaseModel):
@@ -82,6 +93,7 @@ class BehaviorConfig(BaseModel):
     resume_seconds: Positive = 3
     gaze_reset_seconds: Positive = 1.2
     gaze_deadzone: Positive = 24
+    mood: MoodConfig = Field(default_factory=MoodConfig)
 
 
 class NavigationHandler(BaseModel):

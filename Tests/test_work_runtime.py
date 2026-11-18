@@ -333,7 +333,9 @@ class WorkRuntimeTests(unittest.IsolatedAsyncioTestCase):
         speech = await self.packet(lambda packet: "delivery_id" in packet)
         payload = self.requests[-1]["messages"][-1]["content"]
         self.assertIn("next I will document restart behavior", payload)
-        self.assertIn("Preserve coding session context across daemon restarts", payload)
+        self.assertNotIn(
+            "Preserve coding session context across daemon restarts", payload
+        )
         self.assertNotIn("Persist coding session context", payload)
         self.assertNotIn("draft", payload.lower())
         self.assertNotIn(str(self.repository_path), payload)

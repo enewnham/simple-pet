@@ -103,3 +103,19 @@ def work_prose(text: str | None, limit: int = 800, excluded: Sequence[str] = ())
         excerpt = prose[:available].rsplit(" ", 1)[0]
     suffix = "" if excerpt.endswith(_MARKER) else f" {_MARKER}"
     return f"{excerpt}{suffix}".strip()[:limit]
+
+
+def duration(seconds: float | None) -> str | None:
+    if seconds is None:
+        return None
+    seconds = max(0, round(seconds))
+    if seconds < 60:
+        return "less than a minute"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} minute{'s' if minutes != 1 else ''}"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} hour{'s' if hours != 1 else ''}"
+    days = hours // 24
+    return f"{days} day{'s' if days != 1 else ''}"

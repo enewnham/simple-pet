@@ -47,6 +47,25 @@ def request_reason(body: ModelRequest) -> str:
     content = body["messages"][0]["content"]
     if content.startswith("{") and "care" in json.loads(content):
         return "care"
+    if content.startswith("{") and "fact" in json.loads(content):
+        direction = body["system"][-1]["text"]
+        purpose = direction.split("This is a chance to ")[-1].rstrip(".")
+        return {
+            "show interest in the work": "prompt",
+            "react to the new development": "routine",
+            "mark the result": "completion",
+            "celebrate the recovery": "completion",
+            "acknowledge the interruption": "completion",
+            "react to the setback": "failure",
+            "react to the struggle": "failure",
+            "keep the developer company": "check_in",
+            "keep the developer company during the wait": "check_in",
+            "keep the developer company in the quiet": "check_in",
+            "offer a brief moment of company": "care",
+            "invite the developer to take a brief break": "care",
+            "give a casual greeting": "care",
+            "react playfully to the quiet": "care",
+        }[purpose]
     if "The developer requested this recollection with a click." in content:
         return "click"
     instruction = " ".join(content.split())
@@ -69,7 +88,7 @@ def request_reason(body: ModelRequest) -> str:
         ("Recall one of the earlier memories above", "check_in"),
         ("The developer clicked you", "click"),
         ("Give a brief casual greeting", "care"),
-        ("Give a brief spoken aside about taking a stretch break", "care"),
+        ("Invite the developer to take a brief break", "care"),
         ("Give a brief companionable aside about this quiet stretch", "care"),
     ):
         if phrase in instruction:
@@ -1089,7 +1108,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             key for key in self.daemon.application.sessions.by_id if key not in checked
         )
         payload = self.requests[-1]["messages"][-1]["content"]
-        self.assertIn("pytest", payload)
+        self.assertIn("A testing operation is still running", payload)
         self.release.set()
         await self.wait_for(lambda: len(self.requests) == 2)
         payload = self.requests[-1]["messages"][-1]["content"]
@@ -1160,8 +1179,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(animation["animation"]["repeats"], 3)
         await self.packet(lambda packet: packet.get("text") == self.speech)
         self.assertEqual(request_reason(self.requests[-1]), "care")
-        payload = self.requests[-1]["messages"][0]["content"]
-        self.assertIn("stretch", payload)
+        self.assertIn(
+            "invite the developer to take a brief break",
+            self.requests[-1]["system"][-1]["text"],
+        )
         self.send({"kind": "renderer", "event": "click"})
         await self.wait_for(lambda: len(self.requests) == 2)
         self.assertEqual(request_reason(self.requests[-1]), "click")
@@ -2223,8 +2244,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         speech = await self.packet(lambda packet: "text" in packet, timeout=2)
         snapshot = self.requests[0]["messages"][-1]["content"]
         self.assertEqual(request_reason(self.requests[-1]), "completion")
-        self.assertIn("without a reported execution error", snapshot)
-        self.assertIn("does not establish task completion", snapshot)
+        self.assertIn("The agent reported: Checks passed", snapshot)
         self.assertIn("Checks passed", snapshot)
         self.assertNotIn("cargo build", snapshot)
         self.assertEqual(speech["text"], self.speech)
@@ -2254,7 +2274,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(any(packet.get("text") for packet in await self.drain()))
 
-    async def test_check_in_uses_each_tasks_quiet_time_and_repeats_after_the_interval(
+    async def test_check_in_uses_each_tasks_quiet_time_and_only_speaks_once(
         self,
     ) -> None:
         self.use_clock()
@@ -2283,7 +2303,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(speech["text"], self.speech)
         snapshot = self.requests[0]["messages"][-1]["content"]
         self.assertEqual(request_reason(self.requests[-1]), "check_in")
-        self.assertIn("pytest", snapshot)
+        self.assertIn("A testing operation is still running", snapshot)
         self.assertIsNotNone(
             self.daemon.application.sessions.by_id[
                 SessionIdentity(source=SessionSource.CODEX, native_id="one")
@@ -2303,9 +2323,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(lambda: self.daemon.application.next_prune > self.now)
         self.assertEqual(len(self.requests), 1)
         self.now += 1
-        await self.packet(lambda packet: "text" in packet)
-        snapshot = self.requests[1]["messages"][-1]["content"]
-        self.assertIn("pytest", snapshot)
+        await self.wait_for(lambda: self.daemon.application.next_prune > self.now)
+        self.assertEqual(len(self.requests), 1)
 
     async def test_failed_check_in_waits_the_interval_before_retrying(self) -> None:
         self.use_clock()
@@ -2672,8 +2691,19 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(require(lane.failure).activity, "command")
         self.assertFalse(hasattr(require(lane.failure), "detail"))
         await self.comment(SpeechReason.FAILURE)
-        snapshot = self.requests[-1]["messages"][-1]["content"]
-        self.assertIn("The failed operation was command execution.", snapshot)
+        await self.wait_for(
+            lambda: any(request_reason(body) == "failure" for body in self.requests)
+        )
+        failure = next(
+            body for body in self.requests if request_reason(body) == "failure"
+        )
+        snapshot = failure["messages"][-1]["content"]
+        if snapshot.startswith("{"):
+            self.assertIn(
+                "The affected operation was command.", json.loads(snapshot)["fact"]
+            )
+        else:
+            self.assertIn("The failed operation was command execution.", snapshot)
         self.assertNotIn("Exit code", snapshot)
 
     async def test_naming_hook_delivers_once_across_daemon_restart(self) -> None:

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pet_daemon.domain import Activity, ExecutionOutcome, PetState, SessionSource
 from pet_daemon.identity import SessionIdentity
-from pet_daemon.runtime import ConvergenceItem, SwarmActivity
+from pet_daemon.runtime import ConvergenceItem, SessionActivity
 from pet_daemon.sessions.tracking import Sessions, SessionUpdate
 from pet_daemon.storage import Memory
 from pet_daemon.work.models import ExecutionEvidence
@@ -133,7 +133,7 @@ class SessionsTests(unittest.TestCase):
             "intent", goal="Preserve parser behavior", repo="/parser", turn="current"
         )
         before = self.memory.connected_work(
-            SwarmActivity(activity=PetState.IDLE, sessions=())
+            SessionActivity(activity=PetState.IDLE, sessions=())
         )
         context = self.memory.context(
             SessionIdentity(source=SessionSource.CLAUDE, native_id="main")
@@ -149,7 +149,7 @@ class SessionsTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(
             self.memory.connected_work(
-                SwarmActivity(activity=PetState.IDLE, sessions=())
+                SessionActivity(activity=PetState.IDLE, sessions=())
             ),
             before,
         )

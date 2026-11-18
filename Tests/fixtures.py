@@ -18,7 +18,7 @@ from pet_daemon.runtime import (
     FailureSnapshot,
     PetContext,
     ProcessIdentity,
-    SwarmActivity,
+    SessionActivity,
     Trigger,
     UserSentiment,
     WaitingKind,
@@ -146,12 +146,12 @@ def session_snapshot(**values: Unpack[SessionOptions]) -> AgentSessionStatus:
     return snapshot.model_copy(update=dict(**values))
 
 
-def sessions_snapshot(*sessions: AgentSessionStatus) -> SwarmActivity:
-    return SwarmActivity(activity=PetState.IDLE, sessions=sessions)
+def sessions_snapshot(*sessions: AgentSessionStatus) -> SessionActivity:
+    return SessionActivity(activity=PetState.IDLE, sessions=sessions)
 
 
 def capture_snapshot(
-    snapshot: SwarmActivity,
+    snapshot: SessionActivity,
     *,
     work: tuple[WorkSubject, ...] = (),
     memory: Memory | None = None,

@@ -58,7 +58,7 @@ class WorkContext:
 
 
 @dataclass(frozen=True)
-class Moment:
+class CurrentObservation:
     event: Event
     text: str | None = None
     progress: SupportedText | None = None
@@ -148,8 +148,9 @@ type ContextItem = ContextFact | MemoryCandidate
 @dataclass(frozen=True)
 class CommentaryContext:
     work: WorkContext | None = None
-    moment: Moment | None = None
+    moment: CurrentObservation | None = None
     earlier: tuple[ContextItem, ...] = ()
+    character: str | None = None
 
     @property
     def citations(self) -> Citations:

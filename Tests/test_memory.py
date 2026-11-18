@@ -1309,6 +1309,29 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(self.memory.speech(), [])
         self.assertEqual(self.memory.load_attention_history(), {identifier: history})
 
+    def test_spoken_occasion_survives_restart_until_it_expires(self) -> None:
+        expires_at = self.now + 10
+        self.memory.mark_said("parser-recovery", expires_at)
+        self.memory.close()
+        self.memory = Memory(self.path, "fixture", clock=lambda: self.now)
+
+        self.assertTrue(self.memory.has_said("parser-recovery"))
+        self.assertFalse(self.memory.has_said("unrelated-work"))
+        self.now = expires_at
+        self.assertFalse(self.memory.has_said("parser-recovery"))
+
+    def test_recording_speech_and_occasion_rolls_back_together(self) -> None:
+        with self.assertRaises(RuntimeError), self.memory.transaction():
+            self.memory.record_acceptance(
+                "message", "Tests passed.", SpeechReason.COMPLETION
+            )
+            self.memory.mark_said("parser-recovery", self.now + 10)
+            raise RuntimeError("The acceptance transaction failed")
+
+        self.assertIsNone(self.memory.message_outcome("message"))
+        self.assertEqual(self.memory.speech(), [])
+        self.assertFalse(self.memory.has_said("parser-recovery"))
+
     def test_subject_and_session_consideration_share_a_canonical_identity(self) -> None:
         identifier = SessionIdentity(source=SessionSource.CODEX, native_id="parser")
         original = AttentionHistory(

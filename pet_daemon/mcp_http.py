@@ -70,17 +70,35 @@ def load_token(path: Path) -> str:
 
 
 class SharedToken:
-    def __init__(self, token: str) -> None:
+    def __init__(self, token: str, write_token: str | None = None) -> None:
         self.token = token.encode()
+        self.write_token = write_token.encode() if write_token else None
+        if self.write_token is not None and secrets.compare_digest(
+            self.token, self.write_token
+        ):
+            raise ValueError("Read and write credentials must be distinct")
 
     async def verify_token(self, token: str) -> AccessToken | None:
-        if not secrets.compare_digest(token.encode(), self.token):
-            return None
-        return AccessToken(token=token, client_id="pet-mcp", scopes=[])
+        from .mcp import WRITE_PERMISSION
+
+        value = token.encode()
+        if secrets.compare_digest(value, self.token):
+            return AccessToken(token=token, client_id="pet-mcp", scopes=[])
+        if self.write_token is not None and secrets.compare_digest(
+            value, self.write_token
+        ):
+            return AccessToken(
+                token=token, client_id="pet-mcp-writer", scopes=[WRITE_PERMISSION]
+            )
+        return None
 
 
 def http_application(
-    context: WorkContext, token: str, host: str, port: int
+    context: WorkContext,
+    token: str,
+    host: str,
+    port: int,
+    write_token: str | None = None,
 ) -> Starlette:
     from .mcp import create_server
 
@@ -90,15 +108,26 @@ def http_application(
     auth = AuthSettings(
         issuer_url=AnyHttpUrl(f"http://{address}:{port}"), resource_server_url=None
     )
-    server = create_server(context, token_verifier=SharedToken(token), auth=auth)
+    server = create_server(
+        context,
+        token_verifier=SharedToken(token, write_token),
+        auth=auth,
+    )
     return server.streamable_http_app(
         host=host, stateless_http=True, json_response=True
     )
 
 
-def run_http(context: WorkContext, token_file: Path, host: str, port: int) -> None:
+def run_http(
+    context: WorkContext,
+    token_file: Path,
+    host: str,
+    port: int,
+    write_token_file: Path | None = None,
+) -> None:
     token = load_token(token_file)
-    application = http_application(context, token, host, port)
+    write_token = load_token(write_token_file) if write_token_file is not None else None
+    application = http_application(context, token, host, port, write_token)
     uvicorn.run(
         application,
         host=host,

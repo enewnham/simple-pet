@@ -121,7 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         view.onClick = { [weak self] in
             self?.conversation?.requestFocus()
-            self?.sender?.send(["kind": "renderer", "event": "click"])
+            self?.sender?.send(["kind": "renderer", "event": "click", "event_id": UUID().uuidString])
         }
         view.onRounds = { [weak self] in
             self?.conversation?.requestFocus()
