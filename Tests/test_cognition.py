@@ -284,6 +284,62 @@ class CognitionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["fact"], occasion.fact)
         self.assertEqual(payload["character"], character)
 
+    async def test_occasion_rewrites_a_multi_sentence_reaction(self) -> None:
+        snapshot = self.snapshot()
+        selection = self.attention.select(snapshot, SpeechReason.ROUTINE)
+        occasion = Occasion(
+            fingerprint="desktop-deck",
+            fact="The agent proposed deleting the old deck from the Desktop.",
+            situation=SpeechSituation.ROUTINE,
+            expires_at=self.clock() + 10,
+        )
+        quip = "That old deck has been judging us from the Desktop long enough."
+        self.responses.extend(
+            [
+                (
+                    {"speak": "The old deck is on the Desktop. It looks smug."},
+                    "end_turn",
+                ),
+                ({"speak": quip}, "end_turn"),
+            ]
+        )
+
+        result = await self.cognition.generate_commentary(
+            snapshot, selection, occasion=occasion
+        )
+
+        self.assertEqual(result.speak, quip)
+        self.assertEqual(len(self.requests), 2)
+        feedback = self.requests[-1][1]["messages"][-1]["content"]
+        self.assertIn("occasion_length", feedback)
+
+    async def test_occasion_speaks_the_rewrite_even_if_it_runs_long(self) -> None:
+        snapshot = self.snapshot()
+        selection = self.attention.select(snapshot, SpeechReason.ROUTINE)
+        occasion = Occasion(
+            fingerprint="desktop-deck",
+            fact="The agent proposed deleting the old deck from the Desktop.",
+            situation=SpeechSituation.ROUTINE,
+            expires_at=self.clock() + 10,
+        )
+        draft = (
+            "That old deck has been perched on your Desktop for so long that "
+            "I half expected it to start charging us rent."
+        )
+        rewrite = "That deck has been judging us. It can judge from the Trash."
+        self.responses.extend(
+            [({"speak": draft}, "end_turn"), ({"speak": rewrite}, "end_turn")]
+        )
+
+        result = await self.cognition.generate_commentary(
+            snapshot, selection, occasion=occasion
+        )
+
+        self.assertEqual(result.speak, rewrite)
+        self.assertEqual(len(self.requests), 2)
+        feedback = self.requests[-1][1]["messages"][-1]["content"]
+        self.assertIn("occasion_length", feedback)
+
     async def test_prose_occasion_uses_one_cited_statement_from_the_story(self) -> None:
         report_text = (
             "Removed a redundant retry. This paragraph describes several other things."

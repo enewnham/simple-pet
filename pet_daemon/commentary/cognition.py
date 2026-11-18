@@ -96,6 +96,7 @@ class Cognition:
         *,
         response_type: type[BaseModel],
         validate: Callable[[dict[str, object]], T],
+        check_first_draft: Callable[[T], None] | None = None,
         corrections_left: int = 1,
         attempt: int = 0,
     ) -> T:
@@ -107,7 +108,10 @@ class Cognition:
         finally:
             correction_attempt.reset(token)
         try:
-            return validate(draft)
+            result = validate(draft)
+            if attempt == 0 and check_first_draft is not None:
+                check_first_draft(result)
+            return result
         except CorrectableOutput as error:
             if corrections_left <= 0:
                 log.info(
@@ -431,6 +435,9 @@ class Cognition:
                     commentary_request=request,
                     narrative=None,
                     actions=(),
+                ),
+                check_first_draft=lambda result: reaction.validate_occasion_speech(
+                    result.speak
                 ),
             )
         except CorrectableOutput as error:

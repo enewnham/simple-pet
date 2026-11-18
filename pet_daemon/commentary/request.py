@@ -1139,7 +1139,11 @@ class PromptBuilder:
         system: list[TextBlockParam] = [
             {
                 "type": "text",
-                "text": render("system/occasion.jinja", persona=self.config.persona),
+                "text": render(
+                    "system/occasion.jinja",
+                    persona=self.config.persona,
+                    max_words=reaction.OCCASION_MAX_WORDS,
+                ),
                 "cache_control": CACHE_CONTROL,
             },
             {
