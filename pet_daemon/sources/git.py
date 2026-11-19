@@ -1,4 +1,5 @@
 import asyncio
+import os
 from collections.abc import Coroutine
 from pathlib import Path
 from typing import Protocol, TypedDict
@@ -34,11 +35,24 @@ async def _finish[T](task: asyncio.Task[T]) -> T:
                 raise
 
 
+async def _stop(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+    process.terminate()
+    try:
+        await asyncio.wait_for(process.communicate(), timeout=0.5)
+    except TimeoutError:
+        if process.returncode is None:
+            process.kill()
+        await process.communicate()
+
+
 async def command(*args: str, cwd: CommandPath = None, timeout: float = 10) -> str:
     startup = asyncio.create_task(
         asyncio.create_subprocess_exec(
             *args,
             cwd=cwd,
+            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -51,16 +65,12 @@ async def command(*args: str, cwd: CommandPath = None, timeout: float = 10) -> s
         except Exception:  # noqa: BLE001, S110 - Preserve cancellation when subprocess startup fails during cleanup.
             pass
         else:
-            if process.returncode is None:
-                process.kill()
-            await _finish(asyncio.create_task(process.wait()))
+            await _finish(asyncio.create_task(_stop(process)))
         raise
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
     except BaseException:
-        if process.returncode is None:
-            process.kill()
-        await _finish(asyncio.create_task(process.wait()))
+        await _finish(asyncio.create_task(_stop(process)))
         raise
     if process.returncode:
         raise RuntimeError(stderr.decode(errors="replace").strip()[:240])

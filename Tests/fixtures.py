@@ -52,6 +52,7 @@ def story_response(request: ModelRequest) -> dict[str, object]:
 
 class SubprocessOptions(TypedDict, total=False):
     cwd: str | Path | None
+    env: dict[str, str]
     stdout: int
     stderr: int
 

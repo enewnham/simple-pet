@@ -1,6 +1,8 @@
 import asyncio
 import json
+import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -135,6 +137,18 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
                 repository_observation_adapter.validate_json(item.model_dump_json()),
                 item,
             )
+
+    async def test_git_observation_leaves_the_index_unchanged(self) -> None:
+        tracked = self.path / "tracked"
+        os.utime(tracked, (978307200, 978307200))
+        index = self.path / ".git" / "index"
+        original = index.read_bytes()
+
+        with patch.dict(os.environ, {"GIT_OPTIONAL_LOCKS": "1"}):
+            local = await git.observe(self.path)
+
+        self.assertEqual(local.unstaged, 0)
+        self.assertEqual(index.read_bytes(), original)
 
     async def test_unchanged_polls_keep_local_and_github_intervals(self) -> None:
         self.tracker.track_checkout(self.path)
@@ -793,7 +807,7 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
                 release.set()
                 result = await asyncio.gather(task, return_exceptions=True)
             self.assertIsInstance(result[0], asyncio.CancelledError)
-            self.assertIsNotNone(processes[0].returncode)
+            self.assertEqual(processes[0].returncode, -signal.SIGTERM)
         finally:
             for process in processes:
                 if process.returncode is None:
@@ -823,7 +837,43 @@ class RepositoryTests(unittest.IsolatedAsyncioTestCase):
             task.cancel()
             result = await asyncio.gather(task, return_exceptions=True)
         self.assertIsInstance(result[0], asyncio.CancelledError)
-        self.assertIsNotNone(processes[0].returncode)
+        self.assertEqual(processes[0].returncode, -signal.SIGTERM)
+
+    async def test_timed_out_command_kills_only_after_the_child_ignores_termination(
+        self,
+    ) -> None:
+        create = asyncio.create_subprocess_exec
+        processes: list[asyncio.subprocess.Process] = []
+
+        async def started(
+            *args: str, **kwargs: Unpack[SubprocessOptions]
+        ) -> asyncio.subprocess.Process:
+            process = await create(*args, **kwargs)
+            processes.append(process)
+            assert process.stdout is not None
+            self.assertEqual(await process.stdout.readline(), b"ready\n")
+            return process
+
+        for handler, exit_signal in (
+            ("SIG_DFL", signal.SIGTERM),
+            ("SIG_IGN", signal.SIGKILL),
+        ):
+            with self.subTest(handler=handler):
+                script = (
+                    "import signal\n"
+                    f"signal.signal(signal.SIGTERM, signal.{handler})\n"
+                    "print('ready', flush=True)\n"
+                    "signal.pause()\n"
+                )
+                with (
+                    patch(
+                        "pet_daemon.sources.git.asyncio.create_subprocess_exec",
+                        side_effect=started,
+                    ),
+                    self.assertRaises(TimeoutError),
+                ):
+                    await git.command(sys.executable, "-c", script, timeout=0)
+                self.assertEqual(processes[-1].returncode, -exit_signal)
 
 
 class HookObservationTests(unittest.TestCase):
