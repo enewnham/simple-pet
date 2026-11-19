@@ -1040,7 +1040,13 @@ class Application:
             and self.manual is None
         ):
             return
-        snapshot = self.context()
+        runtime = self.sessions.activity()
+        snapshot = PetContext(
+            activity=runtime.activity,
+            sessions=runtime.sessions,
+            sleeping=self.behavior.is_sleeping,
+            convergence=runtime.convergence,
+        )
         check_in = tuple(
             key
             for key in self.sessions.check_in_due(self.config.idle_message_seconds)
@@ -1057,6 +1063,7 @@ class Application:
                 trigger, self.sessions
             ),
             delivery_pending=self.delivery.has_pending(),
+            observation_context=self.context,
         )
         if request is None:
             self.schedule_presence(snapshot)
@@ -1165,9 +1172,8 @@ class Application:
         ):
             self.save_mood()
         care = CareTrigger(care=CareKind.ATTENTION)
-        selection = self.attention.select(
-            snapshot.model_copy(update={"trigger": care}), SpeechReason.CARE
-        )
+        snapshot = self.context(care)
+        selection = self.attention.select(snapshot, SpeechReason.CARE)
         selection = selection.model_copy(update={"occasion": occasion})
         self.attention.mark_scheduled()
         self.reason = SpeechReason.CARE

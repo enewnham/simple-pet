@@ -306,6 +306,18 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.memory.close()
         self.temporary.cleanup()
 
+    async def test_ticks_load_connected_work_when_an_observation_is_due(self) -> None:
+        self.attention.next_observation = self.now + 1
+        with patch.object(
+            self.memory, "connected_work", wraps=self.memory.connected_work
+        ) as connected_work:
+            self.app.tick()
+            connected_work.assert_not_called()
+
+            self.now += 1
+            self.app.tick()
+            connected_work.assert_called()
+
     async def restart_without_sessions(self) -> None:
         behavior = self.app.behavior
         await self.app.close()

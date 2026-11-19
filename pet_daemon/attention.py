@@ -735,6 +735,7 @@ class Attention:
         care: CareKind | None = None,
         reaction_relevant: Callable[[SessionReaction], bool] = lambda trigger: True,
         delivery_pending: bool = False,
+        observation_context: Callable[[], PetContext] | None = None,
     ) -> AttentionRequest | None:
         now = self.clock()
         if manual is not None:
@@ -763,6 +764,8 @@ class Attention:
             self.next_observation = now + self.rng.uniform(
                 *self.config.observation_seconds
             )
+            if observation_context is not None:
+                snapshot = observation_context()
             if any(
                 self.is_routine_eligible(subject, snapshot) for subject in snapshot.work
             ):
